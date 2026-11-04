@@ -120,7 +120,10 @@ fun HomeScreen(
                 val m = mA.await()
                 val s = sA.await()
                 val f = fA.await()
-                val g = gA.await()
+                var g = gA.await()
+                if (g.isEmpty()) {
+                    g = (m + s).flatMap { it.genres }.distinct().filter { it.isNotBlank() }.sorted()
+                }
                 val l = if (m.isNotEmpty()) m else runCatching { c.getLatest(null, 24) }.getOrDefault(emptyList())
 
                 resume = r
