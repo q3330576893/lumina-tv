@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,9 +19,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -29,6 +33,7 @@ import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -48,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -64,20 +70,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
-import androidx.media3.common.MediaItem as ExoMediaItem
-import androidx.media3.common.MimeTypes
-import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
-import androidx.media3.common.VideoSize
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource as ExoSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.ui.components.FocusSurface
@@ -100,8 +104,8 @@ private fun formatTime(ms: Long): String {
 
 private val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
 
-/** 长按 OK 快进的按下时刻（跨重组保持，单播放器会话内唯一） */
-private var boostStartAt = 0L
+/** 长按 OK 快进的按下时刻 */
+private var okDownAt = 0L
 
 @Composable
 fun PlayerScreen(
@@ -122,22 +126,25 @@ fun PlayerScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var speed by remember { mutableFloatStateOf(AppRuntime.prefs?.defaultSpeed ?: 1.0f) }
     var optionMenu by remember { mutableStateOf(false) }
-    var degraded by remember { mutableStateOf(false) } // 是否已自动降级到转码
+    var degraded by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableIntStateOf(0) }
     var currentSourceId by remember { mutableStateOf(initialSourceId) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
-    var boosting by remember { mutableStateOf(false) } // 长按 OK 3 倍快进中
-    var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
+    var boosting by remember { mutableStateOf(false) }
     var nextTriggered by remember { mutableStateOf(false) }
+    var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
 
     val introSeconds = remember(item.id) { AppRuntime.prefs?.introSecondsFor(item.id) ?: 0 }
+
+    val hideFocus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
 
     val httpFactory = remember {
         DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(12_000)
             .setReadTimeoutMs(30_000)
-            .setUserAgent("LuminaTV/1.4 (Android)")
+            .setUserAgent("LuminaTV/1.5 (Android)")
     }
 
     val exo = remember {
@@ -146,8 +153,6 @@ fun PlayerScreen(
             .build()
             .apply { playWhenReady = true }
     }
-
-    val focus = remember { FocusRequester() }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -160,7 +165,15 @@ fun PlayerScreen(
         }
     }
 
-    // 装载播放源：direct 失败自动降级转码；支持指定源
+    // 当前剧的集列表（切集用），优先缓存
+    LaunchedEffect(item.seriesId) {
+        val sid = item.seriesId ?: return@LaunchedEffect
+        val c = client ?: return@LaunchedEffect
+        LibraryCache.episodesOf(sid, item.seasonId)?.let { episodes = it; return@LaunchedEffect }
+        episodes = runCatching { c.getEpisodes(sid, item.seasonId) }.getOrDefault(emptyList())
+        LibraryCache.putEpisodes(sid, item.seasonId, episodes)
+    }
+
     fun loadSource(forceTranscode: Boolean, sourceId: String? = currentSourceId) {
         val c = client ?: return
         scope.launch {
@@ -171,9 +184,8 @@ fun PlayerScreen(
                 currentSourceId = target.source?.id ?: sourceId
                 val videoSource: ExoSource =
                     DefaultMediaSourceFactory(httpFactory).createMediaSource(
-                        ExoMediaItem.Builder().setUri(target.url).build()
+                        androidx.media3.common.MediaItem.Builder().setUri(target.url).build()
                     )
-                // 外挂字幕合并
                 val subs = target.source?.streams
                     ?.filter { it.type == "Subtitle" && it.isExternal }
                     .orEmpty()
@@ -182,17 +194,12 @@ fun PlayerScreen(
                 if (subs.isNotEmpty() && srcId != null) {
                     val configs = subs.mapNotNull { st ->
                         val idx = st.index
-                        val mime = when (st.codec?.lowercase()) {
-                            "vtt" -> MimeTypes.TEXT_VTT
-                            "subrip", "srt" -> MimeTypes.APPLICATION_SUBRIP
-                            else -> MimeTypes.APPLICATION_SUBRIP
-                        }
                         runCatching {
-                            ExoMediaItem.SubtitleConfiguration.Builder(
+                            androidx.media3.common.MediaItem.SubtitleConfiguration.Builder(
                                 android.net.Uri.parse(c.subtitleUrl(item.id, srcId, idx, "vtt"))
                             )
-                                .setMimeType(mime)
-                                .setLabel(st.displayTitle ?: st.language ?: "字幕${idx}")
+                                .setMimeType(androidx.media3.common.MimeTypes.TEXT_VTT)
+                                .setLabel(st.displayTitle ?: st.language ?: "字幕$idx")
                                 .setLanguage(st.language)
                                 .build()
                         }.getOrNull()
@@ -200,7 +207,7 @@ fun PlayerScreen(
                     if (configs.isNotEmpty()) {
                         merged = MergingMediaSource(videoSource, *configs.map {
                             DefaultMediaSourceFactory(httpFactory).createMediaSource(
-                                ExoMediaItem.Builder().setUri(it.uri.toString())
+                                androidx.media3.common.MediaItem.Builder().setUri(it.uri.toString())
                                     .setSubtitleConfigurations(listOf(it)).build()
                             )
                         }.toTypedArray())
@@ -233,10 +240,9 @@ fun PlayerScreen(
         if (reloadKey > 0) loadSource(forceTranscode = true)
     }
 
-    // 播放器事件：错误自动降级 + 缓冲状态 + 帧率匹配 + 自动连播
     DisposableEffect(exo) {
         val listener = object : Player.Listener {
-            override fun onPlayerError(err: PlaybackException) {
+            override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
                 if (!degraded) {
                     degraded = true
                     error = "直连失败，自动切换转码…"
@@ -246,18 +252,20 @@ fun PlayerScreen(
                     error = "播放失败：${err.errorCodeName}"
                 }
             }
+
             override fun onPlaybackStateChanged(state: Int) {
                 buffering = state == Player.STATE_BUFFERING
-                if (state == Player.STATE_READY) error = if (degraded && error?.startsWith("直连失败") == true) null else error
+                if (state == Player.STATE_READY && degraded && error?.startsWith("直连失败") == true) error = null
                 if (state == Player.STATE_ENDED && !nextTriggered &&
                     AppRuntime.prefs?.autoNextEpisode == true && item.seriesId != null
                 ) {
                     nextTriggered = true
                     scope.launch {
                         val c = client ?: return@launch
-                        val episodes = runCatching { c.getEpisodes(item.seriesId!!, item.seasonId) }.getOrDefault(emptyList())
-                        val idx = episodes.indexOfFirst { it.id == item.id }
-                        val next = episodes.getOrNull(idx + 1)
+                        val list = if (episodes.isNotEmpty()) episodes
+                        else runCatching { c.getEpisodes(item.seriesId!!, item.seasonId) }.getOrDefault(emptyList())
+                        val idx = list.indexOfFirst { it.id == item.id }
+                        val next = list.getOrNull(idx + 1)
                         if (next != null) {
                             runCatching { c.reportStop(item.id, 0) }
                             onPlayNext?.invoke(next)
@@ -265,13 +273,13 @@ fun PlayerScreen(
                     }
                 }
             }
+
             override fun onIsPlayingChanged(p: Boolean) { isPlaying = p }
         }
         exo.addListener(listener)
         onDispose { exo.removeListener(listener) }
     }
 
-    // 状态轮询 + 进度上报
     LaunchedEffect(Unit) {
         var sinceReport = 0
         while (true) {
@@ -286,76 +294,46 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(showControls, isPlaying, boosting) {
+    LaunchedEffect(showControls, isPlaying, boosting, optionMenu) {
         if (showControls && isPlaying && !optionMenu && !boosting) {
-            delay(4500)
+            delay(5000)
             showControls = false
         }
     }
 
-    BackHandler {
-        if (optionMenu) optionMenu = false
-        else if (showControls) showControls = false
-        else {
-            scope.launch { AppRuntime.client?.reportStop(item.id, position) }
-            exo.stop()
-            onBack()
+    // 焦点：控制栏隐藏时由捕获层拿焦点，显示时把焦点交给播放按钮
+    LaunchedEffect(showControls, optionMenu) {
+        delay(80)
+        if (!optionMenu) {
+            if (showControls) runCatching { playFocus.requestFocus() }
+            else runCatching { hideFocus.requestFocus() }
         }
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .focusRequester(focus)
-            .focusable()
-            .onKeyEvent { ev ->
-                when (ev.key) {
-                    Key.DirectionCenter, Key.Enter -> {
-                        if (ev.type == KeyEventType.KeyDown) {
-                            if (ev.nativeKeyEvent.repeatCount == 0) {
-                                // 按下：记录时刻并呼出控制栏；短按在松开时切换播放
-                                boostStartAt = System.currentTimeMillis()
-                                showControls = true
-                            } else if (!boosting && System.currentTimeMillis() - boostStartAt > 500) {
-                                // 长按 OK：3 倍速快进
-                                boosting = true
-                                exo.setPlaybackSpeed(3f)
-                            }
-                            true
-                        } else if (ev.type == KeyEventType.KeyUp) {
-                            if (boosting) {
-                                boosting = false
-                                exo.setPlaybackSpeed(speed)
-                            } else if (System.currentTimeMillis() - boostStartAt < 900) {
-                                if (exo.isPlaying) exo.pause() else exo.play()
-                            }
-                            true
-                        } else false
-                    }
-                    Key.DirectionLeft -> { if (ev.type == KeyEventType.KeyDown) { exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0)); showControls = true }; true }
-                    Key.DirectionRight -> { if (ev.type == KeyEventType.KeyDown) { exo.seekTo(exo.currentPosition + 10_000); showControls = true }; true }
-                    Key.DirectionUp, Key.DirectionDown -> { if (ev.type == KeyEventType.KeyDown) showControls = true; true }
-                    Key.MediaPlayPause -> { if (ev.type == KeyEventType.KeyDown) { if (exo.isPlaying) exo.pause() else exo.play() }; true }
-                    Key.MediaRewind -> { if (ev.type == KeyEventType.KeyDown) exo.seekTo((exo.currentPosition - 30_000).coerceAtLeast(0)); true }
-                    Key.MediaFastForward -> { if (ev.type == KeyEventType.KeyDown) exo.seekTo(exo.currentPosition + 30_000); true }
-                    else -> false
-                }
+    BackHandler {
+        when {
+            optionMenu -> optionMenu = false
+            showControls -> showControls = false
+            else -> {
+                scope.launch { AppRuntime.client?.reportStop(item.id, position) }
+                exo.stop()
+                onBack()
             }
-    ) {
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     useController = false
                     player = exo
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
-                    keepScreenOn = true // 屏幕常亮保险
-                    playerViewRef = this
+                    keepScreenOn = true
                 }
             },
             update = { pv ->
                 pv.resizeMode = resizeMode
-                // 字幕样式：字号缩放 + 背景底色
                 val prefs = AppRuntime.prefs
                 pv.subtitleView?.apply {
                     setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * (prefs?.subtitleScale ?: 1.0f))
@@ -364,8 +342,6 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize(),
         )
-
-        LaunchedEffect(Unit) { focus.requestFocus() }
 
         if (buffering && error == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -383,11 +359,9 @@ fun PlayerScreen(
             }
         }
 
-        // 长按快进角标
         AnimatedVisibility(
             visible = boosting,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            enter = fadeIn(), exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
             Text(
@@ -400,8 +374,71 @@ fun PlayerScreen(
             )
         }
 
+        // 隐藏控制栏时的按键捕获层：方向键 seek、OK 呼出控制栏、长按 OK 3 倍速
+        if (!showControls && !optionMenu) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .focusRequester(hideFocus)
+                    .focusable()
+                    .onKeyEvent { ev ->
+                        when (ev.key) {
+                            Key.DirectionCenter, Key.Enter -> {
+                                if (ev.type == KeyEventType.KeyDown) {
+                                    if (ev.nativeKeyEvent.repeatCount == 0) okDownAt = System.currentTimeMillis()
+                                    else if (!boosting && System.currentTimeMillis() - okDownAt > 480) {
+                                        boosting = true
+                                        exo.setPlaybackSpeed(3f)
+                                    }
+                                    true
+                                } else {
+                                    if (boosting) {
+                                        boosting = false
+                                        exo.setPlaybackSpeed(speed)
+                                    } else {
+                                        showControls = true
+                                    }
+                                    true
+                                }
+                            }
+                            Key.DirectionLeft -> {
+                                if (ev.type == KeyEventType.KeyDown) {
+                                    exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0))
+                                    showControls = true
+                                }
+                                true
+                            }
+                            Key.DirectionRight -> {
+                                if (ev.type == KeyEventType.KeyDown) {
+                                    exo.seekTo(exo.currentPosition + 10_000)
+                                    showControls = true
+                                }
+                                true
+                            }
+                            Key.DirectionUp, Key.DirectionDown -> {
+                                if (ev.type == KeyEventType.KeyDown) showControls = true
+                                true
+                            }
+                            Key.MediaPlayPause -> {
+                                if (ev.type == KeyEventType.KeyDown) { if (exo.isPlaying) exo.pause() else exo.play() }
+                                true
+                            }
+                            Key.MediaRewind -> {
+                                if (ev.type == KeyEventType.KeyDown) exo.seekTo((exo.currentPosition - 30_000).coerceAtLeast(0))
+                                true
+                            }
+                            Key.MediaFastForward -> {
+                                if (ev.type == KeyEventType.KeyDown) exo.seekTo(exo.currentPosition + 30_000)
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+            )
+        }
+
         // 跳过片头
-        if (introSeconds > 0 && position > 0 && position < introSeconds * 1000L && error == null) {
+        if (introSeconds > 0 && position > 0 && position < introSeconds * 1000L && error == null && !showControls) {
             FocusSurface(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -420,7 +457,7 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = showControls,
+            visible = showControls && !optionMenu,
             enter = fadeIn() + slideInVertically { it / 3 },
             exit = fadeOut() + slideOutVertically { it / 3 },
         ) {
@@ -453,20 +490,18 @@ fun PlayerScreen(
                     Modifier
                         .fillMaxWidth()
                         .background(Brush.verticalGradient(listOf(Color(0x00070A12), Color(0xE6070A12))))
-                        .padding(horizontal = 36.dp, vertical = 22.dp)
+                        .padding(horizontal = 36.dp, vertical = 18.dp)
                 ) {
                     Column {
-                        Box(
-                            Modifier.fillMaxWidth().height(4.dp)
-                                .background(Color(0x33FFFFFF), RoundedCornerShape(2.dp))
-                        ) {
-                            val ratio = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
-                            Box(
-                                Modifier.fillMaxWidth(ratio).height(4.dp)
-                                    .background(Brush.horizontalGradient(listOf(Accent, Accent2)), RoundedCornerShape(2.dp))
-                            )
-                        }
-                        Spacer(Modifier.height(6.dp))
+                        SeekBar(
+                            position = position,
+                            duration = duration,
+                            onSeek = { target ->
+                                exo.seekTo(target)
+                                position = target
+                            },
+                        )
+                        Spacer(Modifier.height(4.dp))
                         Row {
                             Text(formatTime(position), color = TextSub, fontSize = 11.sp)
                             Spacer(Modifier.weight(1f))
@@ -479,10 +514,23 @@ fun PlayerScreen(
                                 if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                 if (isPlaying) "暂停" else "播放",
                                 primary = true,
+                                focusRequester = playFocus,
                             ) { if (exo.isPlaying) exo.pause() else exo.play() }
                             CtrlButton(Icons.Rounded.FastForward, "前进 10 秒") { exo.seekTo(exo.currentPosition + 10_000) }
-                            Spacer(Modifier.width(6.dp))
-                            CtrlButton(Icons.Rounded.Subtitles, "字幕 / 音轨 / 倍速 / 版本") { optionMenu = true }
+                            if (item.seriesId != null) {
+                                CtrlButton(Icons.Rounded.SkipNext, "下一集") {
+                                    val idx = episodes.indexOfFirst { it.id == item.id }
+                                    val next = episodes.getOrNull(idx + 1)
+                                    if (next != null) {
+                                        scope.launch { runCatching { client?.reportStop(item.id, position) } }
+                                        onPlayNext?.invoke(next)
+                                    }
+                                }
+                            }
+                            CtrlButton(Icons.Rounded.Subtitles, "字幕 / 音轨 / 倍速 / 选集") {
+                                optionMenu = true
+                                showControls = false
+                            }
                             Spacer(Modifier.weight(1f))
                             Text(item.subtitle, color = TextSub.copy(alpha = 0.75f), fontSize = 11.sp)
                         }
@@ -498,6 +546,7 @@ fun PlayerScreen(
                 speed = speed,
                 resizeMode = resizeMode,
                 currentSourceId = currentSourceId,
+                episodes = episodes,
                 onSpeed = {
                     speed = it
                     exo.setPlaybackSpeed(it)
@@ -507,6 +556,11 @@ fun PlayerScreen(
                     optionMenu = false
                     degraded = false
                     loadSource(AppRuntime.prefs?.forceTranscode ?: false, sid)
+                },
+                onPickEpisode = { ep ->
+                    optionMenu = false
+                    scope.launch { runCatching { client?.reportStop(item.id, position) } }
+                    onPlayNext?.invoke(ep)
                 },
                 onRememberIntro = {
                     AppRuntime.prefs?.setIntroSeconds(item.id, (position / 1000L).toInt())
@@ -518,7 +572,46 @@ fun PlayerScreen(
     }
 }
 
-/** 播放选项：倍速 / 字幕轨道 / 音轨轨道 / 画面比例 / 版本 / 片头记忆。 */
+/** 可聚焦进度条：左右键 ±15 秒，带焦点高亮。 */
+@Composable
+private fun SeekBar(position: Long, duration: Long, onSeek: (Long) -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val ratio = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(28.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .onKeyEvent { ev ->
+                if (ev.type == KeyEventType.KeyDown) {
+                    when (ev.key) {
+                        Key.DirectionLeft -> { onSeek((position - 15_000).coerceAtLeast(0)); true }
+                        Key.DirectionRight -> { onSeek((position + 15_000).coerceAtMost(duration)); true }
+                        else -> false
+                    }
+                } else false
+            },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(if (focused) 10.dp else 6.dp)
+                .background(Color(0x33FFFFFF), RoundedCornerShape(5.dp))
+                .then(if (focused) Modifier.border(1.dp, Accent.copy(alpha = 0.8f), RoundedCornerShape(5.dp)) else Modifier)
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(ratio)
+                    .height(if (focused) 10.dp else 6.dp)
+                    .background(Brush.horizontalGradient(listOf(Accent, Accent2)), RoundedCornerShape(5.dp))
+            )
+        }
+    }
+}
+
+/** 播放选项：倍速 / 字幕 / 音轨 / 画面比例 / 版本 / 选集 / 片头记忆。 */
 @Composable
 private fun OptionMenu(
     exo: ExoPlayer,
@@ -526,9 +619,11 @@ private fun OptionMenu(
     speed: Float,
     resizeMode: Int,
     currentSourceId: String?,
+    episodes: List<MediaItem>,
     onSpeed: (Float) -> Unit,
     onResizeMode: (Int) -> Unit,
     onSwitchSource: (String) -> Unit,
+    onPickEpisode: (MediaItem) -> Unit,
     onRememberIntro: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -536,35 +631,86 @@ private fun OptionMenu(
 
     val client = AppRuntime.client
     var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(item.id) {
         sources = runCatching { client?.getMediaSources(item.id) }.getOrDefault(emptyList()).orEmpty()
     }
 
-    val textGroups = exo.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
-    val audioGroups = exo.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
-    var textDisabled = exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
-    var selectedTextKey: String? = null
-    var selectedAudioKey: String? = null
-    for (g in exo.currentTracks.groups) {
+    // 轨道状态化：切换后 UI 立刻刷新
+    var tracks by remember { mutableStateOf(exo.currentTracks) }
+    var textDisabled by remember {
+        mutableStateOf(exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT))
+    }
+    DisposableEffect(exo) {
+        val l = object : Player.Listener {
+            override fun onTracksChanged(t: Tracks) { tracks = t }
+        }
+        exo.addListener(l)
+        onDispose { exo.removeListener(l) }
+    }
+
+    val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
+    val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
+
+    var selectedTextId: String? = null
+    var selectedAudioId: String? = null
+    for (g in tracks.groups) {
         for (i in 0 until g.length) {
             if (g.isTrackSelected(i)) {
-                val f = g.getTrackFormat(i)
                 when (g.type) {
-                    C.TRACK_TYPE_TEXT -> selectedTextKey = "${g.mediaTrackGroup.id}"
-                    C.TRACK_TYPE_AUDIO -> selectedAudioKey = "${g.mediaTrackGroup.id}"
+                    C.TRACK_TYPE_TEXT -> selectedTextId = g.mediaTrackGroup.id
+                    C.TRACK_TYPE_AUDIO -> selectedAudioId = g.mediaTrackGroup.id
                 }
             }
         }
     }
 
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { delay(80); runCatching { firstFocus.requestFocus() } }
+
     Box(
         Modifier.fillMaxSize().background(Color(0xB3000000)),
         contentAlignment = Alignment.Center,
     ) {
-        GlassPanel(Modifier.width(620.dp), corner = 22.dp) {
+        GlassPanel(Modifier.width(680.dp), corner = 22.dp) {
             Column(Modifier.padding(22.dp).verticalScroll(rememberScrollState())) {
                 Text("播放选项", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(14.dp))
+
+                // 选集
+                if (episodes.isNotEmpty()) {
+                    MenuLabel("选集（共 ${episodes.size} 集）")
+                    Column(
+                        Modifier.heightIn(max = 168.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        episodes.forEach { ep ->
+                            val active = ep.id == item.id
+                            FocusSurface(
+                                modifier = Modifier.fillMaxWidth().height(38.dp),
+                                corner = 10.dp, scaleTo = 1.0f,
+                                onClick = { if (!active) onPickEpisode(ep) },
+                            ) { focused ->
+                                Row(
+                                    Modifier.fillMaxSize().background(
+                                        when {
+                                            active -> Accent.copy(alpha = 0.9f)
+                                            focused -> Color(0x2EFFFFFF)
+                                            else -> Color(0x14FFFFFF)
+                                        }, RoundedCornerShape(10.dp)
+                                    ).padding(horizontal = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        "第${ep.indexNumber ?: 0}集 · ${ep.name}",
+                                        color = if (active) Color(0xFF06101F) else TextMain,
+                                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                }
 
                 // 倍速
                 MenuLabel("倍速播放")
@@ -573,8 +719,9 @@ private fun OptionMenu(
                         val active = kotlin.math.abs(speed - s) < 0.01f
                         MenuChip(
                             label = if (s == 1.0f) "1.0x" else "${s}x",
-                            width = 76.dp, active = active, activeColor = Accent,
+                            width = 78.dp, active = active, activeColor = Accent,
                             onClick = { onSpeed(s) },
+                            focusRequester = if (s == 1.0f) firstFocus else null,
                         )
                     }
                 }
@@ -585,39 +732,38 @@ private fun OptionMenu(
                 MenuLabel("字幕")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MenuChip(
-                        label = "关闭字幕", width = 110.dp,
-                        active = !textDisabled && selectedTextKey == null,
+                        label = "关闭字幕", width = 104.dp,
+                        active = textDisabled,
                         activeColor = Accent,
                         onClick = {
                             exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
-                            textDisabled = true
                         },
                     )
                     textGroups.forEach { g ->
                         val key = g.mediaTrackGroup.id
+                        val f0 = g.getTrackFormat(0)
                         val label = buildString {
-                            val f0 = g.getTrackFormat(0)
-                            append(f0.label ?: f0.language ?: "轨道")
+                            append(f0.label ?: f0.language ?: "字幕")
                             if (f0.language != null) append(" (${f0.language})")
                         }
-                        val active = !exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT) && selectedTextKey == key
                         MenuChip(
-                            label = label, width = 150.dp, active = active, activeColor = Accent,
+                            label = label, width = 148.dp,
+                            active = !textDisabled && selectedTextId == key,
+                            activeColor = Accent,
                             onClick = {
                                 exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                                     .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                                     .addOverride(TrackSelectionOverride(g.mediaTrackGroup, 0))
                                     .build()
-                                textDisabled = false
                             },
                         )
                     }
                 }
                 if (textGroups.isEmpty()) {
                     Spacer(Modifier.height(6.dp))
-                    Text("当前片源没有检测到字幕轨道（外挂字幕已自动加载）", color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp)
+                    Text("没有检测到内嵌字幕轨道（外挂字幕会自动加载）", color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp)
                 }
 
                 Spacer(Modifier.height(16.dp))
@@ -629,9 +775,10 @@ private fun OptionMenu(
                         val key = g.mediaTrackGroup.id
                         val f0 = g.getTrackFormat(0)
                         val label = f0.label ?: f0.language ?: "音轨"
-                        val active = selectedAudioKey == key
                         MenuChip(
-                            label = label, width = 150.dp, active = active, activeColor = Accent,
+                            label = label, width = 148.dp,
+                            active = selectedAudioId == key,
+                            activeColor = Accent,
                             onClick = {
                                 exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                     .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
@@ -658,7 +805,7 @@ private fun OptionMenu(
                         AspectRatioFrameLayout.RESIZE_MODE_FILL to "拉伸",
                     ).forEach { (mode, label) ->
                         MenuChip(
-                            label = label, width = 110.dp,
+                            label = label, width = 108.dp,
                             active = resizeMode == mode, activeColor = Accent,
                             onClick = { onResizeMode(mode) },
                         )
@@ -679,22 +826,19 @@ private fun OptionMenu(
                                 onClick = { onSwitchSource(s.id) },
                             ) { focused ->
                                 Row(
-                                    Modifier.fillMaxSize()
-                                        .background(
-                                            when {
-                                                active -> Accent.copy(alpha = 0.9f)
-                                                focused -> Color(0x2EFFFFFF)
-                                                else -> Color(0x14FFFFFF)
-                                            }, RoundedCornerShape(12.dp)
-                                        )
-                                        .padding(horizontal = 12.dp),
+                                    Modifier.fillMaxSize().background(
+                                        when {
+                                            active -> Accent.copy(alpha = 0.9f)
+                                            focused -> Color(0x2EFFFFFF)
+                                            else -> Color(0x14FFFFFF)
+                                        }, RoundedCornerShape(12.dp)
+                                    ).padding(horizontal = 12.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
                                         s.displayLabel + if (active) "  ✓" else "",
                                         color = if (active) Color(0xFF06101F) else TextMain,
-                                        fontSize = 12.sp,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     )
                                 }
                             }
@@ -707,7 +851,7 @@ private fun OptionMenu(
                 MenuLabel("片头")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     MenuChip(
-                        label = "记住片头到此为止", width = 180.dp, active = false,
+                        label = "记住片头到此为止", width = 176.dp, active = false,
                         activeColor = Accent,
                         onClick = onRememberIntro,
                     )
@@ -738,10 +882,13 @@ private fun MenuChip(
     active: Boolean,
     activeColor: Color,
     height: Dp = 38.dp,
+    focusRequester: FocusRequester? = null,
     onClick: () -> Unit,
 ) {
+    var m = Modifier.width(width).height(height)
+    if (focusRequester != null) m = m.focusRequester(focusRequester)
     FocusSurface(
-        modifier = Modifier.width(width).height(height),
+        modifier = m,
         corner = 12.dp, scaleTo = 1f,
         onClick = onClick,
     ) { focused ->
@@ -771,10 +918,13 @@ private fun CtrlButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     primary: Boolean = false,
+    focusRequester: FocusRequester? = null,
     onClick: () -> Unit,
 ) {
+    var m = Modifier.size(if (primary) 52.dp else 44.dp)
+    if (focusRequester != null) m = m.focusRequester(focusRequester)
     FocusSurface(
-        modifier = Modifier.size(if (primary) 52.dp else 44.dp),
+        modifier = m,
         corner = if (primary) 26.dp else 22.dp,
         scaleTo = 1.1f,
         onClick = onClick,
