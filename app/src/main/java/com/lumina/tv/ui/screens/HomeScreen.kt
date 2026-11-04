@@ -300,6 +300,52 @@ fun HomeScreen(
                     onOpenDetail = onOpenDetail,
                 )
                 tab == HomeTab.Genre && genre == null -> GenrePicker(genres, genreGridState) { genre = it }
+                tab == HomeTab.Genre && genre != null -> Column(Modifier.fillMaxSize().padding(top = 70.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 34.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        FocusSurface(
+                            modifier = Modifier.height(34.dp),
+                            corner = 17.dp,
+                            onClick = { genre = null },
+                        ) { focused ->
+                            Row(
+                                Modifier.fillMaxSize().background(
+                                    if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
+                                    RoundedCornerShape(17.dp)
+                                ).padding(horizontal = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("← 全部类型", color = Accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Text(genre ?: "", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(8.dp))
+                        Text("共 ${gridItems.size} 部", color = TextSub, fontSize = 12.sp)
+                    }
+                    if (gridLoading) {
+                        LoadingView(text = "正在筛选 $genre…")
+                    } else if (gridItems.isEmpty()) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("未找到该分类的内容", color = TextSub, fontSize = 13.sp)
+                        }
+                    } else {
+                        LazyVerticalGrid(
+                            state = gridState,
+                            columns = GridCells.Fixed(6),
+                            contentPadding = PaddingValues(start = 34.dp, end = 34.dp, bottom = 40.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(18.dp),
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            items(gridItems, key = { it.id }) { it ->
+                                PosterCard(item = it, imageUrl = client?.imageUrl(it), onClick = { onOpenDetail(it.id) })
+                            }
+                        }
+                    }
+                }
                 gridLoading -> LoadingView(text = "正在加载…")
                 gridItems.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("这里还没有内容", color = TextSub, fontSize = 13.sp)
@@ -351,30 +397,37 @@ private fun NavBar(
     onSearch: () -> Unit,
     onSettings: () -> Unit,
 ) {
-    // 超沉浸紧凑单行导航栏：高度仅 38dp，左右无缝悬浮，绝不抢占视线
+    // 手机与TV自适应紧凑导航栏：左品牌，中可横滑Tab，右常驻搜索+设置
     Row(
         Modifier
             .fillMaxWidth()
             .background(
-                Brush.verticalGradient(listOf(Color(0xE6070A12), Color(0x66070A12), Color(0x00070A12))),
+                Brush.verticalGradient(listOf(Color(0xF0070A12), Color(0x99070A12), Color(0x00070A12))),
             )
-            .padding(start = 32.dp, end = 32.dp, top = 10.dp, bottom = 4.dp),
+            .padding(start = 24.dp, end = 20.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // 品牌：Lumina
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("琉璃", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text("TV", color = Accent, fontSize = 10.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 2.dp))
+            Text("Lumina", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
         }
-        Spacer(Modifier.width(20.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            HomeTab.entries.forEach { t ->
+        Spacer(Modifier.width(16.dp))
+        // 中间横向滑动 Tab，确保在手机端不会撑破布局或把右侧按钮挤掉
+        LazyRow(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            contentPadding = PaddingValues(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            items(HomeTab.entries) { t ->
                 TabChip(t.label, tab == t, 60.dp, height = 28.dp) {
                     onSelect(t, null)
                 }
             }
         }
-        Spacer(Modifier.weight(1f))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Spacer(Modifier.width(12.dp))
+        // 右侧常驻操作区：手机与TV都永远可见！
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             TopAction("搜索", Icons.Rounded.Search, onSearch)
             TopAction("收藏", Icons.Rounded.Favorite) { onSelect(HomeTab.Favorites, null) }
             TopAction("设置", Icons.Rounded.Settings, onSettings)

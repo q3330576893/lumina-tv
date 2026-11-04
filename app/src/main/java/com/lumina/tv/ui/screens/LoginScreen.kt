@@ -197,10 +197,9 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                     Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    // 品牌（统一用「琉璃」）
+                    // 品牌统一为 Lumina
                     Row(verticalAlignment = Alignment.Bottom) {
-                        Text("琉璃", color = LInk, fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-                        Text(" TV", color = LPurple, fontSize = 22.sp, fontWeight = FontWeight.Light)
+                        Text("Lumina", color = LInk, fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                     }
                     Spacer(Modifier.height(4.dp))
                     Text("连接你的 Emby 服务器", color = LInkSub, fontSize = 12.sp)

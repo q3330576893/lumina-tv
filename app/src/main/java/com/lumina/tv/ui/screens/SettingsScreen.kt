@@ -84,7 +84,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 
             // 左栏：外观 / 播放 / 字幕 / 账号 / 诊断
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                SectionTitle("设置", trailing = "琉璃TV ${BuildConfig.VERSION_NAME}")
+                SectionTitle("设置", trailing = "Lumina ${BuildConfig.VERSION_NAME}")
                 Spacer(Modifier.height(18.dp))
 
                 // ---------- 账号与服务器 ----------
