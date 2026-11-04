@@ -133,6 +133,11 @@ fun PlayerScreen(
     var boosting by remember { mutableStateOf(false) }
     var nextTriggered by remember { mutableStateOf(false) }
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var seekHint by remember { mutableStateOf<String?>(null) }
+    var currentResolution by remember { mutableStateOf<String?>(null) }
+    var subScale by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitleScale ?: 1.0f) }
+    var nextEpisode by remember { mutableStateOf<MediaItem?>(null) }
+    var nextCountdown by remember { mutableIntStateOf(0) }
 
     val introSeconds = remember(item.id) { AppRuntime.prefs?.introSecondsFor(item.id) ?: 0 }
 
@@ -182,6 +187,8 @@ fun PlayerScreen(
             try {
                 val target = c.resolvePlayback(item, forceTranscode, sourceId)
                 currentSourceId = target.source?.id ?: sourceId
+                currentResolution = target.source?.resolution
+                    ?: if (target.direct) null else "转码"
                 val videoSource: ExoSource =
                     DefaultMediaSourceFactory(httpFactory).createMediaSource(
                         androidx.media3.common.MediaItem.Builder().setUri(target.url).build()
@@ -267,8 +274,18 @@ fun PlayerScreen(
                         val idx = list.indexOfFirst { it.id == item.id }
                         val next = list.getOrNull(idx + 1)
                         if (next != null) {
-                            runCatching { c.reportStop(item.id, 0) }
-                            onPlayNext?.invoke(next)
+                            runCatching { c.reportStop(item.id, position) }
+                            nextEpisode = next
+                            nextCountdown = 5
+                            while (nextCountdown > 0) {
+                                delay(1000)
+                                if (nextEpisode?.id != next.id) return@launch
+                                nextCountdown--
+                            }
+                            if (nextEpisode?.id == next.id) {
+                                nextEpisode = null
+                                onPlayNext?.invoke(next)
+                            }
                         }
                     }
                 }
@@ -278,6 +295,22 @@ fun PlayerScreen(
         }
         exo.addListener(listener)
         onDispose { exo.removeListener(listener) }
+    }
+
+    LaunchedEffect(seekHint) {
+        if (seekHint != null) {
+            delay(1400)
+            seekHint = null
+        }
+    }
+
+    fun seekBy(delta: Long) {
+        val max = if (duration > 0) duration else Long.MAX_VALUE
+        val to = (exo.currentPosition + delta).coerceIn(0L, max)
+        exo.seekTo(to)
+        position = to
+        seekHint = if (delta > 0) "»»  快进 ${delta / 1000} 秒    ${formatTime(to)}"
+        else "««  快退 ${-delta / 1000} 秒    ${formatTime(to)}"
     }
 
     LaunchedEffect(Unit) {
@@ -336,7 +369,7 @@ fun PlayerScreen(
                 pv.resizeMode = resizeMode
                 val prefs = AppRuntime.prefs
                 pv.subtitleView?.apply {
-                    setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * (prefs?.subtitleScale ?: 1.0f))
+                    setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * subScale)
                     setBackgroundColor(if (prefs?.subtitleBg == true) 0x99000000.toInt() else android.graphics.Color.TRANSPARENT)
                 }
             },
@@ -360,18 +393,72 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = boosting,
+            visible = boosting || seekHint != null,
             enter = fadeIn(), exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
             Text(
-                "3x 快进中 »»",
+                if (boosting) "3x 快进中 »»" else seekHint.orEmpty(),
                 color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .padding(top = 24.dp)
                     .background(Color(0x99000000), RoundedCornerShape(16.dp))
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
+        }
+
+        // 下一集倒计时卡片
+        nextEpisode?.let { ne ->
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 36.dp, bottom = 96.dp)
+                    .background(Color(0xE6070A12), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+            ) {
+                Column {
+                    Text(
+                        "${nextCountdown} 秒后播放下一集",
+                        color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "第${ne.indexNumber ?: 0}集 · ${ne.name}",
+                        color = TextSub, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FocusSurface(
+                            modifier = Modifier.height(34.dp).width(96.dp),
+                            corner = 17.dp, scaleTo = 1.04f,
+                            onClick = {
+                                scope.launch { runCatching { client?.reportStop(item.id, position) } }
+                                nextEpisode = null
+                                onPlayNext?.invoke(ne)
+                            },
+                        ) { focused ->
+                            Box(
+                                Modifier.fillMaxSize().background(
+                                    Accent.copy(alpha = if (focused) 1f else 0.9f), RoundedCornerShape(17.dp)
+                                ),
+                                contentAlignment = Alignment.Center,
+                            ) { Text("立即播放", color = Color(0xFF06101F), fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                        }
+                        FocusSurface(
+                            modifier = Modifier.height(34.dp).width(80.dp),
+                            corner = 17.dp, scaleTo = 1.04f,
+                            onClick = { nextEpisode = null; nextCountdown = 0 },
+                        ) { focused ->
+                            Box(
+                                Modifier.fillMaxSize().background(
+                                    if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF), RoundedCornerShape(17.dp)
+                                ),
+                                contentAlignment = Alignment.Center,
+                            ) { Text("取消", color = TextMain, fontSize = 12.sp) }
+                        }
+                    }
+                }
+            }
         }
 
         // 隐藏控制栏时的按键捕获层：方向键 seek、OK 呼出控制栏、长按 OK 3 倍速
@@ -403,14 +490,14 @@ fun PlayerScreen(
                             }
                             Key.DirectionLeft -> {
                                 if (ev.type == KeyEventType.KeyDown) {
-                                    exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0))
+                                    seekBy(-10_000)
                                     showControls = true
                                 }
                                 true
                             }
                             Key.DirectionRight -> {
                                 if (ev.type == KeyEventType.KeyDown) {
-                                    exo.seekTo(exo.currentPosition + 10_000)
+                                    seekBy(10_000)
                                     showControls = true
                                 }
                                 true
@@ -479,7 +566,11 @@ fun PlayerScreen(
                         }
                     }
                     Text(
-                        "${if (degraded) "转码" else "直连"} · ${speed}x",
+                        listOfNotNull(
+                            currentResolution?.takeIf { it.isNotBlank() },
+                            if (degraded) "转码" else "直连",
+                            "${speed}x",
+                        ).joinToString(" · "),
                         color = TextSub.copy(alpha = 0.7f), fontSize = 11.sp,
                     )
                 }
@@ -547,6 +638,11 @@ fun PlayerScreen(
                 resizeMode = resizeMode,
                 currentSourceId = currentSourceId,
                 episodes = episodes,
+                subScale = subScale,
+                onSubScale = {
+                    subScale = it
+                    AppRuntime.prefs?.subtitleScale = it
+                },
                 onSpeed = {
                     speed = it
                     exo.setPlaybackSpeed(it)
@@ -620,6 +716,8 @@ private fun OptionMenu(
     resizeMode: Int,
     currentSourceId: String?,
     episodes: List<MediaItem>,
+    subScale: Float,
+    onSubScale: (Float) -> Unit,
     onSpeed: (Float) -> Unit,
     onResizeMode: (Int) -> Unit,
     onSwitchSource: (String) -> Unit,
@@ -764,6 +862,19 @@ private fun OptionMenu(
                 if (textGroups.isEmpty()) {
                     Spacer(Modifier.height(6.dp))
                     Text("没有检测到内嵌字幕轨道（外挂字幕会自动加载）", color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp)
+                }
+
+                Spacer(Modifier.height(10.dp))
+                MenuLabel("字幕字号")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(0.85f to "小", 1.0f to "标准", 1.25f to "大", 1.5f to "特大").forEach { (s, label) ->
+                        MenuChip(
+                            label = label, width = 84.dp,
+                            active = kotlin.math.abs(subScale - s) < 0.01f,
+                            activeColor = Accent,
+                            onClick = { onSubScale(s) },
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(16.dp))

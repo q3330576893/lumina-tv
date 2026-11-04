@@ -116,9 +116,10 @@ class EmbyClient(
         getItems(types = "Movie,Series,Episode", sortBy = "DateCreated", sortOrder = "Descending", limit = limit, filters = "IsFavorite")
     }
 
-    /** 全部类型（题材）名称，按影片数量从多到少。 */
+    /** 全部类型（题材）名称。多级兜底：/Genres → /Items/Filters → 本地汇总。 */
     suspend fun getGenres(): List<String> = withContext(Dispatchers.IO) {
-        runCatching {
+        // 1) 标准 /Genres
+        val direct = runCatching {
             val params = mapOf(
                 "UserId" to userId,
                 "Recursive" to "true",
@@ -130,6 +131,27 @@ class EmbyClient(
             (0 until arr.length()).mapNotNull { i ->
                 arr.optJSONObject(i)?.optString("Name")?.ifBlank { null }
             }
+        }.getOrDefault(emptyList())
+        if (direct.isNotEmpty()) return@withContext direct
+
+        // 2) Emby 常用 /Items/Filters（返回字符串数组）
+        val viaFilters = runCatching {
+            val j = getSync(
+                url("/Items/Filters", mapOf("UserId" to userId, "IncludeItemTypes" to "Movie,Series"))
+            )
+            val arr = j.optJSONArray("Genres") ?: JSONArray()
+            (0 until arr.length()).mapNotNull { arr.optString(it).ifBlank { null } }
+        }.getOrDefault(emptyList())
+        if (viaFilters.isNotEmpty()) return@withContext viaFilters
+
+        // 3) 从库里直接汇总（最慢但最兼容）
+        runCatching {
+            val set = LinkedHashSet<String>()
+            listOf("Movie", "Series").forEach { t ->
+                getItems(types = t, sortBy = "DateCreated", sortOrder = "Descending", limit = 300)
+                    .forEach { item -> set.addAll(item.genres) }
+            }
+            set.toList().sorted()
         }.getOrDefault(emptyList())
     }
 
