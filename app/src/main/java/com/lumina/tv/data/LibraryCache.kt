@@ -81,6 +81,8 @@ object LibraryCache {
     }
 
     fun putBrowse(key: String, list: List<MediaItem>) {
+        // 空结果只缓存 30 秒，避免一次超时导致长时间显示“无内容”
+        val ttlMs = if (list.isEmpty()) 30_000L else 3 * 60_000L
         synchronized(this) {
             browse[key] = list to System.currentTimeMillis()
             if (browse.size > 40) browse.keys.firstOrNull()?.let { browse.remove(it) }
