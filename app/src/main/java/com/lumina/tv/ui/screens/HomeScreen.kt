@@ -122,7 +122,12 @@ fun HomeScreen(
                 val f = fA.await()
                 var g = gA.await()
                 if (g.isEmpty()) {
-                    g = (m + s).flatMap { it.genres }.distinct().filter { it.isNotBlank() }.sorted()
+                    // 按出现频率排序，取前 20，避免分类堆砌
+                    g = (m + s).flatMap { it.genres }
+                        .filter { it.isNotBlank() && it.length <= 6 }
+                        .groupingBy { it }.eachCount()
+                        .entries.sortedByDescending { it.value }
+                        .take(20).map { it.key }
                 }
                 val l = if (m.isNotEmpty()) m else runCatching { c.getLatest(null, 24) }.getOrDefault(emptyList())
 
@@ -183,11 +188,15 @@ fun HomeScreen(
     val hero = resume.firstOrNull() ?: movies.firstOrNull() ?: series.firstOrNull()
 
     Column(Modifier.fillMaxSize()) {
-        TopBar(onSearch = onSearch, onSettings = onSettings)
-        TabBar(tab, genres, genre) { t, g ->
-            tab = t
-            genre = g
-        }
+        NavBar(
+            tab = tab,
+            onSelect = { t, g ->
+                tab = t
+                genre = g
+            },
+            onSearch = onSearch,
+            onSettings = onSettings,
+        )
         Box(Modifier.fillMaxSize()) {
             when {
                 loading -> LoadingView(text = "正在读取影库…")
@@ -202,6 +211,7 @@ fun HomeScreen(
                 }
                 tab == HomeTab.Recommend -> LazyColumn(Modifier.fillMaxSize()) {
                     item { Hero(hero, client?.backdropUrl(hero ?: MediaItem("", ""), 1920), onPlay, onOpenDetail) }
+                    if (genres.isNotEmpty()) item { GenreQuickRow(genres) { g -> tab = HomeTab.Genre; genre = g } }
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume) { onOpenDetail(it.id) } }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest) { onOpenDetail(it.id) } }
@@ -235,17 +245,29 @@ fun HomeScreen(
 }
 
 @Composable
-private fun TopBar(onSearch: () -> Unit, onSettings: () -> Unit) {
+private fun NavBar(
+    tab: HomeTab,
+    onSelect: (HomeTab, String?) -> Unit,
+    onSearch: () -> Unit,
+    onSettings: () -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(start = 34.dp, end = 34.dp, top = 16.dp, bottom = 8.dp),
+            .padding(start = 34.dp, end = 34.dp, top = 14.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column {
-            Text("琉璃", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Column(Modifier.width(120.dp)) {
+            Text("琉璃", color = TextMain, fontSize = 19.sp, fontWeight = FontWeight.Bold)
             val user = AppRuntime.session?.userName ?: ""
-            if (user.isNotBlank()) Text(user, color = TextSub, fontSize = 10.sp)
+            if (user.isNotBlank()) Text(user, color = TextSub, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(Modifier.width(18.dp))
+        HomeTab.entries.forEach { t ->
+            TabChip(t.label, tab == t, 76.dp, height = 32.dp) {
+                onSelect(t, if (t == HomeTab.Genre) null else null)
+            }
+            Spacer(Modifier.width(6.dp))
         }
         Spacer(Modifier.weight(1f))
         TopButton(Icons.Rounded.Search, "搜索", onSearch)
@@ -255,40 +277,16 @@ private fun TopBar(onSearch: () -> Unit, onSettings: () -> Unit) {
 }
 
 @Composable
-private fun TabBar(
-    tab: HomeTab,
-    genres: List<String>,
-    genre: String?,
-    onSelect: (HomeTab, String?) -> Unit,
+private fun TabChip(
+    label: String,
+    active: Boolean,
+    width: androidx.compose.ui.unit.Dp,
+    height: androidx.compose.ui.unit.Dp = 34.dp,
+    onClick: () -> Unit,
 ) {
-    Column {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 34.dp, end = 34.dp, bottom = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            HomeTab.entries.forEach { t ->
-                TabChip(t.label, tab == t, 84.dp) { onSelect(t, if (t == HomeTab.Genre) genre else null) }
-            }
-        }
-        if (genres.isNotEmpty()) {
-            LazyRow(
-                contentPadding = PaddingValues(start = 34.dp, end = 34.dp, top = 2.dp, bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(genres, key = { it }) { g ->
-                    TabChip(g, tab == HomeTab.Genre && genre == g, 96.dp) { onSelect(HomeTab.Genre, g) }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TabChip(label: String, active: Boolean, width: androidx.compose.ui.unit.Dp, onClick: () -> Unit) {
     FocusSurface(
-        modifier = Modifier.height(34.dp).width(width),
-        corner = 17.dp,
+        modifier = Modifier.height(height).width(width),
+        corner = (height / 2).coerceAtLeast(17.dp),
         scaleTo = 1.06f,
         onClick = onClick,
     ) { focused ->
@@ -299,7 +297,7 @@ private fun TabChip(label: String, active: Boolean, width: androidx.compose.ui.u
                     focused -> Color(0x33FFFFFF)
                     else -> Color(0x14FFFFFF)
                 },
-                RoundedCornerShape(17.dp),
+                RoundedCornerShape((height / 2).coerceAtLeast(17.dp)),
             ),
             contentAlignment = Alignment.Center,
         ) {
@@ -464,6 +462,36 @@ private fun Hero(
                         Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
                         contentAlignment = Alignment.Center,
                     ) { Text("查看详情", color = TextMain, fontSize = 13.sp) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GenreQuickRow(genres: List<String>, onPick: (String) -> Unit) {
+    Column(Modifier.padding(top = 20.dp)) {
+        SectionTitle("分类看片", Modifier.padding(start = 34.dp, bottom = 10.dp))
+        LazyRow(
+            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(genres, key = { it }) { g ->
+                FocusSurface(
+                    modifier = Modifier.height(36.dp).width(110.dp),
+                    corner = 18.dp,
+                    scaleTo = 1.06f,
+                    onClick = { onPick(g) },
+                ) { focused ->
+                    Box(
+                        Modifier.fillMaxSize().background(
+                            if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
+                            RoundedCornerShape(18.dp),
+                        ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(g, color = TextMain, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
         }

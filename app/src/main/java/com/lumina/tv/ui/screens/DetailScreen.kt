@@ -190,10 +190,11 @@ fun DetailScreen(
                         Spacer(Modifier.height(8.dp))
                         Text(
                             listOfNotNull(
+                                it0.year?.toString(),
                                 it0.subtitle.takeIf { s -> s.isNotBlank() },
                                 it0.genres.take(3).joinToString(" / ").takeIf { s -> s.isNotBlank() },
-                                tmdb?.rating?.takeIf { _ -> it0.rating == null && it0.communityRating == null }
-                                    ?.let { r -> "★ %.1f".format(r) },
+                                (it0.communityRating ?: it0.rating)?.let { r -> "★ %.1f".format(r) },
+                                tmdb?.rating?.let { r -> "TMDB ★ %.1f".format(r) },
                             ).joinToString("   "),
                             color = TextSub, fontSize = 12.sp,
                         )

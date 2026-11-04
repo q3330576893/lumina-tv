@@ -81,6 +81,46 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 SectionTitle("设置", trailing = "琉璃TV ${BuildConfig.VERSION_NAME}")
                 Spacer(Modifier.height(18.dp))
 
+                // ---------- 账号与服务器 ----------
+                GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
+                    Column(Modifier.padding(22.dp)) {
+                        Text("服务器与账号", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(10.dp))
+                        Text("当前服务器", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(6.dp))
+                        Text(AppRuntime.session?.serverName ?: "-", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(AppRuntime.session?.baseUrl ?: "-", color = Accent, fontSize = 12.sp)
+                        Spacer(Modifier.height(8.dp))
+                        Text("账号：${AppRuntime.session?.userName ?: "-"}", color = TextSub, fontSize = 12.sp)
+                        Spacer(Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            FocusSurface(
+                                modifier = Modifier.height(42.dp).width(150.dp),
+                                corner = 21.dp,
+                                onClick = {
+                                    AppRuntime.logout()
+                                    onLogout()
+                                },
+                            ) { focused ->
+                                Box(
+                                    Modifier.fillMaxSize().background(
+                                        if (focused) Color(0x33FF6B81) else Color(0x1AFF6B81)
+                                    ),
+                                    contentAlignment = Alignment.Center,
+                                ) { Text("退出 / 更换账号", color = Color(0xFFFF8A9A), fontSize = 13.sp) }
+                            }
+                            Text(
+                                "修改服务器或账号后重新扫码或登录即可",
+                                color = TextSub.copy(alpha = 0.7f), fontSize = 11.sp,
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+
                 // ---------- 外观 ----------
                 GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
                     Column(Modifier.padding(22.dp)) {
@@ -319,39 +359,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 prefs?.subtitleBg = it
                             },
                         )
-                    }
-                }
-
-                Spacer(Modifier.height(14.dp))
-
-                // ---------- 账号 ----------
-                GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
-                    Column(Modifier.padding(22.dp)) {
-                        Text("账号", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(10.dp))
-                        Text("当前服务器", color = TextSub, fontSize = 11.sp)
-                        Spacer(Modifier.height(6.dp))
-                        Text(AppRuntime.session?.serverName ?: "-", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(4.dp))
-                        Text(AppRuntime.session?.baseUrl ?: "-", color = Accent, fontSize = 12.sp)
-                        Spacer(Modifier.height(8.dp))
-                        Text("账号：${AppRuntime.session?.userName ?: "-"}", color = TextSub, fontSize = 12.sp)
-                        Spacer(Modifier.height(14.dp))
-                        FocusSurface(
-                            modifier = Modifier.height(42.dp).width(140.dp),
-                            corner = 21.dp,
-                            onClick = {
-                                AppRuntime.logout()
-                                onLogout()
-                            },
-                        ) { focused ->
-                            Box(
-                                Modifier.fillMaxSize().background(
-                                    if (focused) Color(0x33FF6B81) else Color(0x1AFF6B81)
-                                ),
-                                contentAlignment = Alignment.Center,
-                            ) { Text("退出登录", color = Color(0xFFFF8A9A), fontSize = 13.sp) }
-                        }
                     }
                 }
 
