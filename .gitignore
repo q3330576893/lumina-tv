@@ -1,0 +1,24 @@
+# Gradle / Android 构建产物
+.gradle/
+.kotlin/
+build/
+app/build/
+local.properties
+*.apk
+*.aab
+
+# 签名文件与密钥（绝不入库）
+*.jks
+*.keystore
+*.p12
+keystore.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# 日志与临时文件
+*.log
+.temp/
