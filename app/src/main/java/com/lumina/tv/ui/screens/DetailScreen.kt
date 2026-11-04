@@ -205,6 +205,28 @@ fun DetailScreen(
                             ).joinToString("   "),
                             color = TextSub, fontSize = 12.sp,
                         )
+                        if (it0.tags.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                it0.tags.forEach { tag ->
+                                    Box(
+                                        Modifier
+                                            .background(
+                                                if (tag == "DOLBY VISION") Color(0x33FFB300) else Color(0x2EFFFFFF),
+                                                RoundedCornerShape(6.dp)
+                                            )
+                                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                                    ) {
+                                        Text(
+                                            tag,
+                                            color = if (tag == "DOLBY VISION") Color(0xFFFFD54F) else TextMain,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(10.dp))
                         it0.overview?.let {
                             Text(

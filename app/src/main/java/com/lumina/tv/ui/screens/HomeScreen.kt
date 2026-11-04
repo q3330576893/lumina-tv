@@ -215,11 +215,11 @@ fun HomeScreen(
         gridLoading = false
     }
 
-    // 媒体库视图内容：并行拉取各视图最近内容
-    LaunchedEffect(tab, views) {
-        if (tab != HomeTab.Media || client == null) return@LaunchedEffect
+    // 媒体库视图内容：启动后即在后台预热拉取各视图最近内容，无需等切换Tab
+    LaunchedEffect(views) {
         val c = client ?: return@LaunchedEffect
-        val enabled = views.filter { v -> !AppRuntime.prefs?.isViewHidden(v.id)!! }
+        if (views.isEmpty()) return@LaunchedEffect
+        val enabled = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
         val missing = enabled.filter { v -> viewContents[v.id] == null }
         if (missing.isEmpty()) return@LaunchedEffect
         val result = coroutineScope {
@@ -243,6 +243,7 @@ fun HomeScreen(
     // 导航自动隐藏：往下滑离开顶部即隐藏，回到顶部/切换标签恢复
     LaunchedEffect(tab, genre) {
         navHidden = false
+        var lastOffset = 0
         snapshotFlow {
             when {
                 tab == HomeTab.Recommend -> recListState.firstVisibleItemIndex to recListState.firstVisibleItemScrollOffset
@@ -251,7 +252,13 @@ fun HomeScreen(
                 else -> 0 to 0
             }
         }.collect { (index, offset) ->
-            navHidden = index > 0 && offset > 60
+            if (index == 0 && offset < 40) {
+                navHidden = false
+            } else if (index > 0 || offset > 100) {
+                // 向下滚离开顶部立刻隐藏，不挡视线
+                navHidden = true
+            }
+            lastOffset = offset
         }
     }
 
@@ -275,6 +282,16 @@ fun HomeScreen(
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest) { onOpenDetail(it.id) } }
                     if (movies.isNotEmpty()) item { RowSection("电影", movies) { onOpenDetail(it.id) } }
                     if (series.isNotEmpty()) item { RowSection("剧集", series) { onOpenDetail(it.id) } }
+                    // 媒体库全分类直接融入首页推荐流，支持无限往下滑
+                    val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
+                    enabledViews.forEach { v ->
+                        val items = viewContents[v.id].orEmpty()
+                        if (items.isNotEmpty()) {
+                            item(key = "home-view-${v.id}") {
+                                RowSection(v.name, items) { onOpenDetail(it.id) }
+                            }
+                        }
+                    }
                     item { Spacer(Modifier.height(36.dp)) }
                 }
                 tab == HomeTab.Media -> MediaLibrary(
@@ -334,34 +351,33 @@ private fun NavBar(
     onSearch: () -> Unit,
     onSettings: () -> Unit,
 ) {
-    // 紧凑悬浮导航：双层结构，半透明玻璃，下滑自动隐藏
-    Column(
+    // 超沉浸紧凑单行导航栏：高度仅 38dp，左右无缝悬浮，绝不抢占视线
+    Row(
         Modifier
             .fillMaxWidth()
             .background(
-                Brush.verticalGradient(listOf(Color(0xD9070A12), Color(0x99070A12), Color(0x00070A12))),
+                Brush.verticalGradient(listOf(Color(0xE6070A12), Color(0x66070A12), Color(0x00070A12))),
             )
-            .padding(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(start = 32.dp, end = 32.dp, top = 10.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 第一行：品牌 + 快捷入口
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("琉璃", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text("TV", color = Accent, fontSize = 11.sp, fontWeight = FontWeight.Light, modifier = Modifier.padding(start = 3.dp))
-            Spacer(Modifier.weight(1f))
-            TopAction("搜索", Icons.Rounded.Search, onSearch)
-            Spacer(Modifier.width(8.dp))
-            TopAction("收藏", Icons.Rounded.Favorite) { onSelect(HomeTab.Favorites, null) }
-            Spacer(Modifier.width(8.dp))
-            TopAction("设置", Icons.Rounded.Settings, onSettings)
+            Text("TV", color = Accent, fontSize = 10.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 2.dp))
         }
-        // 第二行：分类标签
-        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Spacer(Modifier.width(20.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             HomeTab.entries.forEach { t ->
-                TabChip(t.label, tab == t, 62.dp, height = 28.dp) {
+                TabChip(t.label, tab == t, 60.dp, height = 28.dp) {
                     onSelect(t, null)
                 }
             }
+        }
+        Spacer(Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TopAction("搜索", Icons.Rounded.Search, onSearch)
+            TopAction("收藏", Icons.Rounded.Favorite) { onSelect(HomeTab.Favorites, null) }
+            TopAction("设置", Icons.Rounded.Settings, onSettings)
         }
     }
 }

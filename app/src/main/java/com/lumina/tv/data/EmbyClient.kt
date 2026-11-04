@@ -248,6 +248,44 @@ class EmbyClient(
         val ud = o.optJSONObject("UserData")
         val tags = o.optJSONObject("ImageTags")
         val backdrops = o.optJSONObject("BackdropImageTags")
+        val streams = o.optJSONArray("MediaStreams")
+        var w = 0
+        var h = 0
+        var isHdr = false
+        var isDv = false
+        var audioChannels: String? = null
+        if (streams != null) {
+            for (i in 0 until streams.length()) {
+                val s = streams.optJSONObject(i) ?: continue
+                val type = s.optString("Type")
+                if (type == "Video") {
+                    w = s.optInt("Width", w)
+                    h = s.optInt("Height", h)
+                    val vr = s.optString("VideoRange").uppercase()
+                    val title = s.optString("Title").uppercase()
+                    val profile = s.optString("Profile").uppercase()
+                    if ("DOVI" in vr || "DOLBY" in vr || "DV" in profile) isDv = true
+                    if ("HDR" in vr || "HDR10" in vr || "HLG" in vr || "HDR" in title) isHdr = true
+                } else if (type == "Audio" && audioChannels == null) {
+                    val ch = s.optInt("Channels", 0)
+                    val layout = s.optString("ChannelLayout")
+                    val codec = s.optString("Codec").uppercase()
+                    audioChannels = when {
+                        "ATMOS" in codec || "ATMOS" in s.optString("Title").uppercase() -> "ATMOS"
+                        ch >= 8 -> "7.1"
+                        ch >= 6 || "5.1" in layout -> "5.1"
+                        ch >= 2 -> "2.0"
+                        else -> null
+                    }
+                }
+            }
+        }
+        val res = when {
+            w >= 3800 || h >= 2100 -> "4K"
+            w >= 1900 || h >= 1000 -> "1080P"
+            w >= 1200 || h >= 700 -> "720P"
+            else -> null
+        }
         return MediaItem(
             id = o.optString("Id"),
             name = o.optString("Name"),
@@ -271,6 +309,10 @@ class EmbyClient(
                 (0 until g.length()).map { g.optString(it) }
             } ?: emptyList(),
             isFavorite = ud?.optBoolean("IsFavorite", false) ?: false,
+            resolution = res,
+            isHdr = isHdr,
+            isDolbyVision = isDv,
+            audioFormat = audioChannels,
         )
     }
 
