@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.TmdbClient
@@ -53,6 +54,8 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 @Composable
@@ -77,30 +80,54 @@ fun DetailScreen(
     LaunchedEffect(id) {
         AppRuntime.screenLabel = "详情"
         val c = client ?: return@LaunchedEffect
+
+        // 命中缓存：立即渲染，不再转圈
+        val cached = LibraryCache.detail(id)
+        if (cached != null) {
+            item = cached.item
+            seasons = cached.seasons
+            episodes = cached.episodes
+            sources = cached.sources
+            isFav = cached.item?.isFavorite ?: false
+            isPlayed = cached.item?.played ?: false
+            selectedSeason = cached.seasons.firstOrNull()
+            loading = false
+            return@LaunchedEffect
+        }
+
         loading = true
-        item = c.getItem(id)
-        val it0 = item
-        if (it0 != null && it0.type == "Series") {
-            seasons = runCatching { c.getSeasons(it0.id) }.getOrDefault(emptyList())
-            val first = seasons.firstOrNull()
-            selectedSeason = first
-            episodes = runCatching { c.getEpisodes(it0.id, first?.id) }.getOrDefault(emptyList())
-        }
-        loading = false
-        // TMDB 补充：仅当 Emby 自身无评分时异步拉取，失败静默
-        val it1 = item
-        if (it1 != null && it1.rating == null && it1.communityRating == null) {
-            tmdb = TmdbClient.lookup(it1.type, it1.seriesName ?: it1.name, it1.year)
-        }
-        // 收藏/已看状态 + 多源检测
-        if (it1 != null) {
-            isFav = it1.isFavorite
-            isPlayed = it1.played
-            if (it1.type != "Series") {
-                sources = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    runCatching { c.getMediaSources(it1.id) }.getOrDefault(emptyList())
-                }
+        // 详情 / 分季 / 多源并行拉取，避免串行等待
+        val it0 = coroutineScope {
+            val sA = async { runCatching { c.getSeasons(id) }.getOrDefault(emptyList()) }
+            val srcA = async { runCatching { c.getMediaSources(id) }.getOrDefault(emptyList()) }
+            val main = c.getItem(id)
+            if (main != null && main.type == "Series") {
+                val ss = sA.await()
+                seasons = ss
+                val first = ss.firstOrNull()
+                selectedSeason = first
+                LibraryCache.episodesOf(id, first?.id)?.let { episodes = it }
+            } else if (main != null) {
+                sources = srcA.await()
             }
+            main
+        }
+        item = it0
+        loading = false
+        LibraryCache.putDetail(
+            id,
+            LibraryCache.DetailData(
+                item = it0, seasons = seasons, episodes = episodes,
+                sources = sources, at = System.currentTimeMillis(),
+            )
+        )
+        // TMDB 补充：仅当 Emby 自身无评分时异步拉取，失败静默
+        if (it0 != null && it0.rating == null && it0.communityRating == null) {
+            tmdb = TmdbClient.lookup(it0.type, it0.seriesName ?: it0.name, it0.year)
+        }
+        if (it0 != null) {
+            isFav = it0.isFavorite
+            isPlayed = it0.played
         }
     }
 
@@ -108,7 +135,14 @@ fun DetailScreen(
         val c = client ?: return@LaunchedEffect
         val it0 = item ?: return@LaunchedEffect
         if (it0.type == "Series" && selectedSeason != null) {
-            episodes = runCatching { c.getEpisodes(it0.id, selectedSeason?.id) }.getOrDefault(emptyList())
+            val sid = selectedSeason?.id
+            LibraryCache.episodesOf(it0.id, sid)?.let { hit ->
+                if (hit != episodes) episodes = hit
+                return@LaunchedEffect
+            }
+            val list = runCatching { c.getEpisodes(it0.id, sid) }.getOrDefault(emptyList())
+            LibraryCache.putEpisodes(it0.id, sid, list)
+            episodes = list
         }
     }
 
@@ -229,6 +263,8 @@ fun DetailScreen(
                                 corner = 23.dp,
                                 onClick = {
                                     isFav = !isFav
+                                    LibraryCache.invalidateHome()
+                                    LibraryCache.invalidateDetail(it0.id)
                                     kotlinx.coroutines.GlobalScope.launch {
                                         runCatching { client?.setFavorite(it0.id, isFav) }
                                     }
@@ -255,6 +291,8 @@ fun DetailScreen(
                                 corner = 23.dp,
                                 onClick = {
                                     isPlayed = !isPlayed
+                                    LibraryCache.invalidateHome()
+                                    LibraryCache.invalidateDetail(it0.id)
                                     kotlinx.coroutines.GlobalScope.launch {
                                         runCatching { client?.setPlayed(it0.id, isPlayed) }
                                     }

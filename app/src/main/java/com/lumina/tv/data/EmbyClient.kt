@@ -116,6 +116,36 @@ class EmbyClient(
         getItems(types = "Movie,Series,Episode", sortBy = "DateCreated", sortOrder = "Descending", limit = limit, filters = "IsFavorite")
     }
 
+    /** 全部类型（题材）名称，按影片数量从多到少。 */
+    suspend fun getGenres(): List<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val params = mapOf(
+                "UserId" to userId,
+                "Recursive" to "true",
+                "IncludeItemTypes" to "Movie,Series",
+                "SortBy" to "SortName",
+                "SortOrder" to "Ascending",
+            )
+            val arr = getSync(url("/Genres", params)).optJSONArray("Items") ?: JSONArray()
+            (0 until arr.length()).mapNotNull { i ->
+                arr.optJSONObject(i)?.optString("Name")?.ifBlank { null }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /** 按类型取影片（网格浏览用）。 */
+    suspend fun getByGenre(genre: String, limit: Int = 120, startIndex: Int = 0): List<MediaItem> =
+        withContext(Dispatchers.IO) {
+            getItems(
+                types = "Movie,Series",
+                sortBy = "DateCreated",
+                sortOrder = "Descending",
+                limit = limit,
+                startIndex = startIndex,
+                genre = genre,
+            )
+        }
+
     suspend fun getItems(
         parentId: String? = null,
         types: String? = null,
