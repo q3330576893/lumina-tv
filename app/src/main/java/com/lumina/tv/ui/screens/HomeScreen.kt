@@ -1,5 +1,8 @@
 package com.lumina.tv.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,9 +21,12 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
@@ -32,6 +38,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,9 +49,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
+import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.LoadingView
@@ -58,6 +67,7 @@ import kotlinx.coroutines.coroutineScope
 
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
+    Media("媒体库"),
     Movies("电影"),
     Series("剧集"),
     Favorites("收藏"),
@@ -81,11 +91,16 @@ fun HomeScreen(
     var series by remember { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
     var favorites by remember { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
     var genres by remember { mutableStateOf(LibraryCache.home?.genres ?: emptyList()) }
+    var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
 
     var tab by remember { mutableStateOf(HomeTab.Recommend) }
     var genre by remember { mutableStateOf<String?>(null) }
     var gridItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var gridLoading by remember { mutableStateOf(false) }
+    // 各媒体库视图的横向内容（id → items）
+    var viewContents by remember { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
+    // 导航栏自动隐藏
+    var navHidden by remember { mutableStateOf(false) }
 
     // 首页数据：命中缓存立即渲染，过期才在后台刷新（并行请求）
     LaunchedEffect(Unit) {
@@ -115,6 +130,7 @@ fun HomeScreen(
                 }
                 val fA = async { runCatching { c.getFavorites(24) }.getOrDefault(emptyList()) }
                 val gA = async { runCatching { c.getGenres() }.getOrDefault(emptyList()) }
+                val vA = async { runCatching { c.getViews() }.getOrDefault(emptyList()) }
 
                 val r = rA.await()
                 val m = mA.await()
@@ -129,6 +145,7 @@ fun HomeScreen(
                         .entries.sortedByDescending { it.value }
                         .take(20).map { it.key }
                 }
+                val v = vA.await()
                 val l = if (m.isNotEmpty()) m else runCatching { c.getLatest(null, 24) }.getOrDefault(emptyList())
 
                 resume = r
@@ -137,10 +154,11 @@ fun HomeScreen(
                 series = s
                 favorites = f
                 genres = g
+                views = v
                 LibraryCache.putHome(
                     LibraryCache.HomeData(
                         resume = r, latest = l, movies = m, series = s,
-                        favorites = f, genres = g, at = System.currentTimeMillis(),
+                        favorites = f, genres = g, views = v, at = System.currentTimeMillis(),
                     )
                 )
             }
@@ -151,20 +169,32 @@ fun HomeScreen(
         }
     }
 
-    // 切换标签：优先读缓存，没有才请求
+    // 切换标签：Movies/Series 直接复用首页已加载的数据，不再额外请求
     LaunchedEffect(tab, genre) {
-        if (tab == HomeTab.Recommend) return@LaunchedEffect
+        if (tab == HomeTab.Recommend || tab == HomeTab.Media) return@LaunchedEffect
         val c = client ?: return@LaunchedEffect
+        if (tab == HomeTab.Movies && movies.isNotEmpty()) {
+            gridItems = movies
+            return@LaunchedEffect
+        }
+        if (tab == HomeTab.Series && series.isNotEmpty()) {
+            gridItems = series
+            return@LaunchedEffect
+        }
+        if (tab == HomeTab.Favorites && favorites.isNotEmpty()) {
+            gridItems = favorites
+            return@LaunchedEffect
+        }
+        if (tab == HomeTab.Genre && genre == null) {
+            gridItems = emptyList()
+            return@LaunchedEffect
+        }
         val key = when (tab) {
             HomeTab.Movies -> "movies"
             HomeTab.Series -> "series"
             HomeTab.Favorites -> "favorites"
             HomeTab.Genre -> "genre:${genre ?: ""}"
             else -> return@LaunchedEffect
-        }
-        if (tab == HomeTab.Genre && genre == null) {
-            gridItems = emptyList()
-            return@LaunchedEffect
         }
         LibraryCache.browseOf(key)?.let {
             gridItems = it
@@ -185,21 +215,49 @@ fun HomeScreen(
         gridLoading = false
     }
 
+    // 媒体库视图内容：并行拉取各视图最近内容
+    LaunchedEffect(tab, views) {
+        if (tab != HomeTab.Media || client == null) return@LaunchedEffect
+        val c = client ?: return@LaunchedEffect
+        val enabled = views.filter { v -> !AppRuntime.prefs?.isViewHidden(v.id)!! }
+        val missing = enabled.filter { v -> viewContents[v.id] == null }
+        if (missing.isEmpty()) return@LaunchedEffect
+        val result = coroutineScope {
+            missing.map { v ->
+                async {
+                    v.id to runCatching {
+                        c.getItems(parentId = v.id, sortBy = "DateCreated", sortOrder = "Descending", limit = 30)
+                    }.getOrDefault(emptyList())
+                }
+            }.map { it.await() }.toMap()
+        }
+        viewContents = viewContents + result
+    }
+
     val hero = resume.firstOrNull() ?: movies.firstOrNull() ?: series.firstOrNull()
 
-    Column(Modifier.fillMaxSize()) {
-        NavBar(
-            tab = tab,
-            onSelect = { t, g ->
-                tab = t
-                genre = g
-            },
-            onSearch = onSearch,
-            onSettings = onSettings,
-        )
-        Box(Modifier.fillMaxSize()) {
+    val recListState = rememberLazyListState()
+    val gridState = rememberLazyGridState()
+    val genreGridState = rememberLazyGridState()
+
+    // 导航自动隐藏：往下滑离开顶部即隐藏，回到顶部/切换标签恢复
+    LaunchedEffect(tab, genre) {
+        navHidden = false
+        snapshotFlow {
             when {
-                loading -> LoadingView(text = "正在读取影库…")
+                tab == HomeTab.Recommend -> recListState.firstVisibleItemIndex to recListState.firstVisibleItemScrollOffset
+                tab == HomeTab.Movies || tab == HomeTab.Series || tab == HomeTab.Favorites -> gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
+                tab == HomeTab.Genre && genre == null -> genreGridState.firstVisibleItemIndex to genreGridState.firstVisibleItemScrollOffset
+                else -> 0 to 0
+            }
+        }.collect { (index, offset) ->
+            navHidden = index > 0 && offset > 60
+        }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        when {
+            loading -> LoadingView(text = "正在读取影库…")
                 error != null -> Column(
                     Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.Center,
@@ -209,7 +267,7 @@ fun HomeScreen(
                     Spacer(Modifier.height(6.dp))
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
                 }
-                tab == HomeTab.Recommend -> LazyColumn(Modifier.fillMaxSize()) {
+                tab == HomeTab.Recommend -> LazyColumn(state = recListState, modifier = Modifier.fillMaxSize()) {
                     item { Hero(hero, client?.backdropUrl(hero ?: MediaItem("", ""), 1920), onPlay, onOpenDetail) }
                     if (genres.isNotEmpty()) item { GenreQuickRow(genres) { g -> tab = HomeTab.Genre; genre = g } }
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume) { onOpenDetail(it.id) } }
@@ -219,14 +277,20 @@ fun HomeScreen(
                     if (series.isNotEmpty()) item { RowSection("剧集", series) { onOpenDetail(it.id) } }
                     item { Spacer(Modifier.height(36.dp)) }
                 }
-                tab == HomeTab.Genre && genre == null -> GenrePicker(genres) { genre = it }
+                tab == HomeTab.Media -> MediaLibrary(
+                    views = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) },
+                    contents = viewContents,
+                    onOpenDetail = onOpenDetail,
+                )
+                tab == HomeTab.Genre && genre == null -> GenrePicker(genres, genreGridState) { genre = it }
                 gridLoading -> LoadingView(text = "正在加载…")
                 gridItems.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("这里还没有内容", color = TextSub, fontSize = 13.sp)
                 }
                 else -> LazyVerticalGrid(
+                    state = gridState,
                     columns = GridCells.Fixed(6),
-                    contentPadding = PaddingValues(start = 34.dp, end = 34.dp, top = 10.dp, bottom = 40.dp),
+                    contentPadding = PaddingValues(start = 34.dp, end = 34.dp, top = 88.dp, bottom = 40.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -240,6 +304,25 @@ fun HomeScreen(
                     }
                 }
             }
+
+        // 紧凑悬浮导航：盖在内容上方，下滑自动隐藏
+        AnimatedVisibility(
+            visible = !navHidden,
+            enter = slideInVertically { -it },
+            exit = slideOutVertically { -it },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .zIndex(2f),
+        ) {
+NavBar(
+                tab = tab,
+                onSelect = { t, g ->
+                    tab = t
+                    genre = g
+                },
+                onSearch = onSearch,
+                onSettings = onSettings,
+            )
         }
     }
 }
@@ -251,28 +334,57 @@ private fun NavBar(
     onSearch: () -> Unit,
     onSettings: () -> Unit,
 ) {
-    Row(
+    // 紧凑悬浮导航：双层结构，半透明玻璃，下滑自动隐藏
+    Column(
         Modifier
             .fillMaxWidth()
-            .padding(start = 34.dp, end = 34.dp, top = 14.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(
+                Brush.verticalGradient(listOf(Color(0xD9070A12), Color(0x99070A12), Color(0x00070A12))),
+            )
+            .padding(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Column(Modifier.width(120.dp)) {
-            Text("琉璃", color = TextMain, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-            val user = AppRuntime.session?.userName ?: ""
-            if (user.isNotBlank()) Text(user, color = TextSub, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // 第一行：品牌 + 快捷入口
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("琉璃", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text("TV", color = Accent, fontSize = 11.sp, fontWeight = FontWeight.Light, modifier = Modifier.padding(start = 3.dp))
+            Spacer(Modifier.weight(1f))
+            TopAction("搜索", Icons.Rounded.Search, onSearch)
+            Spacer(Modifier.width(8.dp))
+            TopAction("收藏", Icons.Rounded.Favorite) { onSelect(HomeTab.Favorites, null) }
+            Spacer(Modifier.width(8.dp))
+            TopAction("设置", Icons.Rounded.Settings, onSettings)
         }
-        Spacer(Modifier.width(18.dp))
-        HomeTab.entries.forEach { t ->
-            TabChip(t.label, tab == t, 76.dp, height = 32.dp) {
-                onSelect(t, if (t == HomeTab.Genre) null else null)
+        // 第二行：分类标签
+        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            HomeTab.entries.forEach { t ->
+                TabChip(t.label, tab == t, 62.dp, height = 28.dp) {
+                    onSelect(t, null)
+                }
             }
-            Spacer(Modifier.width(6.dp))
         }
-        Spacer(Modifier.weight(1f))
-        TopButton(Icons.Rounded.Search, "搜索", onSearch)
-        Spacer(Modifier.width(10.dp))
-        TopButton(Icons.Rounded.Settings, "设置", onSettings)
+    }
+}
+
+@Composable
+private fun TopAction(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+    FocusSurface(
+        modifier = Modifier.height(30.dp),
+        corner = 15.dp,
+        scaleTo = 1.05f,
+        onClick = onClick,
+    ) { focused ->
+        Row(
+            Modifier.fillMaxSize().background(
+                if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
+                RoundedCornerShape(15.dp),
+            ).padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, contentDescription = label, tint = if (focused) Accent else TextMain, modifier = Modifier.size(15.dp))
+            Spacer(Modifier.width(5.dp))
+            Text(label, color = if (focused) Accent else TextMain, fontSize = 11.sp)
+        }
     }
 }
 
@@ -314,7 +426,11 @@ private fun TabChip(
 }
 
 @Composable
-private fun GenrePicker(genres: List<String>, onPick: (String) -> Unit) {
+private fun GenrePicker(
+    genres: List<String>,
+    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    onPick: (String) -> Unit,
+) {
     if (genres.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("服务器没有返回类型信息", color = TextSub, fontSize = 13.sp)
@@ -322,8 +438,9 @@ private fun GenrePicker(genres: List<String>, onPick: (String) -> Unit) {
         return
     }
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Fixed(5),
-        contentPadding = PaddingValues(start = 34.dp, end = 34.dp, top = 10.dp, bottom = 40.dp),
+        contentPadding = PaddingValues(start = 34.dp, end = 34.dp, top = 88.dp, bottom = 40.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize(),
@@ -344,6 +461,51 @@ private fun GenrePicker(genres: List<String>, onPick: (String) -> Unit) {
                 ) { Text(g, color = TextMain, fontSize = 13.sp) }
             }
         }
+    }
+}
+
+/** 媒体库：展示服务器自带的全部分类（按 setup 顺序），可一直往下滑；隐藏项由设置页控制。 */
+@Composable
+private fun MediaLibrary(
+    views: List<LibraryView>,
+    contents: Map<String, List<MediaItem>>,
+    onOpenDetail: (String) -> Unit,
+) {
+    val client = AppRuntime.client
+    if (views.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("服务器暂无媒体库分类", color = TextSub, fontSize = 13.sp)
+        }
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize().padding(top = 80.dp)) {
+        item {
+            Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 8.dp, bottom = 6.dp)) {
+                Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("服务器自带的全部分类· 可在设置里增删", color = TextSub, fontSize = 11.sp)
+            }
+        }
+        views.forEach { v ->
+            val items = contents[v.id].orEmpty()
+            item(key = "view-${v.id}") {
+                Column(Modifier.padding(top = 16.dp)) {
+                    SectionTitle(v.name, Modifier.padding(start = 34.dp, bottom = 10.dp))
+                    if (items.isEmpty()) {
+                        Text("正在加载…", color = TextSub, fontSize = 11.sp, modifier = Modifier.padding(start = 34.dp))
+                    } else {
+                        LazyRow(
+                            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            items(items, key = { it.id }) { it ->
+                                PosterCard(item = it, imageUrl = client?.imageUrl(it), onClick = { onOpenDetail(it.id) })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(40.dp)) }
     }
 }
 

@@ -34,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -153,18 +154,19 @@ fun DetailScreen(
                 model = client?.backdropUrl(it0, 1920),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().blur(42.dp),
             )
+            // 模糊海报 → 主色铺满：重模糊后叠深色渐层，页面颜色随封面走
             Box(
                 Modifier.fillMaxSize().background(
                     Brush.verticalGradient(
-                        listOf(Color(0xB3070A12), Color(0xE6070A12), Color(0xFF070A12))
+                        listOf(Color(0x4D000000), Color(0x99000000), Color(0xE6000000), Color(0xF20B0A09))
                     )
                 )
             )
             Box(
                 Modifier.fillMaxSize().background(
-                    Brush.horizontalGradient(listOf(Color(0xE6070A12), Color(0x66070A12), Color(0x22070A12)))
+                    Brush.horizontalGradient(listOf(Color(0xCC000000), Color(0x4D000000), Color(0x00000000)))
                 )
             )
         }
@@ -178,7 +180,12 @@ fun DetailScreen(
                 Modifier.fillMaxSize().verticalScroll(rememberScrollState())
                     .padding(start = 48.dp, end = 48.dp, top = 34.dp, bottom = 24.dp)
             ) {
-                Row {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Color(0x14FFFFFF), RoundedCornerShape(26.dp))
+                        .padding(20.dp)
+                ) {
                     Poster(it0!!, client?.imageUrl(it0, 720))
                     Spacer(Modifier.width(30.dp))
                     Column(Modifier.weight(1f)) {

@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.BuildConfig
 import com.lumina.tv.CrashHandler
+import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.QrCode
@@ -64,11 +65,16 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
     var qrUrl by remember { mutableStateOf(AppRuntime.pairingUrl) }
     var crashInfo by remember { mutableStateOf(CrashHandler.lastCrashSummary(context)) }
+    var hiddenIds by remember { mutableStateOf(prefs?.hiddenViewIds ?: emptySet()) }
+    var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
 
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "设置"
         if (AppRuntime.pairing == null) AppRuntime.startPairing(context)
         qrUrl = AppRuntime.pairingUrl
+        if (views.isEmpty()) {
+            views = runCatching { AppRuntime.client?.getViews() }.getOrNull().orEmpty()
+        }
     }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -194,6 +200,72 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp),
                         )
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                // ---------- 首页媒体库分类 ----------
+                GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
+                    Column(Modifier.padding(22.dp)) {
+                        Text("首页媒体库", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "勾选即在首页媒体库中显示，取消勾选即隐藏。只影响首页，不影响搜索与详情",
+                            color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        if (views.isEmpty()) {
+                            Text("打开一次首页后会自动同步服务器分类", color = TextSub, fontSize = 12.sp)
+                        } else {
+                            views.forEach { v ->
+                                SwitchRow(
+                                    title = v.name,
+                                    desc = when (v.type) {
+                                        "movies" -> "电影库"
+                                        "tvshows" -> "剧集库"
+                                        "music" -> "音乐库"
+                                        "boxsets" -> "合集"
+                                        else -> "媒体库"
+                                    },
+                                    checked = v.id !in hiddenIds,
+                                    onChange = {
+                                        prefs?.toggleViewHidden(v.id)
+                                        hiddenIds = prefs?.hiddenViewIds ?: emptySet()
+                                    },
+                                )
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                FocusSurface(
+                                    modifier = Modifier.height(34.dp).width(110.dp),
+                                    corner = 17.dp, scaleTo = 1f,
+                                    onClick = {
+                                        prefs?.hiddenViewIds = emptySet()
+                                        hiddenIds = emptySet()
+                                    },
+                                ) { focused ->
+                                    Box(
+                                        Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)),
+                                        contentAlignment = Alignment.Center,
+                                    ) { Text("全部显示", color = TextMain, fontSize = 11.sp) }
+                                }
+                                FocusSurface(
+                                    modifier = Modifier.height(34.dp).width(110.dp),
+                                    corner = 17.dp, scaleTo = 1f,
+                                    onClick = {
+                                        val all = views.map { it.id }.toSet()
+                                        prefs?.hiddenViewIds = all
+                                        hiddenIds = all
+                                    },
+                                ) { focused ->
+                                    Box(
+                                        Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)),
+                                        contentAlignment = Alignment.Center,
+                                    ) { Text("全部隐藏", color = TextMain, fontSize = 11.sp) }
+                                }
+                            }
+                        }
                     }
                 }
 

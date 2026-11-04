@@ -11,12 +11,16 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -43,14 +47,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.ui.components.FocusSurface
-import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.QrCode
-import com.lumina.tv.ui.theme.Accent
-import com.lumina.tv.ui.theme.Accent2
-import com.lumina.tv.ui.theme.GlassLine
-import com.lumina.tv.ui.theme.TextMain
-import com.lumina.tv.ui.theme.TextSub
 import kotlinx.coroutines.launch
+
+// 淡薰衣草玻璃风配色（参考图：轻盈、留白、圆角）
+private val LBgTop = Color(0xFFEDEBFF)
+private val LBgMid = Color(0xFFF3F2FB)
+private val LBgEnd = Color(0xFFFBFBFE)
+private val LInk = Color(0xFF1A1826)
+private val LInkSub = Color(0xFF6E6B80)
+private val LPurple = Color(0xFF6C5CE7)
+private val LPurple2 = Color(0xFF9D8CFF)
+private val LCard = Color(0xF5FFFFFF)
+private val LLine = Color(0x1F1A1826)
 
 @Composable
 fun LoginScreen(onLoggedIn: () -> Unit) {
@@ -79,6 +88,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
     var qrUrl by remember { mutableStateOf(AppRuntime.pairingUrl) }
     var qrError by remember { mutableStateOf(AppRuntime.pairingError) }
     var paired by remember { mutableStateOf(false) }
+    var showHelp by remember { mutableStateOf(false) }
 
     fun doLogin(baseUrl: String, u: String, p: String) {
         scope.launch {
@@ -127,11 +137,10 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                 add("http://$h:80")
             }.distinct()
             var found: String? = null
-            var lastName = ""
             for (base in candidates) {
                 try {
                     val client = com.lumina.tv.data.EmbyClient(baseUrl = base, deviceId = prefs?.deviceId ?: "lumina-tv")
-                    lastName = client.testConnection(base)
+                    client.testConnection(base)
                     found = base
                     break
                 } catch (_: Exception) { /* 尝试下一个 */ }
@@ -163,198 +172,239 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
         qrError = AppRuntime.pairingError
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val wide = maxWidth >= 1020.dp
+    Box(
+        Modifier.fillMaxSize().background(
+            Brush.verticalGradient(listOf(LBgTop, LBgMid, LBgEnd))
+        )
+    ) {
+        // 背景光晕
+        Box(
+            Modifier.size(620.dp).align(Alignment.TopEnd).offset(x = 180.dp, y = (-220).dp)
+                .background(Brush.radialGradient(listOf(Color(0x73B9A8FF), Color(0x00B9A8FF))), CircleShape)
+        )
+        Box(
+            Modifier.size(520.dp).align(Alignment.BottomStart).offset(x = (-180).dp, y = 200.dp)
+                .background(Brush.radialGradient(listOf(Color(0x4D8FD8FF), Color(0x008FD8FF))), CircleShape)
+        )
 
-        Row(Modifier.fillMaxSize().padding(horizontal = 40.dp, vertical = 28.dp)) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val wide = maxWidth >= 1020.dp
 
-            // 左：品牌 + 登录表单
-            Column(
-                Modifier.weight(1f).fillMaxHeight(),
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text("琉璃", color = TextMain, fontSize = 38.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-                    Text(" TV", color = Accent, fontSize = 26.sp, fontWeight = FontWeight.Light)
-                }
-                Spacer(Modifier.height(4.dp))
-                Text("连接你的 Emby 服务器", color = TextSub, fontSize = 12.sp)
-                Spacer(Modifier.height(20.dp))
+            Row(Modifier.fillMaxSize().padding(horizontal = 44.dp, vertical = 30.dp)) {
 
-                GlassPanel(Modifier.width(520.dp), corner = 26.dp) {
-                    Column(Modifier.padding(26.dp)) {
+                // 左：品牌 + 表单
+                Column(
+                    Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    // 品牌（统一用「琉璃」）
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text("琉璃", color = LInk, fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Text(" TV", color = LPurple, fontSize = 22.sp, fontWeight = FontWeight.Light)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text("连接你的 Emby 服务器", color = LInkSub, fontSize = 12.sp)
 
-                        // ---- 服务器地址 ----
-                        Text("服务器地址", color = TextSub, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                        Spacer(Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Spacer(Modifier.height(26.dp))
+                    Text(
+                        "添加媒体服务器\n从未如此简单",
+                        color = LInk, fontSize = 30.sp, fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FeaturePill("扫码 30 秒配好")
+                        FeaturePill("自动探测端口")
+                        FeaturePill("账号不落明文")
+                    }
+
+                    Spacer(Modifier.height(24.dp))
+
+                    Box(
+                        Modifier.width(560.dp)
+                            .clip(RoundedCornerShape(26.dp))
+                            .background(LCard)
+                            .padding(26.dp)
+                    ) {
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("服务器", color = LInk, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.weight(1f))
                                 listOf("http", "https").forEach { s ->
                                     val selected = scheme == s
                                     FocusSurface(
-                                        modifier = Modifier.width(82.dp).height(50.dp),
-                                        corner = 12.dp,
-                                        scaleTo = 1f,
+                                        modifier = Modifier.width(64.dp).height(32.dp),
+                                        corner = 16.dp, scaleTo = 1f,
                                         onClick = { scheme = s },
                                     ) { focused ->
                                         Box(
                                             Modifier.fillMaxSize().background(
                                                 when {
-                                                    selected -> Accent
-                                                    focused -> Color(0x2EFFFFFF)
-                                                    else -> Color(0x14FFFFFF)
-                                                }
+                                                    selected -> LPurple
+                                                    focused -> Color(0x141A1826)
+                                                    else -> Color(0x0A1A1826)
+                                                }, RoundedCornerShape(16.dp)
                                             ),
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             Text(
-                                                s,
-                                                fontSize = 12.sp,
-                                                color = if (selected) Color(0xFF06101F) else TextSub,
+                                                s, fontSize = 11.sp,
+                                                color = if (selected) Color.White else LInkSub,
                                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                                             )
                                         }
                                     }
                                 }
                             }
-                            Spacer(Modifier.width(8.dp))
-                            LumiField(
-                                value = host,
-                                onChange = { host = it },
-                                placeholder = "IP 或域名",
-                                modifier = Modifier.weight(1f),
-                                imeAction = ImeAction.Next,
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            LumiField(
-                                value = port,
-                                onChange = { port = it.filter { c -> c.isDigit() }.take(5) },
-                                placeholder = "端口",
-                                modifier = Modifier.width(88.dp),
-                                keyboardType = KeyboardType.Number,
-                                imeAction = ImeAction.Next,
-                            )
-                        }
-
-                        Spacer(Modifier.height(14.dp))
-
-                        // ---- 用户名 ----
-                        Text("用户名", color = TextSub, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                        Spacer(Modifier.height(8.dp))
-                        LumiField(
-                            value = user,
-                            onChange = { user = it },
-                            placeholder = "Emby 用户名",
-                            modifier = Modifier.fillMaxWidth(),
-                            imeAction = ImeAction.Next,
-                        )
-
-                        Spacer(Modifier.height(14.dp))
-
-                        // ---- 密码 ----
-                        Text("密码", color = TextSub, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                        Spacer(Modifier.height(8.dp))
-                        LumiField(
-                            value = pass,
-                            onChange = { pass = it },
-                            placeholder = "密码",
-                            modifier = Modifier.fillMaxWidth(),
-                            password = true,
-                            imeAction = ImeAction.Done,
-                            onDone = { submit(user, pass) },
-                        )
-
-                        Spacer(Modifier.height(20.dp))
-
-                        // ---- 登录按钮 ----
-                        FocusSurface(
-                            modifier = Modifier.fillMaxWidth().height(54.dp),
-                            corner = 16.dp,
-                            scaleTo = 1.02f,
-                            onClick = { submit(user, pass) },
-                        ) { _ ->
-                            Box(
-                                Modifier
-                                    .fillMaxSize()
-                                    .background(
-                                        Brush.horizontalGradient(listOf(Accent, Accent2))
-                                    ),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                if (loading || probing) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        CircularProgressIndicator(
-                                            color = Color.White, strokeWidth = 2.dp,
-                                            modifier = Modifier.size(18.dp),
-                                        )
-                                        Spacer(Modifier.width(10.dp))
-                                        Text(
-                                            if (probing) "正在探测服务器…" else "正在登录…",
-                                            color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                                        )
-                                    }
-                                } else {
-                                    Text(
-                                        "登 录",
-                                        color = Color.White,
-                                        fontSize = 17.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        letterSpacing = 6.sp,
-                                    )
-                                }
-                            }
-                        }
-
-                        error?.let {
                             Spacer(Modifier.height(12.dp))
-                            Text(it, color = Color(0xFFFF8A9A), fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-
-            // 右：扫码配对（仅宽屏 / TV 显示）
-            if (wide) {
-                Spacer(Modifier.width(44.dp))
-
-                Column(
-                    Modifier.fillMaxHeight(),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    GlassPanel(Modifier.width(330.dp), corner = 28.dp) {
-                        Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("扫码 30 秒配好", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                "手机扫一扫，直接填服务器、账号、密码",
-                                color = TextSub, fontSize = 11.sp,
-                            )
-                            Spacer(Modifier.height(16.dp))
-                            if (qrUrl.isNotEmpty()) {
-                                QrCode(qrUrl, size = 196.dp)
-                                Spacer(Modifier.height(12.dp))
-                                Text(
-                                    qrUrl.removePrefix("http://").removeSuffix("/"),
-                                    color = Accent, fontSize = 12.sp,
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                LumiField(
+                                    value = host,
+                                    onChange = { host = it },
+                                    placeholder = "IP 或域名",
+                                    modifier = Modifier.weight(1f),
+                                    imeAction = ImeAction.Next,
                                 )
-                            } else {
+                                Spacer(Modifier.width(10.dp))
+                                LumiField(
+                                    value = port,
+                                    onChange = { port = it.filter { c -> c.isDigit() }.take(5) },
+                                    placeholder = "端口",
+                                    modifier = Modifier.width(96.dp),
+                                    keyboardType = KeyboardType.Number,
+                                    imeAction = ImeAction.Next,
+                                )
+                            }
+
+                            Spacer(Modifier.height(14.dp))
+                            LumiField(
+                                value = user,
+                                onChange = { user = it },
+                                placeholder = "Emby 用户名",
+                                modifier = Modifier.fillMaxWidth(),
+                                imeAction = ImeAction.Next,
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            LumiField(
+                                value = pass,
+                                onChange = { pass = it },
+                                placeholder = "密码",
+                                modifier = Modifier.fillMaxWidth(),
+                                password = true,
+                                imeAction = ImeAction.Done,
+                                onDone = { submit(user, pass) },
+                            )
+
+                            Spacer(Modifier.height(18.dp))
+                            FocusSurface(
+                                modifier = Modifier.fillMaxWidth().height(54.dp),
+                                corner = 18.dp,
+                                scaleTo = 1.02f,
+                                onClick = { submit(user, pass) },
+                            ) { focused ->
                                 Box(
-                                    Modifier.size(196.dp).clip(RoundedCornerShape(18.dp)).background(Color(0x14FFFFFF)),
+                                    Modifier.fillMaxSize().background(
+                                        Brush.horizontalGradient(
+                                            listOf(
+                                                if (focused) LPurple else LPurple.copy(alpha = 0.92f),
+                                                if (focused) LPurple2 else LPurple2.copy(alpha = 0.92f),
+                                            )
+                                        )
+                                    ),
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    Text(
-                                        qrError ?: "正在生成二维码…",
-                                        color = TextSub, fontSize = 11.sp,
-                                        modifier = Modifier.padding(16.dp),
-                                    )
+                                    if (loading || probing) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            CircularProgressIndicator(
+                                                color = Color.White, strokeWidth = 2.dp,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                            Text(
+                                                if (probing) "正在探测服务器…" else "正在登录…",
+                                                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                                            )
+                                        }
+                                    } else {
+                                        Text(
+                                            "登 录", color = Color.White, fontSize = 16.sp,
+                                            fontWeight = FontWeight.Bold, letterSpacing = 6.sp,
+                                        )
+                                    }
                                 }
                             }
-                            Spacer(Modifier.height(12.dp))
-                            Text(
-                                if (paired) "已收到手机配置，正在登录…" else "手机与电视需在同一个 WiFi",
-                                color = if (paired) Accent else TextSub, fontSize = 11.sp,
-                            )
+
+                            error?.let {
+                                Spacer(Modifier.height(10.dp))
+                                Text(it, color = Color(0xFFD6304B), fontSize = 12.sp)
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        LightPillButton("从其他设备同步", LPurple) { showHelp = !showHelp }
+                        LightPillButton("帮助与指引", LInkSub) { showHelp = !showHelp }
+                    }
+                    if (showHelp) {
+                        Spacer(Modifier.height(10.dp))
+                        Box(
+                            Modifier.width(560.dp).clip(RoundedCornerShape(16.dp))
+                                .background(Color(0x0F1A1826)).padding(14.dp)
+                        ) {
+                            Column {
+                                Text("如何连接", color = LInk, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "1. 手机与电视连同一个 WiFi\n2. 扫码后自动填入服务器、账号、密码\n3. 也可手动输入 IP（默认端口 8096）",
+                                    color = LInkSub, fontSize = 11.sp, lineHeight = 18.sp,
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(20.dp))
+                }
+
+                // 右：扫码配对
+                if (wide) {
+                    Spacer(Modifier.width(46.dp))
+                    Column(
+                        Modifier.fillMaxHeight(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Box(
+                            Modifier.width(330.dp).clip(RoundedCornerShape(28.dp))
+                                .background(LCard).padding(24.dp)
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("扫码 30 秒配好", color = LInk, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(4.dp))
+                                Text("手机扫一扫，直接填服务器、账号、密码", color = LInkSub, fontSize = 11.sp)
+                                Spacer(Modifier.height(16.dp))
+                                if (qrUrl.isNotEmpty()) {
+                                    Box(
+                                        Modifier.clip(RoundedCornerShape(18.dp))
+                                            .background(Color.White).padding(10.dp)
+                                    ) { QrCode(qrUrl, size = 196.dp) }
+                                    Spacer(Modifier.height(12.dp))
+                                    Text(qrUrl.removePrefix("http://").removeSuffix("/"), color = LPurple, fontSize = 12.sp)
+                                } else {
+                                    Box(
+                                        Modifier.size(196.dp).clip(RoundedCornerShape(18.dp)).background(Color(0x0F1A1826)),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            qrError ?: "正在生成二维码…", color = LInkSub, fontSize = 11.sp,
+                                            modifier = Modifier.padding(16.dp),
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.height(12.dp))
+                                Text(
+                                    if (paired) "已收到手机配置，正在登录…" else "手机与电视需在同一个 WiFi",
+                                    color = if (paired) LPurple else LInkSub, fontSize = 11.sp,
+                                )
+                            }
                         }
                     }
                 }
@@ -363,7 +413,36 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
     }
 }
 
-/** 输入框：外部标签 + 56dp 高度，placeholder 常显，支持 IME 动作。 */
+@Composable
+private fun FeaturePill(text: String) {
+    Row(
+        Modifier.clip(RoundedCornerShape(12.dp)).background(Color(0x121A1826)).padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(5.dp).background(LPurple, CircleShape))
+        Spacer(Modifier.width(6.dp))
+        Text(text, color = LInkSub, fontSize = 10.sp)
+    }
+}
+
+@Composable
+private fun LightPillButton(text: String, color: Color, onClick: () -> Unit) {
+    FocusSurface(
+        modifier = Modifier.height(36.dp),
+        corner = 18.dp, scaleTo = 1.03f,
+        onClick = onClick,
+    ) { focused ->
+        Box(
+            Modifier.fillMaxSize().background(
+                if (focused) Color(0x141A1826) else Color(0x0A1A1826),
+                RoundedCornerShape(18.dp),
+            ).padding(horizontal = 16.dp),
+            contentAlignment = Alignment.Center,
+        ) { Text(text, color = color, fontSize = 12.sp) }
+    }
+}
+
+/** 浅色输入框：白底、淡紫聚焦，56dp。 */
 @Composable
 private fun LumiField(
     value: String,
@@ -378,7 +457,7 @@ private fun LumiField(
     OutlinedTextField(
         value = value,
         onValueChange = onChange,
-        placeholder = { Text(placeholder, fontSize = 13.sp, color = TextSub.copy(alpha = 0.55f)) },
+        placeholder = { Text(placeholder, fontSize = 13.sp, color = LInkSub.copy(alpha = 0.55f)) },
         singleLine = true,
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
@@ -386,15 +465,15 @@ private fun LumiField(
             onDone = { onDone?.invoke() },
             onNext = { /* 默认跳到下一焦点 */ },
         ),
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = OutlinedTextFieldDefaults.colors(
-            focusedTextColor = TextMain,
-            unfocusedTextColor = TextMain,
-            focusedBorderColor = Accent,
-            unfocusedBorderColor = GlassLine,
-            cursorColor = Accent,
-            focusedContainerColor = Color(0x0DFFFFFF),
-            unfocusedContainerColor = Color(0x0AFFFFFF),
+            focusedTextColor = LInk,
+            unfocusedTextColor = LInk,
+            focusedBorderColor = LPurple,
+            unfocusedBorderColor = LLine,
+            cursorColor = LPurple,
+            focusedContainerColor = Color.White,
+            unfocusedContainerColor = Color(0xFAFFFFFF),
         ),
         modifier = modifier.height(56.dp),
     )
