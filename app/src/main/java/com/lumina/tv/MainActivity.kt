@@ -57,17 +57,10 @@ private fun Screen.depth(): Int = when (this) {
 class MainActivity : ComponentActivity() {
     private var phoneSearch by mutableStateOf<String?>(null)
 
-    private val deviceIsTelevision: Boolean
-        get() = packageManager.hasSystemFeature("android.software.leanback") ||
-            packageManager.hasSystemFeature("android.hardware.type.television")
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedOrientation = if (deviceIsTelevision) {
-            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        } else {
-            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        }
+        // Lumina phone and TV clients intentionally share the 16:9 landscape layout.
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         CrashHandler.install(this)
         AppRuntime.init(this)
         AppRuntime.restore()
@@ -177,7 +170,17 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
             label = "nav",
         ) { target ->
         when (target) {
-            is Screen.Login -> LoginScreen(onLoggedIn = { screen = Screen.Home })
+            is Screen.Login -> LoginScreen(
+                onLoggedIn = { screen = Screen.Home },
+                onNavigate = { destination ->
+                    when (destination) {
+                        "search" -> screen = Screen.Search()
+                        "home" -> if (AppRuntime.session != null) screen = Screen.Home
+                        "play" -> if (AppRuntime.session != null) screen = Screen.Home
+                        "settings" -> if (AppRuntime.session != null) screen = Screen.Settings
+                    }
+                },
+            )
 
             is Screen.Home -> {
                 HomeScreen(

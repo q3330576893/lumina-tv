@@ -1,3 +1,9 @@
+## v1.14.1（横屏与登录界面修正）
+
+- 手机和 TV 统一强制 16:9 横屏，恢复用户偏好的 v1.13 登录玻璃界面，并保留扫码登录与登录页导航。
+- 增加 ZXing Android Embedded 依赖及扫码 Activity 声明。
+- 此版本基于 main 当前源码并仅回用 v1.13 的 LoginScreen/Manifest，不回退播放器、Emby 与 v1.14.0 的分类/详情改动。
+
 # 更新记录
 
 ## v1.14.0（TV / Android）

@@ -19,8 +19,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 17
-        versionName = "1.14.0"
+        versionCode = 18
+        versionName = "1.14.1"
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
     }
 
@@ -81,4 +81,5 @@ dependencies {
     implementation("androidx.tv:tv-material:1.0.0")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("com.google.zxing:core:3.5.3")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }
