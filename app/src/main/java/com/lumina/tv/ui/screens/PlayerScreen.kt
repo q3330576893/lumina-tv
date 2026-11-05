@@ -265,7 +265,12 @@ fun PlayerScreen(
                     reloadKey++
                 } else {
                     buffering = false
-                    error = "播放失败：${err.errorCodeName}"
+                    val cause = generateSequence(err as Throwable?) { it.cause }
+                        .take(4).mapNotNull { it.message?.takeIf(String::isNotBlank) }.joinToString(" · ")
+                    error = buildString {
+                        append("播放失败：${err.errorCodeName}")
+                        if (cause.isNotBlank()) append("\n").append(cause.take(220))
+                    }
                 }
             }
 

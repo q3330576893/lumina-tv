@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
         }
 
         AppRuntime.onRemoteKey = { action -> runOnUiThread { dispatchRemote(action) } }
-        AppRuntime.onSearch = { kw -> runOnUiThread { phoneSearch = kw } }
+        AppRuntime.onSearch = { kw -> runOnUiThread { if (AppRuntime.session != null) phoneSearch = kw } }
 
         setContent {
             LuminaTheme {
@@ -186,7 +186,6 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
                 HomeScreen(
                     onOpenDetail = { id -> screen = Screen.Detail(id) },
                     onPlay = { item -> screen = Screen.Play(item) },
-                    onSearch = { screen = Screen.Search() },
                     onSettings = { screen = Screen.Settings },
                 )
             }

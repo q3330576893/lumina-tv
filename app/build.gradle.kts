@@ -19,8 +19,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 18
-        versionName = "1.14.1"
+        versionCode = 19
+        versionName = "1.14.2"
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
     }
 

@@ -104,7 +104,10 @@ fun DetailScreen(
             coroutineScope {
                 val fresh = async { runCatching { c.getItem(id) }.getOrNull() }
                 val related = async { runCatching { c.getSimilarItems(id, 12) }.getOrDefault(emptyList()) }
-                fresh.await()?.let { item = it }
+                fresh.await()?.let { freshItem ->
+                    item = freshItem
+                    LibraryCache.putDetail(id, cached.copy(item = freshItem, at = System.currentTimeMillis()))
+                }
                 similar = related.await()
             }
             return@LaunchedEffect

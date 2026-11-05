@@ -36,9 +36,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
@@ -339,8 +337,8 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
             ) {
                 Text("L", color = VioletBright, fontSize = 25.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
-                listOf(Icons.Filled.Search to "搜索", Icons.Filled.Home to "主页", Icons.Filled.Movie to "播放", Icons.Filled.Settings to "设置").forEachIndexed { idx, pair ->
-                    SideNavButton(pair.first, pair.second, isTv, enabled = true, selected = false) { onNavigate(listOf("search", "home", "play", "settings")[idx]) }
+                listOf(Icons.Filled.Home to "主页", Icons.Filled.Settings to "设置").forEach { (icon, label) ->
+                    SideNavButton(icon, label, isTv, enabled = true, selected = false) { onNavigate(if (label == "主页") "home" else "settings") }
                 }
             }
 
