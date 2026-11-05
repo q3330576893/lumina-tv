@@ -102,6 +102,9 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
     var loading by remember { mutableStateOf(false) }
     var probing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var loginErrorDialog by remember { mutableStateOf<String?>(null) }
+    var pendingLoginBase by remember { mutableStateOf<String?>(null) }
+    var scanLoginRequested by remember { mutableStateOf(false) }
     var paired by remember { mutableStateOf(false) }
     var helpOpen by remember { mutableStateOf(false) }
     var syncOpen by remember { mutableStateOf(false) }
@@ -142,6 +145,24 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
             json != null -> scanError = "二维码中缺少服务器地址或账号字段。"
             else -> scanError = "二维码格式无法识别。请扫描包含服务器地址、用户名和密码的 Lumina 配置码。"
         }
+        val resolvedUser = scanUser ?: direct?.getQueryParameter("user") ?: direct?.getQueryParameter("username")
+        val resolvedPass = scanPass ?: direct?.getQueryParameter("pass") ?: direct?.getQueryParameter("password")
+        val resolvedServer = server?.let { if (it.startsWith("http")) it else "http://$it" } ?: direct?.takeIf { it.host != null }?.let {
+            "${it.scheme ?: "http"}://${it.host}:${it.port.takeIf { p -> p > 0 } ?: if (it.scheme == "https") 8920 else 8096}"
+        }
+        if (scanError == null && !resolvedServer.isNullOrBlank() && !resolvedUser.isNullOrBlank() && !resolvedPass.isNullOrBlank()) {
+            user = resolvedUser
+            pass = resolvedPass
+            val base = Uri.parse(if (resolvedServer.startsWith("http")) resolvedServer else "http://$resolvedServer")
+            scheme = base.scheme?.takeIf { it == "https" } ?: "http"
+            host = base.host.orEmpty()
+            port = base.port.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
+            pendingLoginBase = "${scheme}://${host}:${port}"
+            scanLoginRequested = true
+        } else if (scanError == null) {
+            scanError = "二维码缺少完整的服务器地址、用户名或密码。"
+        }
+
     }
     val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted && activity != null) scanLauncher.launch(IntentIntegrator(activity)
@@ -154,7 +175,10 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
     }
 
     fun launchScan() {
-        if (Build.VERSION.SDK_INT >= 23 && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+        if (activity == null) {
+            scanError = "当前设备无法启动扫码界面。"
+        } else if (Build.VERSION.SDK_INT >= 23 && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+
             cameraPermission.launch(Manifest.permission.CAMERA)
         } else {
             scanLauncher.launch(IntentIntegrator(activity)
@@ -175,7 +199,15 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
                 AppRuntime.applySession(client.login(base, name, password))
                 onLoggedIn()
             } catch (e: Exception) {
-                error = if (e.message?.contains("401") == true) "用户名或密码不正确" else e.message ?: "登录失败，请检查服务器连接"
+                val message = e.message.orEmpty()
+                loginErrorDialog = when {
+                    message.contains("401") || message.contains("账号或密码") || message.contains("Unauthorized", ignoreCase = true) -> "账号或密码错误，请核对后重试。"
+                    message.contains("timeout", ignoreCase = true) || message.contains("timed out", ignoreCase = true) -> "连接超时，请检查服务器地址、端口和网络。"
+                    message.contains("Unable to resolve", ignoreCase = true) || message.contains("Failed to connect", ignoreCase = true) || message.contains("Connection refused", ignoreCase = true) || message.contains("CLEARTEXT", ignoreCase = true) -> "服务器连接失败，请检查服务器地址、端口及 HTTP/HTTPS 设置。"
+                    message.startsWith("HTTP ") -> "服务器接口报错：$message"
+                    else -> "登录失败：${message.ifBlank { "服务器返回异常，请检查网络和账号信息。" }}"
+                }
+                error = loginErrorDialog
             } finally { loading = false; probing = false }
         }
     }
@@ -185,22 +217,44 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
         val cleanHost = host.trim().removePrefix("http://").removePrefix("https://").trimEnd('/')
         if (cleanHost.isBlank() || name.isBlank()) { error = "请填写服务器地址和用户名"; return }
         val selectedPort = port.trim().ifBlank { if (scheme == "https") "8920" else "8096" }
-        val primary = "$scheme://$cleanHost:$selectedPort"
+        val primary = pendingLoginBase ?: "$scheme://$cleanHost:$selectedPort"
+        val onlyPrimary = pendingLoginBase != null
+        pendingLoginBase = null
         scope.launch {
             probing = true; error = null
             val candidates = buildList {
                 add(primary)
-                if (scheme == "http") { add("http://$cleanHost:8096"); add("https://$cleanHost:8920") }
-                else { add("https://$cleanHost:8920"); add("http://$cleanHost:8096") }
-                add("http://$cleanHost:80")
+                if (!onlyPrimary && scheme == "http") { add("http://$cleanHost:8096"); add("https://$cleanHost:8920") }
+                else if (!onlyPrimary) { add("https://$cleanHost:8920"); add("http://$cleanHost:8096") }
+                if (!onlyPrimary) add("http://$cleanHost:80")
+
             }.distinct()
+            val deadline = System.currentTimeMillis() + 26_000L
             var found: String? = null
             for (candidate in candidates) {
-                try { EmbyClient(candidate, deviceId = prefs?.deviceId ?: "lumina-tv").testConnection(candidate); found = candidate; break }
-                catch (_: Exception) { }
+                if (System.currentTimeMillis() >= deadline) break
+                try {
+                    EmbyClient(candidate, deviceId = prefs?.deviceId ?: "lumina-tv").testConnection(candidate)
+                    found = candidate
+                    break
+                } catch (_: Exception) { }
             }
-            if (found == null) { probing = false; error = "未找到服务器，请检查地址、端口或网络" }
-            else { if (found != primary) error = "已自动切换至 $found"; loginAt(found, name, password) }
+            if (found == null) {
+                probing = false
+                val message = if (System.currentTimeMillis() >= deadline) "连接超时：请检查服务器响应和网络。" else "服务器连接失败：未找到可用的 Emby 服务，请检查地址、端口和网络。"
+                error = message
+                loginErrorDialog = message
+            } else {
+                if (found != primary) error = "已自动切换至 $found"
+                loginAt(found, name, password)
+            }
+        }
+    }
+
+    LaunchedEffect(scanLoginRequested) {
+        if (scanLoginRequested) {
+            scanLoginRequested = false
+            submit()
         }
     }
 
@@ -216,12 +270,20 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
             }
             port = u?.port?.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
             user = pairedUser; pass = pairedPass; paired = true
+            pendingLoginBase = null
             submit(pairedUser, pairedPass)
+
             true
         }
         if (AppRuntime.pairing == null) AppRuntime.startPairing(context)
     }
 
+    if (!loginErrorDialog.isNullOrBlank()) AlertDialog(
+        onDismissRequest = { loginErrorDialog = null },
+        title = { Text("登录失败") },
+        text = { Text(loginErrorDialog.orEmpty()) },
+        confirmButton = { TextButton(onClick = { loginErrorDialog = null }) { Text("确定") } },
+    )
     if (helpOpen) AlertDialog(
         onDismissRequest = { helpOpen = false },
         title = { Text("连接与同步") },
@@ -254,10 +316,9 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
     )
 
     BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF090810))) {
-        val isTv = context.packageManager.hasSystemFeature("android.software.leanback") || context.packageManager.hasSystemFeature("android.hardware.type.television")
-        val isLandscapeLayout = isTv || maxWidth > maxHeight
-        val landscape = isLandscapeLayout
-        val navWidth = if (isTv) 88.dp else 62.dp
+        val isTv = true
+        val landscape = true
+        val navWidth = 88.dp
         // Atmospheric poster-like artwork built from blurred cinematic color fields; no external images or network fetches.
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF151226), Color(0xFF090810), Color(0xFF1A1024)))))
         Row(Modifier.fillMaxSize().blur(34.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
@@ -269,12 +330,12 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
         }
         Row(Modifier.fillMaxSize()) {
             Column(
-                Modifier.width(navWidth).fillMaxHeight().padding(vertical = if (landscape) 30.dp else 16.dp)
+                Modifier.width(navWidth).fillMaxHeight().padding(vertical = 30.dp)
                     .clip(RoundedCornerShape(0.dp, 24.dp, 24.dp, 0.dp))
             .background(Color(0x331B1727)).border(1.dp, Color(0x19FFFFFF), RoundedCornerShape(topStart = 0.dp, topEnd = 24.dp, bottomEnd = 24.dp, bottomStart = 0.dp))
                     .padding(vertical = 18.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(if (landscape) 24.dp else 16.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
                 Text("L", color = VioletBright, fontSize = 25.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
@@ -300,22 +361,6 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
                         Modifier.weight(1.1f).widthIn(max = 610.dp).verticalScroll(rememberScrollState()),
                         host, { host = it }, port, { port = it.filter(Char::isDigit).take(5) }, user, { user = it }, pass, { pass = it },
                         scheme, { scheme = it }, loading || probing, probing, error, { submit() }, { launchScan() }, { syncOpen = true }, { helpOpen = true },
-                    )
-                }
-            } else {
-                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("LUMINA · EMBY", color = Violet, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.6.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Text("Lumina", color = Ink, fontSize = 38.sp, fontWeight = FontWeight.Bold)
-                    Text("连接你的 Emby 服务器", color = InkSub, fontSize = 13.sp)
-                    Spacer(Modifier.height(14.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { FeaturePill("扫码 30 秒配好"); FeaturePill("自动探测端口"); FeaturePill("账号不落明文") }
-                    Spacer(Modifier.height(18.dp))
-                    LoginCard(
-                        Modifier.fillMaxWidth().widthIn(max = 560.dp), host, { host = it }, port, { port = it.filter(Char::isDigit).take(5) },
-                        user, { user = it }, pass, { pass = it }, scheme, { scheme = it }, loading || probing, probing, error,
-{ submit() }, { launchScan() }, { syncOpen = true }, { helpOpen = true },
-
                     )
                 }
             }

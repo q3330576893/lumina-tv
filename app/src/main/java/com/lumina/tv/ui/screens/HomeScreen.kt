@@ -169,52 +169,56 @@ fun HomeScreen(
         }
     }
 
-    // 切换标签：Movies/Series 直接复用首页已加载的数据，不再额外请求
+    // 分类请求按 genre 精确隔离，并在切换时取消旧请求。
     LaunchedEffect(tab, genre) {
         if (tab == HomeTab.Recommend || tab == HomeTab.Media) return@LaunchedEffect
         val c = client ?: return@LaunchedEffect
-        if (tab == HomeTab.Movies && movies.isNotEmpty()) {
-            gridItems = movies
-            return@LaunchedEffect
-        }
-        if (tab == HomeTab.Series && series.isNotEmpty()) {
-            gridItems = series
-            return@LaunchedEffect
-        }
-        if (tab == HomeTab.Favorites && favorites.isNotEmpty()) {
-            gridItems = favorites
-            return@LaunchedEffect
-        }
-        if (tab == HomeTab.Genre && genre == null) {
+        if (tab == HomeTab.Genre) {
+            val selectedGenre = genre ?: run { gridItems = emptyList(); gridLoading = false; return@LaunchedEffect }
+            val key = "genre:$selectedGenre"
+            gridLoading = true
             gridItems = emptyList()
+            val cachedItems = LibraryCache.browseOf(key)
+            if (cachedItems != null) {
+                gridItems = cachedItems.toList()
+                gridLoading = false
+                return@LaunchedEffect
+            }
+            val list = runCatching { c.getByGenre(selectedGenre, 120) }.getOrDefault(emptyList())
+            if (tab == HomeTab.Genre && genre == selectedGenre) {
+                LibraryCache.putBrowse(key, list)
+                gridItems = list.toList()
+                gridLoading = false
+            }
             return@LaunchedEffect
         }
+
         val key = when (tab) {
             HomeTab.Movies -> "movies"
             HomeTab.Series -> "series"
             HomeTab.Favorites -> "favorites"
-            HomeTab.Genre -> "genre:${genre ?: ""}"
             else -> return@LaunchedEffect
         }
-        LibraryCache.browseOf(key)?.let {
-            gridItems = it
-            return@LaunchedEffect
-        }
+        if (tab == HomeTab.Movies && movies.isNotEmpty()) { gridItems = movies; gridLoading = false; return@LaunchedEffect }
+        if (tab == HomeTab.Series && series.isNotEmpty()) { gridItems = series; gridLoading = false; return@LaunchedEffect }
+        if (tab == HomeTab.Favorites && favorites.isNotEmpty()) { gridItems = favorites; gridLoading = false; return@LaunchedEffect }
+        LibraryCache.browseOf(key)?.let { gridItems = it; gridLoading = false; return@LaunchedEffect }
         gridLoading = true
+        gridItems = emptyList()
         val list = runCatching {
             when (tab) {
                 HomeTab.Movies -> c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
                 HomeTab.Series -> c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
                 HomeTab.Favorites -> c.getFavorites(120)
-                HomeTab.Genre -> c.getByGenre(genre ?: "", 120)
                 else -> emptyList()
             }
         }.getOrDefault(emptyList())
-        LibraryCache.putBrowse(key, list)
-        gridItems = list
-        gridLoading = false
+        if (tab == HomeTab.Movies || tab == HomeTab.Series || tab == HomeTab.Favorites) {
+            LibraryCache.putBrowse(key, list)
+            gridItems = list
+            gridLoading = false
+        }
     }
-
     // 媒体库视图内容：启动后即在后台预热拉取各视图最近内容，无需等切换Tab
     LaunchedEffect(views) {
         val c = client ?: return@LaunchedEffect

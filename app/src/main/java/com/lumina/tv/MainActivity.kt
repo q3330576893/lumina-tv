@@ -57,17 +57,8 @@ private fun Screen.depth(): Int = when (this) {
 class MainActivity : ComponentActivity() {
     private var phoneSearch by mutableStateOf<String?>(null)
 
-    private val deviceIsTelevision: Boolean
-        get() = packageManager.hasSystemFeature("android.software.leanback") ||
-            packageManager.hasSystemFeature("android.hardware.type.television")
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedOrientation = if (deviceIsTelevision) {
-            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        } else {
-            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        }
         CrashHandler.install(this)
         AppRuntime.init(this)
         AppRuntime.restore()
@@ -133,8 +124,6 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
     var screen by remember {
         mutableStateOf<Screen>(if (AppRuntime.session != null) Screen.Home else Screen.Login)
     }
-    val loginNavigation = remember { mutableStateOf<(String) -> Unit>({}) }
-
     var started by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { started = true }
     val appAlpha by animateFloatAsState(if (started) 1f else 0f, tween(520), label = "appAlpha")
