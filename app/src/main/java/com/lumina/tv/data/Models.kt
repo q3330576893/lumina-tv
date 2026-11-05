@@ -26,6 +26,7 @@ data class MediaItem(
     val isHdr: Boolean = false,
     val isDolbyVision: Boolean = false,
     val audioFormat: String? = null,
+    val people: List<MediaPerson> = emptyList(),
 ) {
     /** 规格胶囊徽标：4K / 1080P / HDR / DV / 5.1CH 等 */
     val tags: List<String>
@@ -51,6 +52,14 @@ data class MediaItem(
             }
         }
 }
+
+data class MediaPerson(
+    val id: String?,
+    val name: String,
+    val role: String? = null,
+    val type: String? = null,
+    val imageTag: String? = null,
+)
 
 data class MediaStream(
     val index: Int,

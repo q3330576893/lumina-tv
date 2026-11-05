@@ -175,14 +175,26 @@ class EmbyClient(
     /** 按类型取影片（网格浏览用）。 */
     suspend fun getByGenre(genre: String, limit: Int = 120, startIndex: Int = 0): List<MediaItem> =
         withContext(Dispatchers.IO) {
-            getItems(
-                types = "Movie,Series",
-                sortBy = "DateCreated",
-                sortOrder = "Descending",
-                limit = limit,
-                startIndex = startIndex,
-                genre = genre,
-            )
+            val wanted = genre.trim()
+            if (wanted.isBlank()) return@withContext emptyList()
+            fun matches(items: List<MediaItem>) = items.filter { item ->
+                item.genres.any { it.trim().equals(wanted, ignoreCase = true) }
+            }
+            // Emby servers usually honor Genres=, but some compatible servers ignore it.
+            // Verify locally so every chip represents a real, distinct genre result.
+            val remote = runCatching {
+                getItems(types = "Movie,Series", sortBy = "DateCreated", sortOrder = "Descending",
+                    limit = limit, startIndex = startIndex, genre = wanted)
+            }.getOrDefault(emptyList())
+            val exact = matches(remote)
+            if (exact.isNotEmpty()) return@withContext exact.take(limit)
+
+            // Compatibility fallback for servers that ignored/partially implemented Genres.
+            val broad = runCatching {
+                getItems(types = "Movie,Series", sortBy = "DateCreated", sortOrder = "Descending",
+                    limit = maxOf(400, limit * 4), startIndex = 0)
+            }.getOrDefault(emptyList())
+            matches(broad).drop(startIndex).take(limit)
         }
 
     suspend fun getItems(
@@ -238,8 +250,21 @@ class EmbyClient(
 
     suspend fun getItem(id: String): MediaItem? = withContext(Dispatchers.IO) {
         try {
-            parseItem(getSync(url("/Users/$userId/Items/$id")))
+            val params = mapOf("UserId" to userId,
+                "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources")
+            parseItem(getSync(url("/Users/$userId/Items/$id", params)))
         } catch (_: Exception) { null }
+    }
+
+    /** Emby returns cast/crew in People when requested through Fields=People. */
+    suspend fun getSimilarItems(itemId: String, limit: Int = 12): List<MediaItem> = withContext(Dispatchers.IO) {
+        runCatching {
+            val params = mapOf("UserId" to userId, "Limit" to limit.toString(),
+                "Fields" to "Overview,PrimaryImageAspectRatio,Genres,ProductionYear,UserData",
+                "EnableImageTypes" to "Primary,Backdrop,Thumb")
+            val arr = getSync(url("/Items/$itemId/Similar", params)).optJSONArray("Items") ?: JSONArray()
+            parseItems(arr).filterNot { it.id == itemId }.take(limit)
+        }.getOrDefault(emptyList())
     }
 
     suspend fun getSeasons(seriesId: String): List<MediaItem> = withContext(Dispatchers.IO) {
@@ -330,6 +355,20 @@ class EmbyClient(
             isHdr = isHdr,
             isDolbyVision = isDv,
             audioFormat = audioChannels,
+            people = o.optJSONArray("People")?.let { people ->
+                (0 until people.length()).mapNotNull { i ->
+                    people.optJSONObject(i)?.let { person ->
+                        val name = person.optString("Name").trim()
+                        if (name.isBlank()) null else MediaPerson(
+                            id = person.optString("Id").ifBlank { null },
+                            name = name,
+                            role = person.optString("Role").ifBlank { null },
+                            type = person.optString("Type").ifBlank { null },
+                            imageTag = person.optString("PrimaryImageTag").ifBlank { null },
+                        )
+                    }
+                }
+            } ?: emptyList(),
         )
     }
 
@@ -343,6 +382,12 @@ class EmbyClient(
     fun imageUrl(id: String, tag: String?, maxHeight: Int = 480): String? {
         if (tag == null) return null
         return url("/Items/$id/Images/Primary", mapOf("maxHeight" to maxHeight.toString(), "tag" to tag, "quality" to "90"))
+    }
+
+    fun personImageUrl(person: MediaPerson, maxHeight: Int = 320): String? {
+        val id = person.id ?: return null
+        val tag = person.imageTag ?: return null
+        return url("/Items/$id/Images/Primary", mapOf("maxHeight" to maxHeight.toString(), "tag" to tag, "quality" to "85"))
     }
 
     fun backdropUrl(item: MediaItem, maxWidth: Int = 1920): String? {

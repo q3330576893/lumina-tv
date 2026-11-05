@@ -1,5 +1,6 @@
 package com.lumina.tv.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
@@ -64,6 +65,8 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
@@ -101,6 +104,17 @@ fun HomeScreen(
     var viewContents by remember { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
     // 导航栏自动隐藏
     var navHidden by remember { mutableStateOf(false) }
+
+    // A genre is an in-page route: Android/TV Back returns to the genre list, then home.
+    BackHandler(enabled = tab == HomeTab.Genre) {
+        if (genre != null) {
+            genre = null
+            gridItems = emptyList()
+            gridLoading = false
+        } else {
+            tab = HomeTab.Recommend
+        }
+    }
 
     // 首页数据：命中缓存立即渲染，过期才在后台刷新（并行请求）
     LaunchedEffect(Unit) {
@@ -171,29 +185,33 @@ fun HomeScreen(
 
     // 切换标签：Movies/Series 直接复用首页已加载的数据，不再额外请求
     LaunchedEffect(tab, genre) {
-        if (tab == HomeTab.Recommend || tab == HomeTab.Media) return@LaunchedEffect
+        val requestTab = tab
+        val requestGenre = genre
+        gridLoading = false
+        if (requestTab == HomeTab.Genre && requestGenre != null) gridItems = emptyList()
+        if (requestTab == HomeTab.Recommend || requestTab == HomeTab.Media) return@LaunchedEffect
         val c = client ?: return@LaunchedEffect
-        if (tab == HomeTab.Movies && movies.isNotEmpty()) {
+        if (requestTab == HomeTab.Movies && movies.isNotEmpty()) {
             gridItems = movies
             return@LaunchedEffect
         }
-        if (tab == HomeTab.Series && series.isNotEmpty()) {
+        if (requestTab == HomeTab.Series && series.isNotEmpty()) {
             gridItems = series
             return@LaunchedEffect
         }
-        if (tab == HomeTab.Favorites && favorites.isNotEmpty()) {
+        if (requestTab == HomeTab.Favorites && favorites.isNotEmpty()) {
             gridItems = favorites
             return@LaunchedEffect
         }
-        if (tab == HomeTab.Genre && genre == null) {
+        if (requestTab == HomeTab.Genre && requestGenre == null) {
             gridItems = emptyList()
             return@LaunchedEffect
         }
-        val key = when (tab) {
+        val key = when (requestTab) {
             HomeTab.Movies -> "movies"
             HomeTab.Series -> "series"
             HomeTab.Favorites -> "favorites"
-            HomeTab.Genre -> "genre:${genre ?: ""}"
+            HomeTab.Genre -> "genre:${requestGenre.orEmpty()}"
             else -> return@LaunchedEffect
         }
         LibraryCache.browseOf(key)?.let {
@@ -201,18 +219,23 @@ fun HomeScreen(
             return@LaunchedEffect
         }
         gridLoading = true
-        val list = runCatching {
-            when (tab) {
-                HomeTab.Movies -> c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
-                HomeTab.Series -> c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
-                HomeTab.Favorites -> c.getFavorites(120)
-                HomeTab.Genre -> c.getByGenre(genre ?: "", 120)
-                else -> emptyList()
-            }
-        }.getOrDefault(emptyList())
-        LibraryCache.putBrowse(key, list)
-        gridItems = list
-        gridLoading = false
+        try {
+            val list = runCatching {
+                when (requestTab) {
+                    HomeTab.Movies -> c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
+                    HomeTab.Series -> c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
+                    HomeTab.Favorites -> c.getFavorites(120)
+                    HomeTab.Genre -> c.getByGenre(requestGenre.orEmpty(), 120)
+                    else -> emptyList()
+                }
+            }.getOrDefault(emptyList())
+            currentCoroutineContext().ensureActive()
+            if (tab != requestTab || genre != requestGenre) return@LaunchedEffect
+            LibraryCache.putBrowse(key, list)
+            gridItems = list
+        } finally {
+            if (tab == requestTab && genre == requestGenre) gridLoading = false
+        }
     }
 
     // 媒体库视图内容：启动后即在后台预热拉取各视图最近内容，无需等切换Tab

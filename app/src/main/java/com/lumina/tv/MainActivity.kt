@@ -38,7 +38,7 @@ import com.lumina.tv.ui.theme.LuminaTheme
 sealed interface Screen {
     data object Login : Screen
     data object Home : Screen
-    data class Detail(val id: String) : Screen
+    data class Detail(val id: String, val previousId: String? = null) : Screen
     data class Play(val item: MediaItem, val sourceId: String? = null) : Screen
     data class Search(val keyword: String = "") : Screen
     data object Settings : Screen
@@ -189,12 +189,14 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
             }
 
             is Screen.Detail -> {
-                BackHandler { screen = Screen.Home }
+                val backTo = target.previousId?.let { Screen.Detail(it) } ?: Screen.Home
+                BackHandler { screen = backTo }
                 DetailScreen(
                     id = target.id,
                     onPlay = { item -> screen = Screen.Play(item) },
                     onPlayWithSource = { item, sid -> screen = Screen.Play(item, sid) },
-                    onBack = { screen = Screen.Home },
+                    onOpenDetail = { nextId -> screen = Screen.Detail(nextId, target.id) },
+                    onBack = { screen = backTo },
                 )
             }
 

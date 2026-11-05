@@ -48,10 +48,12 @@ import coil.compose.AsyncImage
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.LoadingView
+import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
@@ -65,6 +67,7 @@ fun DetailScreen(
     id: String,
     onPlay: (MediaItem) -> Unit,
     onPlayWithSource: (MediaItem, String) -> Unit,
+    onOpenDetail: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     val client = AppRuntime.client
@@ -76,11 +79,13 @@ fun DetailScreen(
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
     var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
+    var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var isFav by remember { mutableStateOf(false) }
     var isPlayed by remember { mutableStateOf(false) }
 
     LaunchedEffect(id) {
+        similar = emptyList()
         AppRuntime.screenLabel = "详情"
         val c = client ?: return@LaunchedEffect
 
@@ -95,6 +100,13 @@ fun DetailScreen(
             isPlayed = cached.item?.played ?: false
             selectedSeason = cached.seasons.firstOrNull()
             loading = false
+            // Cache renders immediately; refresh people and recommendations quietly.
+            coroutineScope {
+                val fresh = async { runCatching { c.getItem(id) }.getOrNull() }
+                val related = async { runCatching { c.getSimilarItems(id, 12) }.getOrDefault(emptyList()) }
+                fresh.await()?.let { item = it }
+                similar = related.await()
+            }
             return@LaunchedEffect
         }
 
@@ -103,7 +115,9 @@ fun DetailScreen(
         val it0 = coroutineScope {
             val sA = async { runCatching { c.getSeasons(id) }.getOrDefault(emptyList()) }
             val srcA = async { runCatching { c.getMediaSources(id) }.getOrDefault(emptyList()) }
+            val relatedA = async { runCatching { c.getSimilarItems(id, 12) }.getOrDefault(emptyList()) }
             val main = c.getItem(id)
+            similar = relatedA.await()
             if (main != null && main.type == "Series") {
                 val ss = sA.await()
                 seasons = ss
@@ -368,6 +382,34 @@ fun DetailScreen(
                     }
                 }
 
+                val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
+                if (cast.isNotEmpty()) {
+                    Spacer(Modifier.height(22.dp))
+                    Text("主演与主创", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
+                            PersonCard(person = person, imageUrl = client?.personImageUrl(person))
+                        }
+                    }
+                }
+
+                if (similar.isNotEmpty()) {
+                    Spacer(Modifier.height(24.dp))
+                    Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        items(similar, key = { it.id }) { related ->
+                            PosterCard(
+                                item = related,
+                                imageUrl = client?.imageUrl(related),
+                                width = 138.dp,
+                                onClick = { onOpenDetail(related.id) },
+                            )
+                        }
+                    }
+                }
+
                 if (seasons.isNotEmpty()) {
                     Spacer(Modifier.height(20.dp))
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -419,6 +461,34 @@ fun DetailScreen(
                 },
                 onClose = { showSourceMenu = false },
             )
+        }
+    }
+}
+
+@Composable
+private fun PersonCard(person: MediaPerson, imageUrl: String?) {
+    FocusSurface(
+        modifier = Modifier.width(112.dp),
+        corner = 14.dp,
+        scaleTo = 1.04f,
+        onClick = {},
+    ) { focused ->
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                Modifier.size(88.dp).clip(RoundedCornerShape(44.dp))
+                    .background(if (focused) Color(0x334C8DFF) else Color(0x1AFFFFFF)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (imageUrl != null) {
+                    AsyncImage(imageUrl, contentDescription = person.name, contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(44.dp)))
+                } else {
+                    Text(person.name.take(1), color = Accent, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(Modifier.height(7.dp))
+            Text(person.name, color = TextMain, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(person.role ?: person.type ?: "演职人员", color = TextSub, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
