@@ -44,7 +44,7 @@ sealed interface Screen {
     data object Settings : Screen
 }
 
-/** 页面层级深度，用于决定导航切换动画方向。 */
+/** 濡炪倗鏁诲鎵沪閸屾粓鐛撴繛锝呭船鐎规娊鏁嶅畝鈧弫銈嗙鎼粹€虫瀫閻庤鑹鹃閬嶆嚋椤忓嫬鐎奸柟骞垮灩婵晠鎮界紒妯荤厵闁告碍鍨埀?*/
 private fun Screen.depth(): Int = when (this) {
     Screen.Login -> 0
     Screen.Home -> 1
@@ -57,12 +57,20 @@ private fun Screen.depth(): Int = when (this) {
 class MainActivity : ComponentActivity() {
     private var phoneSearch by mutableStateOf<String?>(null)
 
+    private val deviceIsTelevision: Boolean
+        get() = packageManager.hasSystemFeature("android.software.leanback") ||
+            packageManager.hasSystemFeature("android.hardware.type.television")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = if (deviceIsTelevision) {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        } else {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
         CrashHandler.install(this)
         AppRuntime.init(this)
         AppRuntime.restore()
-        // 应用个性化主题与玻璃质感
         AppRuntime.prefs?.let {
             com.lumina.tv.ui.theme.ThemeRuntime.applyTheme(it.themeColor)
             com.lumina.tv.ui.theme.ThemeRuntime.applyGlass(it.glassStyle)
@@ -89,7 +97,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    /** 手机遥控 -> 系统按键事件，直接喂给当前 Compose 焦点系统。 */
+    /** 闁归潧顑嗗┃鈧梺顑惧劜鐢?-> 缂侇垵宕电划娲箰婢舵劖鏆涘ù婊冾儎濞嗐垽鏁嶅畝鈧ú鍧楀箳閵夈儲婢撶紓浣圭懃缂嶅宕?Compose 闁绘帪濡囬崑锝囧寲閼姐倗鍩犻柕?*/
     private fun dispatchRemote(action: String) {
         val code = when (action) {
             "up" -> KeyEvent.KEYCODE_DPAD_UP
@@ -125,8 +133,8 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
     var screen by remember {
         mutableStateOf<Screen>(if (AppRuntime.session != null) Screen.Home else Screen.Login)
     }
+    val loginNavigation = remember { mutableStateOf<(String) -> Unit>({}) }
 
-    // 启动渐入：整体从轻微缩小 + 透明淡入，避免进 App 生硬
     var started by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { started = true }
     val appAlpha by animateFloatAsState(if (started) 1f else 0f, tween(520), label = "appAlpha")
@@ -156,7 +164,6 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
         AnimatedContent(
             targetState = screen,
             transitionSpec = {
-                // 进入更深页面：从下方轻微上滑淡入；返回：向上滑出
                 if (targetState.depth() >= initialState.depth()) {
                     (fadeIn(tween(300)) + slideInVertically(tween(300)) { it / 14 }) togetherWith
                         fadeOut(tween(200))
@@ -168,7 +175,17 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
             label = "nav",
         ) { target ->
         when (target) {
-            is Screen.Login -> LoginScreen(onLoggedIn = { screen = Screen.Home })
+            is Screen.Login -> LoginScreen(
+                onLoggedIn = { screen = Screen.Home },
+                onNavigate = { destination ->
+                    when (destination) {
+                        "search" -> screen = Screen.Search()
+                        "home" -> if (AppRuntime.session != null) screen = Screen.Home
+                        "play" -> if (AppRuntime.session != null) screen = Screen.Home
+                        "settings" -> if (AppRuntime.session != null) screen = Screen.Settings
+                    }
+                },
+            )
 
             is Screen.Home -> {
                 HomeScreen(

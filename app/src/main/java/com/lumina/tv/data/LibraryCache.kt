@@ -13,6 +13,7 @@ object LibraryCache {
         val series: List<MediaItem>,
         val favorites: List<MediaItem>,
         val genres: List<String>,
+        val views: List<LibraryView> = emptyList(),
         val at: Long,
     )
 

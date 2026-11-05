@@ -108,6 +108,19 @@ class Prefs(context: Context) {
             return id
         }
 
+    /** 首页媒体库隐藏的服务器分类 ID（勾掉即不在首页显示） */
+    var hiddenViewIds: Set<String>
+        get() = sp.getStringSet("hidden_view_ids", emptySet()) ?: emptySet()
+        set(v) = sp.edit().putStringSet("hidden_view_ids", v).apply()
+
+    fun isViewHidden(viewId: String): Boolean = viewId in hiddenViewIds
+
+    fun toggleViewHidden(viewId: String) {
+        val cur = hiddenViewIds.toMutableSet()
+        if (!cur.add(viewId)) cur.remove(viewId)
+        hiddenViewIds = cur
+    }
+
     fun saveSession(s: Session) {
         baseUrl = s.baseUrl
         token = s.token

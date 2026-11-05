@@ -22,7 +22,19 @@ data class MediaItem(
     val communityRating: Double? = null,
     val genres: List<String> = emptyList(),
     val isFavorite: Boolean = false,
+    val resolution: String? = null,
+    val isHdr: Boolean = false,
+    val isDolbyVision: Boolean = false,
+    val audioFormat: String? = null,
 ) {
+    /** 规格胶囊徽标：4K / 1080P / HDR / DV / 5.1CH 等 */
+    val tags: List<String>
+        get() = buildList {
+            resolution?.let { add(it) }
+            if (isDolbyVision) add("DOLBY VISION")
+            else if (isHdr) add("HDR10")
+            audioFormat?.let { add(it) }
+        }
     val subtitle: String
         get() = buildString {
             val y = year

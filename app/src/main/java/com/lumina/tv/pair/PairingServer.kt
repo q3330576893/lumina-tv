@@ -15,7 +15,8 @@ import java.net.NetworkInterface
 class PairingServer(
     port: Int,
     private val stateProvider: () -> String,
-    private val onConfig: (server: String, user: String, pass: String) -> Unit,
+    private val onConfig: (token: String, server: String, user: String, pass: String) -> Boolean,
+    private val authorize: (token: String) -> Boolean,
     private val onRemote: (action: String) -> Unit,
     private val onSearch: (keyword: String) -> Unit,
 ) : NanoHTTPD(port) {
@@ -31,18 +32,22 @@ class PairingServer(
         return try {
             when {
                 uri == "/" || uri == "/index.html" -> page()
-                uri == "/api/state" -> newFixedLengthResponse(
+                uri == "/api/state" && authorized(session) -> newFixedLengthResponse(
                     Response.Status.OK, "application/json; charset=utf-8", stateProvider()
                 )
                 uri == "/api/config" -> handleConfig(session)
-                uri == "/api/remote" -> handleRemote(session)
-                uri == "/api/search" -> handleSearch(session)
+                uri == "/api/remote" && authorized(session) -> handleRemote(session)
+                uri == "/api/search" && authorized(session) -> handleSearch(session)
+                uri.startsWith("/api/") -> json("{\"ok\":false,\"msg\":\"配对授权无效或已过期\"}")
                 else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found")
             }
         } catch (e: Exception) {
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "error: ${e.message}")
         }
     }
+
+    private fun authorized(session: IHTTPSession): Boolean =
+        authorize(session.parameters["token"]?.firstOrNull().orEmpty())
 
     private fun param(session: IHTTPSession, key: String): String {
         val files = HashMap<String, String>()
@@ -51,14 +56,25 @@ class PairingServer(
     }
 
     private fun handleConfig(session: IHTTPSession): Response {
-        val server = param(session, "server").trim()
-        val user = param(session, "user").trim()
-        val pass = param(session, "pass")
+        if (session.method != Method.POST) return json("{\"ok\":false,\"msg\":\"仅支持 POST\"}")
+        val files = HashMap<String, String>()
+        session.parseBody(files)
+        val token = session.parameters["token"]?.firstOrNull().orEmpty()
+        val server = session.parameters["server"]?.firstOrNull().orEmpty().trim()
+        val user = session.parameters["user"]?.firstOrNull().orEmpty().trim()
+        val pass = session.parameters["pass"]?.firstOrNull().orEmpty()
         if (server.isEmpty() || user.isEmpty()) {
             return json("{\"ok\":false,\"msg\":\"服务器地址和用户名不能为空\"}")
         }
-        mainThread { onConfig(server, user, pass) }
-        return json("{\"ok\":true,\"msg\":\"已发送到电视，请看电视屏幕\"}")
+        if (token.isBlank()) return json("{\"ok\":false,\"msg\":\"配对二维码无效，请重新扫码\"}")
+        val accepted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val completed = java.util.concurrent.CountDownLatch(1)
+        mainThread { try { accepted.set(onConfig(token, server, user, pass)) } finally { completed.countDown() } }
+        if (!completed.await(3, java.util.concurrent.TimeUnit.SECONDS)) {
+            return newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, "application/json; charset=utf-8", "{\"ok\":false,\"msg\":\"电视暂未准备好接收配置\"}")
+        }
+        return if (accepted.get()) json("{\"ok\":true,\"msg\":\"已发送到电视，请看电视屏幕\"}")
+        else json("{\"ok\":false,\"msg\":\"二维码已失效或已使用，请重新扫码\"}")
     }
 
     private fun handleRemote(session: IHTTPSession): Response {
@@ -84,14 +100,15 @@ class PairingServer(
 
         fun start(
             stateProvider: () -> String,
-            onConfig: (String, String, String) -> Unit,
+            onConfig: (String, String, String, String) -> Boolean,
+            authorize: (String) -> Boolean,
             onRemote: (String) -> Unit,
             onSearch: (String) -> Unit,
         ): PairingServer? {
             var port = DEFAULT_PORT
             while (port < DEFAULT_PORT + 10) {
                 try {
-                    val s = PairingServer(port, stateProvider, onConfig, onRemote, onSearch)
+                    val s = PairingServer(port, stateProvider, onConfig, authorize, onRemote, onSearch)
                     s.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
                     return s
                 } catch (_: IOException) {
@@ -223,6 +240,7 @@ function showTab(n){
 function toast(t){var e=document.getElementById('toast');e.innerText=t;e.classList.add('on');setTimeout(()=>e.classList.remove('on'),1800);}
 function post(path,obj,cb){
   var body=Object.keys(obj).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(obj[k])).join('&');
+  if(path!='/api/config'){obj.token=new URLSearchParams(location.search).get('token')||'';body=Object.keys(obj).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(obj[k])).join('&');}
   fetch(path,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(r=>r.json()).then(cb).catch(e=>toast('连接失败，请确认手机与电视同一 WiFi'));
 }
@@ -232,7 +250,8 @@ function sendConfig(){
   var p=document.getElementById('pass').value;
   if(!s||!u){toast('请填写服务器与用户名');return;}
   document.getElementById('cfgStatus').innerText='发送中…';
-  post('/api/config',{server:s,user:u,pass:p},function(r){
+  var token=new URLSearchParams(location.search).get('token')||'';
+  post('/api/config',{token:token,server:s,user:u,pass:p},function(r){
     document.getElementById('cfgStatus').innerText=r.msg||'';
     toast(r.ok?'已发送到电视':'发送失败');
     if(r.ok)setTimeout(()=>document.getElementById('cfgStatus').innerText='电视端正在登录，请看电视屏幕',1200);
@@ -246,7 +265,7 @@ function k(a){
   });
 }
 setInterval(function(){
-  fetch('/api/state').then(r=>r.json()).then(function(s){
+  fetch('/api/state?token='+encodeURIComponent(new URLSearchParams(location.search).get('token')||'')).then(r=>r.json()).then(function(s){
     if(s&&s.screen)document.getElementById('hint').innerText=s.screen;
   }).catch(()=>{});
 },2500);
