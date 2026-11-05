@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,9 +29,15 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.foundation.border
+import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -79,7 +86,10 @@ private enum class HomeTab(val label: String) {
 fun HomeScreen(
     onOpenDetail: (String) -> Unit,
     onPlay: (MediaItem) -> Unit,
+    onSearch: () -> Unit,
     onSettings: () -> Unit,
+    onSwitchServer: () -> Unit,
+    onLogout: () -> Unit,
 ) {
     val client = AppRuntime.client
 
@@ -103,12 +113,16 @@ fun HomeScreen(
     var navHidden by remember { mutableStateOf(false) }
 
     // A genre is an in-page route: Android/TV Back returns to the genre list, then home.
-    BackHandler(enabled = tab == HomeTab.Media) {
-        if (selectedLibrary != null) {
+    BackHandler(enabled = tab != HomeTab.Recommend) {
+        if (tab == HomeTab.Media && selectedLibrary != null) {
             selectedLibrary = null
             gridItems = emptyList()
             gridLoading = false
-        } else tab = HomeTab.Recommend
+        } else {
+            tab = HomeTab.Recommend
+            selectedLibrary = null
+            gridItems = emptyList()
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -366,7 +380,10 @@ fun HomeScreen(
 NavBar(
                 tab = tab,
                 onSelect = { t, _ -> tab = t; selectedLibrary = null },
+                onSearch = onSearch,
                 onSettings = onSettings,
+                onSwitchServer = onSwitchServer,
+                onLogout = onLogout,
             )
         }
     }
@@ -376,41 +393,78 @@ NavBar(
 private fun NavBar(
     tab: HomeTab,
     onSelect: (HomeTab, String?) -> Unit,
+    onSearch: () -> Unit,
     onSettings: () -> Unit,
+    onSwitchServer: () -> Unit,
+    onLogout: () -> Unit,
 ) {
-    // 手机与TV自适应紧凑导航栏：左品牌，中可横滑Tab，右常驻搜索+设置
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(listOf(Color(0xF0070A12), Color(0x99070A12), Color(0x00070A12))),
-            )
-            .padding(start = 24.dp, end = 20.dp, top = 8.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // 品牌：Lumina
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Lumina", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
-        }
-        Spacer(Modifier.width(16.dp))
-        // 中间横向滑动 Tab，确保在手机端不会撑破布局或把右侧按钮挤掉
-        LazyRow(
-            modifier = Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            contentPadding = PaddingValues(horizontal = 4.dp),
+    var serverMenuOpen by remember { mutableStateOf(false) }
+    val glassShape = RoundedCornerShape(28.dp)
+    Box(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color(0xEE070A12), Color(0x00070A12))))
+                .padding(horizontal = 24.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            items(HomeTab.entries) { t ->
-                TabChip(t.label, tab == t, 60.dp, height = 28.dp) {
-                    onSelect(t, null)
+            FocusSurface(modifier = Modifier.height(42.dp).width(138.dp), corner = 21.dp,
+                onClick = { serverMenuOpen = true }) { focused ->
+                Box(Modifier.fillMaxSize().background(if (focused) Color(0x36FFFFFF) else Color(0x18FFFFFF), RoundedCornerShape(21.dp)), contentAlignment = Alignment.CenterStart) {
+                    Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("L", color = Accent, fontSize = 20.sp, fontWeight = FontWeight.Black)
+                Spacer(Modifier.width(7.dp))
+                Text("Lumina ▾", color = if (focused) Accent else TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
                 }
             }
+            DropdownMenu(expanded = serverMenuOpen, onDismissRequest = { serverMenuOpen = false }) {
+                DropdownMenuItem(text = { Text("当前服务器：${AppRuntime.session?.serverName ?: "未连接"}") }, onClick = { serverMenuOpen = false })
+                DropdownMenuItem(text = { Text("切换服务器 / 账号") }, onClick = { serverMenuOpen = false; onSwitchServer() })
+                DropdownMenuItem(text = { Text("退出当前服务器") }, onClick = { serverMenuOpen = false; onLogout() })
+            }
         }
-        Spacer(Modifier.width(12.dp))
-        // 右侧常驻操作区：手机与TV都永远可见！
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            TopAction("收藏", Icons.Rounded.Favorite) { onSelect(HomeTab.Favorites, null) }
-            TopAction("设置", Icons.Rounded.Settings, onSettings)
+        Row(
+            Modifier.align(Alignment.BottomCenter).padding(start = 16.dp, end = 92.dp, bottom = 20.dp)
+                .clip(glassShape)
+                .background(Brush.horizontalGradient(listOf(Color(0xBCE4E4EE), Color(0x85B7C6D9), Color(0xA8EEE9F6))))
+                .border(1.dp, Color(0x55FFFFFF), glassShape)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            itemsNav(tab, onSelect, onSettings)
+        }
+        FocusSurface(
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 20.dp).size(64.dp),
+            corner = 34.dp, scaleTo = 1.05f, onClick = onSearch,
+        ) { focused ->
+            Box(Modifier.fillMaxSize().clip(RoundedCornerShape(34.dp)).background(if (focused) Color(0xEEFFFFFF) else Color(0xB8FFFFFF)).border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(34.dp)), contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Search, contentDescription = "搜索", tint = Color(0xFF111522), modifier = Modifier.size(29.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.itemsNav(tab: HomeTab, onSelect: (HomeTab, String?) -> Unit, onSettings: () -> Unit) {
+    val entries = listOf(
+        Triple(HomeTab.Recommend, "首页", Icons.Rounded.Home),
+        Triple(HomeTab.Favorites, "收藏", Icons.Rounded.Favorite),
+        Triple(HomeTab.Media, "媒体库", Icons.Rounded.Movie),
+    )
+    entries.forEach { (entry, label, icon) ->
+        val active = tab == entry
+        FocusSurface(modifier = Modifier.height(56.dp).width(76.dp), corner = 24.dp, onClick = { onSelect(entry, null) }) { focused ->
+            Column(Modifier.fillMaxSize().clip(RoundedCornerShape(24.dp)).background(if (active) Color(0x58FFFFFF) else if (focused) Color(0x35FFFFFF) else Color.Transparent).padding(vertical = 5.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Icon(icon, contentDescription = label, tint = if (active) Color(0xFF171A24) else Color(0xFF363B47), modifier = Modifier.size(23.dp))
+                Text(label, color = Color(0xFF171A24), fontSize = 10.sp)
+            }
+        }
+    }
+    FocusSurface(modifier = Modifier.height(56.dp).width(70.dp), corner = 24.dp, onClick = onSettings) { focused ->
+        Column(Modifier.fillMaxSize().clip(RoundedCornerShape(24.dp)).background(if (focused) Color(0x35FFFFFF) else Color.Transparent).padding(vertical = 5.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Icon(Icons.Rounded.Settings, contentDescription = "设置", tint = Color(0xFF363B47), modifier = Modifier.size(23.dp))
+            Text("设置", color = Color(0xFF171A24), fontSize = 10.sp)
         }
     }
 }

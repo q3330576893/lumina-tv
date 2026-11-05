@@ -104,6 +104,7 @@ object LibraryCache {
             home = null
             details.clear()
             seasonEpisodes.clear()
+            browse.clear()
         }
     }
 }

@@ -186,7 +186,18 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
                 HomeScreen(
                     onOpenDetail = { id -> screen = Screen.Detail(id) },
                     onPlay = { item -> screen = Screen.Play(item) },
+                    onSearch = { screen = Screen.Search() },
                     onSettings = { screen = Screen.Settings },
+                    onSwitchServer = {
+                        AppRuntime.logout()
+                        com.lumina.tv.data.LibraryCache.clear()
+                        screen = Screen.Login
+                    },
+                    onLogout = {
+                        AppRuntime.logout()
+                        com.lumina.tv.data.LibraryCache.clear()
+                        screen = Screen.Login
+                    },
                 )
             }
 
