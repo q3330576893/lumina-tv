@@ -57,8 +57,17 @@ private fun Screen.depth(): Int = when (this) {
 class MainActivity : ComponentActivity() {
     private var phoneSearch by mutableStateOf<String?>(null)
 
+    private val deviceIsTelevision: Boolean
+        get() = packageManager.hasSystemFeature("android.software.leanback") ||
+            packageManager.hasSystemFeature("android.hardware.type.television")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = if (deviceIsTelevision) {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        } else {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
         CrashHandler.install(this)
         AppRuntime.init(this)
         AppRuntime.restore()

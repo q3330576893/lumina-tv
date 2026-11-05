@@ -11,6 +11,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -69,7 +73,11 @@ fun SearchScreen(
         if (initialKeyword.isNotBlank()) doSearch(initialKeyword)
     }
 
-    Column(Modifier.fillMaxSize().padding(horizontal = 40.dp, vertical = 28.dp)) {
+    Column(
+        Modifier.fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .padding(horizontal = 40.dp, vertical = 28.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = keyword,
@@ -85,7 +93,7 @@ fun SearchScreen(
                     unfocusedBorderColor = GlassLine,
                     cursorColor = Accent,
                 ),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).widthIn(min = 0.dp),
             )
             Spacer(Modifier.width(12.dp))
             FocusSurface(

@@ -104,9 +104,6 @@ private fun formatTime(ms: Long): String {
 
 private val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
 
-/** 长按 OK 快进的按下时刻 */
-private var okDownAt = 0L
-
 @Composable
 fun PlayerScreen(
     item: MediaItem,
@@ -144,6 +141,8 @@ fun PlayerScreen(
     val hideFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
 
+    var okDownAt by remember(item.id) { mutableLongStateOf(0L) }
+
     val httpFactory = remember {
         DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
@@ -159,13 +158,8 @@ fun PlayerScreen(
             .apply { playWhenReady = true }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(exo, item.id) {
         onDispose {
-            runCatching {
-                if (client != null && position > 0) {
-                    kotlinx.coroutines.GlobalScope.launch { client.reportStop(item.id, position) }
-                }
-            }
             exo.release()
         }
     }
@@ -181,17 +175,29 @@ fun PlayerScreen(
 
     fun loadSource(forceTranscode: Boolean, sourceId: String? = currentSourceId) {
         val c = client ?: return
+        val resumePosition = if (exo.mediaItemCount > 0) {
+            exo.currentPosition.coerceAtLeast(0L).let { current ->
+                val total = exo.duration
+                if (total > 0) current.coerceAtMost(total) else current
+            }
+        } else item.positionTicks / 10_000
         scope.launch {
             error = null
             buffering = true
             try {
-                val target = c.resolvePlayback(item, forceTranscode, sourceId)
+                val target = c.resolvePlayback(item, forceTranscode, sourceId, resumePosition)
                 currentSourceId = target.source?.id ?: sourceId
                 currentResolution = target.source?.resolution
                     ?: if (target.direct) null else "转码"
                 val videoSource: ExoSource =
                     DefaultMediaSourceFactory(httpFactory).createMediaSource(
-                        androidx.media3.common.MediaItem.Builder().setUri(target.url).build()
+                        androidx.media3.common.MediaItem.Builder().setUri(target.url)
+                            .setMediaMetadata(
+                                androidx.media3.common.MediaMetadata.Builder()
+                                    .setTitle(item.name)
+                                    .build()
+                            )
+                            .build()
                     )
                 val subs = target.source?.streams
                     ?.filter { it.type == "Subtitle" && it.isExternal }
@@ -234,6 +240,9 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(item.id) {
+        degraded = false
+        reloadKey = 0
+        currentSourceId = initialSourceId
         AppRuntime.screenLabel = "播放"
         AppRuntime.nowPlaying = item.seriesName?.let { "${it} · ${item.name}" } ?: item.name
         if (client == null) {
@@ -247,7 +256,7 @@ fun PlayerScreen(
         if (reloadKey > 0) loadSource(forceTranscode = true)
     }
 
-    DisposableEffect(exo) {
+    DisposableEffect(exo, item.id) {
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
                 if (!degraded) {
@@ -320,7 +329,7 @@ fun PlayerScreen(
             position = exo.currentPosition
             duration = exo.duration.coerceAtLeast(0)
             sinceReport++
-            if (sinceReport >= 10 && AppRuntime.client != null && duration > 0) {
+            if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && (exo.isPlaying || position > 0)) {
                 sinceReport = 0
                 AppRuntime.client?.reportProgress(item.id, position, !exo.isPlaying, currentSourceId)
             }
@@ -348,7 +357,7 @@ fun PlayerScreen(
             optionMenu -> optionMenu = false
             showControls -> showControls = false
             else -> {
-                scope.launch { AppRuntime.client?.reportStop(item.id, position) }
+                scope.launch { AppRuntime.client?.reportStop(item.id, exo.currentPosition.coerceAtLeast(0L)) }
                 exo.stop()
                 onBack()
             }
@@ -740,7 +749,10 @@ private fun OptionMenu(
     }
     DisposableEffect(exo) {
         val l = object : Player.Listener {
-            override fun onTracksChanged(t: Tracks) { tracks = t }
+            override fun onTracksChanged(t: Tracks) {
+                tracks = t
+                textDisabled = exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+            }
         }
         exo.addListener(l)
         onDispose { exo.removeListener(l) }
@@ -749,14 +761,14 @@ private fun OptionMenu(
     val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
     val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
 
-    var selectedTextId: String? = null
-    var selectedAudioId: String? = null
+    var selectedText: Pair<String, Int>? = null
+    var selectedAudio: Pair<String, Int>? = null
     for (g in tracks.groups) {
         for (i in 0 until g.length) {
             if (g.isTrackSelected(i)) {
                 when (g.type) {
-                    C.TRACK_TYPE_TEXT -> selectedTextId = g.mediaTrackGroup.id
-                    C.TRACK_TYPE_AUDIO -> selectedAudioId = g.mediaTrackGroup.id
+                    C.TRACK_TYPE_TEXT -> selectedText = g.mediaTrackGroup.id to i
+                    C.TRACK_TYPE_AUDIO -> selectedAudio = g.mediaTrackGroup.id to i
                 }
             }
         }
@@ -834,29 +846,33 @@ private fun OptionMenu(
                         active = textDisabled,
                         activeColor = Accent,
                         onClick = {
+                            textDisabled = true
                             exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                         },
                     )
                     textGroups.forEach { g ->
+                      for (trackIndex in 0 until g.length) {
                         val key = g.mediaTrackGroup.id
-                        val f0 = g.getTrackFormat(0)
+                        val f0 = g.getTrackFormat(trackIndex)
                         val label = buildString {
                             append(f0.label ?: f0.language ?: "字幕")
                             if (f0.language != null) append(" (${f0.language})")
                         }
                         MenuChip(
                             label = label, width = 148.dp,
-                            active = !textDisabled && selectedTextId == key,
+                            active = !textDisabled && selectedText == (key to trackIndex),
                             activeColor = Accent,
                             onClick = {
+                                textDisabled = false
                                 exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                                     .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                                    .addOverride(TrackSelectionOverride(g.mediaTrackGroup, 0))
+                                    .addOverride(TrackSelectionOverride(g.mediaTrackGroup, trackIndex))
                                     .build()
                             },
                         )
+                      }
                     }
                 }
                 if (textGroups.isEmpty()) {
@@ -883,20 +899,22 @@ private fun OptionMenu(
                 MenuLabel("音轨")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     audioGroups.forEach { g ->
+                      for (trackIndex in 0 until g.length) {
                         val key = g.mediaTrackGroup.id
-                        val f0 = g.getTrackFormat(0)
-                        val label = f0.label ?: f0.language ?: "音轨"
+                        val f0 = g.getTrackFormat(trackIndex)
+                        val label = listOfNotNull(f0.label ?: f0.language ?: "音轨", f0.language, f0.sampleMimeType?.substringAfter('/')?.uppercase()).distinct().joinToString(" · ")
                         MenuChip(
                             label = label, width = 148.dp,
-                            active = selectedAudioId == key,
+                            active = selectedAudio == (key to trackIndex),
                             activeColor = Accent,
                             onClick = {
                                 exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                     .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
-                                    .addOverride(TrackSelectionOverride(g.mediaTrackGroup, 0))
+                                    .addOverride(TrackSelectionOverride(g.mediaTrackGroup, trackIndex))
                                     .build()
                             },
                         )
+                      }
                     }
                     if (audioGroups.isEmpty()) {
                         Box(Modifier.height(38.dp), contentAlignment = Alignment.Center) {

@@ -71,7 +71,7 @@ private enum class HomeTab(val label: String) {
     Movies("电影"),
     Series("剧集"),
     Favorites("收藏"),
-    Genre("分类"),
+    Genre("题材"),
 }
 
 @Composable
@@ -243,7 +243,6 @@ fun HomeScreen(
     // 导航自动隐藏：往下滑离开顶部即隐藏，回到顶部/切换标签恢复
     LaunchedEffect(tab, genre) {
         navHidden = false
-        var lastOffset = 0
         snapshotFlow {
             when {
                 tab == HomeTab.Recommend -> recListState.firstVisibleItemIndex to recListState.firstVisibleItemScrollOffset
@@ -258,7 +257,6 @@ fun HomeScreen(
                 // 向下滚离开顶部立刻隐藏，不挡视线
                 navHidden = true
             }
-            lastOffset = offset
         }
     }
 
@@ -334,8 +332,8 @@ fun HomeScreen(
                     } else {
                         LazyVerticalGrid(
                             state = gridState,
-                            columns = GridCells.Fixed(6),
-                            contentPadding = PaddingValues(start = 34.dp, end = 34.dp, bottom = 40.dp),
+                            columns = GridCells.Adaptive(minSize = 112.dp),
+                            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 40.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             verticalArrangement = Arrangement.spacedBy(18.dp),
                             modifier = Modifier.fillMaxSize(),
@@ -352,8 +350,8 @@ fun HomeScreen(
                 }
                 else -> LazyVerticalGrid(
                     state = gridState,
-                    columns = GridCells.Fixed(6),
-                    contentPadding = PaddingValues(start = 34.dp, end = 34.dp, top = 88.dp, bottom = 40.dp),
+                            columns = GridCells.Adaptive(minSize = 112.dp),
+                            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 88.dp, bottom = 40.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -419,7 +417,7 @@ private fun NavBar(
             contentPadding = PaddingValues(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            items(HomeTab.entries) { t ->
+            items(HomeTab.entries.filterNot { it == HomeTab.Favorites }) { t ->
                 TabChip(t.label, tab == t, 60.dp, height = 28.dp) {
                     onSelect(t, null)
                 }

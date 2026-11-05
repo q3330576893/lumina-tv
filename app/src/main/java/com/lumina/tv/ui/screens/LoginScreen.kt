@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -159,13 +161,17 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
 
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "登录"
-        AppRuntime.onPairConfig = { s, _, _ ->
+        AppRuntime.onPairConfig = config@{ s, pairedUser, pairedPass ->
+            if (loading || probing) return@config false
             val norm = s.removePrefix("http://").removePrefix("https://")
             scheme = if (s.startsWith("https")) "https" else "http"
             host = norm.substringBefore(":")
             port = norm.substringAfter(":", "8096").ifBlank { "8096" }
+            user = pairedUser
+            pass = pairedPass
             paired = true
-            submit(user, pass)
+            submit(pairedUser, pairedPass)
+            true
         }
         if (AppRuntime.pairing == null) AppRuntime.startPairing(context)
         qrUrl = AppRuntime.pairingUrl
@@ -190,11 +196,21 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val wide = maxWidth >= 1020.dp
 
-            Row(Modifier.fillMaxSize().padding(horizontal = 44.dp, vertical = 30.dp)) {
+            Row(
+                Modifier.fillMaxSize().padding(
+                    horizontal = if (wide) 44.dp else 20.dp,
+                    vertical = if (wide) 30.dp else 16.dp,
+                ),
+                horizontalArrangement = Arrangement.Center,
+            ) {
 
                 // 左：品牌 + 表单
                 Column(
-                    Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                    Modifier
+                        .weight(if (wide) 1f else 0.92f)
+                        .widthIn(max = 720.dp)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.Center,
                 ) {
                     // 品牌统一为 Lumina
@@ -219,7 +235,8 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                     Spacer(Modifier.height(24.dp))
 
                     Box(
-                        Modifier.width(560.dp)
+                        Modifier.fillMaxWidth()
+                            .widthIn(max = 560.dp)
                             .clip(RoundedCornerShape(26.dp))
                             .background(LCard)
                             .padding(26.dp)
@@ -347,7 +364,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                     if (showHelp) {
                         Spacer(Modifier.height(10.dp))
                         Box(
-                            Modifier.width(560.dp).clip(RoundedCornerShape(16.dp))
+                        Modifier.fillMaxWidth().widthIn(max = 560.dp).clip(RoundedCornerShape(16.dp))
                                 .background(Color(0x0F1A1826)).padding(14.dp)
                         ) {
                             Column {

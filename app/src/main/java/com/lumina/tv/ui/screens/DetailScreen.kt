@@ -31,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,6 +68,7 @@ fun DetailScreen(
     onBack: () -> Unit,
 ) {
     val client = AppRuntime.client
+    val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
     var item by remember { mutableStateOf<MediaItem?>(null) }
     var seasons by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
@@ -295,8 +297,9 @@ fun DetailScreen(
                                     isFav = !isFav
                                     LibraryCache.invalidateHome()
                                     LibraryCache.invalidateDetail(it0.id)
-                                    kotlinx.coroutines.GlobalScope.launch {
-                                        runCatching { client?.setFavorite(it0.id, isFav) }
+                                    scope.launch {
+                                        val saved = runCatching { client?.setFavorite(it0.id, isFav) }.getOrNull()
+                                        if (saved == false) isFav = !isFav
                                     }
                                 },
                             ) { focused ->
@@ -323,8 +326,9 @@ fun DetailScreen(
                                     isPlayed = !isPlayed
                                     LibraryCache.invalidateHome()
                                     LibraryCache.invalidateDetail(it0.id)
-                                    kotlinx.coroutines.GlobalScope.launch {
-                                        runCatching { client?.setPlayed(it0.id, isPlayed) }
+                                    scope.launch {
+                                        val saved = runCatching { client?.setPlayed(it0.id, isPlayed) }.getOrNull()
+                                        if (saved == false) isPlayed = !isPlayed
                                     }
                                 },
                             ) { focused ->

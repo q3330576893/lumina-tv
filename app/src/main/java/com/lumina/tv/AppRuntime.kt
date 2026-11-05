@@ -6,6 +6,8 @@ import com.lumina.tv.data.Prefs
 import com.lumina.tv.data.Session
 import com.lumina.tv.pair.PairingServer
 import org.json.JSONObject
+import java.security.SecureRandom
+import java.util.Base64
 
 /** 全局运行时：给 UI 与内置配对服务共享的薄状态层。 */
 object AppRuntime {
@@ -22,7 +24,37 @@ object AppRuntime {
 
     var onRemoteKey: ((String) -> Unit)? = null
     var onSearch: ((String) -> Unit)? = null
-    var onPairConfig: ((String, String, String) -> Unit)? = null
+    var onPairConfig: ((String, String, String) -> Boolean)? = null
+
+    @Volatile private var pairingToken: String? = null
+    @Volatile private var pairingAccessToken: String? = null
+    @Volatile private var pairingTokenExpiresAt: Long = 0L
+
+    fun issuePairingToken(): String {
+        val bytes = ByteArray(24).also { SecureRandom().nextBytes(it) }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes).also {
+            pairingToken = it
+            pairingAccessToken = it
+            pairingTokenExpiresAt = System.currentTimeMillis() + 5 * 60 * 1000L
+        }
+    }
+
+    @Synchronized
+    fun consumePairingToken(token: String): Boolean {
+        val expected = pairingToken ?: return false
+        pairingToken = null
+        val notExpired = System.currentTimeMillis() <= pairingTokenExpiresAt
+        pairingTokenExpiresAt = 0L
+        return notExpired && token.isNotBlank() && java.security.MessageDigest.isEqual(
+            expected.toByteArray(Charsets.UTF_8), token.toByteArray(Charsets.UTF_8)
+        )
+    }
+
+    fun validatePairingAccess(token: String): Boolean {
+        val expected = pairingAccessToken ?: return false
+        return System.currentTimeMillis() <= pairingTokenExpiresAt && token.isNotBlank() &&
+            java.security.MessageDigest.isEqual(expected.toByteArray(Charsets.UTF_8), token.toByteArray(Charsets.UTF_8))
+    }
 
     fun init(context: Context) {
         if (prefs == null) prefs = Prefs(context.applicationContext)
@@ -65,13 +97,16 @@ object AppRuntime {
         if (pairing != null) return
         val server = PairingServer.start(
             stateProvider = { stateJson() },
-            onConfig = { server, user, pass -> onPairConfig?.invoke(server, user, pass) },
+            onConfig = { token, server, user, pass ->
+                if (consumePairingToken(token)) onPairConfig?.invoke(server, user, pass) == true else false
+            },
+            authorize = { token -> validatePairingAccess(token) },
             onRemote = { action -> onRemoteKey?.invoke(action) },
             onSearch = { keyword -> onSearch?.invoke(keyword) },
         )
         pairing = server
         val ip = PairingServer.localIp()
-        pairingUrl = if (server != null && ip != null) "http://$ip:${server.listeningPort}/" else ""
+        pairingUrl = if (server != null && ip != null) "http://$ip:${server.listeningPort}/?token=${issuePairingToken()}" else ""
         pairingError = if (server == null) "无法启动配对服务（端口被占用）" else if (ip == null) "未连接到局域网" else null
     }
 
@@ -79,6 +114,9 @@ object AppRuntime {
         runCatching { pairing?.stop() }
         pairing = null
         pairingUrl = ""
+        pairingToken = null
+        pairingAccessToken = null
+        pairingTokenExpiresAt = 0L
     }
 
     fun stateJson(): String = JSONObject()

@@ -42,8 +42,16 @@ class EmbyClient(
     private fun url(path: String, params: Map<String, String?> = emptyMap()): String {
         val sb = StringBuilder(normalize(baseUrl)).append(path)
         val q = StringBuilder()
-        params.forEach { (k, v) -> if (v != null) { if (q.isNotEmpty()) q.append('&'); q.append(k).append('=').append(enc(v)) } }
-        if (token.isNotEmpty()) { if (q.isNotEmpty()) q.append('&'); q.append("api_key=").append(enc(token)) }
+        params.forEach { (k, v) ->
+            if (v != null) {
+                if (q.isNotEmpty()) q.append('&')
+                q.append(enc(k)).append('=').append(enc(v))
+            }
+        }
+        if (token.isNotEmpty()) {
+            if (q.isNotEmpty()) q.append('&')
+            q.append("api_key=").append(enc(token))
+        }
         if (q.isNotEmpty()) sb.append('?').append(q)
         return sb.toString()
     }
@@ -54,8 +62,8 @@ class EmbyClient(
         val req = Request.Builder().url(url).header("X-Emby-Authorization", authHeader(withToken)).build()
         http.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${body.take(200)}")
-            return if (body.isBlank()) JSONObject() else JSONObject(body)
+            if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${safeErrorBody(body)}")
+            return parseJsonObject(body)
         }
     }
 
@@ -66,10 +74,19 @@ class EmbyClient(
             .build()
         http.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${text.take(200)}")
-            return if (text.isBlank()) JSONObject() else JSONObject(text)
+            if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${safeErrorBody(text)}")
+            return parseJsonObject(text)
         }
     }
+
+    private fun parseJsonObject(body: String): JSONObject =
+        if (body.isBlank()) JSONObject() else runCatching { JSONObject(body) }
+            .getOrElse { throw EmbyException("服务器返回了无效数据") }
+
+    /** 避免服务端错误正文意外回显访问令牌或认证字段。 */
+    private fun safeErrorBody(body: String): String = body
+        .replace(Regex("(?i)(\\\"?(?:AccessToken|api_key|Token|Pw|Password)\\\"?\\s*[:=]\\s*\\\")([^\\\"]*)(\\\")"), "$1[redacted]$3")
+        .take(200)
 
     // ---------------- 认证 ----------------
 
@@ -93,7 +110,7 @@ class EmbyClient(
     }
 
     private fun getServerNameSafe(): String = try {
-        val info = getSync(url("/System/Info/Public"))
+        val info = getSync(url("/System/Info/Public", emptyMap()), withToken = false)
         info.optString("ServerName", "Emby")
     } catch (_: Exception) { "Emby" }
 
@@ -410,11 +427,12 @@ class EmbyClient(
         item: MediaItem,
         forceTranscode: Boolean = false,
         mediaSourceId: String? = null,
+        startPositionMs: Long = item.positionTicks / 10_000,
     ): PlaybackTarget =
         withContext(Dispatchers.IO) {
             val infoBody = JSONObject()
                 .put("UserId", userId)
-                .put("StartTimeTicks", item.positionTicks)
+                .put("StartTimeTicks", startPositionMs.coerceAtLeast(0L) * 10_000)
                 .put("IsPlayback", true)
                 .put("AutoOpenLiveStream", false)
                 .put("MaxStreamingBitrate", 120_000_000)
@@ -455,7 +473,7 @@ class EmbyClient(
                 url = if (useDirect) directUrl else hlsUrl,
                 direct = useDirect,
                 source = source,
-                startPositionMs = item.positionTicks / 10_000,
+                startPositionMs = startPositionMs.coerceAtLeast(0L),
             )
         }
 
