@@ -385,36 +385,10 @@ fun DetailScreen(
                     }
                 }
 
-                val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
-                if (cast.isNotEmpty()) {
-                    Spacer(Modifier.height(22.dp))
-                    Text("主演与主创", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(10.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
-                            PersonCard(person = person, imageUrl = client?.personImageUrl(person))
-                        }
-                    }
-                }
-
-                if (similar.isNotEmpty()) {
-                    Spacer(Modifier.height(24.dp))
-                    Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(10.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        items(similar, key = { it.id }) { related ->
-                            PosterCard(
-                                item = related,
-                                imageUrl = client?.imageUrl(related),
-                                width = 138.dp,
-                                onClick = { onOpenDetail(related.id) },
-                            )
-                        }
-                    }
-                }
-
                 if (seasons.isNotEmpty()) {
-                    Spacer(Modifier.height(20.dp))
+                    Spacer(Modifier.height(18.dp))
+                    Text("季数与剧集", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(seasons, key = { it.id }) { s ->
                             val active = s.id == selectedSeason?.id
@@ -449,6 +423,34 @@ fun DetailScreen(
                         }
                     }
                 }
+                val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
+                if (cast.isNotEmpty()) {
+                    Spacer(Modifier.height(22.dp))
+                    Text("主演与主创", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
+                            PersonCard(person = person, imageUrl = client?.personImageUrl(person))
+                        }
+                    }
+                }
+
+                if (similar.isNotEmpty()) {
+                    Spacer(Modifier.height(24.dp))
+                    Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        items(similar, key = { it.id }) { related ->
+                            PosterCard(
+                                item = related,
+                                imageUrl = client?.imageUrl(related),
+                                width = 138.dp,
+                                onClick = { onOpenDetail(related.id) },
+                            )
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(28.dp))
             }
         }

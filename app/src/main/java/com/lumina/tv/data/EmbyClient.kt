@@ -228,13 +228,19 @@ class EmbyClient(
     }
 
     /** 分页读取指定 Emby 媒体库，避免首页预览的 30 条限制截断完整库。 */
-    suspend fun getAllItems(parentId: String, pageSize: Int = 200, maxItems: Int = 10000): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun getAllItems(
+        parentId: String,
+        sortBy: String = "SortName",
+        sortOrder: String = "Ascending",
+        pageSize: Int = 200,
+        maxItems: Int = 10000,
+    ): List<MediaItem> = withContext(Dispatchers.IO) {
         val output = ArrayList<MediaItem>()
         val ids = HashSet<String>()
         val size = pageSize.coerceIn(1, 500)
         var start = 0
         while (start < maxItems) {
-            val page = getItems(parentId = parentId, sortBy = "SortName", sortOrder = "Ascending", limit = size, startIndex = start)
+            val page = getItems(parentId = parentId, sortBy = sortBy, sortOrder = sortOrder, limit = size, startIndex = start)
             if (page.isEmpty()) break
             page.forEach { if (ids.add(it.id)) output += it }
             start += page.size

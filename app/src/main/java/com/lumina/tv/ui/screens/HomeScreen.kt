@@ -1,6 +1,14 @@
 package com.lumina.tv.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
@@ -63,6 +71,7 @@ import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.ui.components.FocusSurface
+import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.SectionTitle
@@ -105,6 +114,7 @@ fun HomeScreen(
     var tab by remember { mutableStateOf(HomeTab.Recommend) }
     var selectedLibrary by remember { mutableStateOf<LibraryView?>(null) }
     var libraryError by remember { mutableStateOf<String?>(null) }
+    var librarySort by remember { mutableStateOf("date") }
     var gridItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var gridLoading by remember { mutableStateOf(false) }
     // 各媒体库视图的横向内容（id → items）
@@ -181,9 +191,10 @@ fun HomeScreen(
     }
 
     // 切换标签：Movies/Series 直接复用首页已加载的数据，不再额外请求
-    LaunchedEffect(tab, selectedLibrary) {
+    LaunchedEffect(tab, selectedLibrary, librarySort) {
         val requestTab = tab
         val requestLibrary = selectedLibrary
+        val requestSort = librarySort
         gridLoading = false
         libraryError = null
         if (requestTab == HomeTab.Media && requestLibrary != null) gridItems = emptyList()
@@ -205,7 +216,7 @@ fun HomeScreen(
             HomeTab.Movies -> "movies"
             HomeTab.Series -> "series"
             HomeTab.Favorites -> "favorites"
-            HomeTab.Media -> "library:${requestLibrary?.id.orEmpty()}"
+            HomeTab.Media -> "library:${requestLibrary?.id.orEmpty()}:$requestSort"
             else -> return@LaunchedEffect
         }
         LibraryCache.browseOf(key)?.let {
@@ -219,12 +230,20 @@ fun HomeScreen(
                     HomeTab.Movies -> c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
                     HomeTab.Series -> c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
                     HomeTab.Favorites -> c.getFavorites(120)
-                    HomeTab.Media -> requestLibrary?.let { c.getAllItems(it.id) }.orEmpty()
+                    HomeTab.Media -> requestLibrary?.let {
+                        val (sb, so) = when (requestSort) {
+                            "name" -> "SortName" to "Ascending"
+                            "rating" -> "CommunityRating" to "Descending"
+                            "year" -> "ProductionYear" to "Descending"
+                            else -> "DateCreated" to "Descending"
+                        }
+                        c.getAllItems(it.id, sortBy = sb, sortOrder = so)
+                    }.orEmpty()
                     else -> emptyList()
                 }
             }
             currentCoroutineContext().ensureActive()
-            if (tab != requestTab || selectedLibrary != requestLibrary) return@LaunchedEffect
+            if (tab != requestTab || selectedLibrary != requestLibrary || librarySort != requestSort) return@LaunchedEffect
             result.onSuccess { list ->
                 LibraryCache.putBrowse(key, list)
                 gridItems = list
@@ -233,7 +252,7 @@ fun HomeScreen(
                 gridItems = emptyList()
             }
         } finally {
-            if (tab == requestTab && selectedLibrary == requestLibrary) gridLoading = false
+            if (tab == requestTab && selectedLibrary == requestLibrary && librarySort == requestSort) gridLoading = false
         }
     }
 
@@ -260,6 +279,8 @@ fun HomeScreen(
 
     val recListState = rememberLazyListState()
     val gridState = rememberLazyGridState()
+    val scope = rememberCoroutineScope()
+    val navFocus = remember { FocusRequester() }
 
     // 导航自动隐藏：往下滑离开顶部即隐藏，回到顶部/切换标签恢复
     LaunchedEffect(tab, selectedLibrary) {
@@ -310,7 +331,8 @@ fun HomeScreen(
                             }
                         }
                     }
-                    item { Spacer(Modifier.height(36.dp)) }
+                    item { OpenNavButton { navHidden = false; scope.launch { delay(220); runCatching { navFocus.requestFocus() } } } }
+                    item { Spacer(Modifier.height(140.dp)) }
                 }
                 tab == HomeTab.Media && selectedLibrary == null -> MediaLibrary(
                     views = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) },
@@ -318,17 +340,65 @@ fun HomeScreen(
                     onOpenDetail = onOpenDetail,
                     onOpenLibrary = { selectedLibrary = it },
                 )
-                tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize().padding(top = 70.dp)) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 34.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        FocusSurface(modifier = Modifier.height(34.dp), corner = 17.dp, onClick = { selectedLibrary = null; gridItems = emptyList() }) { focused ->
-                            Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)).padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
-                                Text("← 全部媒体库", color = Accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize().padding(top = 64.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 6.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        FocusSurface(modifier = Modifier.height(40.dp).width(96.dp), corner = 20.dp, onClick = { selectedLibrary = null; gridItems = emptyList() }) { focused ->
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("‹ 返回", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
-                        Spacer(Modifier.width(16.dp))
-                        Text(selectedLibrary?.name.orEmpty(), color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.width(8.dp))
-                        Text("共 ${gridItems.size} 部", color = TextSub, fontSize = 12.sp)
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text(
+                                selectedLibrary?.name.orEmpty(),
+                                color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            Text("共 ${gridItems.size} 部", color = TextSub, fontSize = 11.sp)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        FocusSurface(
+                            modifier = Modifier.height(40.dp).width(112.dp),
+                            corner = 20.dp, scaleTo = 1.03f,
+                            onClick = {
+                                val keys = SORT_LABELS.keys.toList()
+                                val idx = keys.indexOf(librarySort)
+                                librarySort = keys[(idx + 1) % keys.size]
+                            },
+                        ) { focused ->
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("排序", color = if (focused) Accent else TextSub, fontSize = 9.sp, lineHeight = 11.sp)
+                                    Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SORT_LABELS.forEach { (key, label) ->
+                            val active = librarySort == key
+                            FocusSurface(modifier = Modifier.height(32.dp).width(86.dp), corner = 16.dp, scaleTo = 1.03f, onClick = { librarySort = key }) { focused ->
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        label,
+                                        color = when {
+                                            active -> Color(0xFF06101F)
+                                            focused -> Accent
+                                            else -> TextSub
+                                        },
+                                        fontSize = 12.sp,
+                                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
+                        }
                     }
                     if (gridLoading) LoadingView(text = "正在读取 ${selectedLibrary?.name.orEmpty()}…")
                     else if (libraryError != null) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -337,12 +407,19 @@ fun HomeScreen(
                     else if (gridItems.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("此媒体库暂无内容", color = TextSub, fontSize = 13.sp)
                     }
-                    else LazyVerticalGrid(state = gridState, columns = GridCells.Adaptive(minSize = 112.dp),
-                        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 40.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(18.dp),
-                        modifier = Modifier.fillMaxSize()) {
+                    else LazyVerticalGrid(
+                        state = gridState,
+                        columns = GridCells.Adaptive(minSize = 112.dp),
+                        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 160.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
                         items(gridItems, key = { it.id }) { media ->
                             PosterCard(item = media, imageUrl = client?.imageUrl(media), onClick = { onOpenDetail(media.id) })
+                        }
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            OpenNavButton { navHidden = false; scope.launch { delay(220); runCatching { navFocus.requestFocus() } } }
                         }
                     }
                 }
@@ -353,7 +430,7 @@ fun HomeScreen(
                 else -> LazyVerticalGrid(
                     state = gridState,
                             columns = GridCells.Adaptive(minSize = 112.dp),
-                            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 88.dp, bottom = 40.dp),
+                            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 88.dp, bottom = 160.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -364,6 +441,9 @@ fun HomeScreen(
                             imageUrl = client?.imageUrl(it),
                             onClick = { onOpenDetail(it.id) },
                         )
+                    }
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        OpenNavButton { navHidden = false; scope.launch { delay(220); runCatching { navFocus.requestFocus() } } }
                     }
                 }
             }
@@ -384,6 +464,7 @@ NavBar(
                 onSettings = onSettings,
                 onSwitchServer = onSwitchServer,
                 onLogout = onLogout,
+                navFocus = navFocus,
             )
         }
     }
@@ -397,30 +478,84 @@ private fun NavBar(
     onSettings: () -> Unit,
     onSwitchServer: () -> Unit,
     onLogout: () -> Unit,
+    navFocus: FocusRequester,
 ) {
     var serverMenuOpen by remember { mutableStateOf(false) }
     val glassShape = RoundedCornerShape(28.dp)
+    val menuShape = RoundedCornerShape(24.dp)
+    if (serverMenuOpen) BackHandler { serverMenuOpen = false }
     Box(Modifier.fillMaxSize()) {
+        if (serverMenuOpen) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0x59000000))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { serverMenuOpen = false },
+            )
+        }
         Row(
             Modifier.align(Alignment.TopCenter).fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color(0xEE070A12), Color(0x00070A12))))
-                .padding(horizontal = 24.dp, vertical = 14.dp),
+                .padding(horizontal = 24.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FocusSurface(modifier = Modifier.height(42.dp).width(138.dp), corner = 21.dp,
+            FocusSurface(modifier = Modifier.height(46.dp).width(150.dp), corner = 23.dp,
                 onClick = { serverMenuOpen = true }) { focused ->
-                Box(Modifier.fillMaxSize().background(if (focused) Color(0x36FFFFFF) else Color(0x18FFFFFF), RoundedCornerShape(21.dp)), contentAlignment = Alignment.CenterStart) {
-                    Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("L", color = Accent, fontSize = 20.sp, fontWeight = FontWeight.Black)
-                Spacer(Modifier.width(7.dp))
-                Text("Lumina ▾", color = if (focused) Accent else TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                    Row(Modifier.padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("L", color = Accent, fontSize = 22.sp, fontWeight = FontWeight.Black)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Lumina", color = if (focused) Accent else TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(6.dp))
+                        Text("▾", color = if (focused) Accent else TextSub, fontSize = 13.sp)
+                    }
                 }
             }
-            DropdownMenu(expanded = serverMenuOpen, onDismissRequest = { serverMenuOpen = false }) {
-                DropdownMenuItem(text = { Text("当前服务器：${AppRuntime.session?.serverName ?: "未连接"}") }, onClick = { serverMenuOpen = false })
-                DropdownMenuItem(text = { Text("切换服务器 / 账号") }, onClick = { serverMenuOpen = false; onSwitchServer() })
-                DropdownMenuItem(text = { Text("退出当前服务器") }, onClick = { serverMenuOpen = false; onLogout() })
+            Spacer(Modifier.width(12.dp))
+            GlassPanel(Modifier.height(46.dp).weight(1f), corner = 23.dp) {
+                Box(Modifier.fillMaxSize().padding(horizontal = 14.dp), contentAlignment = Alignment.CenterStart) {
+                    Column {
+                        Text("当前服务器", color = TextSub, fontSize = 9.sp, lineHeight = 11.sp)
+                        Text(
+                            AppRuntime.session?.serverName ?: "未连接",
+                            color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+        if (serverMenuOpen) {
+            Column(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 24.dp, top = 72.dp)
+                    .width(320.dp)
+                    .clip(menuShape)
+                    .background(Brush.verticalGradient(listOf(Color(0xF51C2638), Color(0xEA121A28))))
+                    .border(1.dp, Color(0x40FFFFFF), menuShape)
+                    .padding(10.dp),
+            ) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(34.dp).clip(RoundedCornerShape(17.dp)).background(Color(0x2E6EA8FF)), contentAlignment = Alignment.Center) {
+                        Text("L", color = Accent, fontSize = 17.sp, fontWeight = FontWeight.Black)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text("Lumina · Emby", color = TextSub, fontSize = 9.sp)
+                        Text(
+                            AppRuntime.session?.userName ?: "未登录",
+                            color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                MenuRowGlass("切换服务器 / 账号", "重新扫码或输入地址登录") { serverMenuOpen = false; onSwitchServer() }
+                MenuRowGlass("退出当前服务器", "清除登录状态并返回登录页", danger = true) { serverMenuOpen = false; onLogout() }
             }
         }
         Row(
@@ -432,7 +567,7 @@ private fun NavBar(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            itemsNav(tab, onSelect, onSettings)
+            itemsNav(tab, onSelect, onSettings, navFocus)
         }
         FocusSurface(
             modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 20.dp).size(64.dp),
@@ -446,15 +581,52 @@ private fun NavBar(
 }
 
 @Composable
-private fun RowScope.itemsNav(tab: HomeTab, onSelect: (HomeTab, String?) -> Unit, onSettings: () -> Unit) {
+private fun MenuRowGlass(title: String, sub: String, danger: Boolean = false, onClick: () -> Unit) {
+    FocusSurface(
+        modifier = Modifier.fillMaxWidth().height(56.dp),
+        corner = 16.dp, scaleTo = 1.0f, onClick = onClick,
+    ) { focused ->
+        Row(
+            Modifier.fillMaxSize()
+                .background(
+                    when {
+                        focused -> if (danger) Color(0x33FF6B81) else Color(0x2EFFFFFF)
+                        else -> Color(0x0FFFFFFF)
+                    },
+                    RoundedCornerShape(16.dp),
+                )
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, color = if (danger) Color(0xFFFF8A9A) else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(sub, color = TextSub, fontSize = 10.sp)
+            }
+            Text("›", color = TextSub, fontSize = 15.sp)
+        }
+    }
+}
+
+@Composable
+private fun RowScope.itemsNav(
+    tab: HomeTab,
+    onSelect: (HomeTab, String?) -> Unit,
+    onSettings: () -> Unit,
+    navFocus: FocusRequester,
+) {
     val entries = listOf(
         Triple(HomeTab.Recommend, "首页", Icons.Rounded.Home),
         Triple(HomeTab.Favorites, "收藏", Icons.Rounded.Favorite),
         Triple(HomeTab.Media, "媒体库", Icons.Rounded.Movie),
     )
-    entries.forEach { (entry, label, icon) ->
+    entries.forEachIndexed { index, (entry, label, icon) ->
         val active = tab == entry
-        FocusSurface(modifier = Modifier.height(56.dp).width(76.dp), corner = 24.dp, onClick = { onSelect(entry, null) }) { focused ->
+        val itemModifier = if (index == 0) {
+            Modifier.height(56.dp).width(76.dp).focusRequester(navFocus)
+        } else {
+            Modifier.height(56.dp).width(76.dp)
+        }
+        FocusSurface(modifier = itemModifier, corner = 24.dp, onClick = { onSelect(entry, null) }) { focused ->
             Column(Modifier.fillMaxSize().clip(RoundedCornerShape(24.dp)).background(if (active) Color(0x58FFFFFF) else if (focused) Color(0x35FFFFFF) else Color.Transparent).padding(vertical = 5.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Icon(icon, contentDescription = label, tint = if (active) Color(0xFF171A24) else Color(0xFF363B47), modifier = Modifier.size(23.dp))
                 Text(label, color = Color(0xFF171A24), fontSize = 10.sp)
@@ -465,6 +637,27 @@ private fun RowScope.itemsNav(tab: HomeTab, onSelect: (HomeTab, String?) -> Unit
         Column(Modifier.fillMaxSize().clip(RoundedCornerShape(24.dp)).background(if (focused) Color(0x35FFFFFF) else Color.Transparent).padding(vertical = 5.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
             Icon(Icons.Rounded.Settings, contentDescription = "设置", tint = Color(0xFF363B47), modifier = Modifier.size(23.dp))
             Text("设置", color = Color(0xFF171A24), fontSize = 10.sp)
+        }
+    }
+}
+
+private val SORT_LABELS = linkedMapOf(
+    "date" to "最新添加",
+    "name" to "名称",
+    "rating" to "评分",
+    "year" to "年份",
+)
+
+@Composable
+private fun OpenNavButton(onOpen: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        FocusSurface(
+            modifier = Modifier.height(44.dp).width(190.dp),
+            corner = 22.dp, scaleTo = 1.04f, onClick = onOpen,
+        ) { focused ->
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("⌄ 打开导航栏", color = if (focused) Accent else TextSub, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
         }
     }
 }
