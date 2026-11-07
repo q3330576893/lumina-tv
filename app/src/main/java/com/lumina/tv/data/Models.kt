@@ -86,6 +86,8 @@ data class MediaSource(
     val streams: List<MediaStream>,
     val size: Long = 0L,
     val resolution: String? = null,
+    val directStreamUrl: String? = null,
+    val additionalOptions: String? = null,
 ) {
     val audioStreams: List<MediaStream> get() = streams.filter { it.type == "Audio" }
     val subtitleStreams: List<MediaStream> get() = streams.filter { it.type == "Subtitle" }

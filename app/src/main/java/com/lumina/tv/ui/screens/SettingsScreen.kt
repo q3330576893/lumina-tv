@@ -19,6 +19,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Switch
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +33,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.focusable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -78,6 +82,31 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var checkingUpdate by remember { mutableStateOf(false) }
     var updateResult by remember { mutableStateOf<String?>(null) }
     var releaseUrl by remember { mutableStateOf<String?>(null) }
+    var renameServerUrl by remember { mutableStateOf<String?>(null) }
+    var renameServerText by remember { mutableStateOf("") }
+
+    renameServerUrl?.let { url ->
+        AlertDialog(
+            onDismissRequest = { renameServerUrl = null },
+            title = { Text("编辑服务器名称") },
+            text = {
+                OutlinedTextField(
+                    value = renameServerText,
+                    onValueChange = { renameServerText = it.take(32) },
+                    singleLine = true,
+                    placeholder = { Text("例如：客厅 NAS") },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    prefs?.renameSavedServer(url, renameServerText)
+                    savedServers = prefs?.savedServers().orEmpty()
+                    renameServerUrl = null
+                }) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { renameServerUrl = null }) { Text("取消") } },
+        )
+    }
 
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "设置"
@@ -136,7 +165,9 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Spacer(Modifier.height(14.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("已保存服务器", color = TextSub, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                            FocusSurface(Modifier.height(34.dp).width(112.dp), corner = 17.dp, scaleTo = 1f,
+                            FocusSurface(
+                                    modifier = Modifier.height(34.dp).width(112.dp),
+                                    corner = 17.dp, scaleTo = 1.04f,
                                 onClick = { prefs?.saveCurrentServer(); savedServers = prefs?.savedServers().orEmpty() }) { focused ->
                                 Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)), contentAlignment = Alignment.Center) {
                                     Text("保存当前服务器", color = TextMain, fontSize = 10.sp)
@@ -149,7 +180,18 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                     Text(name, color = TextMain, fontSize = 12.sp, maxLines = 1)
                                     Text(url, color = TextSub, fontSize = 10.sp, maxLines = 1)
                                 }
-                                FocusSurface(Modifier.size(32.dp), corner = 16.dp, scaleTo = 1f, onClick = {
+                                FocusSurface(
+                                    modifier = Modifier.height(32.dp).width(58.dp),
+                                    corner = 16.dp, scaleTo = 1.04f, onClick = {
+                                    renameServerUrl = url
+                                    renameServerText = name
+                                }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), CircleShape), contentAlignment = Alignment.Center) {
+                                        Text("编辑", color = TextMain, fontSize = 10.sp)
+                                    }
+                                }
+                                Spacer(Modifier.width(6.dp))
+                                FocusSurface(Modifier.size(32.dp), corner = 16.dp, scaleTo = 1.04f, onClick = {
                                     prefs?.removeSavedServer(url)
                                     savedServers = prefs?.savedServers().orEmpty()
                                 }) { focused ->
@@ -206,7 +248,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 val active = glassKey == g.key
                                 FocusSurface(
                                     modifier = Modifier.width(96.dp).height(38.dp),
-                                    corner = 12.dp, scaleTo = 1f,
+                                    corner = 12.dp, scaleTo = 1.04f,
                                     onClick = {
                                         glassKey = g.key
                                         ThemeRuntime.applyGlass(g.key)
@@ -276,7 +318,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 FocusSurface(
                                     modifier = Modifier.height(34.dp).width(110.dp),
-                                    corner = 17.dp, scaleTo = 1f,
+                                    corner = 17.dp, scaleTo = 1.04f,
                                     onClick = {
                                         prefs?.hiddenViewIds = emptySet()
                                         hiddenIds = emptySet()
@@ -289,7 +331,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 }
                                 FocusSurface(
                                     modifier = Modifier.height(34.dp).width(110.dp),
-                                    corner = 17.dp, scaleTo = 1f,
+                                    corner = 17.dp, scaleTo = 1.04f,
                                     onClick = {
                                         val all = views.map { it.id }.toSet()
                                         prefs?.hiddenViewIds = all
@@ -321,7 +363,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 val active = kotlin.math.abs(defaultSpeed - s) < 0.01f
                                 FocusSurface(
                                     modifier = Modifier.width(72.dp).height(36.dp),
-                                    corner = 12.dp, scaleTo = 1f,
+                                    corner = 12.dp, scaleTo = 1.04f,
                                     onClick = {
                                         defaultSpeed = s
                                         prefs?.defaultSpeed = s
@@ -362,7 +404,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             listOf(android.graphics.Color.WHITE, android.graphics.Color.YELLOW, android.graphics.Color.CYAN, android.graphics.Color.GREEN).forEach { color ->
-                                FocusSurface(Modifier.size(34.dp), corner = 17.dp, scaleTo = 1f, onClick = {
+                                FocusSurface(Modifier.size(34.dp), corner = 17.dp, scaleTo = 1.04f, onClick = {
                                     subtitleColor = color
                                     prefs?.subtitleColor = color
                                 }) { focused ->
@@ -381,7 +423,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf(0.04f to "低", 0.08f to "标准", 0.15f to "高").forEach { (value, label) ->
                                 val active = kotlin.math.abs(subtitlePosition - value) < .01f
-                                FocusSurface(Modifier.width(74.dp).height(34.dp), corner = 17.dp, scaleTo = 1f, onClick = {
+                                FocusSurface(Modifier.width(74.dp).height(34.dp), corner = 17.dp, scaleTo = 1.04f, onClick = {
                                     subtitlePosition = value
                                     prefs?.subtitlePosition = value
                                 }) { focused ->
@@ -418,7 +460,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 val active = introSeconds == sec
                                 FocusSurface(
                                     modifier = Modifier.width(84.dp).height(36.dp),
-                                    corner = 12.dp, scaleTo = 1f,
+                                    corner = 12.dp, scaleTo = 1.04f,
                                     onClick = {
                                         introSeconds = sec
                                         prefs?.globalIntroSeconds = sec
@@ -455,7 +497,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf("auto" to "自动", "hardware" to "硬解优先", "software" to "软解优先").forEach { (key, label) ->
                                 val active = decoderPreference == key
-                                FocusSurface(Modifier.width(100.dp).height(36.dp), corner = 18.dp, scaleTo = 1f, onClick = {
+                                FocusSurface(Modifier.width(100.dp).height(36.dp), corner = 18.dp, scaleTo = 1.04f, onClick = {
                                     decoderPreference = key
                                     prefs?.decoderPreference = key
                                 }) { focused ->
@@ -476,7 +518,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Spacer(Modifier.height(6.dp))
                         Text("清除图片与临时文件缓存，不会删除登录信息或播放记录", color = TextSub, fontSize = 11.sp)
                         Spacer(Modifier.height(12.dp))
-                        FocusSurface(Modifier.height(38.dp).width(130.dp), corner = 19.dp, scaleTo = 1f, onClick = {
+                        FocusSurface(Modifier.height(38.dp).width(130.dp), corner = 19.dp, scaleTo = 1.04f, onClick = {
                             runCatching { context.cacheDir.listFiles()?.forEach { it.deleteRecursively() } }
                             android.widget.Toast.makeText(context, "缓存已清除", android.widget.Toast.LENGTH_SHORT).show()
                         }) { focused ->
@@ -494,7 +536,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Spacer(Modifier.height(8.dp))
                         Text("清除当前 Emby 用户的已观看标记", color = TextSub, fontSize = 11.sp)
                         Spacer(Modifier.height(12.dp))
-                        FocusSurface(Modifier.height(38.dp).width(150.dp), corner = 19.dp, scaleTo = 1f,
+                        FocusSurface(Modifier.height(38.dp).width(150.dp), corner = 19.dp, scaleTo = 1.04f,
                             onClick = {
                                 if (!clearingHistory) {
                                     clearingHistory = true
@@ -524,7 +566,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 val active = kotlin.math.abs(subtitleScale - scale) < 0.01f
                                 FocusSurface(
                                     modifier = Modifier.width(84.dp).height(36.dp),
-                                    corner = 12.dp, scaleTo = 1f,
+                                    corner = 12.dp, scaleTo = 1.04f,
                                     onClick = {
                                         subtitleScale = scale
                                         prefs?.subtitleScale = scale
@@ -574,7 +616,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         updateResult?.let { Text(it, color = TextSub, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp)) }
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FocusSurface(Modifier.height(38.dp).width(138.dp), corner = 19.dp, scaleTo = 1f, onClick = {
+                            FocusSurface(Modifier.height(38.dp).width(138.dp), corner = 19.dp, scaleTo = 1.04f, onClick = {
                                 if (!checkingUpdate) scope.launch {
                                     checkingUpdate = true
                                     updateResult = "正在检查…"
@@ -611,7 +653,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                     Text(if (checkingUpdate) "检查中…" else "检查更新", color = TextMain, fontSize = 12.sp)
                                 }
                             }
-                            if (releaseUrl != null) FocusSurface(Modifier.height(38.dp).width(120.dp), corner = 19.dp, scaleTo = 1f, onClick = {
+                            if (releaseUrl != null) FocusSurface(Modifier.height(38.dp).width(120.dp), corner = 19.dp, scaleTo = 1.04f, onClick = {
                                 runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(releaseUrl))) }
                             }) { focused ->
                                 Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp)), contentAlignment = Alignment.Center) {
@@ -631,7 +673,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf("auto" to "自动", "media3" to "Media3", "mpv" to "mpv").forEach { (key, label) ->
                                 val active = playerEngine == key
-                                FocusSurface(Modifier.width(92.dp).height(36.dp), corner = 18.dp, scaleTo = 1f, onClick = {
+                                FocusSurface(Modifier.width(92.dp).height(36.dp), corner = 18.dp, scaleTo = 1.04f, onClick = {
                                     playerEngine = key
                                     prefs?.playerEngine = key
                                 }) { focused ->
@@ -651,7 +693,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 FocusSurface(
                     modifier = Modifier.width(92.dp).height(36.dp),
                     corner = 18.dp,
-                    scaleTo = 1f,
+                    scaleTo = 1.04f,
                     onClick = {
                         playerEngine = "ijk"
                         prefs?.playerEngine = "ijk"
@@ -679,38 +721,58 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 }
 
                 Spacer(Modifier.height(20.dp))
+
+                if (!wide) {
+                    PairingPanel(Modifier.fillMaxWidth(), qrUrl)
+                }
             }
 
-            // 右栏：扫码配对（窄屏自动隐藏）
+            // 窄屏配对面板放在主列末尾，宽屏保留独立右栏。
             if (wide) {
                 Spacer(Modifier.width(36.dp))
+                PairingPanel(Modifier.width(320.dp), qrUrl)
+            }
+        }
+    }
+}
 
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    GlassPanel(Modifier.width(320.dp), corner = 26.dp) {
-                        Column(Modifier.padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("手机遥控 / 换服务器", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(4.dp))
-                            Text("扫码后可用手机打字搜索、当遥控器", color = TextSub, fontSize = 11.sp)
-                            Spacer(Modifier.height(14.dp))
-                            if (qrUrl.isNotEmpty()) {
-                                QrCode(qrUrl, size = 200.dp)
-                                Spacer(Modifier.height(10.dp))
-                                Text(qrUrl.removePrefix("http://").removeSuffix("/"), color = Accent, fontSize = 12.sp)
-                            } else {
-                                Box(
-                                    Modifier.height(200.dp).fillMaxWidth()
-                                        .background(Color(0x14FFFFFF), RoundedCornerShape(18.dp)),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Text(
-                                        AppRuntime.pairingError ?: "未连接局域网",
-                                        color = TextSub, fontSize = 11.sp,
-                                    )
-                                }
-                            }
-                        }
-                    }
+@Composable
+private fun PairingPanel(modifier: Modifier, qrUrl: String) {
+    val pairingStatus = AppRuntime.pairingStatus
+    val pairingSucceeded = pairingStatus.contains("成功")
+    val pairingFailed = pairingStatus.contains("失败") || pairingStatus.contains("错误")
+    val statusColor = when {
+        pairingSucceeded -> Color(0xFF72D89A)
+        pairingFailed -> Color(0xFFFF7777)
+        else -> TextSub
+    }
+    val statusText = if (pairingSucceeded) "手机已连接 ✓" else pairingStatus
+
+    GlassPanel(modifier, corner = 26.dp) {
+        Column(Modifier.padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("手机遥控 / 换服务器", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(4.dp))
+            Text("扫码后可用手机打字搜索、当遥控器", color = TextSub, fontSize = 11.sp)
+            Spacer(Modifier.height(14.dp))
+            if (qrUrl.isNotEmpty()) {
+                QrCode(qrUrl, size = 200.dp)
+                Spacer(Modifier.height(10.dp))
+                Text(qrUrl.removePrefix("http://").removeSuffix("/"), color = Accent, fontSize = 12.sp)
+            } else {
+                Box(
+                    Modifier.height(200.dp).fillMaxWidth()
+                        .background(Color(0x14FFFFFF), RoundedCornerShape(18.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        AppRuntime.pairingError ?: "未连接局域网",
+                        color = TextSub, fontSize = 11.sp,
+                    )
                 }
+            }
+            if (pairingStatus.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(statusText, color = statusColor, fontSize = 12.sp)
             }
         }
     }
@@ -718,23 +780,31 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 
 @Composable
 private fun SwitchRow(title: String, desc: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(vertical = 7.dp),
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = TextMain, fontSize = 13.sp)
-            Text(desc, color = TextSub, fontSize = 11.sp)
+    FocusSurface(
+        modifier = Modifier.fillMaxWidth().height(56.dp),
+        corner = 14.dp,
+        scaleTo = 1.02f,
+        onClick = { onChange(!checked) },
+    ) { focused ->
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, color = if (focused) TextMain else TextMain.copy(alpha = 0.86f), fontSize = 13.sp)
+                Text(desc, color = if (focused) TextSub else TextSub.copy(alpha = 0.78f), fontSize = 11.sp)
+            }
+            Switch(
+                modifier = Modifier.focusable(false),
+                checked = checked,
+                onCheckedChange = onChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color(0xFF06101F),
+                    checkedTrackColor = Accent,
+                    uncheckedThumbColor = Color(0xFF8B99B0),
+                    uncheckedTrackColor = Color(0x33FFFFFF),
+                ),
+            )
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color(0xFF06101F),
-                checkedTrackColor = Accent,
-                uncheckedThumbColor = Color(0xFF8B99B0),
-                uncheckedTrackColor = Color(0x33FFFFFF),
-            ),
-        )
     }
 }

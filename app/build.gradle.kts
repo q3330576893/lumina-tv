@@ -21,6 +21,7 @@ android {
         targetSdk = 35
         versionCode = 22
         versionName = "1.15.0"
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
     }
 

@@ -1,6 +1,9 @@
 package com.lumina.tv
 
 import android.content.Context
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.Prefs
 import com.lumina.tv.data.Session
@@ -18,7 +21,7 @@ object AppRuntime {
     var pairing: PairingServer? = null
     var pairingUrl: String = ""
     var pairingError: String? = null
-    @Volatile var pairingStatus: String = ""
+    var pairingStatus by mutableStateOf("")
 
     var screenLabel: String = "登录"
     var nowPlaying: String = ""

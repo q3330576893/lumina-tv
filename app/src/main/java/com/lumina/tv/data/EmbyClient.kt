@@ -444,11 +444,13 @@ class EmbyClient(
 
     // ---------------- 播放 ----------------
 
-    data class PlaybackTarget(
+data class PlaybackTarget(
         val url: String,
         val direct: Boolean,
         val source: MediaSource?,
         val startPositionMs: Long,
+        val headers: Map<String, String> = emptyMap(),
+        val durationMs: Long? = null,
     )
 
     /** 解析单个 MediaSource JSON 为模型（含大小与分辨率）。 */
@@ -489,6 +491,8 @@ class EmbyClient(
             streams = streams,
             size = o.optLong("Size", 0L),
             resolution = resolution,
+            directStreamUrl = o.optString("DirectStreamUrl").ifBlank { null },
+            additionalOptions = o.optString("AdditionalOptions").ifBlank { null },
         )
     }
 
@@ -506,6 +510,65 @@ class EmbyClient(
                 sources.optJSONObject(i)?.let { parseMediaSource(it) }
             }
         }.getOrDefault(emptyList())
+    }
+
+    /** 读取纯文本响应：.strm 内容是文本，不能按 JSON 解析 */
+    private fun getTextSync(target: String): String? = runCatching {
+        val req = Request.Builder().url(target)
+            .header("X-Emby-Authorization", authHeader())
+            .build()
+        http.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}")
+            text
+        }
+    }.getOrNull()
+
+    /** 从 .strm 文本里取第一条有效地址，跳过空行与 # 注释行 */
+    private fun extractStrmUrl(text: String?): String? {
+        if (text.isNullOrBlank()) return null
+        return text.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { line ->
+                line.isNotEmpty() && !line.startsWith("#") &&
+                    (line.startsWith("http://", true) || line.startsWith("https://", true))
+            }
+    }
+
+    /** 解析 #EXTVLCOPT 和 #EXTHTTP 片段，返回请求头映射 */
+    private fun parseStrmOptions(text: String?): Map<String, String> {
+        val headers = mutableMapOf<String, String>()
+        if (text?.isNotBlank() != true) return headers
+        for (line in text.lines()) {
+            val upper = line.uppercase()
+            if (upper.startsWith("#EXTVLCOPT:HTTP-REFERRER=")) {
+                val referrer = line.substringAfter('=').trim()
+                headers["Referer"] = referrer
+            } else if (upper.startsWith("#EXTVLCOPT:HTTP-USER-AGENT=")) {
+                val ua = line.substringAfter('=').trim()
+                headers["User-Agent"] = ua
+            } else if (upper.startsWith("#EXTHTTP:")) {
+                val jsonPart = line.substringAfter("#EXTHTTP:").trim()
+                try {
+                    val json = JSONObject(jsonPart)
+                    json.keys().forEach { key ->
+                        val value = json.optString(key)
+                        if (value.isNotBlank()) headers[key] = value
+                    }
+                } catch (_: Exception) { /* ignore malformed EXTHTTP */ }
+            }
+        }
+        return headers
+    }
+
+    /** 判断 MediaSource 是否为 STRM 条目 */
+    private fun isStrmSource(o: JSONObject): Boolean {
+        val size = o.optLong("Size", 0L)
+        val container = o.optString("Container")
+        val path = o.optString("Path")
+        val isStrmName = container.contains("strm", ignoreCase = true) ||
+            path.endsWith(".strm", ignoreCase = true)
+        return isStrmName && size <= 0L
     }
 
     suspend fun resolvePlayback(
@@ -554,11 +617,39 @@ class EmbyClient(
                 )
             )
             val useDirect = !forceTranscode && source.supportsDirectPlay
+            // --- STRM 处理 ---
+            // 只在确实是 STRM 条目时读一次文本，URL 与请求头都从这里出，避免重复请求。
+            val strmText: String? =
+                if (first != null && isStrmSource(first)) {
+                    getTextSync(url("/Items/${item.id}/Download", mapOf("UserId" to userId)))
+                } else null
+            val strmUrl: String? = when {
+                // Emby 已经在 MediaSources 里给了绝对直链
+                source.directStreamUrl?.startsWith("http") == true -> source.directStreamUrl
+                // 否则从 .strm 文本取第一条有效地址
+                strmText != null -> extractStrmUrl(strmText)
+                else -> null
+            }
+            val isStrm = strmUrl?.isNotBlank() == true
+            // 是 STRM 条目却拿不到地址：直接报错，不要退化成转码流导致无限缓冲
+            if (!isStrm && first != null && isStrmSource(first) &&
+                source.directStreamUrl?.startsWith("http") != true
+            ) {
+                throw EmbyException("该 STRM 条目没有可用地址（文件为空或内容不是 http 链接）")
+            }
+            val finalUrl = if (isStrm) strmUrl!! else if (useDirect) directUrl else hlsUrl
+            // 请求头：#EXTVLCOPT / #EXTHTTP 既可能来自 MediaSources.AdditionalOptions，也可能在 .strm 文本里
+            val headers = buildMap {
+                putAll(parseStrmOptions(source.additionalOptions))
+                putAll(parseStrmOptions(strmText))
+            }
             PlaybackTarget(
-                url = if (useDirect) directUrl else hlsUrl,
-                direct = useDirect,
+                url = finalUrl,
+                // STRM 直链本身就是直连播放，不参与转码判定
+                direct = if (isStrm) true else useDirect,
                 source = source,
                 startPositionMs = startPositionMs.coerceAtLeast(0L),
+                headers = headers,
             )
         }
 

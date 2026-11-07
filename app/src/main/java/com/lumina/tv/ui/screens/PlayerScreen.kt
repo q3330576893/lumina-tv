@@ -3,6 +3,7 @@ package com.lumina.tv.ui.screens
 import android.os.Build
 import android.util.TypedValue
 import android.view.SurfaceHolder
+import android.view.Surface
 import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -33,6 +34,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Pause
@@ -78,6 +80,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -130,6 +133,7 @@ fun PlayerScreen(
     var buffering by remember { mutableStateOf(true) }
     var position by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
+    var estimatedBitrate by remember { mutableLongStateOf(0L) }
     var error by remember { mutableStateOf<String?>(null) }
     var speed by remember { mutableFloatStateOf(AppRuntime.prefs?.defaultSpeed ?: 1.0f) }
     var optionMenu by remember { mutableStateOf(false) }
@@ -146,6 +150,7 @@ fun PlayerScreen(
     }
     var mpvBackend by remember(item.id) { mutableStateOf<MpvPlayerController?>(null) }
     var mpvState by remember(item.id) { mutableStateOf(MpvPlayerController.State()) }
+    var currentSurface by remember(item.id) { mutableStateOf<Surface?>(null) }
     var ijkBackend by remember(item.id) { mutableStateOf<IjkPlayerController?>(null) }
     var ijkState by remember(item.id) { mutableStateOf(IjkPlayerController.State()) }
     var reloadKey by remember { mutableIntStateOf(0) }
@@ -162,6 +167,7 @@ fun PlayerScreen(
     var nextCountdown by remember { mutableIntStateOf(0) }
     var chapters by remember { mutableStateOf<List<MediaChapter>>(emptyList()) }
     var chapterPanel by remember { mutableStateOf(false) }
+    var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
 
     val introSeconds = remember(item.id) { AppRuntime.prefs?.introSecondsFor(item.id) ?: 0 }
 
@@ -198,7 +204,12 @@ fun PlayerScreen(
         ExoPlayer.Builder(context, renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
             .build()
-            .apply { playWhenReady = true }
+            .apply {
+                playWhenReady = true
+                trackSelectionParameters = trackSelectionParameters.buildUpon()
+                    .setPreferredTextLanguages("zh", "chi", "zho")
+                    .build()
+            }
     }
 
     DisposableEffect(exo, item.id) {
@@ -263,6 +274,8 @@ fun PlayerScreen(
                 currentSourceId = target.source?.id ?: sourceId
                 currentResolution = target.source?.resolution
                     ?: if (target.direct) null else "转码"
+                // 透传 STRM 的 Referer/User-Agent 等请求头
+                if (target.headers.isNotEmpty()) httpFactory.setDefaultRequestProperties(target.headers)
                 val videoSource: ExoSource =
                     DefaultMediaSourceFactory(httpFactory).createMediaSource(
                         androidx.media3.common.MediaItem.Builder().setUri(target.url)
@@ -309,22 +322,42 @@ fun PlayerScreen(
                         isPlaying = state.playing
                         if (state.ended) startAutoNext()
                         if (state.error != null) {
-                            if (AppRuntime.prefs?.playerEngine == "auto" && !ijkFallbackTried) {
-                                error = "mpv 无法播放，切换 FFmpeg 解码器…"
+                            if (AppRuntime.prefs?.playerEngine == "auto") {
+                                error = "mpv 播放失败，正在回退 Media3…"
                                 mpvBackend?.release()
                                 mpvBackend = null
-                                activeEngine = "ijk"
+                                degraded = true
+                                ffmpegFallback = true
+                                activeEngine = "media3"
+                                reloadKey++
                             } else {
                                 buffering = false
                                 error = state.error
                             }
                         }
                     }.also { mpvBackend = it }
+                    val unavailable = backend.unavailableReason
+                    if (unavailable != null) {
+                        mpvBackend = null
+                        runCatching { backend.release() }
+                        if (AppRuntime.prefs?.playerEngine == "auto") {
+                            degraded = true
+                            ffmpegFallback = true
+                            error = "该设备不支持 mpv 内核，已回退 Media3：$unavailable"
+                            activeEngine = "media3"
+                            reloadKey++
+                        } else {
+                            buffering = false
+                            error = "该设备不支持 mpv 内核：$unavailable"
+                        }
+                        return@launch
+                    }
+                    currentSurface?.takeIf { it.isValid }?.let(backend::attachSurface)
                     val externalSubtitles = subs.mapNotNull { stream ->
                         srcId?.let { c.subtitleUrl(item.id, it, stream.index, "vtt") }
                     }
                     backend.setSpeed(if (boosting) 3f else speed)
-                    backend.load(target.url, target.startPositionMs, externalSubtitles)
+                    backend.load(target.url, target.startPositionMs, externalSubtitles, target.headers)
                 } else if (activeEngine == "ijk") {
                     val backend = ijkBackend ?: IjkPlayerController(context) { state ->
                         ijkState = state
@@ -348,8 +381,27 @@ fun PlayerScreen(
                             }
                         }
                     }.also { ijkBackend = it }
-                    backend.setSpeed(if (boosting) 3f else speed)
-                    backend.load(target.url, target.startPositionMs)
+                    // 内核构造阶段就失败（so 缺失 / ABI 不支持 / JNI 初始化异常）时立刻降级，
+                    // 不要等到 prepareAsync 才报错，避免上层空等或闪退。
+                    val unavailable = backend.unavailableReason
+                    if (unavailable != null) {
+                        ijkBackend = null
+                        runCatching { backend.release() }
+                        if (AppRuntime.prefs?.playerEngine == "auto" && !ijkFallbackTried) {
+                            ijkFallbackTried = true
+                            degraded = true
+                            ffmpegFallback = true
+                            error = "IJK 内核不可用，已回退 Media3：$unavailable"
+                            activeEngine = "media3"
+                            reloadKey++
+                        } else {
+                            buffering = false
+                            error = "IJK 内核不可用：$unavailable"
+                        }
+                    } else {
+                        backend.setSpeed(if (boosting) 3f else speed)
+                        backend.load(target.url, target.startPositionMs, target.headers)
+                    }
                 } else {
                     exo.setMediaSource(merged)
                     exo.prepare()
@@ -360,7 +412,24 @@ fun PlayerScreen(
                 c.reportStart(item.id, target.startPositionMs, target.source?.id, if (target.direct) "DirectPlay" else "Transcode")
             } catch (e: Exception) {
                 buffering = false
-                error = e.message ?: "播放失败"
+                val reason = e.message ?: "播放失败"
+                if (AppRuntime.prefs?.playerEngine == "auto" && activeEngine == "mpv" && !ijkFallbackTried) {
+                    ijkFallbackTried = true
+                    mpvBackend?.release()
+                    mpvBackend = null
+                    error = "mpv 初始化失败，正在回退 Media3：$reason"
+                    activeEngine = "media3"
+                    degraded = true
+                    ffmpegFallback = true
+                    reloadKey++
+                } else if (AppRuntime.prefs?.playerEngine == "auto" && activeEngine == "ijk") {
+                    error = "IJK 不可用，正在回退 Media3：$reason"
+                    activeEngine = "media3"
+                    degraded = true
+                    ffmpegFallback = true
+                } else {
+                    error = reason
+                }
             }
         }
     }
@@ -389,8 +458,16 @@ fun PlayerScreen(
 
     LaunchedEffect(activeEngine) {
         when (activeEngine) {
-            "mpv" -> loadSource(forceTranscode = false)
-            "ijk" -> loadSource(forceTranscode = false)
+            "mpv" -> {
+                exo.pause()
+                ijkBackend?.pause()
+                loadSource(forceTranscode = false)
+            }
+            "ijk" -> {
+                exo.pause()
+                mpvBackend?.pause()
+                loadSource(forceTranscode = false)
+            }
             "media3" -> if (mpvBackend != null || ijkBackend != null) {
                 mpvBackend?.pause()
                 ijkBackend?.pause()
@@ -483,10 +560,57 @@ fun PlayerScreen(
                 }
             }
 
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                if (activeEngine != "media3" || subtitleSelectionApplied) return
+                val remembered = AppRuntime.prefs?.subtitleTrackFor(item.id)
+                val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
+                if (textGroups.isEmpty()) return
+                val all = textGroups.flatMap { group ->
+                    (0 until group.length).map { index -> Triple(group, index, group.getTrackFormat(index)) }
+                }
+                val selected = remembered?.let { key ->
+                    all.firstOrNull { (group, index, _) -> group.mediaTrackGroup.id + ":" + index == key }
+                }
+                val chinese = all.firstOrNull { (_, _, format) ->
+                    val description = listOfNotNull(format.language, format.label, format.id).joinToString(" ")
+                    description.contains(Regex("zh|chi|zho|中文|简体|繁體|繁体|中字", RegexOption.IGNORE_CASE))
+                }
+                val keepDefault = all.firstOrNull { (group, index, _) -> group.isTrackSelected(index) }
+                val choice = selected ?: chinese ?: keepDefault
+                subtitleSelectionApplied = true
+                if (choice != null) {
+                    val (group, index, _) = choice
+                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .addOverride(TrackSelectionOverride(group.mediaTrackGroup, index))
+                        .build()
+                } else {
+                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                        .build()
+                }
+            }
+
             override fun onIsPlayingChanged(p: Boolean) { isPlaying = p }
         }
         exo.addListener(listener)
         onDispose { exo.removeListener(listener) }
+    }
+
+    DisposableEffect(exo) {
+        val analytics = object : AnalyticsListener {
+            override fun onBandwidthEstimate(
+                eventTime: AnalyticsListener.EventTime,
+                totalLoadTimeMs: Int,
+                totalBytesLoaded: Long,
+                bitrateEstimate: Long,
+            ) {
+                estimatedBitrate = bitrateEstimate.coerceAtLeast(0L)
+            }
+        }
+        exo.addAnalyticsListener(analytics)
+        onDispose { exo.removeAnalyticsListener(analytics) }
     }
 
     DisposableEffect(mpvBackend, item.id) {
@@ -602,16 +726,20 @@ fun PlayerScreen(
             factory = { ctx ->
                 SurfaceView(ctx).apply {
                     keepScreenOn = true
+                    currentSurface = holder.surface.takeIf { it.isValid }
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
+                            currentSurface = holder.surface
                             mpvBackend?.attachSurface(holder.surface)
                             ijkBackend?.attachSurface(holder.surface)
                         }
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                            currentSurface = holder.surface
                             mpvBackend?.attachSurface(holder.surface)
                             ijkBackend?.attachSurface(holder.surface)
                         }
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            if (currentSurface === holder.surface) currentSurface = null
                             mpvBackend?.detachSurface()
                             ijkBackend?.detachSurface()
                         }
@@ -619,6 +747,7 @@ fun PlayerScreen(
                 }
             },
             update = { view -> if (view.holder.surface.isValid) {
+                currentSurface = view.holder.surface
                 mpvBackend?.attachSurface(view.holder.surface)
                 ijkBackend?.attachSurface(view.holder.surface)
             } },
@@ -850,6 +979,7 @@ fun PlayerScreen(
                     Text(
                         listOfNotNull(
                             currentResolution?.takeIf { it.isNotBlank() },
+                            if (estimatedBitrate > 0L) "%.1f MB/s".format(estimatedBitrate / 8_000_000.0) else null,
                             if (degraded) "转码" else "直连",
                             "${speed}x",
                         ).joinToString(" · "),
@@ -890,10 +1020,10 @@ fun PlayerScreen(
                                 focusRequester = playFocus,
                             ) { togglePlayback() }
                             CtrlButton(Icons.Rounded.FastForward, "前进 10 秒") { seekBy(10_000) }
-                            if (item.seriesId != null) {
+                            val currentEpisodeIndex = episodes.indexOfFirst { it.id == item.id }
+                            if (currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.lastIndex) {
                                 CtrlButton(Icons.Rounded.SkipNext, "下一集") {
-                                    val idx = episodes.indexOfFirst { it.id == item.id }
-                                    val next = episodes.getOrNull(idx + 1)
+                                    val next = episodes.getOrNull(currentEpisodeIndex + 1)
                                     if (next != null) {
                                         scope.launch { runCatching { client?.reportStop(item.id, position) } }
                                         onPlayNext?.invoke(next)
@@ -904,7 +1034,7 @@ fun PlayerScreen(
                                 optionMenu = true
                                 showControls = false
                             }
-                            if (chapters.isNotEmpty()) CtrlButton(Icons.Rounded.SkipNext, "章节与片段") { chapterPanel = true; showControls = false }
+                            if (chapters.isNotEmpty()) CtrlButton(Icons.Rounded.Bookmarks, "章节与片段") { chapterPanel = true; showControls = false }
                             Spacer(Modifier.weight(1f))
                             Text(item.subtitle, color = TextSub.copy(alpha = 0.75f), fontSize = 11.sp)
                         }
@@ -927,6 +1057,8 @@ fun PlayerScreen(
                 episodes = episodes,
                 subScale = subScale,
                 subtitleOffsetMs = subtitleOffsetMs,
+                activeEngine = activeEngine,
+                onSubtitleSelected = { AppRuntime.prefs?.rememberSubtitleTrack(item.id, it) },
                 onSubtitleOffset = {
                     subtitleOffsetMs = it.coerceIn(-10_000L, 10_000L)
                     AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
@@ -937,6 +1069,14 @@ fun PlayerScreen(
                 },
                 onSpeed = {
                     setPlaybackSpeed(it)
+                },
+                onSwitchEngine = {
+                    error = "正在切换播放内核…"
+                    activeEngine = when (activeEngine) {
+                        "media3" -> "mpv"
+                        "mpv" -> "ijk"
+                        else -> "media3"
+                    }
                 },
                 onResizeMode = { resizeMode = it },
                 onSwitchSource = { sid ->
@@ -1009,9 +1149,12 @@ private fun OptionMenu(
     episodes: List<MediaItem>,
     subScale: Float,
     subtitleOffsetMs: Long,
+    activeEngine: String,
+    onSubtitleSelected: (String?) -> Unit,
     onSubtitleOffset: (Long) -> Unit,
     onSubScale: (Float) -> Unit,
     onSpeed: (Float) -> Unit,
+    onSwitchEngine: () -> Unit,
     onResizeMode: (Int) -> Unit,
     onSwitchSource: (String) -> Unit,
     onPickEpisode: (MediaItem) -> Unit,
@@ -1106,6 +1249,29 @@ private fun OptionMenu(
                     Spacer(Modifier.height(16.dp))
                 }
 
+                Spacer(Modifier.height(8.dp))
+                FocusSurface(
+                    modifier = Modifier.fillMaxWidth().height(38.dp),
+                    corner = 10.dp, scaleTo = 1.0f,
+                    onClick = onSwitchEngine,
+                ) { focused ->
+                    Row(
+                        Modifier.fillMaxSize().background(
+                            if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
+                            RoundedCornerShape(10.dp),
+                        ).padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("播放内核", color = if (focused) Accent else TextMain, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            when (activeEngine) { "mpv" -> "mpv"; "ijk" -> "IJK"; else -> "M3" },
+                            color = TextSub,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+
                 // 倍速
                 MenuLabel("倍速播放")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1145,6 +1311,7 @@ private fun OptionMenu(
                         activeColor = Accent,
                         onClick = {
                             textDisabled = true
+                            onSubtitleSelected(null)
                             exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                         },
@@ -1163,6 +1330,7 @@ private fun OptionMenu(
                             activeColor = Accent,
                             onClick = {
                                 textDisabled = false
+                                onSubtitleSelected(key + ":" + trackIndex)
                                 exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                                     .clearOverridesOfType(C.TRACK_TYPE_TEXT)

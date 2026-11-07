@@ -68,6 +68,29 @@ class Prefs(context: Context) {
         }.toString()
     }
 
+    fun renameSavedServer(url: String, name: String) {
+        val normalized = url.trimEnd('/')
+        savedServersJson = org.json.JSONArray().apply {
+            savedServers().forEach { (oldName, serverUrl) ->
+                put(
+                    org.json.JSONObject()
+                        .put("name", if (serverUrl.trimEnd('/').equals(normalized, true)) name.trim().ifBlank { serverUrl } else oldName)
+                        .put("url", serverUrl),
+                )
+            }
+        }.toString()
+        if (baseUrl.trimEnd('/').equals(normalized, true)) serverName = name.trim().ifBlank { "Emby" }
+    }
+
+    fun subtitleTrackFor(itemId: String): String? = sp.getString("subtitle_track_$itemId", null)
+
+    fun rememberSubtitleTrack(itemId: String, trackKey: String?) {
+        sp.edit().apply {
+            if (trackKey.isNullOrBlank()) remove("subtitle_track_$itemId")
+            else putString("subtitle_track_$itemId", trackKey)
+        }.apply()
+    }
+
     /** 强制转码（部分异形编码在电视盒上直连会卡顿时使用） */
     var forceTranscode: Boolean
         get() = sp.getBoolean("force_transcode", false)

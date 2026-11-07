@@ -81,6 +81,7 @@ fun DetailScreen(
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
     var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
+    var sourcesLoading by remember { mutableStateOf(false) }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var isFav by remember { mutableStateOf(false) }
@@ -91,6 +92,7 @@ fun DetailScreen(
 
     LaunchedEffect(id) {
         similar = emptyList()
+        showSourceMenu = false
         AppRuntime.screenLabel = "详情"
         val c = client ?: return@LaunchedEffect
 
@@ -105,20 +107,31 @@ fun DetailScreen(
             isPlayed = cached.item?.played ?: false
             selectedSeason = cached.seasons.firstOrNull()
             loading = false
+            sourcesLoading = cached.sources.isEmpty()
             // Cache renders immediately; refresh people and recommendations quietly.
             coroutineScope {
                 val fresh = async { runCatching { c.getItem(id) }.getOrNull() }
                 val related = async { runCatching { c.getSimilarItems(id, 12) }.getOrDefault(emptyList()) }
-                fresh.await()?.let { freshItem ->
-                    item = freshItem
-                    LibraryCache.putDetail(id, cached.copy(item = freshItem, at = System.currentTimeMillis()))
+                val freshSources = async {
+                    if (cached.sources.isEmpty()) {
+                        runCatching { c.getMediaSources(id) }.getOrDefault(emptyList())
+                    } else cached.sources
                 }
+                sources = freshSources.await()
+                sourcesLoading = false
+                val freshItem = fresh.await()
+                if (freshItem != null) item = freshItem
+                LibraryCache.putDetail(
+                    id,
+                    cached.copy(item = freshItem ?: cached.item, sources = sources, at = System.currentTimeMillis()),
+                )
                 similar = related.await()
             }
             return@LaunchedEffect
         }
 
         loading = true
+        sourcesLoading = true
         // 详情 / 分季 / 多源并行拉取，避免串行等待
         val it0 = coroutineScope {
             val sA = async { runCatching { c.getSeasons(id) }.getOrDefault(emptyList()) }
@@ -126,19 +139,19 @@ fun DetailScreen(
             val relatedA = async { runCatching { c.getSimilarItems(id, 12) }.getOrDefault(emptyList()) }
             val main = c.getItem(id)
             similar = relatedA.await()
+            sources = srcA.await()
             if (main != null && main.type == "Series") {
                 val ss = sA.await()
                 seasons = ss
                 val first = ss.firstOrNull()
                 selectedSeason = first
                 LibraryCache.episodesOf(id, first?.id)?.let { episodes = it }
-            } else if (main != null) {
-                sources = srcA.await()
             }
             main
         }
         item = it0
         loading = false
+        sourcesLoading = false
         LibraryCache.putDetail(
             id,
             LibraryCache.DetailData(
@@ -293,7 +306,7 @@ fun DetailScreen(
                             if (sources.size > 1) {
                                 Spacer(Modifier.width(12.dp))
                                 FocusSurface(
-                                    modifier = Modifier.height(46.dp).width(130.dp),
+                                    modifier = Modifier.height(46.dp).width(210.dp),
                                     corner = 23.dp,
                                     onClick = { showSourceMenu = true },
                                 ) { focused ->
@@ -306,7 +319,13 @@ fun DetailScreen(
                                     ) {
                                         Icon(Icons.Rounded.Layers, null, tint = TextMain, modifier = Modifier.size(18.dp))
                                         Spacer(Modifier.width(6.dp))
-                                        Text("版本", color = TextMain, fontSize = 13.sp)
+                                        Text(
+                                            "版本 · ${sources.firstOrNull()?.displayLabel ?: "默认源"}",
+                                            color = TextMain,
+                                            fontSize = 13.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
                                     }
                                 }
                             }
@@ -467,6 +486,8 @@ fun DetailScreen(
             val it0 = item
             SourceMenu(
                 sources = sources,
+                sourcesLoading = sourcesLoading,
+                currentSourceId = sources.firstOrNull()?.id,
                 onPick = { sid ->
                     showSourceMenu = false
                     if (it0 != null) onPlayWithSource(it0, sid)
@@ -509,6 +530,8 @@ private fun PersonCard(person: MediaPerson, imageUrl: String?) {
 @Composable
 private fun SourceMenu(
     sources: List<MediaSource>,
+    sourcesLoading: Boolean,
+    currentSourceId: String?,
     onPick: (String) -> Unit,
     onClose: () -> Unit,
 ) {
@@ -521,8 +544,10 @@ private fun SourceMenu(
             Column(Modifier.padding(22.dp).verticalScroll(rememberScrollState())) {
                 Text("选择版本", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(14.dp))
-                if (sources.isEmpty()) {
+                if (sourcesLoading) {
                     Text("正在读取版本列表…", color = TextSub, fontSize = 12.sp)
+                } else if (sources.isEmpty()) {
+                    Text("该影片只有一个版本", color = TextSub, fontSize = 12.sp)
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     sources.forEach { s ->
@@ -540,9 +565,20 @@ private fun SourceMenu(
                                     .padding(horizontal = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(Icons.Rounded.Layers, null, tint = Accent, modifier = Modifier.size(16.dp))
+                                Icon(
+                                    if (s.id == currentSourceId) Icons.Rounded.CheckCircle else Icons.Rounded.Layers,
+                                    null,
+                                    tint = if (s.id == currentSourceId) Accent else TextSub,
+                                    modifier = Modifier.size(16.dp),
+                                )
                                 Spacer(Modifier.width(10.dp))
-                                Text(s.displayLabel, color = TextMain, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    s.displayLabel,
+                                    color = TextMain,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
                         }
                     }

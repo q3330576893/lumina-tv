@@ -37,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
@@ -152,14 +153,25 @@ fun FocusSurface(
     modifier: Modifier = Modifier,
     corner: Dp = 20.dp,
     scaleTo: Float = 1.06f,
+    requestFocus: Boolean = false,
+    onFocused: (() -> Unit)? = null,
     onClick: () -> Unit,
     content: @Composable (focused: Boolean) -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) scaleTo else 1f, tween(180), label = "scale")
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(requestFocus) {
+        if (requestFocus) {
+            kotlinx.coroutines.delay(100)
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
     Box(
         modifier
+            .then(if (requestFocus) Modifier.focusRequester(focusRequester) else Modifier)
+            .onFocusChanged { if (it.isFocused) onFocused?.invoke() }
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -180,11 +192,13 @@ fun FocusSurface(
 
 /** 海报卡片：竖版封面 + 进度条 + 标题。 */
 @Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun PosterCard(
     item: MediaItem,
     imageUrl: String?,
     width: Dp = 168.dp,
     requestInitialFocus: Boolean = false,
+    trapUp: Boolean = false,
     onFocused: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
@@ -202,6 +216,7 @@ fun PosterCard(
         Modifier
             .width(width)
             .then(if (requestInitialFocus) Modifier.focusRequester(focusRequester) else Modifier)
+            .focusProperties { if (trapUp) up = FocusRequester.Cancel }
             .onFocusChanged { if (it.isFocused) onFocused?.invoke() }
             .graphicsLayer {
                 scaleX = scale
