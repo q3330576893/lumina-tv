@@ -2,6 +2,7 @@ package com.lumina.tv.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.lumina.tv.data.MediaChapter
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -276,6 +277,23 @@ class EmbyClient(
                 "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources")
             parseItem(getSync(url("/Users/$userId/Items/$id", params)))
         } catch (_: Exception) { null }
+    }
+
+    suspend fun getChapters(itemId: String): List<MediaChapter> = withContext(Dispatchers.IO) {
+        runCatching {
+            val response = getSync(url("/Users/$userId/Items/$itemId", mapOf("Fields" to "Chapters")))
+            val chapters = response.optJSONArray("Chapters") ?: JSONArray()
+            (0 until chapters.length()).mapNotNull { i ->
+                val chapter = chapters.optJSONObject(i) ?: return@mapNotNull null
+                val ticks = chapter.optLong("StartPositionTicks", -1L)
+                if (ticks < 0) return@mapNotNull null
+                MediaChapter(
+                    name = chapter.optString("Name").ifBlank { "章节 ${i + 1}" },
+                    startMs = ticks / 10_000L,
+                    imageTag = chapter.optString("ImageTag").ifBlank { null },
+                )
+            }.sortedBy { it.startMs }
+        }.getOrDefault(emptyList())
     }
 
     /** Emby returns cast/crew in People when requested through Fields=People. */
@@ -620,6 +638,33 @@ class EmbyClient(
                 .put("PositionTicks", positionMs * 10_000)
                 .toString())
         }
+    }
+
+    suspend fun clearWatchHistory(): Int = withContext(Dispatchers.IO) {
+        var cleared = 0
+        while (cleared < 100_000) {
+            val page = getItems(
+                types = "Movie,Series,Episode",
+                sortBy = "DateCreated",
+                sortOrder = "Descending",
+                limit = 100,
+                startIndex = 0,
+                filters = "IsPlayed",
+            )
+            if (page.isEmpty()) break
+            page.forEach { item ->
+                val request = Request.Builder()
+                    .url(url("/Users/$userId/PlayedItems/${item.id}"))
+                    .header("X-Emby-Authorization", authHeader())
+                    .delete()
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) cleared++
+                }
+            }
+            if (page.size < 100) break
+        }
+        cleared
     }
 
     suspend fun testConnection(server: String): String = withContext(Dispatchers.IO) {

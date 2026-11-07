@@ -13,14 +13,14 @@ val localProps = Properties().apply {
 
 android {
     namespace = "com.lumina.tv"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.lumina.tv"
-        minSdk = 23
+        minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "1.14.4"
+        versionCode = 22
+        versionName = "1.15.0"
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
     }
 
@@ -69,11 +69,15 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.foundation:foundation")
 
-    implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
-    implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
-    implementation("androidx.media3:media3-ui:1.4.1")
-    implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
+    implementation("androidx.media3:media3-exoplayer:1.7.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.7.1")
+    implementation("androidx.media3:media3-exoplayer-dash:1.7.1")
+    implementation("androidx.media3:media3-ui:1.7.1")
+    implementation("androidx.media3:media3-datasource-okhttp:1.7.1")
+    implementation("org.jellycine.mpv:libmpv:1.0.4")
+    implementation("io.github.jdpxiaoming:ijkplayer-java:0.0.26")
+    implementation("io.github.jdpxiaoming:ijkplayer-arm64:0.0.26")
+    implementation("io.github.jdpxiaoming:ijkplayer-armv7a:0.0.26")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
@@ -82,4 +86,5 @@ dependencies {
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    implementation("com.github.promeg:tinypinyin:2.0.3")
 }

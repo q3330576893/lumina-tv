@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
@@ -27,7 +28,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,6 +48,7 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.GlassLine
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
+import com.github.promeg.pinyinhelper.Pinyin
 import kotlinx.coroutines.launch
 
 @Composable
@@ -55,10 +59,17 @@ fun SearchScreen(
 ) {
     val client = AppRuntime.client
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var keyword by remember { mutableStateOf(initialKeyword) }
+    var keyword by rememberSaveable { mutableStateOf(initialKeyword) }
     var results by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
+    var focusedItemId by rememberSaveable { mutableStateOf<String?>(null) }
+    var typeFilter by rememberSaveable { mutableIntStateOf(0) }
+    var yearFilter by rememberSaveable { mutableIntStateOf(0) }
+    var ratingFilter by rememberSaveable { mutableIntStateOf(0) }
+    var favoritesOnly by rememberSaveable { mutableStateOf(false) }
+    var unwatchedOnly by rememberSaveable { mutableStateOf(false) }
+    val resultGridState = rememberLazyGridState()
 
     suspend fun doSearch(k: String) {
         if (k.isBlank() || client == null) return
@@ -70,7 +81,8 @@ fun SearchScreen(
 
     LaunchedEffect(initialKeyword) {
         AppRuntime.screenLabel = "搜索"
-        if (initialKeyword.isNotBlank()) doSearch(initialKeyword)
+        val query = keyword.ifBlank { initialKeyword }
+        if (query.isNotBlank()) doSearch(query)
     }
 
     Column(
@@ -119,24 +131,102 @@ fun SearchScreen(
             }
         }
 
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("全部", "电影", "剧集").forEachIndexed { index, label ->
+                FocusSurface(Modifier.height(34.dp).width(74.dp), corner = 17.dp, scaleTo = 1f,
+                    onClick = { typeFilter = index }) { focused ->
+                    Box(Modifier.fillMaxSize().background(
+                        if (typeFilter == index) Accent.copy(alpha = .9f) else if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
+                        RoundedCornerShape(17.dp)), contentAlignment = Alignment.Center) {
+                        Text(label, color = if (typeFilter == index) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("全部年份", "2020+", "2010-2019", "2020 以前").forEachIndexed { index, label ->
+                FilterChip(label, yearFilter == index) { yearFilter = index }
+            }
+            listOf("不限分", "6+", "7+", "8+").forEachIndexed { index, label ->
+                FilterChip(label, ratingFilter == index) { ratingFilter = index }
+            }
+            FilterChip("收藏", favoritesOnly) { favoritesOnly = !favoritesOnly }
+            FilterChip("未观看", unwatchedOnly) { unwatchedOnly = !unwatchedOnly }
+        }
+
+        val visibleResults = remember(results, keyword, typeFilter, yearFilter, ratingFilter, favoritesOnly, unwatchedOnly) {
+            val q = keyword.trim()
+            results.filter { item ->
+                val typeMatches = when (typeFilter) {
+                    1 -> item.type.equals("Movie", true)
+                    2 -> item.type.equals("Series", true) || item.type.equals("Episode", true)
+                    else -> true
+                }
+                val yearMatches = when (yearFilter) {
+                    1 -> (item.year ?: 0) >= 2020
+                    2 -> item.year in 2010..2019
+                    3 -> (item.year ?: Int.MAX_VALUE) < 2020
+                    else -> true
+                }
+                val score = item.rating ?: item.communityRating ?: 0.0
+                val ratingMatches = score >= listOf(0.0, 6.0, 7.0, 8.0)[ratingFilter]
+                val textMatches = q.isBlank() || item.name.contains(q, true) ||
+                    runCatching {
+                        val full = Pinyin.toPinyin(item.name, "").filterNot(Char::isWhitespace)
+                        val initials = Pinyin.toPinyin(item.name, " ").split(' ')
+                            .mapNotNull { it.firstOrNull() }.joinToString("")
+                        val needle = q.filterNot(Char::isWhitespace)
+                        full.contains(needle, true) || initials.contains(needle, true)
+                    }.getOrDefault(false)
+                typeMatches && yearMatches && ratingMatches && textMatches &&
+                    (!favoritesOnly || item.isFavorite) && (!unwatchedOnly || !item.played)
+            }
+        }
+        val groups = remember(visibleResults) {
+            listOf("电影" to visibleResults.filter { it.type.equals("Movie", true) },
+                "剧集" to visibleResults.filter { it.type.equals("Series", true) || it.type.equals("Episode", true) },
+                "其他" to visibleResults.filterNot { it.type.equals("Movie", true) || it.type.equals("Series", true) || it.type.equals("Episode", true) })
+                .filter { it.second.isNotEmpty() }
+        }
+        Spacer(Modifier.height(8.dp))
 
         when {
             loading -> LoadingView(text = "搜索中…")
-            results.isNotEmpty() -> LazyVerticalGrid(
+            visibleResults.isNotEmpty() -> LazyVerticalGrid(
+                state = resultGridState,
                 columns = GridCells.Adaptive(150.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                items(results, key = { it.id }) { item ->
-                    PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp) {
+                groups.forEach { (group, groupItems) ->
+                item(key = "header:$group", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                    Text(group, color = TextMain, fontSize = 16.sp, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+                }
+                items(groupItems, key = { it.id }) { item ->
+                    PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp,
+                        requestInitialFocus = item.id == focusedItemId || (focusedItemId == null && item == visibleResults.firstOrNull()),
+                        onFocused = { focusedItemId = item.id }) {
                         onOpenDetail(item.seriesId ?: item.id)
                     }
+                }
                 }
             }
             searched -> EmptyView("没有找到「$keyword」相关内容")
             else -> EmptyView("输入关键词开始搜索")
+        }
+    }
+}
+
+@Composable
+private fun FilterChip(label: String, active: Boolean, onClick: () -> Unit) {
+    FocusSurface(Modifier.height(32.dp).width(78.dp), corner = 16.dp, scaleTo = 1f, onClick = onClick) { focused ->
+        Box(Modifier.fillMaxSize().background(
+            if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
+            RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+            Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 10.sp, maxLines = 1)
         }
     }
 }

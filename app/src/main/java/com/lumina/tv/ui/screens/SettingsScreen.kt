@@ -26,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,7 +37,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.BuildConfig
-import com.lumina.tv.CrashHandler
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
@@ -49,24 +49,35 @@ import com.lumina.tv.ui.theme.GLASS_PRESETS
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     val context = LocalContext.current
     val prefs = AppRuntime.prefs
+    val scope = rememberCoroutineScope()
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
     var autoNext by remember { mutableStateOf(prefs?.autoNextEpisode ?: false) }
     var bootLaunch by remember { mutableStateOf(prefs?.bootLaunch ?: false) }
     var subtitleBg by remember { mutableStateOf(prefs?.subtitleBg ?: false) }
+    var subtitleColor by remember { mutableStateOf(prefs?.subtitleColor ?: android.graphics.Color.WHITE) }
+    var subtitleOutline by remember { mutableStateOf(prefs?.subtitleOutline ?: true) }
+    var subtitlePosition by remember { mutableStateOf(prefs?.subtitlePosition ?: 0.08f) }
     var defaultSpeed by remember { mutableStateOf(prefs?.defaultSpeed ?: 1.0f) }
     var subtitleScale by remember { mutableStateOf(prefs?.subtitleScale ?: 1.0f) }
     var introSeconds by remember { mutableStateOf(prefs?.globalIntroSeconds ?: 0) }
     var themeKey by remember { mutableStateOf(prefs?.themeColor ?: "blue") }
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
     var qrUrl by remember { mutableStateOf(AppRuntime.pairingUrl) }
-    var crashInfo by remember { mutableStateOf(CrashHandler.lastCrashSummary(context)) }
+    var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
+    var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
+    var savedServers by remember { mutableStateOf(prefs?.savedServers().orEmpty()) }
     var hiddenIds by remember { mutableStateOf(prefs?.hiddenViewIds ?: emptySet()) }
     var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
+    var clearingHistory by remember { mutableStateOf(false) }
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var updateResult by remember { mutableStateOf<String?>(null) }
+    var releaseUrl by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "设置"
@@ -121,6 +132,32 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 color = TextSub.copy(alpha = 0.7f), fontSize = 11.sp,
                                 modifier = Modifier.align(Alignment.CenterVertically),
                             )
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("已保存服务器", color = TextSub, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                            FocusSurface(Modifier.height(34.dp).width(112.dp), corner = 17.dp, scaleTo = 1f,
+                                onClick = { prefs?.saveCurrentServer(); savedServers = prefs?.savedServers().orEmpty() }) { focused ->
+                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)), contentAlignment = Alignment.Center) {
+                                    Text("保存当前服务器", color = TextMain, fontSize = 10.sp)
+                                }
+                            }
+                        }
+                        savedServers.forEach { (name, url) ->
+                            Row(Modifier.fillMaxWidth().padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(name, color = TextMain, fontSize = 12.sp, maxLines = 1)
+                                    Text(url, color = TextSub, fontSize = 10.sp, maxLines = 1)
+                                }
+                                FocusSurface(Modifier.size(32.dp), corner = 16.dp, scaleTo = 1f, onClick = {
+                                    prefs?.removeSavedServer(url)
+                                    savedServers = prefs?.savedServers().orEmpty()
+                                }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FF6B81) else Color(0x14FF6B81), CircleShape), contentAlignment = Alignment.Center) {
+                                        Text("×", color = Color(0xFFFF8A9A), fontSize = 16.sp)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -320,6 +357,40 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 prefs?.autoNextEpisode = it
                             },
                         )
+                        Spacer(Modifier.height(10.dp))
+                        Text("文字颜色", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            listOf(android.graphics.Color.WHITE, android.graphics.Color.YELLOW, android.graphics.Color.CYAN, android.graphics.Color.GREEN).forEach { color ->
+                                FocusSurface(Modifier.size(34.dp), corner = 17.dp, scaleTo = 1f, onClick = {
+                                    subtitleColor = color
+                                    prefs?.subtitleColor = color
+                                }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(Color(color), CircleShape).then(
+                                        if (subtitleColor == color || focused) Modifier.border(2.dp, Accent, CircleShape) else Modifier))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        SwitchRow(title = "字幕描边", desc = "高对比背景下保持文字清晰", checked = subtitleOutline, onChange = {
+                            subtitleOutline = it
+                            prefs?.subtitleOutline = it
+                        })
+                        Spacer(Modifier.height(8.dp))
+                        Text("垂直位置", color = TextSub, fontSize = 11.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(0.04f to "低", 0.08f to "标准", 0.15f to "高").forEach { (value, label) ->
+                                val active = kotlin.math.abs(subtitlePosition - value) < .01f
+                                FocusSurface(Modifier.width(74.dp).height(34.dp), corner = 17.dp, scaleTo = 1f, onClick = {
+                                    subtitlePosition = value
+                                    prefs?.subtitlePosition = value
+                                }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)), contentAlignment = Alignment.Center) {
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
+                                    }
+                                }
+                            }
+                        }
                         SwitchRow(
                             title = "强制转码",
                             desc = "电视盒子解码异常或画面卡顿时打开",
@@ -379,10 +450,67 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         )
                         Spacer(Modifier.height(10.dp))
                         Text("播放内核：ExoPlayer（硬解 · 支持 H.264/H.265/AV1 · 帧率自动匹配）", color = TextSub, fontSize = 11.sp)
+                        Text("解码器优先级", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("auto" to "自动", "hardware" to "硬解优先", "software" to "软解优先").forEach { (key, label) ->
+                                val active = decoderPreference == key
+                                FocusSurface(Modifier.width(100.dp).height(36.dp), corner = 18.dp, scaleTo = 1f, onClick = {
+                                    decoderPreference = key
+                                    prefs?.decoderPreference = key
+                                }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = 0.9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
                 Spacer(Modifier.height(14.dp))
+
+                GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
+                    Column(Modifier.padding(22.dp)) {
+                        Text("存储", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        Text("清除图片与临时文件缓存，不会删除登录信息或播放记录", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(12.dp))
+                        FocusSurface(Modifier.height(38.dp).width(130.dp), corner = 19.dp, scaleTo = 1f, onClick = {
+                            runCatching { context.cacheDir.listFiles()?.forEach { it.deleteRecursively() } }
+                            android.widget.Toast.makeText(context, "缓存已清除", android.widget.Toast.LENGTH_SHORT).show()
+                        }) { focused ->
+                            Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp)), contentAlignment = Alignment.Center) {
+                                Text("清除缓存", color = TextMain, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+                GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
+                    Column(Modifier.padding(22.dp)) {
+                        Text("观看记录", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        Text("清除当前 Emby 用户的已观看标记", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(12.dp))
+                        FocusSurface(Modifier.height(38.dp).width(150.dp), corner = 19.dp, scaleTo = 1f,
+                            onClick = {
+                                if (!clearingHistory) {
+                                    clearingHistory = true
+                                    scope.launch {
+                                        val count = runCatching { AppRuntime.client?.clearWatchHistory() ?: 0 }.getOrDefault(0)
+                                        clearingHistory = false
+                                        android.widget.Toast.makeText(context, "已清除 $count 条观看记录", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }) { focused ->
+                            Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp)), contentAlignment = Alignment.Center) {
+                                Text(if (clearingHistory) "正在清除…" else "清除观看记录", color = TextMain, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
 
                 // ---------- 字幕 ----------
                 GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
@@ -436,50 +564,108 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 
                 Spacer(Modifier.height(14.dp))
 
-                // ---------- 诊断与反馈 ----------
+                Spacer(Modifier.height(14.dp))
+
                 GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
                     Column(Modifier.padding(22.dp)) {
-                        Text("诊断与反馈", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(8.dp))
-                        if (crashInfo != null) {
-                            Text("上次崩溃：$crashInfo", color = Color(0xFFFF8A9A), fontSize = 11.sp)
-                        } else {
-                            Text("暂无崩溃记录", color = TextSub, fontSize = 11.sp)
-                        }
+                        Text("版本更新", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        Text("当前版本 ${BuildConfig.VERSION_NAME}", color = TextSub, fontSize = 11.sp)
+                        updateResult?.let { Text(it, color = TextSub, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp)) }
                         Spacer(Modifier.height(12.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            FocusSurface(
-                                modifier = Modifier.height(40.dp).width(150.dp),
-                                corner = 18.dp,
-                                onClick = { CrashHandler.shareReport(context) },
-                            ) { focused ->
-                                Box(
-                                    Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
-                                    contentAlignment = Alignment.Center,
-                                ) { Text("导出诊断包", color = TextMain, fontSize = 12.sp) }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FocusSurface(Modifier.height(38.dp).width(138.dp), corner = 19.dp, scaleTo = 1f, onClick = {
+                                if (!checkingUpdate) scope.launch {
+                                    checkingUpdate = true
+                                    updateResult = "正在检查…"
+                                    val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        runCatching {
+                                            val request = okhttp3.Request.Builder()
+                                                .url("https://api.github.com/repos/q3330576893/lumina-tv/releases/latest")
+                                                .header("Accept", "application/vnd.github+json")
+                                                .header("User-Agent", "LuminaTV/${BuildConfig.VERSION_NAME}")
+                                                .build()
+                                            okhttp3.OkHttpClient().newCall(request).execute().use { response ->
+                                                if (!response.isSuccessful) error("HTTP ${response.code}")
+                                                val json = org.json.JSONObject(response.body?.string().orEmpty())
+                                                val tag = json.optString("tag_name")
+                                                val url = json.optString("html_url")
+                                                val latest = tag.removePrefix("v").substringBefore('-').split('.').mapNotNull(String::toIntOrNull)
+                                                val current = BuildConfig.VERSION_NAME.split('.').mapNotNull(String::toIntOrNull)
+                                                val newer = (0 until maxOf(latest.size, current.size)).firstNotNullOfOrNull { index ->
+                                                    val delta = (latest.getOrElse(index) { 0 }).compareTo(current.getOrElse(index) { 0 })
+                                                    delta.takeIf { it != 0 }
+                                                }?.let { it > 0 } ?: false
+                                                url to if (newer) "发现新版本 $tag" else "当前已是最新版本"
+                                            }
+                                        }
+                                    }
+                                    result.onSuccess { (url, message) ->
+                                        releaseUrl = url
+                                        updateResult = message
+                                    }.onFailure { updateResult = "检查失败：${it.message ?: "网络不可用"}" }
+                                    checkingUpdate = false
+                                }
+                            }) { focused ->
+                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp)), contentAlignment = Alignment.Center) {
+                                    Text(if (checkingUpdate) "检查中…" else "检查更新", color = TextMain, fontSize = 12.sp)
+                                }
                             }
-                            if (crashInfo != null) {
-                                FocusSurface(
-                                    modifier = Modifier.height(40.dp).width(130.dp),
-                                    corner = 18.dp,
-                                    onClick = {
-                                        CrashHandler.clearCrash(context)
-                                        crashInfo = null
-                                    },
-                                ) { focused ->
-                                    Box(
-                                        Modifier.fillMaxSize().background(if (focused) Color(0x33FF6B81) else Color(0x1AFF6B81)),
-                                        contentAlignment = Alignment.Center,
-                                    ) { Text("清除记录", color = Color(0xFFFF8A9A), fontSize = 12.sp) }
+                            if (releaseUrl != null) FocusSurface(Modifier.height(38.dp).width(120.dp), corner = 19.dp, scaleTo = 1f, onClick = {
+                                runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(releaseUrl))) }
+                            }) { focused ->
+                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp)), contentAlignment = Alignment.Center) {
+                                    Text("打开发布页", color = TextMain, fontSize = 12.sp)
                                 }
                             }
                         }
-                        Spacer(Modifier.height(8.dp))
-                        Text("闪退后重新打开本页，点「导出诊断包」把内容发给开发者即可定位问题", color = TextSub, fontSize = 10.sp)
                     }
                 }
 
                 Spacer(Modifier.height(14.dp))
+
+                GlassPanel(Modifier.fillMaxWidth(), corner = 18.dp) {
+                    Column(Modifier.padding(18.dp)) {
+                        Text("播放后端", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("auto" to "自动", "media3" to "Media3", "mpv" to "mpv").forEach { (key, label) ->
+                                val active = playerEngine == key
+                                FocusSurface(Modifier.width(92.dp).height(36.dp), corner = 18.dp, scaleTo = 1f, onClick = {
+                                    playerEngine = key
+                                    prefs?.playerEngine = key
+                                }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text("自动：Media3 → mpv；mpv 硬解启动失败时自动改用软解。", color = TextSub, fontSize = 10.sp)
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                FocusSurface(
+                    modifier = Modifier.width(92.dp).height(36.dp),
+                    corner = 18.dp,
+                    scaleTo = 1f,
+                    onClick = {
+                        playerEngine = "ijk"
+                        prefs?.playerEngine = "ijk"
+                    },
+                ) { focused ->
+                    val active = playerEngine == "ijk"
+                    Box(
+                        Modifier.fillMaxSize().background(
+                            if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
+                            RoundedCornerShape(18.dp),
+                        ),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("IJK", color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp) }
+                }
 
                 FocusSurface(
                     modifier = Modifier.height(44.dp).width(130.dp),

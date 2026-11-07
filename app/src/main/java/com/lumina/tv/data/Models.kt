@@ -61,6 +61,8 @@ data class MediaPerson(
     val imageTag: String? = null,
 )
 
+data class MediaChapter(val name: String, val startMs: Long, val imageTag: String? = null)
+
 data class MediaStream(
     val index: Int,
     val type: String,

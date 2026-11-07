@@ -41,7 +41,24 @@ object CrashHandler {
             appendLine("页面: ${AppRuntime.screenLabel}")
             appendLine("播放: ${AppRuntime.nowPlaying}")
         }
-        runCatching { crashFile(context).writeText(text) }
+        runCatching {
+            val target = crashFile(context)
+            val pending = File(target.parentFile, "$CRASH_FILE.pending")
+            pending.outputStream().bufferedWriter(Charsets.UTF_8).use { writer -> writer.write(text) }
+            if (!pending.renameTo(target)) {
+                target.writeText(text, Charsets.UTF_8)
+                pending.delete()
+            }
+            context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE)
+                .edit().putBoolean("notice_pending", true).commit()
+        }
+    }
+
+    fun takeStartupNotice(context: Context): String? {
+        val preferences = context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE)
+        if (!preferences.getBoolean("notice_pending", false)) return null
+        preferences.edit().putBoolean("notice_pending", false).commit()
+        return lastCrashSummary(context)
     }
 
     fun deviceBlock(): String = buildString {

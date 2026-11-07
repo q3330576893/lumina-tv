@@ -18,6 +18,7 @@ object AppRuntime {
     var pairing: PairingServer? = null
     var pairingUrl: String = ""
     var pairingError: String? = null
+    @Volatile var pairingStatus: String = ""
 
     var screenLabel: String = "登录"
     var nowPlaying: String = ""
@@ -39,12 +40,14 @@ object AppRuntime {
         }
     }
 
+    fun updatePairingStatus(message: String) {
+        pairingStatus = message.take(240)
+    }
+
     @Synchronized
     fun consumePairingToken(token: String): Boolean {
         val expected = pairingToken ?: return false
-        pairingToken = null
         val notExpired = System.currentTimeMillis() <= pairingTokenExpiresAt
-        pairingTokenExpiresAt = 0L
         return notExpired && token.isNotBlank() && java.security.MessageDigest.isEqual(
             expected.toByteArray(Charsets.UTF_8), token.toByteArray(Charsets.UTF_8)
         )
@@ -95,6 +98,7 @@ object AppRuntime {
 
     fun startPairing(context: Context) {
         if (pairing != null) return
+        pairingStatus = ""
         val server = PairingServer.start(
             stateProvider = { stateJson() },
             onConfig = { token, server, user, pass ->
@@ -124,5 +128,6 @@ object AppRuntime {
         .put("playing", nowPlaying)
         .put("server", session?.serverName ?: "")
         .put("user", session?.userName ?: "")
+        .put("pairingStatus", pairingStatus)
         .toString()
 }

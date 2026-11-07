@@ -29,8 +29,44 @@ class Prefs(context: Context) {
 
     /** 播放内核：exo（硬解直连） / auto */
     var playerEngine: String
-        get() = sp.getString("engine", "exo") ?: "exo"
+        get() = sp.getString("engine", "auto") ?: "auto"
         set(v) = sp.edit().putString("engine", v).apply()
+
+    var decoderPreference: String
+        get() = sp.getString("decoder_preference", "auto") ?: "auto"
+        set(v) = sp.edit().putString("decoder_preference", v).apply()
+
+    var savedServersJson: String
+        get() = sp.getString("saved_servers", "[]") ?: "[]"
+        set(v) = sp.edit().putString("saved_servers", v).apply()
+
+    fun savedServers(): List<Pair<String, String>> = runCatching {
+        val array = org.json.JSONArray(savedServersJson)
+        (0 until array.length()).mapNotNull { index ->
+            array.optJSONObject(index)?.let { it.optString("name") to it.optString("url") }
+                ?.takeIf { it.second.isNotBlank() }
+        }
+    }.getOrDefault(emptyList())
+
+    fun saveCurrentServer() {
+        val url = baseUrl.trim().trimEnd('/')
+        if (url.isBlank()) return
+        val existing = savedServers().filterNot { it.second.equals(url, ignoreCase = true) }
+        val name = serverName.ifBlank { url }
+        savedServersJson = org.json.JSONArray().apply {
+            (existing + (name to url)).forEach { (serverName, serverUrl) ->
+                put(org.json.JSONObject().put("name", serverName).put("url", serverUrl))
+            }
+        }.toString()
+    }
+
+    fun removeSavedServer(url: String) {
+        savedServersJson = org.json.JSONArray().apply {
+            savedServers().filterNot { it.second == url }.forEach { (name, serverUrl) ->
+                put(org.json.JSONObject().put("name", name).put("url", serverUrl))
+            }
+        }.toString()
+    }
 
     /** 强制转码（部分异形编码在电视盒上直连会卡顿时使用） */
     var forceTranscode: Boolean
@@ -73,6 +109,22 @@ class Prefs(context: Context) {
     var subtitleBg: Boolean
         get() = sp.getBoolean("subtitle_bg", false)
         set(v) = sp.edit().putBoolean("subtitle_bg", v).apply()
+
+    var subtitleColor: Int
+        get() = sp.getInt("subtitle_color", android.graphics.Color.WHITE)
+        set(v) = sp.edit().putInt("subtitle_color", v).apply()
+
+    var subtitleOutline: Boolean
+        get() = sp.getBoolean("subtitle_outline", true)
+        set(v) = sp.edit().putBoolean("subtitle_outline", v).apply()
+
+    var subtitlePosition: Float
+        get() = sp.getFloat("subtitle_position", 0.08f)
+        set(v) = sp.edit().putFloat("subtitle_position", v.coerceIn(0f, 0.25f)).apply()
+
+    var subtitleOffsetMs: Long
+        get() = sp.getLong("subtitle_offset_ms", 0L)
+        set(v) = sp.edit().putLong("subtitle_offset_ms", v.coerceIn(-10_000L, 10_000L)).apply()
 
     /** 全局片头时长（秒），0 = 关闭 */
     var globalIntroSeconds: Int

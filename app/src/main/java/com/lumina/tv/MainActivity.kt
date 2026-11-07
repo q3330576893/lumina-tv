@@ -15,12 +15,19 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Modifier
@@ -44,6 +51,8 @@ sealed interface Screen {
     data object Settings : Screen
 }
 
+private data class BackStackEntry(val screen: Screen, val returnTo: Screen? = null)
+
 /** 页面层级深度，用于决定导航切换动画方向。 */
 private fun Screen.depth(): Int = when (this) {
     Screen.Login -> 0
@@ -56,12 +65,14 @@ private fun Screen.depth(): Int = when (this) {
 
 class MainActivity : ComponentActivity() {
     private var phoneSearch by mutableStateOf<String?>(null)
+    private var startupCrashNotice by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Lumina phone and TV clients intentionally share the 16:9 landscape layout.
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         CrashHandler.install(this)
+        startupCrashNotice = CrashHandler.takeStartupNotice(this)
         AppRuntime.init(this)
         AppRuntime.restore()
         // 应用个性化主题与玻璃质感
@@ -79,6 +90,8 @@ class MainActivity : ComponentActivity() {
                     AppRoot(
                         phoneSearch = phoneSearch,
                         onConsumePhoneSearch = { phoneSearch = null },
+                        crashNotice = startupCrashNotice,
+                        onConsumeCrashNotice = { startupCrashNotice = null },
                     )
                 }
             }
@@ -122,10 +135,35 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
+private fun AppRoot(
+    phoneSearch: String?,
+    onConsumePhoneSearch: () -> Unit,
+    crashNotice: String?,
+    onConsumeCrashNotice: () -> Unit,
+) {
     val context = LocalContext.current
-    var screen by remember {
-        mutableStateOf<Screen>(if (AppRuntime.session != null) Screen.Home else Screen.Login)
+    var showCrashLog by remember { mutableStateOf(false) }
+    val backStack = remember {
+        androidx.compose.runtime.mutableStateListOf(
+            BackStackEntry(if (AppRuntime.session != null) Screen.Home else Screen.Login)
+        )
+    }
+    val screen = backStack.last().screen
+    val stateHolder = rememberSaveableStateHolder()
+    fun navigate(destination: Screen, returnTo: Screen? = screen) {
+        backStack.add(BackStackEntry(destination, returnTo))
+    }
+    fun replaceRoot(destination: Screen) {
+        backStack.clear()
+        backStack.add(BackStackEntry(destination))
+    }
+    fun replaceCurrent(destination: Screen) {
+        val returnTo = backStack.lastOrNull()?.returnTo
+        backStack[backStack.lastIndex] = BackStackEntry(destination, returnTo)
+    }
+    fun goBack(fallback: Screen = Screen.Home) {
+        if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+        else replaceRoot(fallback)
     }
 
     // 启动渐入：整体从轻微缩小 + 透明淡入，避免进 App 生硬
@@ -141,8 +179,15 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
     LaunchedEffect(phoneSearch) {
         val kw = phoneSearch
         if (!kw.isNullOrBlank()) {
-            screen = Screen.Search(kw)
+            navigate(Screen.Search(kw))
             onConsumePhoneSearch()
+        }
+    }
+
+    LaunchedEffect(crashNotice) {
+        if (!crashNotice.isNullOrBlank()) {
+            kotlinx.coroutines.delay(7000)
+            onConsumeCrashNotice()
         }
     }
 
@@ -155,6 +200,29 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
                 scaleY = appScale
             }
     ) {
+        if (!crashNotice.isNullOrBlank()) {
+            Snackbar(
+                modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(top = 16.dp),
+                action = {
+                    TextButton(onClick = { showCrashLog = true; onConsumeCrashNotice() }) { Text("查看") }
+                },
+                dismissAction = { TextButton(onClick = onConsumeCrashNotice) { Text("关闭") } },
+            ) { Text("检测到上次异常，日志已保存在本地") }
+        }
+        if (showCrashLog) {
+            AlertDialog(
+                onDismissRequest = { showCrashLog = false },
+                title = { Text("上次崩溃日志") },
+                text = {
+                    Text(
+                        runCatching { CrashHandler.crashFile(context).readText().take(8000) }
+                            .getOrDefault("无法读取崩溃日志"),
+                        maxLines = 24,
+                    )
+                },
+                confirmButton = { TextButton(onClick = { showCrashLog = false }) { Text("关闭") } },
+            )
+        }
         AnimatedContent(
             targetState = screen,
             transitionSpec = {
@@ -169,47 +237,46 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
             },
             label = "nav",
         ) { target ->
+        stateHolder.SaveableStateProvider(target.stateKey()) {
         when (target) {
             is Screen.Login -> LoginScreen(
-                onLoggedIn = { screen = Screen.Home },
+                onLoggedIn = { replaceRoot(Screen.Home) },
+                onCancel = { goBack() },
                 onNavigate = { destination ->
                     when (destination) {
-                        "search" -> screen = Screen.Search()
-                        "home" -> if (AppRuntime.session != null) screen = Screen.Home
-                        "play" -> if (AppRuntime.session != null) screen = Screen.Home
-                        "settings" -> if (AppRuntime.session != null) screen = Screen.Settings
+                        "search" -> navigate(Screen.Search())
+                        "home" -> if (AppRuntime.session != null) replaceRoot(Screen.Home)
+                        "play" -> if (AppRuntime.session != null) replaceRoot(Screen.Home)
+                        "settings" -> if (AppRuntime.session != null) navigate(Screen.Settings)
                     }
                 },
             )
 
             is Screen.Home -> {
                 HomeScreen(
-                    onOpenDetail = { id -> screen = Screen.Detail(id) },
-                    onPlay = { item -> screen = Screen.Play(item) },
-                    onSearch = { screen = Screen.Search() },
-                    onSettings = { screen = Screen.Settings },
+                    onOpenDetail = { id -> navigate(Screen.Detail(id), Screen.Home) },
+                    onPlay = { item -> navigate(Screen.Play(item), Screen.Home) },
+                    onSearch = { navigate(Screen.Search()) },
+                    onSettings = { navigate(Screen.Settings) },
                     onSwitchServer = {
-                        AppRuntime.logout()
-                        com.lumina.tv.data.LibraryCache.clear()
-                        screen = Screen.Login
+                        navigate(Screen.Login, Screen.Home)
                     },
                     onLogout = {
                         AppRuntime.logout()
                         com.lumina.tv.data.LibraryCache.clear()
-                        screen = Screen.Login
+                        replaceRoot(Screen.Login)
                     },
                 )
             }
 
             is Screen.Detail -> {
-                val backTo = target.previousId?.let { Screen.Detail(it) } ?: Screen.Home
-                BackHandler { screen = backTo }
+                BackHandler { goBack() }
                 DetailScreen(
                     id = target.id,
-                    onPlay = { item -> screen = Screen.Play(item) },
-                    onPlayWithSource = { item, sid -> screen = Screen.Play(item, sid) },
-                    onOpenDetail = { nextId -> screen = Screen.Detail(nextId, target.id) },
-                    onBack = { screen = backTo },
+                    onPlay = { item -> navigate(Screen.Play(item), target) },
+                    onPlayWithSource = { item, sid -> navigate(Screen.Play(item, sid), target) },
+                    onOpenDetail = { nextId -> navigate(Screen.Detail(nextId), target) },
+                    onBack = { goBack() },
                 )
             }
 
@@ -217,28 +284,38 @@ private fun AppRoot(phoneSearch: String?, onConsumePhoneSearch: () -> Unit) {
                 PlayerScreen(
                     item = target.item,
                     initialSourceId = target.sourceId,
-                    onBack = { screen = Screen.Detail(target.item.seriesId ?: target.item.id) },
-                    onPlayNext = { next -> screen = Screen.Play(next) },
+                    onBack = { goBack() },
+                    onPlayNext = { next -> replaceCurrent(Screen.Play(next)) },
                 )
             }
 
             is Screen.Search -> {
-                BackHandler { screen = Screen.Home }
+                BackHandler { goBack() }
                 SearchScreen(
                     initialKeyword = target.keyword,
-                    onOpenDetail = { id -> screen = Screen.Detail(id) },
-                    onBack = { screen = Screen.Home },
+                    onOpenDetail = { id -> navigate(Screen.Detail(id), target) },
+                    onBack = { goBack() },
                 )
             }
 
             is Screen.Settings -> {
-                BackHandler { screen = Screen.Home }
+                BackHandler { goBack() }
                 SettingsScreen(
-                    onBack = { screen = Screen.Home },
-                    onLogout = { screen = Screen.Login },
+                    onBack = { goBack() },
+                    onLogout = { AppRuntime.logout(); replaceRoot(Screen.Login) },
                 )
             }
         }
         }
+        }
     }
+}
+
+private fun Screen.stateKey(): String = when (this) {
+    Screen.Login -> "login"
+    Screen.Home -> "home"
+    is Screen.Detail -> "detail:$id"
+    is Screen.Play -> "play:${item.id}"
+    is Screen.Search -> "search:$keyword"
+    Screen.Settings -> "settings"
 }

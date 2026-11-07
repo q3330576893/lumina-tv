@@ -46,6 +46,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -82,7 +83,7 @@ private val Glass = Color(0xB8161420)
 private val GlassLine = Color(0x47FFFFFF)
 
 @Composable
-fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
+fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (String) -> Unit = {}) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     val scope = rememberCoroutineScope()
@@ -194,7 +195,12 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
             error = null
             try {
                 val client = EmbyClient(baseUrl = base, deviceId = prefs?.deviceId ?: "lumina-tv")
-                AppRuntime.applySession(client.login(base, name, password))
+                val newSession = client.login(base, name, password)
+                if (AppRuntime.session?.baseUrl?.trimEnd('/') != newSession.baseUrl.trimEnd('/')) {
+                    com.lumina.tv.data.LibraryCache.clear()
+                }
+                AppRuntime.applySession(newSession)
+                AppRuntime.updatePairingStatus("登录成功，电视已连接")
                 onLoggedIn()
             } catch (e: Exception) {
                 val message = e.message.orEmpty()
@@ -206,6 +212,12 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
                     else -> "登录失败：${message.ifBlank { "服务器返回异常，请检查网络和账号信息。" }}"
                 }
                 error = loginErrorDialog
+                AppRuntime.updatePairingStatus(loginErrorDialog.orEmpty())
+                if (AppRuntime.session != null) {
+                    android.widget.Toast.makeText(context, loginErrorDialog, android.widget.Toast.LENGTH_LONG).show()
+                    kotlinx.coroutines.delay(1200)
+                    onCancel()
+                }
             } finally { loading = false; probing = false }
         }
     }
@@ -256,8 +268,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
         }
     }
 
-    LaunchedEffect(Unit) {
-        AppRuntime.screenLabel = "登录"
+    DisposableEffect(Unit) {
         AppRuntime.onPairConfig = config@{ server, pairedUser, pairedPass ->
             if (loading || probing) return@config false
             val u = runCatching { Uri.parse(if (server.startsWith("http")) server else "http://$server") }.getOrNull()
@@ -268,11 +279,17 @@ fun LoginScreen(onLoggedIn: () -> Unit, onNavigate: (String) -> Unit = {}) {
             }
             port = u?.port?.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
             user = pairedUser; pass = pairedPass; paired = true
-            pendingLoginBase = null
+            pendingLoginBase = "${scheme}://${host}:${port}"
+            AppRuntime.updatePairingStatus("电视正在连接服务器…")
             submit(pairedUser, pairedPass)
 
             true
         }
+        onDispose { AppRuntime.onPairConfig = null }
+    }
+
+    LaunchedEffect(Unit) {
+        AppRuntime.screenLabel = "登录"
         if (AppRuntime.pairing == null) AppRuntime.startPairing(context)
     }
 

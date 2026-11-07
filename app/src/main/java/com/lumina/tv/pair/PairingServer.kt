@@ -267,6 +267,10 @@ function k(a){
 setInterval(function(){
   fetch('/api/state?token='+encodeURIComponent(new URLSearchParams(location.search).get('token')||'')).then(r=>r.json()).then(function(s){
     if(s&&s.screen)document.getElementById('hint').innerText=s.screen;
+    if(s&&s.pairingStatus){
+      document.getElementById('cfgStatus').innerText=s.pairingStatus;
+      if(s.pairingStatus.indexOf('成功')>=0)document.getElementById('hint').innerText='登录成功，电视已连接';
+    }
   }).catch(()=>{});
 },2500);
 document.getElementById('server').addEventListener('paste',function(e){

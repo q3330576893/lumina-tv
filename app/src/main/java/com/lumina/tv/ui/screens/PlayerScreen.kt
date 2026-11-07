@@ -2,10 +2,14 @@ package com.lumina.tv.ui.screens
 
 import android.os.Build
 import android.util.TypedValue
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
@@ -74,6 +78,8 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource as ExoSource
@@ -83,6 +89,7 @@ import androidx.media3.ui.PlayerView
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.MediaChapter
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
@@ -90,6 +97,9 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
+import com.lumina.tv.player.SubtitleRenderersFactory
+import com.lumina.tv.player.MpvPlayerController
+import com.lumina.tv.player.IjkPlayerController
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -124,6 +134,20 @@ fun PlayerScreen(
     var speed by remember { mutableFloatStateOf(AppRuntime.prefs?.defaultSpeed ?: 1.0f) }
     var optionMenu by remember { mutableStateOf(false) }
     var degraded by remember { mutableStateOf(false) }
+    var mpvFallbackTried by remember(item.id) { mutableStateOf(false) }
+    var ijkFallbackTried by remember(item.id) { mutableStateOf(false) }
+    var ffmpegFallback by remember(item.id) { mutableStateOf(false) }
+    var activeEngine by remember(item.id) {
+        mutableStateOf(when (AppRuntime.prefs?.playerEngine) {
+            "mpv" -> "mpv"
+            "ijk" -> "ijk"
+            else -> "media3"
+        })
+    }
+    var mpvBackend by remember(item.id) { mutableStateOf<MpvPlayerController?>(null) }
+    var mpvState by remember(item.id) { mutableStateOf(MpvPlayerController.State()) }
+    var ijkBackend by remember(item.id) { mutableStateOf<IjkPlayerController?>(null) }
+    var ijkState by remember(item.id) { mutableStateOf(IjkPlayerController.State()) }
     var reloadKey by remember { mutableIntStateOf(0) }
     var currentSourceId by remember { mutableStateOf(initialSourceId) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
@@ -133,8 +157,11 @@ fun PlayerScreen(
     var seekHint by remember { mutableStateOf<String?>(null) }
     var currentResolution by remember { mutableStateOf<String?>(null) }
     var subScale by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitleScale ?: 1.0f) }
+    var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
     var nextEpisode by remember { mutableStateOf<MediaItem?>(null) }
     var nextCountdown by remember { mutableIntStateOf(0) }
+    var chapters by remember { mutableStateOf<List<MediaChapter>>(emptyList()) }
+    var chapterPanel by remember { mutableStateOf(false) }
 
     val introSeconds = remember(item.id) { AppRuntime.prefs?.introSecondsFor(item.id) ?: 0 }
 
@@ -151,8 +178,24 @@ fun PlayerScreen(
             .setUserAgent("LuminaTV/1.5 (Android)")
     }
 
-    val exo = remember {
-        ExoPlayer.Builder(context)
+    val subtitleRenderersFactory = remember(item.id) { SubtitleRenderersFactory(context) }
+
+    val exo = remember(item.id, ffmpegFallback) {
+        val preference = AppRuntime.prefs?.decoderPreference ?: "auto"
+        val codecSelector = MediaCodecSelector { mimeType, secure, tunneling ->
+            val decoders = MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, secure, tunneling)
+            when (preference) {
+                "hardware" -> decoders.sortedByDescending { it.hardwareAccelerated }
+                "software" -> decoders.sortedByDescending { it.softwareOnly }
+                else -> decoders
+            }
+        }
+        subtitleRenderersFactory.subtitleOffsetMs = subtitleOffsetMs
+        val renderers = subtitleRenderersFactory
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setMediaCodecSelector(codecSelector)
+            .setEnableDecoderFallback(true)
+        ExoPlayer.Builder(context, renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
             .build()
             .apply { playWhenReady = true }
@@ -164,6 +207,7 @@ fun PlayerScreen(
         }
     }
 
+
     // 当前剧的集列表（切集用），优先缓存
     LaunchedEffect(item.seriesId) {
         val sid = item.seriesId ?: return@LaunchedEffect
@@ -173,14 +217,44 @@ fun PlayerScreen(
         LibraryCache.putEpisodes(sid, item.seasonId, episodes)
     }
 
+    LaunchedEffect(item.id) { chapters = runCatching { client?.getChapters(item.id) }.getOrNull().orEmpty() }
+
+    fun startAutoNext() {
+        if (nextTriggered || AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null) return
+        nextTriggered = true
+        scope.launch {
+            val c = client ?: return@launch
+            val list = if (episodes.isNotEmpty()) episodes
+            else runCatching { c.getEpisodes(item.seriesId, item.seasonId) }.getOrDefault(emptyList())
+            val idx = list.indexOfFirst { it.id == item.id }
+            val next = list.getOrNull(idx + 1) ?: return@launch
+            runCatching { c.reportStop(item.id, position) }
+            nextEpisode = next
+            nextCountdown = 5
+            while (nextCountdown > 0) {
+                delay(1000)
+                if (nextEpisode?.id != next.id) return@launch
+                nextCountdown--
+            }
+            if (nextEpisode?.id == next.id) {
+                nextEpisode = null
+                onPlayNext?.invoke(next)
+            }
+        }
+    }
+
     fun loadSource(forceTranscode: Boolean, sourceId: String? = currentSourceId) {
         val c = client ?: return
-        val resumePosition = if (exo.mediaItemCount > 0) {
+        val resumePosition = when (activeEngine) {
+            "mpv" -> mpvBackend?.positionMs()?.takeIf { it > 0 } ?: position.takeIf { it > 0 } ?: item.positionTicks / 10_000
+            "ijk" -> ijkBackend?.positionMs()?.takeIf { it > 0 } ?: position.takeIf { it > 0 } ?: item.positionTicks / 10_000
+            else -> if (exo.mediaItemCount > 0) {
             exo.currentPosition.coerceAtLeast(0L).let { current ->
                 val total = exo.duration
                 if (total > 0) current.coerceAtMost(total) else current
             }
-        } else item.positionTicks / 10_000
+            } else position.takeIf { it > 0 } ?: item.positionTicks / 10_000
+        }
         scope.launch {
             error = null
             buffering = true
@@ -226,11 +300,63 @@ fun PlayerScreen(
                         }.toTypedArray())
                     }
                 }
-                exo.setMediaSource(merged)
-                exo.prepare()
-                exo.seekTo(target.startPositionMs.coerceAtLeast(0))
-                exo.playWhenReady = true
-                exo.setPlaybackSpeed(if (boosting) 3f else speed)
+                if (activeEngine == "mpv") {
+                    val backend = mpvBackend ?: MpvPlayerController(context) { state ->
+                        mpvState = state
+                        position = state.positionMs
+                        if (state.durationMs > 0L) duration = state.durationMs
+                        buffering = state.buffering
+                        isPlaying = state.playing
+                        if (state.ended) startAutoNext()
+                        if (state.error != null) {
+                            if (AppRuntime.prefs?.playerEngine == "auto" && !ijkFallbackTried) {
+                                error = "mpv 无法播放，切换 FFmpeg 解码器…"
+                                mpvBackend?.release()
+                                mpvBackend = null
+                                activeEngine = "ijk"
+                            } else {
+                                buffering = false
+                                error = state.error
+                            }
+                        }
+                    }.also { mpvBackend = it }
+                    val externalSubtitles = subs.mapNotNull { stream ->
+                        srcId?.let { c.subtitleUrl(item.id, it, stream.index, "vtt") }
+                    }
+                    backend.setSpeed(if (boosting) 3f else speed)
+                    backend.load(target.url, target.startPositionMs, externalSubtitles)
+                } else if (activeEngine == "ijk") {
+                    val backend = ijkBackend ?: IjkPlayerController(context) { state ->
+                        ijkState = state
+                        position = state.positionMs
+                        if (state.durationMs > 0L) duration = state.durationMs
+                        buffering = state.buffering
+                        isPlaying = state.playing
+                        if (state.ended) startAutoNext()
+                        state.error?.let {
+                            if (AppRuntime.prefs?.playerEngine == "auto" && !ijkFallbackTried) {
+                                ijkFallbackTried = true
+                                ijkBackend?.release()
+                                ijkBackend = null
+                                degraded = true
+                                activeEngine = "media3"
+                                ffmpegFallback = true
+                                reloadKey++
+                            } else {
+                                error = it
+                                buffering = false
+                            }
+                        }
+                    }.also { ijkBackend = it }
+                    backend.setSpeed(if (boosting) 3f else speed)
+                    backend.load(target.url, target.startPositionMs)
+                } else {
+                    exo.setMediaSource(merged)
+                    exo.prepare()
+                    exo.seekTo(target.startPositionMs.coerceAtLeast(0))
+                    exo.playWhenReady = true
+                    exo.setPlaybackSpeed(if (boosting) 3f else speed)
+                }
                 c.reportStart(item.id, target.startPositionMs, target.source?.id, if (target.direct) "DirectPlay" else "Transcode")
             } catch (e: Exception) {
                 buffering = false
@@ -249,20 +375,71 @@ fun PlayerScreen(
             error = "未登录"
             return@LaunchedEffect
         }
-        loadSource(AppRuntime.prefs?.forceTranscode ?: false, initialSourceId)
+        if (activeEngine == "media3") loadSource(AppRuntime.prefs?.forceTranscode ?: false, initialSourceId)
+    }
+
+    LaunchedEffect(exo, subtitleOffsetMs) {
+        subtitleRenderersFactory.subtitleOffsetMs = subtitleOffsetMs
+        AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
     }
 
     LaunchedEffect(reloadKey) {
         if (reloadKey > 0) loadSource(forceTranscode = true)
     }
 
+    LaunchedEffect(activeEngine) {
+        when (activeEngine) {
+            "mpv" -> loadSource(forceTranscode = false)
+            "ijk" -> loadSource(forceTranscode = false)
+            "media3" -> if (mpvBackend != null || ijkBackend != null) {
+                mpvBackend?.pause()
+                ijkBackend?.pause()
+                loadSource(forceTranscode = ffmpegFallback)
+            }
+        }
+    }
+
+    fun seekPlayerTo(targetMs: Long) {
+        when (activeEngine) {
+            "mpv" -> mpvBackend?.seekTo(targetMs)
+            "ijk" -> ijkBackend?.seekTo(targetMs)
+            else -> exo.seekTo(targetMs)
+        }
+        position = targetMs.coerceAtLeast(0L)
+    }
+
+    fun togglePlayback() {
+        when (activeEngine) {
+            "mpv" -> if (mpvState.playing) mpvBackend?.pause() else mpvBackend?.play()
+            "ijk" -> if (ijkState.playing) ijkBackend?.pause() else ijkBackend?.play()
+            else -> if (exo.isPlaying) exo.pause() else exo.play()
+        }
+    }
+
+    fun setPlaybackSpeed(value: Float) {
+        speed = value
+        when (activeEngine) {
+            "mpv" -> mpvBackend?.setSpeed(value)
+            "ijk" -> ijkBackend?.setSpeed(value)
+            else -> exo.setPlaybackSpeed(value)
+        }
+    }
+
     DisposableEffect(exo, item.id) {
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
+                if (activeEngine != "media3") return
                 if (!degraded) {
                     degraded = true
                     error = "直连失败，自动切换转码…"
                     reloadKey++
+                } else if (AppRuntime.prefs?.playerEngine == "auto" && !mpvFallbackTried) {
+                    mpvFallbackTried = true
+                    activeEngine = "mpv"
+                    error = "Media3 播放失败，切换至 mpv…"
+                } else if (!ffmpegFallback) {
+                    error = "媒体服务器流解码失败，切换 FFmpeg 软件解码…"
+                    ffmpegFallback = true
                 } else {
                     buffering = false
                     val cause = generateSequence(err as Throwable?) { it.cause }
@@ -275,6 +452,7 @@ fun PlayerScreen(
             }
 
             override fun onPlaybackStateChanged(state: Int) {
+                if (activeEngine != "media3") return
                 buffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY && degraded && error?.startsWith("直连失败") == true) error = null
                 if (state == Player.STATE_ENDED && !nextTriggered &&
@@ -311,6 +489,13 @@ fun PlayerScreen(
         onDispose { exo.removeListener(listener) }
     }
 
+    DisposableEffect(mpvBackend, item.id) {
+        onDispose { mpvBackend?.release(); mpvBackend = null }
+    }
+    DisposableEffect(ijkBackend, item.id) {
+        onDispose { ijkBackend?.release(); ijkBackend = null }
+    }
+
     LaunchedEffect(seekHint) {
         if (seekHint != null) {
             delay(1400)
@@ -320,8 +505,13 @@ fun PlayerScreen(
 
     fun seekBy(delta: Long) {
         val max = if (duration > 0) duration else Long.MAX_VALUE
-        val to = (exo.currentPosition + delta).coerceIn(0L, max)
-        exo.seekTo(to)
+        val current = if (activeEngine == "mpv") mpvBackend?.positionMs() ?: position else exo.currentPosition
+        val to = (current + delta).coerceIn(0L, max)
+        when (activeEngine) {
+            "mpv" -> mpvBackend?.seekTo(to)
+            "ijk" -> ijkBackend?.seekTo(to)
+            else -> exo.seekTo(to)
+        }
         position = to
         seekHint = if (delta > 0) "»»  快进 ${delta / 1000} 秒    ${formatTime(to)}"
         else "««  快退 ${-delta / 1000} 秒    ${formatTime(to)}"
@@ -331,12 +521,21 @@ fun PlayerScreen(
         var sinceReport = 0
         while (true) {
             delay(1000)
-            position = exo.currentPosition
-            duration = exo.duration.coerceAtLeast(0)
+            position = when (activeEngine) {
+                "mpv" -> mpvBackend?.positionMs() ?: position
+                "ijk" -> ijkBackend?.positionMs() ?: position
+                else -> exo.currentPosition
+            }
+            duration = when (activeEngine) {
+                "mpv" -> mpvBackend?.durationMs() ?: duration
+                "ijk" -> ijkBackend?.durationMs() ?: duration
+                else -> exo.duration.coerceAtLeast(0)
+            }
             sinceReport++
-            if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && (exo.isPlaying || position > 0)) {
+            if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "ijk" && ijkState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
                 sinceReport = 0
-                AppRuntime.client?.reportProgress(item.id, position, !exo.isPlaying, currentSourceId)
+                val paused = when (activeEngine) { "mpv" -> !mpvState.playing; "ijk" -> !ijkState.playing; else -> !exo.isPlaying }
+                AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId)
             }
         }
     }
@@ -359,18 +558,19 @@ fun PlayerScreen(
 
     BackHandler {
         when {
+            chapterPanel -> chapterPanel = false
             optionMenu -> optionMenu = false
             showControls -> showControls = false
             else -> {
-                scope.launch { AppRuntime.client?.reportStop(item.id, exo.currentPosition.coerceAtLeast(0L)) }
-                exo.stop()
+                scope.launch { AppRuntime.client?.reportStop(item.id, position.coerceAtLeast(0L)) }
+                when (activeEngine) { "mpv" -> mpvBackend?.pause(); "ijk" -> ijkBackend?.pause(); else -> exo.stop() }
                 onBack()
             }
         }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(
+        if (activeEngine == "media3") AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     useController = false
@@ -385,12 +585,47 @@ fun PlayerScreen(
                 pv.subtitleView?.apply {
                     setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * subScale)
                     setBackgroundColor(if (prefs?.subtitleBg == true) 0x99000000.toInt() else android.graphics.Color.TRANSPARENT)
+                    setStyle(androidx.media3.ui.CaptionStyleCompat(
+                        prefs?.subtitleColor ?: android.graphics.Color.WHITE,
+                        if (prefs?.subtitleBg == true) 0x99000000.toInt() else android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT,
+                        if (prefs?.subtitleOutline != false) androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE else androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE,
+                        android.graphics.Color.BLACK,
+                        null,
+                    ))
+                    setBottomPaddingFraction(prefs?.subtitlePosition ?: 0.08f)
                 }
             },
             modifier = Modifier.fillMaxSize(),
         )
+        else AndroidView(
+            factory = { ctx ->
+                SurfaceView(ctx).apply {
+                    keepScreenOn = true
+                    holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            mpvBackend?.attachSurface(holder.surface)
+                            ijkBackend?.attachSurface(holder.surface)
+                        }
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                            mpvBackend?.attachSurface(holder.surface)
+                            ijkBackend?.attachSurface(holder.surface)
+                        }
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            mpvBackend?.detachSurface()
+                            ijkBackend?.detachSurface()
+                        }
+                    })
+                }
+            },
+            update = { view -> if (view.holder.surface.isValid) {
+                mpvBackend?.attachSurface(view.holder.surface)
+                ijkBackend?.attachSurface(view.holder.surface)
+            } },
+            modifier = Modifier.fillMaxSize(),
+        )
 
-        if (buffering && error == null) {
+        if ((if (activeEngine == "mpv") mpvState.buffering else buffering) && error == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Accent, strokeWidth = 2.5.dp, modifier = Modifier.size(36.dp))
@@ -403,6 +638,39 @@ fun PlayerScreen(
         error?.let {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(it, color = Color(0xFFFF8A9A), fontSize = 14.sp, modifier = Modifier.padding(horizontal = 40.dp))
+            }
+        }
+
+        if (chapterPanel && chapters.isNotEmpty()) {
+            Box(Modifier.fillMaxSize().background(Color(0x66000000)), contentAlignment = Alignment.Center) {
+                GlassPanel(Modifier.width(520.dp).heightIn(max = 560.dp), corner = 20.dp, fillColor = Color(0xD910141D)) {
+                    Column(Modifier.padding(18.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("章节与片段", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.weight(1f))
+                            CtrlButton(Icons.Rounded.Pause, "关闭章节列表") { chapterPanel = false }
+                        }
+                        LazyColumn(Modifier.heightIn(max = 470.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(chapters) { chapter ->
+                                FocusSurface(Modifier.fillMaxWidth().height(42.dp), corner = 8.dp, scaleTo = 1f, onClick = {
+                                    seekPlayerTo(chapter.startMs)
+                                    position = chapter.startMs
+                                    chapterPanel = false
+                                    showControls = true
+                                }) { focused ->
+                                    Row(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(formatTime(chapter.startMs), color = Accent, fontSize = 12.sp)
+                                        Spacer(Modifier.width(12.dp))
+                                        Text(chapter.name, color = TextMain, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Spacer(Modifier.weight(1f))
+                                        if (chapter.name.contains(Regex("intro|opening|片头", RegexOption.IGNORE_CASE))) Text("片头", color = TextSub, fontSize = 10.sp)
+                                        if (chapter.name.contains(Regex("credit|ending|片尾|字幕", RegexOption.IGNORE_CASE))) Text("片尾", color = TextSub, fontSize = 10.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -489,13 +757,13 @@ fun PlayerScreen(
                                     if (ev.nativeKeyEvent.repeatCount == 0) okDownAt = System.currentTimeMillis()
                                     else if (!boosting && System.currentTimeMillis() - okDownAt > 480) {
                                         boosting = true
-                                        exo.setPlaybackSpeed(3f)
+                                        setPlaybackSpeed(3f)
                                     }
                                     true
                                 } else {
                                     if (boosting) {
                                         boosting = false
-                                        exo.setPlaybackSpeed(speed)
+                                        setPlaybackSpeed(speed)
                                     } else {
                                         showControls = true
                                     }
@@ -521,15 +789,15 @@ fun PlayerScreen(
                                 true
                             }
                             Key.MediaPlayPause -> {
-                                if (ev.type == KeyEventType.KeyDown) { if (exo.isPlaying) exo.pause() else exo.play() }
+                                if (ev.type == KeyEventType.KeyDown) togglePlayback()
                                 true
                             }
                             Key.MediaRewind -> {
-                                if (ev.type == KeyEventType.KeyDown) exo.seekTo((exo.currentPosition - 30_000).coerceAtLeast(0))
+                                if (ev.type == KeyEventType.KeyDown) seekBy(-30_000)
                                 true
                             }
                             Key.MediaFastForward -> {
-                                if (ev.type == KeyEventType.KeyDown) exo.seekTo(exo.currentPosition + 30_000)
+                                if (ev.type == KeyEventType.KeyDown) seekBy(30_000)
                                 true
                             }
                             else -> false
@@ -546,7 +814,7 @@ fun PlayerScreen(
                     .padding(end = 36.dp, bottom = 120.dp)
                     .height(40.dp).width(130.dp),
                 corner = 20.dp,
-                onClick = { exo.seekTo(introSeconds * 1000L) },
+                onClick = { seekPlayerTo(introSeconds * 1000L) },
             ) { focused ->
                 Box(
                     Modifier.fillMaxSize().background(
@@ -602,7 +870,7 @@ fun PlayerScreen(
                             position = position,
                             duration = duration,
                             onSeek = { target ->
-                                exo.seekTo(target)
+                                seekPlayerTo(target)
                                 position = target
                             },
                         )
@@ -614,14 +882,14 @@ fun PlayerScreen(
                         }
                         Spacer(Modifier.height(10.dp))
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            CtrlButton(Icons.Rounded.FastRewind, "后退 10 秒") { exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0)) }
+                            CtrlButton(Icons.Rounded.FastRewind, "后退 10 秒") { seekBy(-10_000) }
                             CtrlButton(
                                 if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                 if (isPlaying) "暂停" else "播放",
                                 primary = true,
                                 focusRequester = playFocus,
-                            ) { if (exo.isPlaying) exo.pause() else exo.play() }
-                            CtrlButton(Icons.Rounded.FastForward, "前进 10 秒") { exo.seekTo(exo.currentPosition + 10_000) }
+                            ) { togglePlayback() }
+                            CtrlButton(Icons.Rounded.FastForward, "前进 10 秒") { seekBy(10_000) }
                             if (item.seriesId != null) {
                                 CtrlButton(Icons.Rounded.SkipNext, "下一集") {
                                     val idx = episodes.indexOfFirst { it.id == item.id }
@@ -636,6 +904,7 @@ fun PlayerScreen(
                                 optionMenu = true
                                 showControls = false
                             }
+                            if (chapters.isNotEmpty()) CtrlButton(Icons.Rounded.SkipNext, "章节与片段") { chapterPanel = true; showControls = false }
                             Spacer(Modifier.weight(1f))
                             Text(item.subtitle, color = TextSub.copy(alpha = 0.75f), fontSize = 11.sp)
                         }
@@ -644,7 +913,11 @@ fun PlayerScreen(
             }
         }
 
-        if (optionMenu) {
+        AnimatedVisibility(
+            visible = optionMenu,
+            enter = fadeIn() + scaleIn(initialScale = 0.96f),
+            exit = fadeOut() + scaleOut(targetScale = 0.98f),
+        ) {
             OptionMenu(
                 exo = exo,
                 item = item,
@@ -653,13 +926,17 @@ fun PlayerScreen(
                 currentSourceId = currentSourceId,
                 episodes = episodes,
                 subScale = subScale,
+                subtitleOffsetMs = subtitleOffsetMs,
+                onSubtitleOffset = {
+                    subtitleOffsetMs = it.coerceIn(-10_000L, 10_000L)
+                    AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
+                },
                 onSubScale = {
                     subScale = it
                     AppRuntime.prefs?.subtitleScale = it
                 },
                 onSpeed = {
-                    speed = it
-                    exo.setPlaybackSpeed(it)
+                    setPlaybackSpeed(it)
                 },
                 onResizeMode = { resizeMode = it },
                 onSwitchSource = { sid ->
@@ -731,6 +1008,8 @@ private fun OptionMenu(
     currentSourceId: String?,
     episodes: List<MediaItem>,
     subScale: Float,
+    subtitleOffsetMs: Long,
+    onSubtitleOffset: (Long) -> Unit,
     onSubScale: (Float) -> Unit,
     onSpeed: (Float) -> Unit,
     onResizeMode: (Int) -> Unit,
@@ -783,10 +1062,10 @@ private fun OptionMenu(
     LaunchedEffect(Unit) { delay(80); runCatching { firstFocus.requestFocus() } }
 
     Box(
-        Modifier.fillMaxSize().background(Color(0xB3000000)),
+        Modifier.fillMaxSize().background(Color(0x66000000)),
         contentAlignment = Alignment.Center,
     ) {
-        GlassPanel(Modifier.width(680.dp), corner = 22.dp) {
+        GlassPanel(Modifier.width(680.dp), corner = 22.dp, fillColor = Color(0x7510141D)) {
             Column(Modifier.padding(22.dp).verticalScroll(rememberScrollState())) {
                 Text("播放选项", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(14.dp))
@@ -837,6 +1116,20 @@ private fun OptionMenu(
                             width = 78.dp, active = active, activeColor = Accent,
                             onClick = { onSpeed(s) },
                             focusRequester = if (s == 1.0f) firstFocus else null,
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                MenuLabel("字幕同步 ${if (subtitleOffsetMs >= 0) "+" else ""}${subtitleOffsetMs}ms")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(-500L, -100L, 0L, 100L, 500L).forEach { step ->
+                        MenuChip(
+                            label = if (step == 0L) "重置" else if (step > 0) "+${step}ms" else "${step}ms",
+                            width = 90.dp,
+                            active = step == 0L && subtitleOffsetMs == 0L,
+                            activeColor = Accent,
+                            onClick = { onSubtitleOffset(if (step == 0L) 0L else subtitleOffsetMs + step) },
                         )
                     }
                 }

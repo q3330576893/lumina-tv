@@ -2,6 +2,11 @@ package com.lumina.tv.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.Key
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.runtime.rememberCoroutineScope
@@ -27,8 +32,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -52,6 +59,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -111,26 +119,55 @@ fun HomeScreen(
     var favorites by remember { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
     var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
 
-    var tab by remember { mutableStateOf(HomeTab.Recommend) }
-    var selectedLibrary by remember { mutableStateOf<LibraryView?>(null) }
+    var tab by rememberSaveable { mutableStateOf(HomeTab.Recommend) }
+    var selectedLibraryId by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedLibrary = views.firstOrNull { it.id == selectedLibraryId }
     var libraryError by remember { mutableStateOf<String?>(null) }
-    var librarySort by remember { mutableStateOf("date") }
+    var librarySort by rememberSaveable { mutableStateOf("date") }
+    var librarySortOrder by rememberSaveable { mutableStateOf("Descending") }
+    var sortMenuOpen by remember { mutableStateOf(false) }
     var gridItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var gridLoading by remember { mutableStateOf(false) }
+    var gridAppending by remember { mutableStateOf(false) }
+    var gridNextIndex by remember { mutableStateOf(0) }
+    var gridHasMore by remember { mutableStateOf(true) }
+    val recListState = rememberLazyListState()
+    val libraryListState = rememberLazyListState()
+    val gridStates = remember { mutableMapOf<String, LazyGridState>() }
+    var savedGridPosition by rememberSaveable { mutableStateOf("") }
+    val gridStateKey = when {
+        tab == HomeTab.Media -> "library:${selectedLibraryId ?: "list"}"
+        else -> "tab:${tab.name}"
+    }
+    val gridState = remember(gridStateKey) {
+        gridStates.getOrPut(gridStateKey) {
+            val parts = savedGridPosition.split('|')
+            val index = if (parts.getOrNull(0) == gridStateKey) parts.getOrNull(1)?.toIntOrNull() ?: 0 else 0
+            val offset = if (parts.getOrNull(0) == gridStateKey) parts.getOrNull(2)?.toIntOrNull() ?: 0 else 0
+            LazyGridState(index, offset)
+        }
+    }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(gridStateKey, gridState) {
+        snapshotFlow { gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) -> savedGridPosition = "$gridStateKey|$index|$offset" }
+    }
     // 各媒体库视图的横向内容（id → items）
     var viewContents by remember { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
     // 导航栏自动隐藏
     var navHidden by remember { mutableStateOf(false) }
+    var initialFocusPending by rememberSaveable { mutableStateOf(true) }
+    var focusedMediaId by rememberSaveable { mutableStateOf<String?>(null) }
 
     // A genre is an in-page route: Android/TV Back returns to the genre list, then home.
     BackHandler(enabled = tab != HomeTab.Recommend) {
         if (tab == HomeTab.Media && selectedLibrary != null) {
-            selectedLibrary = null
+            selectedLibraryId = null
             gridItems = emptyList()
             gridLoading = false
         } else {
             tab = HomeTab.Recommend
-            selectedLibrary = null
+            selectedLibraryId = null
             gridItems = emptyList()
         }
     }
@@ -190,14 +227,25 @@ fun HomeScreen(
         }
     }
 
+    LaunchedEffect(loading, initialFocusPending, resume, favorites, latest, movies, series) {
+        if (!loading && initialFocusPending && (resume.isNotEmpty() || favorites.isNotEmpty() || latest.isNotEmpty() || movies.isNotEmpty() || series.isNotEmpty())) {
+            delay(240)
+            initialFocusPending = false
+        }
+    }
+
     // 切换标签：Movies/Series 直接复用首页已加载的数据，不再额外请求
-    LaunchedEffect(tab, selectedLibrary, librarySort) {
+    LaunchedEffect(tab, selectedLibrary, librarySort, librarySortOrder) {
         val requestTab = tab
         val requestLibrary = selectedLibrary
         val requestSort = librarySort
+        val requestOrder = librarySortOrder
         gridLoading = false
         libraryError = null
-        if (requestTab == HomeTab.Media && requestLibrary != null) gridItems = emptyList()
+        if (requestTab == HomeTab.Media && requestLibrary != null) {
+            gridNextIndex = 0
+            gridHasMore = true
+        }
         if (requestTab == HomeTab.Recommend || (requestTab == HomeTab.Media && requestLibrary == null)) return@LaunchedEffect
         val c = client ?: return@LaunchedEffect
         if (requestTab == HomeTab.Movies && movies.isNotEmpty()) {
@@ -216,14 +264,14 @@ fun HomeScreen(
             HomeTab.Movies -> "movies"
             HomeTab.Series -> "series"
             HomeTab.Favorites -> "favorites"
-            HomeTab.Media -> "library:${requestLibrary?.id.orEmpty()}:$requestSort"
+            HomeTab.Media -> "library:${requestLibrary?.id.orEmpty()}:$requestSort:$requestOrder"
             else -> return@LaunchedEffect
         }
-        LibraryCache.browseOf(key)?.let {
+        if (requestTab != HomeTab.Media) LibraryCache.browseOf(key)?.let {
             gridItems = it
             return@LaunchedEffect
         }
-        gridLoading = true
+        gridLoading = requestTab == HomeTab.Media || gridItems.isEmpty()
         try {
             val result = runCatching {
                 when (requestTab) {
@@ -232,27 +280,70 @@ fun HomeScreen(
                     HomeTab.Favorites -> c.getFavorites(120)
                     HomeTab.Media -> requestLibrary?.let {
                         val (sb, so) = when (requestSort) {
-                            "name" -> "SortName" to "Ascending"
-                            "rating" -> "CommunityRating" to "Descending"
-                            "year" -> "ProductionYear" to "Descending"
-                            else -> "DateCreated" to "Descending"
+                            "name" -> "SortName" to librarySortOrder
+                            "rating" -> "CommunityRating" to librarySortOrder
+                            "year" -> "ProductionYear" to librarySortOrder
+                            "plays" -> "PlayCount" to librarySortOrder
+                            else -> "DateCreated" to librarySortOrder
                         }
-                        c.getAllItems(it.id, sortBy = sb, sortOrder = so)
+                        c.getItems(parentId = it.id, sortBy = sb, sortOrder = so, limit = 50, startIndex = 0)
                     }.orEmpty()
                     else -> emptyList()
                 }
             }
             currentCoroutineContext().ensureActive()
-            if (tab != requestTab || selectedLibrary != requestLibrary || librarySort != requestSort) return@LaunchedEffect
+            if (tab != requestTab || selectedLibrary != requestLibrary || librarySort != requestSort || librarySortOrder != requestOrder) return@LaunchedEffect
             result.onSuccess { list ->
-                LibraryCache.putBrowse(key, list)
-                gridItems = list
+                if (requestTab == HomeTab.Media) {
+                    gridItems = list
+                    gridNextIndex = list.size
+                    gridHasMore = list.size == 50
+                } else {
+                    LibraryCache.putBrowse(key, list)
+                    gridItems = list
+                }
             }.onFailure { failure ->
                 libraryError = failure.message ?: "媒体库读取失败"
                 gridItems = emptyList()
             }
         } finally {
-            if (tab == requestTab && selectedLibrary == requestLibrary && librarySort == requestSort) gridLoading = false
+            if (tab == requestTab && selectedLibrary == requestLibrary && librarySort == requestSort && librarySortOrder == requestOrder) gridLoading = false
+        }
+    }
+
+    LaunchedEffect(selectedLibrary, librarySort, librarySortOrder) {
+        if (selectedLibrary == null) return@LaunchedEffect
+        val activeSort = librarySort
+        val activeOrder = librarySortOrder
+        snapshotFlow {
+            val info = gridState.layoutInfo
+            info.visibleItemsInfo.lastOrNull()?.index ?: -1
+        }.collect { lastVisible ->
+            if (lastVisible >= gridItems.lastIndex - 8 && gridHasMore && !gridLoading && !gridAppending) {
+                val c = client ?: return@collect
+                val library = selectedLibrary ?: return@collect
+                val (sortBy, _) = when (activeSort) {
+                    "name" -> "SortName" to activeOrder
+                    "rating" -> "CommunityRating" to activeOrder
+                    "year" -> "ProductionYear" to activeOrder
+                    "plays" -> "PlayCount" to activeOrder
+                    else -> "DateCreated" to activeOrder
+                }
+                gridAppending = true
+                try {
+                    val page = c.getItems(parentId = library.id, sortBy = sortBy, sortOrder = activeOrder,
+                        limit = 50, startIndex = gridNextIndex)
+                    if (selectedLibrary == library && librarySort == activeSort && librarySortOrder == activeOrder) {
+                        gridItems = (gridItems + page).distinctBy { it.id }
+                        gridNextIndex += page.size
+                        gridHasMore = page.size == 50
+                    }
+                } catch (_: Exception) {
+                    gridHasMore = false
+                } finally {
+                    gridAppending = false
+                }
+            }
         }
     }
 
@@ -277,10 +368,14 @@ fun HomeScreen(
 
     val hero = resume.firstOrNull() ?: movies.firstOrNull() ?: series.firstOrNull()
 
-    val recListState = rememberLazyListState()
-    val gridState = rememberLazyGridState()
-    val scope = rememberCoroutineScope()
     val navFocus = remember { FocusRequester() }
+
+    LaunchedEffect(navHidden, tab, selectedLibrary) {
+        if (!navHidden) {
+            delay(3000)
+            navHidden = true
+        }
+    }
 
     // 导航自动隐藏：往下滑离开顶部即隐藏，回到顶部/切换标签恢复
     LaunchedEffect(tab, selectedLibrary) {
@@ -302,7 +397,13 @@ fun HomeScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp && navHidden) {
+            navHidden = false
+            scope.launch { delay(80); runCatching { navFocus.requestFocus() } }
+            true
+        } else false
+    }) {
         when {
             loading -> LoadingView(text = "正在读取影库…")
                 error != null -> Column(
@@ -316,18 +417,18 @@ fun HomeScreen(
                 }
                 tab == HomeTab.Recommend -> LazyColumn(state = recListState, modifier = Modifier.fillMaxSize()) {
                     item { Hero(hero, client?.backdropUrl(hero ?: MediaItem("", ""), 1920), onPlay, onOpenDetail) }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume) { onOpenDetail(it.id) } }
-                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites) { onOpenDetail(it.id) } }
-                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest) { onOpenDetail(it.id) } }
-                    if (movies.isNotEmpty()) item { RowSection("电影", movies) { onOpenDetail(it.id) } }
-                    if (series.isNotEmpty()) item { RowSection("剧集", series) { onOpenDetail(it.id) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, onItemFocused = { focusedMediaId = it }) { onPlay(it) } }
+                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, onItemFocused = { focusedMediaId = it }) { onOpenDetail(it.id) } }
+                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, onItemFocused = { focusedMediaId = it }) { onOpenDetail(it.id) } }
+                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, onItemFocused = { focusedMediaId = it }) { onOpenDetail(it.id) } }
+                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty(), focusItemId = focusedMediaId, onItemFocused = { focusedMediaId = it }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
                         val items = viewContents[v.id].orEmpty()
                         if (items.isNotEmpty()) {
                             item(key = "home-view-${v.id}") {
-                                RowSection(v.name, items) { onOpenDetail(it.id) }
+                                RowSection(v.name, items, focusItemId = focusedMediaId, onItemFocused = { focusedMediaId = it }) { onOpenDetail(it.id) }
                             }
                         }
                     }
@@ -335,17 +436,20 @@ fun HomeScreen(
                     item { Spacer(Modifier.height(140.dp)) }
                 }
                 tab == HomeTab.Media && selectedLibrary == null -> MediaLibrary(
+                    state = libraryListState,
                     views = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) },
                     contents = viewContents,
+                    focusedItemId = focusedMediaId,
+                    onItemFocused = { focusedMediaId = it },
                     onOpenDetail = onOpenDetail,
-                    onOpenLibrary = { selectedLibrary = it },
+                    onOpenLibrary = { selectedLibraryId = it.id },
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize().padding(top = 64.dp)) {
                     Row(
                         Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 6.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        FocusSurface(modifier = Modifier.height(40.dp).width(96.dp), corner = 20.dp, onClick = { selectedLibrary = null; gridItems = emptyList() }) { focused ->
+                        FocusSurface(modifier = Modifier.height(40.dp).width(96.dp), corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("‹ 返回", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                             }
@@ -363,11 +467,7 @@ fun HomeScreen(
                         FocusSurface(
                             modifier = Modifier.height(40.dp).width(112.dp),
                             corner = 20.dp, scaleTo = 1.03f,
-                            onClick = {
-                                val keys = SORT_LABELS.keys.toList()
-                                val idx = keys.indexOf(librarySort)
-                                librarySort = keys[(idx + 1) % keys.size]
-                            },
+                            onClick = { sortMenuOpen = true },
                         ) { focused ->
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -376,31 +476,26 @@ fun HomeScreen(
                                 }
                             }
                         }
-                    }
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        SORT_LABELS.forEach { (key, label) ->
-                            val active = librarySort == key
-                            FocusSurface(modifier = Modifier.height(32.dp).width(86.dp), corner = 16.dp, scaleTo = 1.03f, onClick = { librarySort = key }) { focused ->
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        label,
-                                        color = when {
-                                            active -> Color(0xFF06101F)
-                                            focused -> Accent
-                                            else -> TextSub
-                                        },
-                                        fontSize = 12.sp,
-                                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                        maxLines = 1,
-                                    )
-                                }
+                        androidx.compose.material3.DropdownMenu(
+                            expanded = sortMenuOpen,
+                            onDismissRequest = { sortMenuOpen = false },
+                        ) {
+                            SORT_LABELS.forEach { (key, label) ->
+                                DropdownMenuItem(text = { Text(label) }, onClick = {
+                                    librarySort = key
+                                    sortMenuOpen = false
+                                })
                             }
+                            DropdownMenuItem(
+                                text = { Text(if (librarySortOrder == "Ascending") "升序 ↑" else "降序 ↓") },
+                                onClick = {
+                                    librarySortOrder = if (librarySortOrder == "Ascending") "Descending" else "Ascending"
+                                    sortMenuOpen = false
+                                },
+                            )
                         }
                     }
-                    if (gridLoading) LoadingView(text = "正在读取 ${selectedLibrary?.name.orEmpty()}…")
+                    if (gridLoading && gridItems.isEmpty()) LoadingView(text = "正在读取 ${selectedLibrary?.name.orEmpty()}…")
                     else if (libraryError != null) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("读取失败：${libraryError}", color = TextSub, fontSize = 13.sp)
                     }
@@ -416,7 +511,10 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         items(gridItems, key = { it.id }) { media ->
-                            PosterCard(item = media, imageUrl = client?.imageUrl(media), onClick = { onOpenDetail(media.id) })
+                            PosterCard(item = media, imageUrl = client?.imageUrl(media), requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && media == gridItems.firstOrNull()), onFocused = { focusedMediaId = media.id }, onClick = { onOpenDetail(media.id) })
+                        }
+                        if (gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
+                            androidx.compose.material3.CircularProgressIndicator(Modifier.padding(20.dp).size(24.dp), color = Accent, strokeWidth = 2.dp)
                         }
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             OpenNavButton { navHidden = false; scope.launch { delay(220); runCatching { navFocus.requestFocus() } } }
@@ -439,6 +537,8 @@ fun HomeScreen(
                         PosterCard(
                             item = it,
                             imageUrl = client?.imageUrl(it),
+                            requestInitialFocus = focusedMediaId == it.id || (initialFocusPending && focusedMediaId == null && it == gridItems.firstOrNull()),
+                            onFocused = { focusedMediaId = it.id },
                             onClick = { onOpenDetail(it.id) },
                         )
                     }
@@ -459,7 +559,7 @@ fun HomeScreen(
         ) {
 NavBar(
                 tab = tab,
-                onSelect = { t, _ -> tab = t; selectedLibrary = null },
+                onSelect = { t, _ -> tab = t; selectedLibraryId = null },
                 onSearch = onSearch,
                 onSettings = onSettings,
                 onSwitchServer = onSwitchServer,
@@ -646,6 +746,7 @@ private val SORT_LABELS = linkedMapOf(
     "name" to "名称",
     "rating" to "评分",
     "year" to "年份",
+    "plays" to "播放次数",
 )
 
 @Composable
@@ -724,8 +825,11 @@ private fun TabChip(
 /** 媒体库：展示服务器自带的全部分类（按 setup 顺序），可一直往下滑；隐藏项由设置页控制。 */
 @Composable
 private fun MediaLibrary(
+    state: LazyListState,
     views: List<LibraryView>,
     contents: Map<String, List<MediaItem>>,
+    focusedItemId: String?,
+    onItemFocused: (String) -> Unit,
     onOpenDetail: (String) -> Unit,
     onOpenLibrary: (LibraryView) -> Unit,
 ) {
@@ -736,7 +840,7 @@ private fun MediaLibrary(
         }
         return
     }
-    LazyColumn(Modifier.fillMaxSize().padding(top = 80.dp)) {
+    LazyColumn(state = state, modifier = Modifier.fillMaxSize().padding(top = 80.dp)) {
         item {
             Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 8.dp, bottom = 6.dp)) {
                 Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -760,7 +864,7 @@ private fun MediaLibrary(
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                         ) {
                             items(items, key = { it.id }) { it ->
-                                PosterCard(item = it, imageUrl = client?.imageUrl(it), onClick = { onOpenDetail(it.id) })
+                                PosterCard(item = it, imageUrl = client?.imageUrl(it), requestInitialFocus = it.id == focusedItemId, onFocused = { onItemFocused(it.id) }, onClick = { onOpenDetail(it.id) })
                             }
                         }
                     }
@@ -893,7 +997,14 @@ private fun Hero(
 }
 
 @Composable
-private fun RowSection(title: String, items: List<MediaItem>, onClick: (MediaItem) -> Unit) {
+private fun RowSection(
+    title: String,
+    items: List<MediaItem>,
+    requestInitialFocus: Boolean = false,
+    focusItemId: String? = null,
+    onItemFocused: ((String) -> Unit)? = null,
+    onClick: (MediaItem) -> Unit,
+) {
     val client = AppRuntime.client
     Column(Modifier.padding(top = 16.dp)) {
         SectionTitle(title, Modifier.padding(start = 34.dp, bottom = 10.dp))
@@ -902,7 +1013,13 @@ private fun RowSection(title: String, items: List<MediaItem>, onClick: (MediaIte
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             items(items, key = { it.id }) { it ->
-                PosterCard(item = it, imageUrl = client?.imageUrl(it), onClick = { onClick(it) })
+                PosterCard(
+                    item = it,
+                    imageUrl = client?.imageUrl(it),
+                    requestInitialFocus = it.id == focusItemId || (requestInitialFocus && it == items.firstOrNull()),
+                    onFocused = { onItemFocused?.invoke(it.id) },
+                    onClick = { onClick(it) },
+                )
             }
         }
     }

@@ -30,10 +30,14 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -127,12 +131,13 @@ fun GlassPanel(
     modifier: Modifier = Modifier,
     corner: Dp = 24.dp,
     focused: Boolean = false,
+    fillColor: Color? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     Box(
         modifier
             .clip(RoundedCornerShape(corner))
-            .background(if (focused) ThemeRuntime.glassFill(true).copy(alpha = 1.4f) else ThemeRuntime.glassFill(false))
+            .background(fillColor ?: if (focused) ThemeRuntime.glassFill(true).copy(alpha = 1.4f) else ThemeRuntime.glassFill(false))
             .border(
                 width = if (focused) 1.5.dp else 1.dp,
                 color = ThemeRuntime.glassLine(focused),
@@ -179,14 +184,25 @@ fun PosterCard(
     item: MediaItem,
     imageUrl: String?,
     width: Dp = 168.dp,
+    requestInitialFocus: Boolean = false,
+    onFocused: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
+    val focusRequester = remember { FocusRequester() }
     val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(180), label = "posterScale")
+    LaunchedEffect(requestInitialFocus) {
+        if (requestInitialFocus) {
+            kotlinx.coroutines.delay(120)
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
     Column(
         Modifier
             .width(width)
+            .then(if (requestInitialFocus) Modifier.focusRequester(focusRequester) else Modifier)
+            .onFocusChanged { if (it.isFocused) onFocused?.invoke() }
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,6 +85,9 @@ fun DetailScreen(
     var showSourceMenu by remember { mutableStateOf(false) }
     var isFav by remember { mutableStateOf(false) }
     var isPlayed by remember { mutableStateOf(false) }
+    var focusedRelatedId by rememberSaveable(id) { mutableStateOf<String?>(null) }
+    val castRowState = rememberLazyListState()
+    val similarRowState = rememberLazyListState()
 
     LaunchedEffect(id) {
         similar = emptyList()
@@ -417,7 +422,7 @@ fun DetailScreen(
 
                 if (episodes.isNotEmpty()) {
                     Spacer(Modifier.height(14.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LazyRow(state = castRowState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(episodes, key = { it.id }) { ep ->
                             EpisodeCard(ep, client?.imageUrl(ep, 360)) { onPlay(ep) }
                         }
@@ -439,12 +444,14 @@ fun DetailScreen(
                     Spacer(Modifier.height(24.dp))
                     Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    LazyRow(state = similarRowState, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         items(similar, key = { it.id }) { related ->
                             PosterCard(
                                 item = related,
                                 imageUrl = client?.imageUrl(related),
                                 width = 138.dp,
+                                requestInitialFocus = related.id == focusedRelatedId,
+                                onFocused = { focusedRelatedId = related.id },
                                 onClick = { onOpenDetail(related.id) },
                             )
                         }
