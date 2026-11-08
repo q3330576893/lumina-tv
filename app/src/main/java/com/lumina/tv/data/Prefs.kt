@@ -193,6 +193,34 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("auto_next", false)
         set(v) = sp.edit().putBoolean("auto_next", v).apply()
 
+    var endSkipSeconds: Int
+        get() = sp.getInt("end_skip_seconds", 30).coerceIn(0, 60)
+        set(v) = sp.edit().putInt("end_skip_seconds", v.coerceIn(0, 60)).apply()
+
+    var searchHistoryJson: String
+        get() = sp.getString("search_history", "[]") ?: "[]"
+        private set(v) = sp.edit().putString("search_history", v).apply()
+
+    fun searchHistory(): List<String> = runCatching {
+        val array = org.json.JSONArray(searchHistoryJson)
+        (0 until array.length()).mapNotNull { array.optString(it).trim().takeIf(String::isNotEmpty) }.take(8)
+    }.getOrDefault(emptyList())
+
+    fun rememberSearch(query: String) {
+        val normalized = query.trim()
+        if (normalized.isBlank()) return
+        searchHistoryJson = org.json.JSONArray().apply {
+            (listOf(normalized) + searchHistory().filterNot { it.equals(normalized, ignoreCase = true) })
+                .take(8).forEach(::put)
+        }.toString()
+    }
+
+    fun removeSearch(query: String) {
+        searchHistoryJson = org.json.JSONArray().apply {
+            searchHistory().filterNot { it == query }.forEach(::put)
+        }.toString()
+    }
+
     /** 开机自启（TV 盒子实用） */
     var bootLaunch: Boolean
         get() = sp.getBoolean("boot_launch", false)

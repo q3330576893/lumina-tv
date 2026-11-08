@@ -1,25 +1,26 @@
 package com.lumina.tv.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -27,17 +28,24 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.github.promeg.pinyinhelper.Pinyin
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.ui.components.EmptyView
@@ -48,7 +56,8 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.GlassLine
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
-import com.github.promeg.pinyinhelper.Pinyin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 @Composable
@@ -58,174 +67,297 @@ fun SearchScreen(
     onBack: () -> Unit,
 ) {
     val client = AppRuntime.client
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val prefs = AppRuntime.prefs
+    val keyboard = LocalSoftwareKeyboardController.current
+    val density = LocalDensity.current
+    val inputFocus = remember { FocusRequester() }
     var keyword by rememberSaveable { mutableStateOf(initialKeyword) }
     var results by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var latest by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var hasMore by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
+    var pageStart by remember { mutableIntStateOf(0) }
+    var searchNow by remember { mutableIntStateOf(0) }
+    var handledSearchNow by remember { mutableIntStateOf(0) }
+    var history by remember { mutableStateOf(prefs?.searchHistory().orEmpty()) }
     var focusedItemId by rememberSaveable { mutableStateOf<String?>(null) }
     var typeFilter by rememberSaveable { mutableIntStateOf(0) }
     var yearFilter by rememberSaveable { mutableIntStateOf(0) }
     var ratingFilter by rememberSaveable { mutableIntStateOf(0) }
     var favoritesOnly by rememberSaveable { mutableStateOf(false) }
     var unwatchedOnly by rememberSaveable { mutableStateOf(false) }
-    val resultGridState = rememberLazyGridState()
+    val gridState = rememberLazyGridState()
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
 
-    suspend fun doSearch(k: String) {
-        if (k.isBlank() || client == null) return
-        loading = true
-        results = runCatching { client.getItems(searchTerm = k, limit = 60) }.getOrDefault(emptyList())
-        loading = false
-        searched = true
+    fun submitSearch(query: String = keyword) {
+        keyword = query
+        searchNow++
     }
 
-    LaunchedEffect(initialKeyword) {
+    BackHandler {
+        if (imeVisible) keyboard?.hide() else onBack()
+    }
+
+    LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "搜索"
-        val query = keyword.ifBlank { initialKeyword }
-        if (query.isNotBlank()) doSearch(query)
+        runCatching { inputFocus.requestFocus() }
+        latest = runCatching { client?.getLatest(null, 12) }.getOrNull().orEmpty()
     }
+
+    LaunchedEffect(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow) {
+        val query = keyword.trim()
+        if (query.isBlank()) {
+            results = emptyList()
+            pageStart = 0
+            hasMore = false
+            loading = false
+            loadingMore = false
+            searched = false
+            gridState.scrollToItem(0)
+            return@LaunchedEffect
+        }
+        if (searchNow != handledSearchNow) handledSearchNow = searchNow else delay(400)
+        val currentClient = client ?: return@LaunchedEffect
+        loading = true
+        loadingMore = false
+        results = emptyList()
+        pageStart = 0
+        searched = true
+        gridState.scrollToItem(0)
+        val filters = listOfNotNull(
+            "IsFavorite".takeIf { favoritesOnly },
+            "IsUnplayed".takeIf { unwatchedOnly },
+        ).joinToString(",").ifBlank { null }
+        val types = when (typeFilter) {
+            1 -> "Movie"
+            2 -> "Series"
+            else -> null
+        }
+        val page = runCatching {
+            currentClient.getItems(types = types, sortBy = "SortName", sortOrder = "Ascending", limit = 60,
+                startIndex = 0, searchTerm = query, filters = filters)
+        }.getOrDefault(emptyList())
+        results = page
+        pageStart = page.size
+        hasMore = page.size == 60 && pageStart < 300
+        loading = false
+        prefs?.rememberSearch(query)
+        history = prefs?.searchHistory().orEmpty()
+    }
+
+    LaunchedEffect(gridState, hasMore, loading, keyword, typeFilter, favoritesOnly, unwatchedOnly) {
+        snapshotFlow {
+            val layout = gridState.layoutInfo
+            Triple(layout.visibleItemsInfo.lastOrNull()?.index, layout.totalItemsCount, loadingMore)
+        }
+            .distinctUntilChanged()
+            .collect { (lastVisible, totalItems, isLoadingMore) ->
+                if (lastVisible == null || lastVisible < totalItems - 8 || !hasMore || isLoadingMore || loading || keyword.isBlank()) return@collect
+                val currentClient = client ?: return@collect
+                loadingMore = true
+                val filters = listOfNotNull(
+                    "IsFavorite".takeIf { favoritesOnly },
+                    "IsUnplayed".takeIf { unwatchedOnly },
+                ).joinToString(",").ifBlank { null }
+                val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
+                val page = runCatching {
+                    currentClient.getItems(types = types, sortBy = "SortName", sortOrder = "Ascending", limit = 60,
+                        startIndex = pageStart, searchTerm = keyword.trim(), filters = filters)
+                }.getOrDefault(emptyList())
+                results = (results + page).distinctBy { it.id }
+                pageStart += page.size
+                hasMore = page.size == 60 && pageStart < 300
+                loadingMore = false
+            }
+    }
+
+    val folded = remember(results) {
+        results.groupBy { if (it.type.equals("Episode", true)) it.seriesId ?: it.id else it.id }
+            .values.map { group -> group.firstOrNull { it.type.equals("Series", true) } ?: group.first() }
+    }
+    val visibleResults = remember(folded, keyword, yearFilter, ratingFilter) {
+        val query = keyword.trim()
+        val needle = query.filterNot(Char::isWhitespace)
+        fun matchRank(item: MediaItem): Int {
+            val name = item.name.trim()
+            if (name.equals(query, true)) return 0
+            if (name.startsWith(query, true)) return 1
+            if (name.contains(query, true)) return 2
+            val pinyin = runCatching {
+                val full = Pinyin.toPinyin(name, "").filterNot(Char::isWhitespace)
+                val initials = Pinyin.toPinyin(name, " ").split(' ').mapNotNull { it.firstOrNull() }.joinToString("")
+                when {
+                    full.equals(needle, true) || initials.equals(needle, true) -> 0
+                    full.startsWith(needle, true) || initials.startsWith(needle, true) -> 1
+                    full.contains(needle, true) || initials.contains(needle, true) -> 2
+                    else -> 3
+                }
+            }.getOrDefault(3)
+            return pinyin
+        }
+        folded.filter { item ->
+            val yearMatches = when (yearFilter) {
+                1 -> (item.year ?: 0) >= 2020
+                2 -> item.year in 2010..2019
+                3 -> (item.year ?: Int.MAX_VALUE) < 2020
+                else -> true
+            }
+            val score = item.rating ?: item.communityRating ?: 0.0
+            yearMatches && score >= listOf(0.0, 6.0, 7.0, 8.0)[ratingFilter] && matchRank(item) < 3
+        }.sortedWith(compareBy<MediaItem> { matchRank(it) }
+            .thenByDescending { it.rating ?: it.communityRating ?: 0.0 }
+            .thenByDescending { it.year ?: 0 })
+    }
+
+    val filterDescription = buildList {
+        add(when (typeFilter) { 1 -> "电影"; 2 -> "剧集"; else -> "全部类型" })
+        if (favoritesOnly) add("收藏")
+        if (unwatchedOnly) add("未看")
+        if (yearFilter != 0) add(listOf("", "2020+", "2010-2019", "2020 前")[yearFilter])
+        if (ratingFilter != 0) add("${listOf(0, 6, 7, 8)[ratingFilter]} 分以上")
+    }.joinToString(" · ")
 
     Column(
-        Modifier.fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(horizontal = 40.dp, vertical = 28.dp),
+        Modifier.fillMaxSize().padding(horizontal = 40.dp, vertical = 28.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = keyword,
                 onValueChange = { keyword = it },
-                placeholder = { Text("搜索电影、剧集…", color = TextSub.copy(alpha = 0.7f), fontSize = 13.sp) },
+                placeholder = { Text("搜索电影、剧集", color = TextSub.copy(alpha = 0.7f), fontSize = 13.sp) },
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { submitSearch() }),
+                trailingIcon = {
+                    if (keyword.isNotEmpty()) FocusSurface(Modifier.width(42.dp).height(42.dp), corner = 21.dp,
+                        onClick = { keyword = "" }) { focused ->
+                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
+                            Text("清除", color = TextSub, fontSize = 11.sp)
+                        }
+                    }
+                },
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = TextMain,
-                    unfocusedTextColor = TextMain,
-                    focusedBorderColor = Accent,
-                    unfocusedBorderColor = GlassLine,
-                    cursorColor = Accent,
+                    focusedTextColor = TextMain, unfocusedTextColor = TextMain,
+                    focusedBorderColor = Accent, unfocusedBorderColor = GlassLine, cursorColor = Accent,
                 ),
-                modifier = Modifier.weight(1f).widthIn(min = 0.dp),
+                modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(inputFocus),
             )
             Spacer(Modifier.width(12.dp))
-            FocusSurface(
-                modifier = Modifier.height(52.dp).width(96.dp),
-                corner = 16.dp,
-                onClick = { if (keyword.isNotBlank()) scope.launch { doSearch(keyword) } },
-            ) { focused ->
-                Box(
-                    Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
-                    contentAlignment = Alignment.Center,
-                ) { Text("搜索", color = TextMain, fontSize = 13.sp) }
+            FocusSurface(Modifier.height(52.dp).width(96.dp), corner = 16.dp,
+                onClick = { submitSearch() }) { focused ->
+                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                    Text("搜索", color = TextMain, fontSize = 13.sp)
+                }
             }
             Spacer(Modifier.width(10.dp))
-            FocusSurface(
-                modifier = Modifier.height(52.dp).width(96.dp),
-                corner = 16.dp,
-                onClick = onBack,
-            ) { focused ->
-                Box(
-                    Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
-                    contentAlignment = Alignment.Center,
-                ) { Text("返回", color = TextMain, fontSize = 13.sp) }
+            FocusSurface(Modifier.height(52.dp).width(96.dp), corner = 16.dp, onClick = onBack) { focused ->
+                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                    Text("返回", color = TextMain, fontSize = 13.sp)
+                }
             }
         }
 
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("全部", "电影", "剧集").forEachIndexed { index, label ->
-                FocusSurface(Modifier.height(34.dp).width(74.dp), corner = 17.dp, scaleTo = 1f,
-                    onClick = { typeFilter = index }) { focused ->
-                    Box(Modifier.fillMaxSize().background(
-                        if (typeFilter == index) Accent.copy(alpha = .9f) else if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
-                        RoundedCornerShape(17.dp)), contentAlignment = Alignment.Center) {
-                        Text(label, color = if (typeFilter == index) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
-                    }
-                }
+                FilterChip(label, typeFilter == index) { typeFilter = index }
             }
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("全部年份", "2020+", "2010-2019", "2020 以前").forEachIndexed { index, label ->
+            listOf("全部年份", "2020+", "2010-19", "2020 前").forEachIndexed { index, label ->
                 FilterChip(label, yearFilter == index) { yearFilter = index }
             }
             listOf("不限分", "6+", "7+", "8+").forEachIndexed { index, label ->
                 FilterChip(label, ratingFilter == index) { ratingFilter = index }
             }
             FilterChip("收藏", favoritesOnly) { favoritesOnly = !favoritesOnly }
-            FilterChip("未观看", unwatchedOnly) { unwatchedOnly = !unwatchedOnly }
+            FilterChip("未看", unwatchedOnly) { unwatchedOnly = !unwatchedOnly }
         }
 
-        val visibleResults = remember(results, keyword, typeFilter, yearFilter, ratingFilter, favoritesOnly, unwatchedOnly) {
-            val q = keyword.trim()
-            results.filter { item ->
-                val typeMatches = when (typeFilter) {
-                    1 -> item.type.equals("Movie", true)
-                    2 -> item.type.equals("Series", true) || item.type.equals("Episode", true)
-                    else -> true
-                }
-                val yearMatches = when (yearFilter) {
-                    1 -> (item.year ?: 0) >= 2020
-                    2 -> item.year in 2010..2019
-                    3 -> (item.year ?: Int.MAX_VALUE) < 2020
-                    else -> true
-                }
-                val score = item.rating ?: item.communityRating ?: 0.0
-                val ratingMatches = score >= listOf(0.0, 6.0, 7.0, 8.0)[ratingFilter]
-                val textMatches = q.isBlank() || item.name.contains(q, true) ||
-                    runCatching {
-                        val full = Pinyin.toPinyin(item.name, "").filterNot(Char::isWhitespace)
-                        val initials = Pinyin.toPinyin(item.name, " ").split(' ')
-                            .mapNotNull { it.firstOrNull() }.joinToString("")
-                        val needle = q.filterNot(Char::isWhitespace)
-                        full.contains(needle, true) || initials.contains(needle, true)
-                    }.getOrDefault(false)
-                typeMatches && yearMatches && ratingMatches && textMatches &&
-                    (!favoritesOnly || item.isFavorite) && (!unwatchedOnly || !item.played)
-            }
-        }
-        val groups = remember(visibleResults) {
-            listOf("电影" to visibleResults.filter { it.type.equals("Movie", true) },
-                "剧集" to visibleResults.filter { it.type.equals("Series", true) || it.type.equals("Episode", true) },
-                "其他" to visibleResults.filterNot { it.type.equals("Movie", true) || it.type.equals("Series", true) || it.type.equals("Episode", true) })
-                .filter { it.second.isNotEmpty() }
-        }
-        Spacer(Modifier.height(8.dp))
-
+        Spacer(Modifier.height(10.dp))
         when {
-            loading -> LoadingView(text = "搜索中…")
-            visibleResults.isNotEmpty() -> LazyVerticalGrid(
-                state = resultGridState,
-                columns = GridCells.Adaptive(150.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                groups.forEach { (group, groupItems) ->
-                item(key = "header:$group", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
-                    Text(group, color = TextMain, fontSize = 16.sp, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+            loading && results.isEmpty() -> LoadingView(text = "搜索中…")
+            keyword.isNotBlank() && searched -> {
+                Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("找到 ${visibleResults.size} 个结果", color = TextMain, fontSize = 14.sp)
+                    Spacer(Modifier.width(12.dp))
+                    Text(filterDescription, color = TextSub, fontSize = 11.sp)
                 }
-                items(groupItems, key = { it.id }) { item ->
-                    PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp,
-                        requestInitialFocus = item.id == focusedItemId || (focusedItemId == null && item == visibleResults.firstOrNull()),
-                        onFocused = { focusedItemId = item.id }) {
-                        onOpenDetail(item.seriesId ?: item.id)
+                if (visibleResults.isEmpty()) {
+                    EmptyView("没有找到相关内容")
+                } else {
+                    LazyVerticalGrid(
+                        state = gridState,
+                        columns = GridCells.Adaptive(150.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        items(visibleResults, key = { it.id }) { item ->
+                            PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp,
+                                requestInitialFocus = item.id == focusedItemId || (focusedItemId == null && item == visibleResults.firstOrNull()),
+                                onFocused = { focusedItemId = item.id }) {
+                                onOpenDetail(item.seriesId ?: item.id)
+                            }
+                        }
+                        if (loadingMore) item { LoadingView(text = "加载更多…") }
                     }
                 }
+            }
+            else -> {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(150.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    if (history.isNotEmpty()) {
+                        item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                            Column {
+                                Text("最近搜索", color = TextSub, fontSize = 12.sp)
+                                Spacer(Modifier.height(8.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    history.forEach { entry ->
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            FilterChip(entry.take(12), false) { submitSearch(entry) }
+                                            FocusSurface(Modifier.width(30.dp).height(32.dp), corner = 15.dp,
+                                                onClick = { prefs?.removeSearch(entry); history = prefs?.searchHistory().orEmpty() }) { focused ->
+                                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
+                                                    Text("×", color = TextSub, fontSize = 16.sp)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.height(12.dp))
+                            }
+                        }
+                    }
+                    item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                        Text("最近添加", color = TextMain, fontSize = 16.sp, modifier = Modifier.padding(bottom = 2.dp))
+                    }
+                    items(latest, key = { "latest:${it.id}" }) { item ->
+                        PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp,
+                            requestInitialFocus = item == latest.firstOrNull(), onFocused = {}) {
+                            onOpenDetail(item.seriesId ?: item.id)
+                        }
+                    }
+                    if (latest.isEmpty()) item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                        EmptyView("暂无最近添加内容")
+                    }
                 }
             }
-            searched -> EmptyView("没有找到「$keyword」相关内容")
-            else -> EmptyView("输入关键词开始搜索")
         }
     }
 }
 
 @Composable
 private fun FilterChip(label: String, active: Boolean, onClick: () -> Unit) {
-    FocusSurface(Modifier.height(32.dp).width(78.dp), corner = 16.dp, scaleTo = 1f, onClick = onClick) { focused ->
-        Box(Modifier.fillMaxSize().background(
+    FocusSurface(Modifier.height(32.dp).widthIn(min = 54.dp).padding(horizontal = 0.dp), corner = 16.dp, scaleTo = 1f, onClick = onClick) { focused ->
+        Box(Modifier.background(
             if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
-            RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+            RoundedCornerShape(16.dp)).padding(horizontal = 12.dp, vertical = 7.dp), contentAlignment = Alignment.Center) {
             Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 10.sp, maxLines = 1)
         }
     }

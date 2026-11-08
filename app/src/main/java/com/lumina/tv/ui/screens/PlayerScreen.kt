@@ -110,6 +110,7 @@ import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.ui.components.DiagExportDialog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -215,6 +216,10 @@ fun PlayerScreen(
     var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
     var nextEpisode by remember { mutableStateOf<MediaItem?>(null) }
     var nextCountdown by remember { mutableIntStateOf(0) }
+    var seekHoldDirection by remember { mutableIntStateOf(0) }
+    var seekHoldActive by remember { mutableStateOf(false) }
+    var seekHoldDelta by remember { mutableLongStateOf(0L) }
+    var seekHoldJob by remember { mutableStateOf<Job?>(null) }
     var chapters by remember { mutableStateOf<List<MediaChapter>>(emptyList()) }
     var chapterPanel by remember { mutableStateOf(false) }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
@@ -889,6 +894,36 @@ fun PlayerScreen(
         else "««  快退 ${-delta / 1000} 秒    ${formatTime(to)}"
     }
 
+    fun beginSeekHold(direction: Int) {
+        if (seekHoldDirection == direction) return
+        seekHoldJob?.cancel()
+        seekHoldDirection = direction
+        seekHoldActive = false
+        seekHoldDelta = 0L
+        seekHoldJob = scope.launch {
+            delay(500)
+            if (seekHoldDirection != direction) return@launch
+            seekHoldActive = true
+            while (seekHoldDirection == direction) {
+                seekBy(direction * 5_000L)
+                seekHoldDelta += direction * 5_000L
+                val seconds = kotlin.math.abs(seekHoldDelta) / 1000
+                seekHint = if (direction > 0) "快进 +${seconds} 秒" else "快退 -${seconds} 秒"
+                delay(120)
+            }
+        }
+    }
+
+    fun endSeekHold(direction: Int) {
+        if (seekHoldDirection != direction) return
+        seekHoldJob?.cancel()
+        seekHoldJob = null
+        if (!seekHoldActive) seekBy(direction * 10_000L)
+        seekHoldDirection = 0
+        seekHoldActive = false
+        seekHoldDelta = 0L
+    }
+
     LaunchedEffect(Unit) {
         var sinceReport = 0
         var bufferingSince = 0L
@@ -902,6 +937,30 @@ fun PlayerScreen(
             duration = when (activeEngine) {
                 "mpv" -> mpvBackend?.durationMs() ?: duration
                 else -> exo.duration.coerceAtLeast(0)
+            }
+            val endSkipSeconds = AppRuntime.prefs?.endSkipSeconds ?: 30
+            if (endSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
+                position >= duration - endSkipSeconds * 1000L
+            ) {
+                nextTriggered = true
+                scope.launch {
+                    val c = client ?: return@launch
+                    val list = if (episodes.isNotEmpty()) episodes
+                    else runCatching { c.getEpisodes(item.seriesId!!, item.seasonId) }.getOrDefault(emptyList())
+                    val index = list.indexOfFirst { it.id == item.id }
+                    val next = list.getOrNull(index + 1) ?: return@launch
+                    nextEpisode = next
+                    nextCountdown = 5
+                    while (nextCountdown > 0) {
+                        delay(1000)
+                        if (nextEpisode?.id != next.id) return@launch
+                        nextCountdown--
+                    }
+                    if (nextEpisode?.id == next.id) {
+                        nextEpisode = null
+                        onPlayNext?.invoke(next)
+                    }
+                }
             }
             if (activeEngine == "media3" && exo.playbackState == Player.STATE_BUFFERING) {
                 val now = System.currentTimeMillis()
@@ -1166,6 +1225,10 @@ fun PlayerScreen(
                     .focusRequester(hideFocus)
                     .focusable()
                     .onKeyEvent { ev ->
+                        if (ev.type == KeyEventType.KeyDown && nextEpisode != null) {
+                            nextEpisode = null
+                            nextCountdown = 0
+                        }
                         when (ev.key) {
                             Key.DirectionCenter, Key.Enter -> {
                                 if (ev.type == KeyEventType.KeyDown) {
@@ -1186,17 +1249,13 @@ fun PlayerScreen(
                                 }
                             }
                             Key.DirectionLeft -> {
-                                if (ev.type == KeyEventType.KeyDown) {
-                                    seekBy(-10_000)
-                                    showControls = true
-                                }
+                                if (ev.type == KeyEventType.KeyDown) beginSeekHold(-1) else endSeekHold(-1)
+                                showControls = true
                                 true
                             }
                             Key.DirectionRight -> {
-                                if (ev.type == KeyEventType.KeyDown) {
-                                    seekBy(10_000)
-                                    showControls = true
-                                }
+                                if (ev.type == KeyEventType.KeyDown) beginSeekHold(1) else endSeekHold(1)
+                                showControls = true
                                 true
                             }
                             Key.DirectionUp, Key.DirectionDown -> {
@@ -1215,7 +1274,30 @@ fun PlayerScreen(
                                 if (ev.type == KeyEventType.KeyDown) seekBy(30_000)
                                 true
                             }
-                            else -> false
+                            else -> {
+                                val nativeCode = ev.nativeKeyEvent.keyCode
+                                when {
+                                    ev.type == KeyEventType.KeyDown && nativeCode in android.view.KeyEvent.KEYCODE_1..android.view.KeyEvent.KEYCODE_9 && duration > 0 -> {
+                                        val percent = nativeCode - android.view.KeyEvent.KEYCODE_0
+                                        seekPlayerTo(duration * percent / 10)
+                                        seekHint = "跳到 ${percent * 10}%"
+                                        true
+                                    }
+                                    ev.type == KeyEventType.KeyDown && nativeCode == android.view.KeyEvent.KEYCODE_PAGE_UP -> {
+                                        subtitleOffsetMs = (subtitleOffsetMs - 250L).coerceIn(-10_000L, 10_000L)
+                                        AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
+                                        seekHint = "字幕偏移 ${subtitleOffsetMs}ms"
+                                        true
+                                    }
+                                    ev.type == KeyEventType.KeyDown && nativeCode == android.view.KeyEvent.KEYCODE_PAGE_DOWN -> {
+                                        subtitleOffsetMs = (subtitleOffsetMs + 250L).coerceIn(-10_000L, 10_000L)
+                                        AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
+                                        seekHint = "字幕偏移 ${subtitleOffsetMs}ms"
+                                        true
+                                    }
+                                    else -> false
+                                }
+                            }
                         }
                     }
             )
@@ -1684,7 +1766,7 @@ private fun OptionMenu(
                 Spacer(Modifier.height(8.dp))
                 MenuLabel("字幕同步 ${if (subtitleOffsetMs >= 0) "+" else ""}${subtitleOffsetMs}ms")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(-500L, -100L, 0L, 100L, 500L).forEach { step ->
+                    listOf(-100L, 0L, 100L).forEach { step ->
                         MenuChip(
                             label = if (step == 0L) "重置" else if (step > 0) "+${step}ms" else "${step}ms",
                             width = 90.dp,
@@ -1693,6 +1775,12 @@ private fun OptionMenu(
                             onClick = { onSubtitleOffset(if (step == 0L) 0L else subtitleOffsetMs + step) },
                         )
                     }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MenuChip(label = "-0.5s", width = 90.dp, active = false, activeColor = Accent,
+                        onClick = { onSubtitleOffset(subtitleOffsetMs - 500L) })
+                    MenuChip(label = "+0.5s", width = 90.dp, active = false, activeColor = Accent,
+                        onClick = { onSubtitleOffset(subtitleOffsetMs + 500L) })
                 }
 
                 Spacer(Modifier.height(16.dp))

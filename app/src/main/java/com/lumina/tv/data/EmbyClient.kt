@@ -639,6 +639,13 @@ data class PlaybackTarget(
                     .firstOrNull { it.optString("Id") == mediaSourceId }
             } else null
             val first = chosen ?: sources?.optJSONObject(0)
+            val responsePositionTicks = info.optJSONObject("UserData")
+                ?.optLong("PlaybackPositionTicks", -1L)
+                ?: info.optJSONObject("Item")?.optJSONObject("UserData")?.optLong("PlaybackPositionTicks", -1L)
+                ?: first?.optJSONObject("UserData")?.optLong("PlaybackPositionTicks", -1L)
+                ?: -1L
+            val resolvedStartPositionMs = if (responsePositionTicks >= 0L) responsePositionTicks / 10_000L
+                else startPositionMs.coerceAtLeast(0L)
             val msId = first?.optString("Id")?.ifBlank { null } ?: item.id
             val source = if (first != null) parseMediaSource(first) else MediaSource(
                 id = msId, name = "源", container = null,
@@ -706,7 +713,7 @@ data class PlaybackTarget(
                 // STRM 直链本身就是直连播放，不参与转码判定
                 direct = if (isStrm && !forceTranscode) true else useDirect,
                 source = source,
-                startPositionMs = startPositionMs.coerceAtLeast(0L),
+                startPositionMs = resolvedStartPositionMs,
                 headers = headers,
             )
         }
