@@ -170,12 +170,12 @@ fun PlayerScreen(
     var softDecodeNoticeShown by remember(item.id) { mutableStateOf(false) }
     var mpvFallbackTried by remember(item.id) { mutableStateOf(false) }
     var ffmpegFallback by remember(item.id) { mutableStateOf(false) }
+    // 用户手动选过内核、或已确认 media3 解不了时，把内核钉住，后续重载不再强行弹回 media3
+    var enginePinned by remember(item.id) { mutableStateOf<String?>(null) }
     var activeEngine by remember(item.id) {
-        mutableStateOf(when (AppRuntime.prefs?.audioDecodeMode) {
-            "soft" -> "mpv"
-            "passthrough" -> "media3"
-            else -> if (AppRuntime.prefs?.playerEngine == "mpv") "mpv" else "media3"
-        })
+        // media3 永远是默认内核；只有用户在设置里显式选了 mpv 才直接用 mpv。
+        // 音频档位（auto/soft/passthrough）只影响解码策略，不再有强制切内核的权力。
+        mutableStateOf(if (AppRuntime.prefs?.playerEngine == "mpv") "mpv" else "media3")
     }
     var mpvBackend by remember(item.id) { mutableStateOf<MpvPlayerController?>(null) }
     var mpvState by remember(item.id) { mutableStateOf(MpvPlayerController.State()) }
@@ -321,13 +321,12 @@ fun PlayerScreen(
                     ?: target.source?.audioStreams?.firstOrNull()
                 val audioCodec = listOfNotNull(defaultAudio?.codec, defaultAudio?.profile).joinToString(" ").lowercase()
                 val unsupportedAudio = listOf("truehd", "dts", "dca", "mlp", "atmos", "eac3").any(audioCodec::contains)
-                val selectedEngine = when (audioDecodeMode) {
-                    "soft" -> "mpv"
-                    "passthrough" -> "media3"
-                    else -> if (unsupportedAudio) "mpv" else if (AppRuntime.prefs?.playerEngine == "mpv") "mpv" else "media3"
-                }
+                // 统一走 media3 优先：不再因为音轨编码就提前把内核换成 mpv，
+                // 由 media3 真正解码失败后再自动回落，避免“什么都用 MPV 转圈”。
+                val selectedEngine = enginePinned
+                    ?: if (AppRuntime.prefs?.playerEngine == "mpv") "mpv" else "media3"
                 if (audioDecodeMode == "auto" && unsupportedAudio && !softDecodeNoticeShown) {
-                    audioDecodeNotice = "该音轨已用 mpv 本地软解"
+                    audioDecodeNotice = "检测到 ${audioCodec.trim().ifBlank { "高级" }} 音轨，先试本机硬解，失败会自动转本地软解"
                     softDecodeNoticeShown = true
                 }
                 if (activeEngine != selectedEngine) {
@@ -621,10 +620,11 @@ fun PlayerScreen(
                     buffering = false
                     audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
                     error = "设备不支持该音轨直通，建议改回自动"
-                } else if (audioDecodeMode == "auto" && err.errorCodeName.contains("DECOD", true) && !mpvFallbackTried) {
+                } else if (audioDecodeMode != "passthrough" && err.errorCodeName.contains("DECOD", true) && !mpvFallbackTried) {
                     buffering = false
                     mpvFallbackTried = true
-                    audioDecodeNotice = "该音轨已用 mpv 本地软解"
+                    audioDecodeNotice = "本机解码不支持该音轨，已自动切到 mpv 本地软解"
+                    enginePinned = "mpv"
                     activeEngine = "mpv"
                 } else if (!degraded) {
                     degraded = true
@@ -711,8 +711,9 @@ fun PlayerScreen(
                             if (audioDecodeMode == "passthrough") {
                                 audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
                                 error = "设备不支持该音轨直通，建议改回自动"
-                            } else if (audioDecodeMode == "auto" && activeEngine == "media3") {
-                                audioDecodeNotice = "该音轨已用 mpv 本地软解"
+                            } else if (audioDecodeMode != "passthrough" && activeEngine == "media3") {
+                                audioDecodeNotice = "该音轨已自动切到 mpv 本地软解"
+                                enginePinned = "mpv"
                                 activeEngine = "mpv"
                             } else {
                                 error = "该音轨（$codec）无法播放"
@@ -1174,6 +1175,7 @@ fun PlayerScreen(
                             currentResolution?.takeIf { it.isNotBlank() },
                             if (estimatedBitrate > 0L) "%.1f MB/s".format(estimatedBitrate / 8_000_000.0) else null,
                             if (degraded) "转码" else "直连",
+                            if (activeEngine == "mpv") "mpv 本地软解" else "media3",
                             "${speed}x",
                         ).joinToString(" · "),
                         color = TextSub.copy(alpha = 0.7f), fontSize = 11.sp,
@@ -1282,9 +1284,15 @@ fun PlayerScreen(
                     audioDecodeMode = mode
                     AppRuntime.prefs?.audioDecodeMode = mode
                     audioDecodeNotice = when (mode) {
-                        "soft" -> "全部音轨将在本地软解"
+                        "soft" -> "全部音轨将在本地软解（已切到 mpv）"
                         "passthrough" -> "已切换到音频直通"
                         else -> "已切换到自动音频解码"
+                    }
+                    // 显式选择才切内核：默认永远是 media3，避免"什么都用 MPV 转圈"
+                    when (mode) {
+                        "soft" -> { enginePinned = "mpv"; if (activeEngine != "mpv") activeEngine = "mpv" }
+                        "passthrough" -> { enginePinned = "media3"; if (activeEngine != "media3") activeEngine = "media3" }
+                        else -> enginePinned = null
                     }
                     engineSwitchTrace.add("audio-decode-mode=$mode")
                     reloadForceTranscode = false
@@ -1297,7 +1305,9 @@ fun PlayerScreen(
                     error = "正在切换播放内核…"
                     val engines = listOf("media3", "mpv")
                     if (engines.size > 1) {
-                        activeEngine = engines[(engines.indexOf(activeEngine).coerceAtLeast(0) + 1) % engines.size]
+                        val next = engines[(engines.indexOf(activeEngine).coerceAtLeast(0) + 1) % engines.size]
+                        enginePinned = next
+                        activeEngine = next
                     }
                 },
                 onlyMedia3Available = false,

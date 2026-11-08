@@ -20,8 +20,10 @@ object AppRuntime {
     var session: Session? = null
 
     var pairing: PairingServer? = null
-    var pairingUrl: String = ""
-    var pairingError: String? = null
+
+    /** 配对地址必须走 Compose 状态：配对服务是异步启动的，普通 var 不会触发重组，二维码会一直是空白。 */
+    var pairingUrl by mutableStateOf("")
+    var pairingError by mutableStateOf<String?>(null)
     var pairingStatus by mutableStateOf("")
 
     var screenLabel: String = "登录"
@@ -144,6 +146,19 @@ object AppRuntime {
         val ip = PairingServer.localIp()
         pairingUrl = if (server != null && ip != null) "http://$ip:${server.listeningPort}/?token=${issuePairingToken()}" else ""
         pairingError = if (server == null) "无法启动配对服务（端口被占用）" else if (ip == null) "未连接到局域网" else null
+    }
+
+    /** 重新签发配对 token 并刷新地址：二维码过期或一开始没拿到 IP 时手动兜底。 */
+    fun refreshPairingUrl() {
+        val server = pairing
+        if (server == null) {
+            pairingUrl = ""
+            pairingError = "配对服务未启动"
+            return
+        }
+        val ip = PairingServer.localIp()
+        pairingUrl = if (ip != null) "http://$ip:${server.listeningPort}/?token=${issuePairingToken()}" else ""
+        pairingError = if (ip == null) "未连接到局域网" else null
     }
 
     fun stopPairing() {

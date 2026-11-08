@@ -95,6 +95,20 @@ object LibraryCache {
         synchronized(this) { home = null }
     }
 
+    // ---- 媒体库网格滚动位置：index / 像素偏移 / 当时已加载条目数 ----
+    // 只放内存即可满足"点进影片再退出回到原位"；进程重启后从头开始是可接受的。
+    private val gridPositions = HashMap<String, Triple<Int, Int, Int>>()
+
+    fun gridPosition(key: String): Triple<Int, Int, Int>? = synchronized(this) { gridPositions[key] }
+
+    fun putGridPosition(key: String, index: Int, offset: Int, loaded: Int) {
+        synchronized(this) { gridPositions[key] = Triple(index, offset, loaded) }
+    }
+
+    fun clearGridPosition(key: String) {
+        synchronized(this) { gridPositions.remove(key) }
+    }
+
     fun invalidateDetail(id: String) {
         synchronized(this) { details.remove(id) }
     }
@@ -105,6 +119,7 @@ object LibraryCache {
             details.clear()
             seasonEpisodes.clear()
             browse.clear()
+            gridPositions.clear()
         }
     }
 }

@@ -286,6 +286,20 @@ class EmbyClient(
         } catch (_: Exception) { null }
     }
 
+    /** 换列表接口按 Ids 再取一次 People：部分服务器在单条目接口不回传 People（剧集尤甚）。 */
+    suspend fun getItemPeople(itemId: String): List<MediaPerson> = withContext(Dispatchers.IO) {
+        runCatching {
+            val params = mapOf(
+                "UserId" to userId,
+                "Ids" to itemId,
+                "Fields" to "People",
+                "Limit" to "1",
+            )
+            val arr = getSync(url("/Users/$userId/Items", params)).optJSONArray("Items") ?: JSONArray()
+            parseItems(arr).firstOrNull()?.people.orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
     suspend fun getChapters(itemId: String): List<MediaChapter> = withContext(Dispatchers.IO) {
         runCatching {
             val response = getSync(url("/Users/$userId/Items/$itemId", mapOf("Fields" to "Chapters")))

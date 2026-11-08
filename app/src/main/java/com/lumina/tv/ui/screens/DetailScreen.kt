@@ -39,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -61,6 +62,7 @@ import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
@@ -89,6 +91,7 @@ fun DetailScreen(
     var focusedRelatedId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     val castRowState = rememberLazyListState()
     val similarRowState = rememberLazyListState()
+    val playFocus = remember { FocusRequester() }
 
     LaunchedEffect(id) {
         similar = emptyList()
@@ -184,6 +187,35 @@ fun DetailScreen(
         }
     }
 
+    LaunchedEffect(item?.id) {
+        if (item == null) return@LaunchedEffect
+        delay(240)
+        runCatching { playFocus.requestFocus() }
+    }
+
+    // 部分服务器在剧集条目上不带 People：换列表接口再取一次，避免"主演"整块消失
+    LaunchedEffect(id, item) {
+        val current = item ?: return@LaunchedEffect
+        if (current.people.isNotEmpty()) return@LaunchedEffect
+        val extra = runCatching { client?.getItemPeople(id) }.getOrNull().orEmpty()
+        if (extra.isNotEmpty()) item = current.copy(people = extra)
+    }
+
+    // 相关推荐为空 → 退化成同类型高分片，避免整栏空白
+    LaunchedEffect(id, item) {
+        if (similar.isNotEmpty()) return@LaunchedEffect
+        val current = item ?: return@LaunchedEffect
+        val genre = current.genres.firstOrNull { it.isNotBlank() } ?: return@LaunchedEffect
+        val c = client ?: return@LaunchedEffect
+        similar = runCatching {
+            c.getItems(
+                types = if (current.type == "Series") "Series" else "Movie,Series",
+                sortBy = "CommunityRating", sortOrder = "Descending",
+                limit = 14, genre = genre,
+            )
+        }.getOrDefault(emptyList()).filterNot { it.id == id }.take(12)
+    }
+
     Box(Modifier.fillMaxSize()) {
         val it0 = item
         if (it0 != null) {
@@ -277,6 +309,7 @@ fun DetailScreen(
                             FocusSurface(
                                 modifier = Modifier.height(46.dp).width(150.dp),
                                 corner = 23.dp,
+                                focusRequester = playFocus,
                                 onClick = {
                                     val target = if (it0.type == "Series") {
                                         episodes.firstOrNull { !it.played && it.positionTicks > 0 }
@@ -448,10 +481,16 @@ fun DetailScreen(
                     }
                 }
                 val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
-                if (cast.isNotEmpty()) {
-                    Spacer(Modifier.height(22.dp))
-                    Text("主演与主创", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(22.dp))
+                Text("主演与主创", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(10.dp))
+                if (cast.isEmpty()) {
+                    Text(
+                        "暂无演职人员信息",
+                        color = TextSub, fontSize = 12.sp,
+                        modifier = Modifier.padding(vertical = 6.dp),
+                    )
+                } else {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
                             PersonCard(person = person, imageUrl = client?.personImageUrl(person))
@@ -459,10 +498,16 @@ fun DetailScreen(
                     }
                 }
 
-                if (similar.isNotEmpty()) {
-                    Spacer(Modifier.height(24.dp))
-                    Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(24.dp))
+                Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(10.dp))
+                if (similar.isEmpty()) {
+                    Text(
+                        "暂无相关推荐",
+                        color = TextSub, fontSize = 12.sp,
+                        modifier = Modifier.padding(vertical = 6.dp),
+                    )
+                } else {
                     LazyRow(state = similarRowState, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         items(similar, key = { it.id }) { related ->
                             PosterCard(

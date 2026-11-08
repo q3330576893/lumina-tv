@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -70,12 +71,14 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.google.zxing.integration.android.IntentIntegrator
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.EmbyClient
+import com.lumina.tv.data.SavedServer
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.QrCode
@@ -122,6 +125,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     var pendingPairConfig by remember { mutableStateOf<PairConfig?>(null) }
     var pairNotice by remember { mutableStateOf<String?>(null) }
     val loginFocusRequester = remember { FocusRequester() }
+    val passFocusRequester = remember { FocusRequester() }
 
     val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val parsed = IntentIntegrator.parseActivityResult(result.resultCode, result.data)
@@ -365,16 +369,40 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
             .background(Brush.radialGradient(listOf(Color(0x143DB8B0), Color.Transparent))))
         Box(Modifier.align(Alignment.BottomEnd).offset(x = 140.dp, y = 190.dp).size(520.dp)
             .background(Brush.radialGradient(listOf(Color(0x103B79D8), Color.Transparent))))
+        val savedServers = remember { AppRuntime.prefs?.savedServerList().orEmpty() }
+        fun fillFromSaved(server: SavedServer) {
+            val u = runCatching { Uri.parse(server.url) }.getOrNull()
+            scheme = if (u?.scheme == "https") "https" else "http"
+            host = u?.host ?: server.url.substringAfter("://").substringBefore(':').substringBefore('/')
+            port = u?.port?.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
+            path = u?.path.orEmpty().trim('/')
+            user = server.userName
+            pass = ""
+            pairNotice = "已填入 ${server.name}，补上密码即可登录"
+            error = null
+            runCatching { passFocusRequester.requestFocus() }
+        }
+        val maxCardHeight = maxHeight - 64.dp
         if (wide) {
-            Row(Modifier.fillMaxSize().padding(horizontal = 44.dp, vertical = 32.dp), verticalAlignment = Alignment.CenterVertically) {
-                LoginBrand(Modifier.weight(0.58f).fillMaxHeight())
-                Spacer(Modifier.width(28.dp))
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 32.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BrandPanel(
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                    savedServers = savedServers,
+                    onPickServer = { fillFromSaved(it) },
+                    expand = true,
+                )
+                Spacer(Modifier.width(44.dp))
                 LoginCard(
-                    Modifier.weight(1.42f).widthIn(min = 620.dp, max = 900.dp)
-                        .fillMaxHeight().verticalScroll(rememberScrollState()),
+                    Modifier.widthIn(min = 560.dp, max = 720.dp).heightIn(max = maxCardHeight)
+                        .verticalScroll(rememberScrollState()),
                     host, { host = it }, port, { port = it.filter(Char::isDigit).take(5) }, path, { path = it }, user, { user = it }, pass, { pass = it },
                     scheme, { scheme = it }, loading || probing, probing, error, AppRuntime.pairingUrl,
                     { submit() }, { launchScan() }, { helpOpen = true }, pairNotice, { pairNotice = null }, loginFocusRequester,
+                    onRefreshQr = { AppRuntime.refreshPairingUrl() },
+                    passFocus = passFocusRequester,
                 )
             }
         } else {
@@ -384,9 +412,15 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                     host, { host = it }, port, { port = it.filter(Char::isDigit).take(5) }, path, { path = it }, user, { user = it }, pass, { pass = it },
                     scheme, { scheme = it }, loading || probing, probing, error, AppRuntime.pairingUrl,
                     { submit() }, { launchScan() }, { helpOpen = true }, pairNotice, { pairNotice = null }, loginFocusRequester,
+                    onRefreshQr = { AppRuntime.refreshPairingUrl() },
+                    passFocus = passFocusRequester,
                 )
                 Spacer(Modifier.height(24.dp))
-                LoginBrand(Modifier.fillMaxWidth())
+                BrandPanel(
+                    modifier = Modifier.fillMaxWidth(),
+                    savedServers = savedServers,
+                    onPickServer = { fillFromSaved(it) },
+                )
             }
         }
     }
@@ -412,6 +446,8 @@ private fun LoginCard(
     scheme: String, onScheme: (String) -> Unit, busy: Boolean, probing: Boolean, error: String?,
     pairingUrl: String, onLogin: () -> Unit, onScan: () -> Unit, onHelp: () -> Unit,
     pairNotice: String?, onNoticeDismiss: () -> Unit, loginFocusRequester: FocusRequester,
+    onRefreshQr: () -> Unit,
+    passFocus: FocusRequester,
 ) {
     var qrOpen by remember { mutableStateOf(false) }
     var cardFocused by remember { mutableStateOf(false) }
@@ -453,15 +489,48 @@ private fun LoginCard(
                     QrCode(pairingUrl, size = 200.dp)
                 }
                 Text("手机扫码 → 填写 → 点『同步到电视』", color = InkSub, fontSize = 10.sp)
-                Text(pairingUrl, color = VioletBright, fontSize = 10.sp, maxLines = 2, modifier = Modifier.fillMaxWidth().clickable {
-                    clipboard.setText(AnnotatedString(pairingUrl))
-                    android.widget.Toast.makeText(context, "配对地址已复制", android.widget.Toast.LENGTH_SHORT).show()
-                })
-            } else Text(AppRuntime.pairingError ?: "未连接局域网，配对服务暂不可用", color = InkSub, fontSize = 11.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        pairingUrl, color = VioletBright, fontSize = 10.sp, maxLines = 2,
+                        modifier = Modifier.weight(1f).clickable {
+                            clipboard.setText(AnnotatedString(pairingUrl))
+                            android.widget.Toast.makeText(context, "配对地址已复制", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    FocusSurface(Modifier.height(30.dp), corner = 15.dp, onClick = onRefreshQr) { focused ->
+                        Box(
+                            Modifier.height(30.dp).background(
+                                if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
+                                RoundedCornerShape(15.dp),
+                            ).padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) { Text("刷新二维码", color = if (focused) VioletBright else Ink, fontSize = 10.sp) }
+                    }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        AppRuntime.pairingError ?: "未连接局域网，配对服务暂不可用",
+                        color = InkSub, fontSize = 11.sp, modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    FocusSurface(Modifier.height(30.dp), corner = 15.dp, onClick = onRefreshQr) { focused ->
+                        Box(
+                            Modifier.height(30.dp).background(
+                                if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
+                                RoundedCornerShape(15.dp),
+                            ).padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) { Text("重试", color = if (focused) VioletBright else Ink, fontSize = 10.sp) }
+                    }
+                }
+            }
             TextButton(onClick = { qrOpen = false }, modifier = Modifier.align(Alignment.End)) { Text("收起", color = VioletBright, fontSize = 11.sp) }
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x33FFFFFF)))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+        // 分割线独占一行；之前把协议 Row 写成了这个 1dp Box 的内容，导致整行被压成 1dp 高、压在下面的输入框上
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x33FFFFFF))) { }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 Text("协议", color = InkSub, fontSize = 11.sp)
                 listOf("http", "https").forEach { candidate ->
                     FocusSurface(Modifier.width(66.dp).height(36.dp), corner = 13.dp, onClick = { onScheme(candidate) }) { focused ->
@@ -477,7 +546,7 @@ private fun LoginCard(
             }
             GlassField(path, onPath, "路径（可选）", Modifier.fillMaxWidth(), ImeAction.Next)
             GlassField(user, onUser, "Emby 用户名", Modifier.fillMaxWidth(), ImeAction.Next)
-            GlassField(pass, onPass, "密码", Modifier.fillMaxWidth(), ImeAction.Done, password = true, onDone = onLogin)
+            GlassField(pass, onPass, "密码", Modifier.fillMaxWidth(), ImeAction.Done, password = true, onDone = onLogin, focusRequester = passFocus)
             FocusSurface(Modifier.fillMaxWidth().height(48.dp).focusRequester(loginFocusRequester), corner = 16.dp, scaleTo = 1.02f, onClick = onLogin) { focused ->
                 Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(if (focused) listOf(Color(0xFF58D9C7), Color(0xFF2694A0)) else listOf(Color(0xFF34B8AE), Color(0xFF207C8F))), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
                     if (busy) Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(17.dp), color = Color.White, strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text(if (probing) "正在探测服务器…" else "正在登录…", color = Color.White, fontSize = 13.sp) }
@@ -495,32 +564,97 @@ private fun LoginCard(
                 Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) { Text("帮助", color = if (focused) VioletBright else InkSub, fontSize = 11.sp) }
             }
         }
+        Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("v${com.lumina.tv.BuildConfig.VERSION_NAME} · Lumina for Emby", color = InkSub.copy(alpha = 0.65f), fontSize = 10.sp)
+            Spacer(Modifier.weight(1f))
+            Box(
+                Modifier.size(6.dp).background(
+                    if (pairingUrl.isNotBlank()) Color(0xFF35E0C0) else Color(0xFF6B7280),
+                    CircleShape,
+                )
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                if (pairingUrl.isNotBlank()) "局域网配对就绪" else "局域网未就绪",
+                color = InkSub.copy(alpha = 0.65f), fontSize = 10.sp,
+            )
+        }
         error?.let { Text(it, color = Color(0xFFFF929D), fontSize = 11.sp) }
     }
 }
 
 @Composable
-private fun LoginBrand(modifier: Modifier) {
-    Column(modifier.padding(horizontal = 10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)).background(Brush.linearGradient(listOf(Color(0xFF49C8B7), Color(0xFF657DE8)))), contentAlignment = Alignment.Center) {
-            Text("L", color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold)
+private fun BrandPanel(
+    modifier: Modifier,
+    savedServers: List<SavedServer>,
+    onPickServer: (SavedServer) -> Unit,
+    expand: Boolean = false,
+) {
+    Column(modifier.padding(horizontal = 10.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)).background(Brush.linearGradient(listOf(Color(0xFF49C8B7), Color(0xFF657DE8)))), contentAlignment = Alignment.Center) {
+                Text("L", color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold)
+            }
+            Text("LUMINA · EMBY", color = VioletBright, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Text("Lumina", color = Ink, fontSize = 42.sp, fontWeight = FontWeight.Bold)
+            Text("把 Emby 内容带到客厅屏幕", color = InkSub, fontSize = 15.sp)
         }
-        Text("LUMINA · EMBY", color = VioletBright, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-        Text("Lumina", color = Ink, fontSize = 42.sp, fontWeight = FontWeight.Bold)
-        Text("把 Emby 内容带到客厅屏幕", color = InkSub, fontSize = 15.sp)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(18.dp))
         Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
             Text("本地解码 · 支持 TrueHD / DTS", color = InkSub, fontSize = 12.sp, modifier = Modifier.height(22.dp))
             Text("手机扫码配对，无需遥控输入", color = InkSub, fontSize = 12.sp, modifier = Modifier.height(22.dp))
             Text("多服务器一键切换", color = InkSub, fontSize = 12.sp, modifier = Modifier.height(22.dp))
         }
+        Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             FeaturePill("4K HDR 直连")
             FeaturePill("多内核播放")
             FeaturePill("局域网同步")
         }
-        Spacer(Modifier.height(28.dp))
-        Text("版本 ${com.lumina.tv.BuildConfig.VERSION_NAME}", color = InkSub, fontSize = 10.sp)
+
+        if (savedServers.isNotEmpty()) {
+            Spacer(Modifier.height(26.dp))
+            Text("最近连接", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                savedServers.sortedByDescending { it.lastUsed }.take(3).forEach { server ->
+                    FocusSurface(
+                        modifier = Modifier.fillMaxWidth().height(58.dp),
+                        corner = 16.dp,
+                        scaleTo = 1.01f,
+                        onClick = { onPickServer(server) },
+                    ) { focused ->
+                        Row(
+                            Modifier.fillMaxSize()
+                                .background(if (focused) Color(0x1FFFFFFF) else Color(0x0DFFFFFF), RoundedCornerShape(16.dp))
+                                .padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                Modifier.size(30.dp).clip(CircleShape)
+                                    .background(if (focused) Color(0x3335E0C0) else Color(0x1FFFFFFF)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("L", color = if (focused) VioletBright else InkSub, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(server.name, color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    "${server.userName.ifBlank { "未记录账号" }} · ${server.url.substringAfter("://").trimEnd('/')}",
+                                    color = InkSub, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Text("填入", color = if (focused) VioletBright else InkSub, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 宽屏才把版本号压到底部；窄屏是可滚动的 wrap 高度，不能有 weight
+        if (expand) Spacer(Modifier.weight(1f)) else Spacer(Modifier.height(20.dp))
+        Text("版本 ${com.lumina.tv.BuildConfig.VERSION_NAME}", color = InkSub.copy(alpha = 0.6f), fontSize = 10.sp)
     }
 }
 

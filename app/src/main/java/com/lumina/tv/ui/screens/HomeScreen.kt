@@ -74,6 +74,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -177,19 +178,15 @@ fun HomeScreen(
     val recListState = rememberLazyListState()
     val libraryListState = rememberLazyListState()
     val gridStates = remember { mutableMapOf<String, LazyGridState>() }
-    var savedGridPosition by rememberSaveable { mutableStateOf("") }
     val gridStateKey = when {
         tab == HomeTab.Media -> "library:${selectedLibraryId ?: "list"}"
         else -> "tab:${tab.name}"
     }
     val gridState = remember(gridStateKey) {
-        gridStates.getOrPut(gridStateKey) {
-            val parts = savedGridPosition.split('|')
-            val index = if (parts.getOrNull(0) == gridStateKey) parts.getOrNull(1)?.toIntOrNull() ?: 0 else 0
-            val offset = if (parts.getOrNull(0) == gridStateKey) parts.getOrNull(2)?.toIntOrNull() ?: 0 else 0
-            LazyGridState(index, offset)
-        }
+        gridStates.getOrPut(gridStateKey) { LazyGridState() }
     }
+    // 待恢复的滚动位置：null 表示没有待恢复目标（此时才允许把位置写回缓存）
+    var pendingGridRestore by remember(gridStateKey) { mutableStateOf(LibraryCache.gridPosition(gridStateKey)) }
     val scope = rememberCoroutineScope()
     fun closeSortMenu() {
         sortMenuOpen = false
@@ -202,9 +199,56 @@ fun HomeScreen(
             runCatching { sortItemRequesters[librarySort]?.requestFocus() }
         }
     }
-    LaunchedEffect(gridStateKey, gridState) {
-        snapshotFlow { gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset }
-            .collect { (index, offset) -> savedGridPosition = "$gridStateKey|$index|$offset" }
+    // 保存位置：只有"恢复完成"之后才写回，避免刚进页面时的 (0,0) 把记忆冲掉
+    LaunchedEffect(gridStateKey, gridState, pendingGridRestore) {
+        if (pendingGridRestore != null) return@LaunchedEffect
+        snapshotFlow {
+            Triple(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset, gridItems.size)
+        }.collect { (index, offset, loaded) ->
+            if (gridItems.isNotEmpty()) LibraryCache.putGridPosition(gridStateKey, index, offset, loaded)
+        }
+    }
+
+    // 恢复位置：必须等条目到齐（含上次已加载的分页数量）再滚，否则会被列表钳到 0
+    LaunchedEffect(gridStateKey, gridState, pendingGridRestore, gridItems.size) {
+        val target = pendingGridRestore ?: return@LaunchedEffect
+        val (wantIndex, wantOffset, wantLoaded) = target
+        if (gridItems.isEmpty()) return@LaunchedEffect
+        // 电影/剧集/收藏是一次性全量拉取，没有分页，直接进入滚动恢复
+        if (selectedLibrary != null && gridItems.size < wantLoaded && gridHasMore && !gridAppending) {
+            val lib = selectedLibrary
+            if (lib != null && client != null) {
+                val (sb, so) = sortParams(librarySort, librarySortOrder)
+                gridAppending = true
+                try {
+                    val page = client.getItems(
+                        parentId = lib.id, types = collectionTypeToItemTypes(lib.type),
+                        sortBy = sb, sortOrder = so, limit = 50, startIndex = gridNextIndex,
+                    )
+                    if (page.isNotEmpty()) {
+                        gridItems = (gridItems + page).distinctBy { it.id }
+                        gridNextIndex += page.size
+                        gridHasMore = page.size == 50
+                    } else {
+                        gridHasMore = false
+                    }
+                } catch (_: Exception) {
+                    gridHasMore = false
+                } finally {
+                    gridAppending = false
+                }
+            }
+            return@LaunchedEffect
+        }
+        // 列表布局完成后再滚，必要时重试几帧（数据刚到的那一帧 LazyGrid 还没测量）
+        var attempt = 0
+        while (attempt < 3) {
+            runCatching { gridState.scrollToItem(wantIndex.coerceAtLeast(0), wantOffset.coerceAtLeast(0)) }
+            withFrameNanos { }
+            if (gridState.firstVisibleItemIndex == wantIndex) break
+            attempt++
+        }
+        pendingGridRestore = null
     }
     // 各媒体库视图的横向内容（id → items）
     var viewContents by remember { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
@@ -468,7 +512,7 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, onPlay, onOpenDetail, heroPlayFocus, hazeState) }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onPlay(it) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
                     if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
@@ -494,12 +538,12 @@ fun HomeScreen(
                     onLibraryFocused = { focusedLibraryId = it },
                     onItemFocused = { focusedMediaId = it },
                     onOpenDetail = onOpenDetail,
-                    onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null },
+                    onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
                     contentFocus = heroPlayFocus,
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
-                        Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 12.dp, bottom = 12.dp),
+                        Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 76.dp, bottom = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         FocusSurface(modifier = Modifier.height(40.dp).width(44.dp), corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
@@ -558,6 +602,9 @@ fun HomeScreen(
                                                     ) {
                                                         librarySort = key
                                                         AppRuntime.prefs?.librarySort = key
+                                                        // 换排序等于换内容顺序，旧位置作废
+                                                        LibraryCache.clearGridPosition(gridStateKey)
+                                                        scope.launch { runCatching { gridState.scrollToItem(0) } }
                                                         closeSortMenu()
                                                     }
                                                     .background(if (itemFocused) Color(0x26FFFFFF) else if (selected) Accent.copy(alpha = 0.20f) else Color.Transparent, RoundedCornerShape(10.dp))
@@ -583,6 +630,8 @@ fun HomeScreen(
                                                     val nextOrder = if (librarySortOrder == "Ascending") "Descending" else "Ascending"
                                                     librarySortOrder = nextOrder
                                                     AppRuntime.prefs?.librarySortOrder = nextOrder
+                                                    LibraryCache.clearGridPosition(gridStateKey)
+                                                    scope.launch { runCatching { gridState.scrollToItem(0) } }
                                                     closeSortMenu()
                                                 }
                                                 .background(if (orderFocused) Color(0x26FFFFFF) else Color.Transparent, RoundedCornerShape(10.dp))
@@ -610,7 +659,7 @@ fun HomeScreen(
                     else LazyVerticalGrid(
                         state = gridState,
                         columns = GridCells.Adaptive(minSize = 140.dp),
-                        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 80.dp, bottom = 160.dp),
+                        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 160.dp),
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                         modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2),
@@ -630,7 +679,7 @@ fun HomeScreen(
                 else -> LazyVerticalGrid(
                     state = gridState,
                             columns = GridCells.Adaptive(minSize = 140.dp),
-                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 80.dp, bottom = 160.dp),
+                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 76.dp, bottom = 160.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2),
@@ -753,8 +802,8 @@ private fun ServerCapsule(
                     modifier = Modifier.height(Space.section + Space.m).widthIn(min = 172.dp, max = 240.dp)
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                                runCatching { contentFocus.requestFocus() }
-                                true
+                                // 内容区没有可聚焦目标时（如媒体库标签页）不要吞掉按键，交给系统继续找
+                                runCatching { contentFocus.requestFocus() }.isSuccess
                             } else false
                         },
                     corner = Space.l - Space.xs,
@@ -960,8 +1009,8 @@ private fun SideRail(
                     .then(if (active) Modifier.focusRequester(navFocus) else Modifier)
                     .onPreviewKeyEvent { event ->
                         if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft) {
-                            runCatching { contentFocus.requestFocus() }
-                            true
+                            // 同上：内容区拿不到焦点就放行，避免左键被吞死在竖栏里
+                            runCatching { contentFocus.requestFocus() }.isSuccess
                         } else false
                     },
                 corner = Space.m - Space.xs / 2,
@@ -995,6 +1044,15 @@ private fun SideRail(
             }
         }
     }
+}
+
+/** 内部排序键 → Emby SortBy/SortOrder，多处复用避免各写一份。 */
+private fun sortParams(sort: String, order: String): Pair<String, String> = when (sort) {
+    "name" -> "SortName" to order
+    "rating" -> "CommunityRating" to order
+    "year" -> "ProductionYear" to order
+    "plays" -> "PlayCount" to order
+    else -> "DateCreated" to order
 }
 
 private val SORT_LABELS = linkedMapOf(
@@ -1087,7 +1145,7 @@ private fun MediaLibrary(
     }
     LazyColumn(state = state, modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2)) {
         item {
-            Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 8.dp, bottom = 6.dp)) {
+            Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 76.dp, bottom = 6.dp)) {
         Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Text("服务器自带的全部分类· 可在设置里增删", color = TextSub, fontSize = 11.sp)
             }
@@ -1280,7 +1338,8 @@ private fun Hero(
         }
         
             Row(
-                Modifier.align(Alignment.BottomEnd).padding(end = 34.dp, bottom = 34.dp),
+                // end 要给右侧竖栏让位，否则轮播指示点会被压在竖栏底下
+                Modifier.align(Alignment.BottomEnd).padding(end = 34.dp + Space.xl + Space.section * 2, bottom = 34.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
