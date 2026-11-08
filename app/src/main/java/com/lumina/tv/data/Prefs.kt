@@ -32,6 +32,10 @@ class Prefs(context: Context) {
         get() = sp.getString("engine", "auto") ?: "auto"
         set(v) = sp.edit().putString("engine", v).apply()
 
+    var mpvBroken: Boolean
+        get() = sp.getBoolean("mpv_broken", false)
+        set(v) = sp.edit().putBoolean("mpv_broken", v).apply()
+
     var decoderPreference: String
         get() = sp.getString("decoder_preference", "auto") ?: "auto"
         set(v) = sp.edit().putString("decoder_preference", v).apply()
@@ -91,10 +95,20 @@ class Prefs(context: Context) {
         }.apply()
     }
 
+    fun audioTrackFor(itemId: String): Int? = sp.getInt("audio_track_$itemId", -1).takeIf { it >= 0 }
+
+    fun rememberAudioTrack(itemId: String, streamIndex: Int) {
+        sp.edit().putInt("audio_track_$itemId", streamIndex).apply()
+    }
+
     /** 强制转码（部分异形编码在电视盒上直连会卡顿时使用） */
     var forceTranscode: Boolean
         get() = sp.getBoolean("force_transcode", false)
         set(v) = sp.edit().putBoolean("force_transcode", v).apply()
+
+    var lastPlaybackAudioFailure: String
+        get() = sp.getString("last_playback_audio_failure", "") ?: ""
+        set(v) = sp.edit().putString("last_playback_audio_failure", v).apply()
 
     // ---------------- v1.4.0 个性化 ----------------
 

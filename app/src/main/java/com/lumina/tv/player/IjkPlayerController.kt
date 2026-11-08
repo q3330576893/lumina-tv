@@ -2,6 +2,7 @@ package com.lumina.tv.player
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import android.view.Surface
 import tv.danmaku.ijk.media.player.IMediaPlayer
 import tv.danmaku.ijk.media.player.IjkMediaPlayer
@@ -24,6 +25,7 @@ class IjkPlayerController(
     // 构造与初始化全部包进 runCatching，失败不抛出、不崩溃，改通过 onState 上报，
     // 让 PlayerScreen 走已有的 mpv → IJK → Media3 降级链。
     private val init = runCatching {
+        loadNativeLibraries()
         IjkMediaPlayer().apply {
             setOption(IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec", 1L)
             setOption(IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec-auto-rotate", 1L)
@@ -48,6 +50,9 @@ class IjkPlayerController(
                 true
             }
         }
+    }.onFailure {
+        nativeLibraryFailure = nativeLibraryFailure ?: it
+        Log.e(TAG, "IJK initialization failed", it)
     }
     private val player: IjkMediaPlayer? = init.getOrNull()
 
@@ -157,5 +162,38 @@ class IjkPlayerController(
             error = error,
         )
         onState(state)
+    }
+
+    companion object {
+        private const val TAG = "IjkCtrl"
+        @Volatile private var nativeLibraryFailure: Throwable? = null
+        @Volatile private var nativeLibrariesLoaded = false
+
+        private fun loadNativeLibraries() {
+            if (nativeLibrariesLoaded) return
+            synchronized(IjkPlayerController::class.java) {
+                if (nativeLibrariesLoaded) return
+                nativeLibraryFailure?.let { throw it }
+                try {
+                    System.loadLibrary("ijkwdzffmpeg")
+                    System.loadLibrary("ijksdl")
+                    System.loadLibrary("ijkplayer")
+                    nativeLibrariesLoaded = true
+                } catch (failure: Throwable) {
+                    nativeLibraryFailure = failure
+                    Log.e(TAG, "preload failed", failure)
+                    throw failure
+                }
+            }
+        }
+
+        fun isAvailable(context: Context): Boolean = runCatching {
+            if (!Build.SUPPORTED_ABIS.any { it == "arm64-v8a" || it == "armeabi-v7a" }) return false
+            loadNativeLibraries()
+            true
+        }.getOrElse { false }
+
+        fun preloadFailureStack(): String = nativeLibraryFailure?.let(Log::getStackTraceString)
+            ?: "IJK native preload has not failed in this process"
     }
 }

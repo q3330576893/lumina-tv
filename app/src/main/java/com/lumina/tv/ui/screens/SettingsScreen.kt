@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,9 +43,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.player.IjkPlayerController
+import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.BuildConfig
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.ui.components.FocusSurface
+import com.lumina.tv.ui.components.DiagExportDialog
 import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.QrCode
 import com.lumina.tv.ui.components.SectionTitle
@@ -54,8 +60,11 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     val context = LocalContext.current
     val prefs = AppRuntime.prefs
@@ -75,6 +84,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var qrUrl by remember { mutableStateOf(AppRuntime.pairingUrl) }
     var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
     var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
+    val mpvBroken = prefs?.mpvBroken ?: false
     var savedServers by remember { mutableStateOf(prefs?.savedServers().orEmpty()) }
     var hiddenIds by remember { mutableStateOf(prefs?.hiddenViewIds ?: emptySet()) }
     var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
@@ -84,6 +94,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var releaseUrl by remember { mutableStateOf<String?>(null) }
     var renameServerUrl by remember { mutableStateOf<String?>(null) }
     var renameServerText by remember { mutableStateOf("") }
+    var showDiagExport by remember { mutableStateOf(false) }
 
     renameServerUrl?.let { url ->
         AlertDialog(
@@ -124,8 +135,24 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 
             // 左栏：外观 / 播放 / 字幕 / 账号 / 诊断
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                SectionTitle("设置", trailing = "Lumina ${BuildConfig.VERSION_NAME}")
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("设置", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Lumina ${BuildConfig.VERSION_NAME}", color = TextSub, fontSize = 11.sp)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    FocusSurface(Modifier.height(38.dp).width(88.dp), corner = 19.dp, onClick = onBack) { focused ->
+                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                            Text("返回", color = TextMain, fontSize = 12.sp)
+                        }
+                    }
+                }
                 Spacer(Modifier.height(18.dp))
+
+                if (!wide) {
+                    PairingPanel(Modifier.fillMaxWidth(), qrUrl, wide = false)
+                    Spacer(Modifier.height(14.dp))
+                }
 
                 // ---------- 账号与服务器 ----------
                 GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
@@ -670,15 +697,21 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                     Column(Modifier.padding(18.dp)) {
                         Text("播放后端", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(10.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf("auto" to "自动", "media3" to "Media3", "mpv" to "mpv").forEach { (key, label) ->
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            buildList {
+                                add("auto" to "自动")
+                                add("media3" to "Media3")
+                                add("mpv" to if (mpvBroken) "mpv（已禁用）" else "mpv")
+                                if (IjkPlayerController.isAvailable(context)) add("ijk" to "IJK")
+                            }.forEach { (key, label) ->
                                 val active = playerEngine == key
-                                FocusSurface(Modifier.width(92.dp).height(36.dp), corner = 18.dp, scaleTo = 1.04f, onClick = {
+                                FocusSurface(Modifier.widthIn(min = 76.dp, max = if (mpvBroken && key == "mpv") 126.dp else 94.dp).height(36.dp), corner = 18.dp, scaleTo = 1.04f, onClick = {
+                                    if (key == "mpv" && mpvBroken) return@FocusSurface
                                     playerEngine = key
                                     prefs?.playerEngine = key
                                 }) { focused ->
-                                    Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
-                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
+                                    Box(Modifier.fillMaxSize().background(if (active && !mpvBroken) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
+                                        Text(label, color = if (active && !mpvBroken) Color(0xFF06101F) else if (mpvBroken && key == "mpv") TextSub.copy(alpha = .6f) else TextMain, fontSize = 11.sp)
                                     }
                                 }
                             }
@@ -689,55 +722,37 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 }
 
                 Spacer(Modifier.height(14.dp))
-
-                FocusSurface(
-                    modifier = Modifier.width(92.dp).height(36.dp),
-                    corner = 18.dp,
-                    scaleTo = 1.04f,
-                    onClick = {
-                        playerEngine = "ijk"
-                        prefs?.playerEngine = "ijk"
-                    },
-                ) { focused ->
-                    val active = playerEngine == "ijk"
-                    Box(
-                        Modifier.fillMaxSize().background(
-                            if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
-                            RoundedCornerShape(18.dp),
-                        ),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("IJK", color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp) }
-                }
-
-                FocusSurface(
-                    modifier = Modifier.height(44.dp).width(130.dp),
-                    corner = 22.dp,
-                    onClick = onBack,
-                ) { focused ->
-                    Box(
-                        Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("返回", color = TextMain, fontSize = 13.sp) }
+                GlassPanel(Modifier.fillMaxWidth(), corner = 18.dp) {
+                    Column(Modifier.padding(18.dp)) {
+                        Text("诊断", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        FocusSurface(Modifier.height(40.dp).width(180.dp), corner = 20.dp, onClick = { showDiagExport = true }) { focused ->
+                            Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x1AFFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                                Text("导出诊断日志", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                            }
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(20.dp))
-
-                if (!wide) {
-                    PairingPanel(Modifier.fillMaxWidth(), qrUrl)
-                }
             }
 
             // 窄屏配对面板放在主列末尾，宽屏保留独立右栏。
             if (wide) {
                 Spacer(Modifier.width(36.dp))
-                PairingPanel(Modifier.width(320.dp), qrUrl)
+                PairingPanel(Modifier.width(320.dp), qrUrl, wide = true)
             }
+        }
+    }
+    DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
+        withContext(Dispatchers.IO) {
+            DiagExporter.export(context, DiagExporter.environmentPayload(context, outcome), "environment")
         }
     }
 }
 
 @Composable
-private fun PairingPanel(modifier: Modifier, qrUrl: String) {
+private fun PairingPanel(modifier: Modifier, qrUrl: String, wide: Boolean) {
     val pairingStatus = AppRuntime.pairingStatus
     val pairingSucceeded = pairingStatus.contains("成功")
     val pairingFailed = pairingStatus.contains("失败") || pairingStatus.contains("错误")
@@ -752,10 +767,10 @@ private fun PairingPanel(modifier: Modifier, qrUrl: String) {
         Column(Modifier.padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text("手机遥控 / 换服务器", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
-            Text("扫码后可用手机打字搜索、当遥控器", color = TextSub, fontSize = 11.sp)
+            Text("扫码后填表单 → 自动登录本机", color = TextSub, fontSize = 11.sp)
             Spacer(Modifier.height(14.dp))
             if (qrUrl.isNotEmpty()) {
-                QrCode(qrUrl, size = 200.dp)
+                QrCode(qrUrl, size = if (wide) 200.dp else 180.dp)
                 Spacer(Modifier.height(10.dp))
                 Text(qrUrl.removePrefix("http://").removeSuffix("/"), color = Accent, fontSize = 12.sp)
             } else {

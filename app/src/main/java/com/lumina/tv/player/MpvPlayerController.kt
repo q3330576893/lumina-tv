@@ -6,6 +6,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import org.jellycine.mpv.MPVLib
+import java.util.ArrayDeque
 
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
 class MpvPlayerController(
@@ -23,6 +24,17 @@ class MpvPlayerController(
     )
 
     private val handler = Handler(Looper.getMainLooper())
+    private val logLock = Any()
+    private val diagnosticLines = ArrayDeque<String>()
+    private var softwareRetryCount = 0
+    private val logObserver = object : MPVLib.LogObserver {
+        override fun logMessage(prefix: String, level: Int, text: String) {
+            synchronized(logLock) {
+                if (diagnosticLines.size >= MAX_DIAGNOSTIC_LINES) diagnosticLines.removeFirst()
+                diagnosticLines.addLast("${timestamp()} $prefix/$level $text")
+            }
+        }
+    }
     private var mpv: MPVLib? = null
     var unavailableReason: String? = null
         private set
@@ -35,6 +47,10 @@ class MpvPlayerController(
     private var pendingUrl: String? = null
     private var pendingPositionMs = 0L
     private var attachedSurface: Surface? = null
+    private var lastSurfaceWidth = -1
+    private var lastSurfaceHeight = -1
+    private var fileLoaded = false
+    private var buffering = false
     private val loadTimeout = Runnable { onLoadTimeout() }
 
     init {
@@ -52,7 +68,7 @@ class MpvPlayerController(
                     "load-scripts" to "no",
                     "load-auto-profiles" to "no",
                     "terminal" to "no",
-                    "msg-level" to "all=no",
+                    "msg-level" to "all=info",
                     "vo" to "gpu",
                     "gpu-context" to "android",
                     "force-window" to "yes",
@@ -65,6 +81,7 @@ class MpvPlayerController(
                 ).forEach { (key, value) -> engine.setOptionString(key, value) }
                 engine.init()
                 engine.addObserver(this)
+                engine.addLogObserver(logObserver)
                 engine.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 engine.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 engine.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
@@ -80,17 +97,30 @@ class MpvPlayerController(
         }
     }
 
-    fun attachSurface(surface: Surface) {
+    fun attachSurface(surface: Surface, width: Int = 0, height: Int = 0) {
         if (!released && surface.isValid) {
-            mpv?.let { it.attachSurface(surface); it.setOptionString("force-window", "yes"); it.setOptionString("vo", "gpu") }
-            if (attachedSurface !== surface) Log.d(TAG, "surface attached")
+            mpv?.attachSurface(surface)
+            if (attachedSurface !== surface || (width > 0 && height > 0 &&
+                    (width != lastSurfaceWidth || height != lastSurfaceHeight))) {
+                Log.i(TAG, "${timestamp()} attached surface ${width}x$height, vo=gpu")
+                if (width > 0 && height > 0) {
+                    lastSurfaceWidth = width
+                    lastSurfaceHeight = height
+                }
+                if (fileLoaded && pendingUrl != null) {
+                    // Re-seek after late attachment to make the Android VO render the already-loaded frame.
+                    mpv?.setPropertyBoolean("pause", false)
+                    mpv?.command(arrayOf("seek", (positionMs / 1000.0).toString(), "absolute+exact"))
+                    Log.i(TAG, "${timestamp()} re-render requested after late surface attachment")
+                }
+            }
             attachedSurface = surface
         }
     }
 
     fun detachSurface() {
         if (!released) {
-            mpv?.let { it.setOptionString("vo", "null"); it.setOptionString("force-window", "no"); it.detachSurface() }
+            mpv?.detachSurface()
             if (attachedSurface != null) Log.d(TAG, "surface detached")
             attachedSurface = null
         }
@@ -101,8 +131,10 @@ class MpvPlayerController(
         pendingUrl = url
         pendingPositionMs = startPositionMs.coerceAtLeast(0L)
         ready = false
+        fileLoaded = false
         positionMs = pendingPositionMs
         softwareRetryUsed = false
+        softwareRetryCount = 0
         mpv?.setOptionString("hwdec", "auto-safe")
         val headerFields = headers.entries.mapNotNull { (key, value) ->
             if (',' in key || ',' in value) {
@@ -124,6 +156,7 @@ class MpvPlayerController(
         handler.removeCallbacks(loadTimeout)
         handler.postDelayed(loadTimeout, SOFTWARE_RETRY_TIMEOUT_MS)
         pendingSubtitles = subtitleUrls
+        buffering = true
         emit(buffering = true)
     }
 
@@ -160,6 +193,8 @@ class MpvPlayerController(
 
     fun positionMs(): Long = positionMs
     fun durationMs(): Long = durationMs
+    fun diagnosticLog(): String = synchronized(logLock) { diagnosticLines.joinToString("\n") }
+    fun softwareRetryCount(): Int = softwareRetryCount
 
     fun release() {
         if (released) return
@@ -167,6 +202,7 @@ class MpvPlayerController(
         handler.removeCallbacks(loadTimeout)
         mpv?.let { engine ->
             runCatching { engine.removeObserver(this) }
+            runCatching { engine.removeLogObserver(logObserver) }
             runCatching { engine.detachSurface() }
             runCatching { engine.destroy() }
         }
@@ -178,6 +214,7 @@ class MpvPlayerController(
         handler.removeCallbacks(loadTimeout)
         if (!softwareRetryUsed) {
             softwareRetryUsed = true
+            softwareRetryCount++
             mpv?.setOptionString("hwdec", "no")
             mpv?.command(loadCommand(url, pendingPositionMs))
             mpv?.setPropertyBoolean("pause", false)
@@ -185,14 +222,14 @@ class MpvPlayerController(
             handler.postDelayed(loadTimeout, SOFTWARE_RETRY_TIMEOUT_MS)
             emit(buffering = true)
         } else {
-            Log.e(TAG, "mpv startup timed out")
-            emit(error = "mpv 未能起播（超时），已回退 Media3")
+            Log.e(TAG, "${timestamp()} mpv did not produce first frame within ${LOAD_TIMEOUT_MS}ms")
+            emit(buffering = false, error = "mpv 未能出画（12s 无首帧）")
         }
     }
 
     override fun eventProperty(property: String) = Unit
     override fun eventProperty(property: String, value: String) {
-        if (property == "end-file") Log.w(TAG, "END_FILE reason: $value")
+        if (property == "end-file") Log.w(TAG, "${timestamp()} END_FILE reason: $value")
     }
     override fun eventProperty(property: String, value: Long) = Unit
     override fun eventProperty(property: String, value: Double) {
@@ -205,7 +242,10 @@ class MpvPlayerController(
 
     override fun eventProperty(property: String, value: Boolean) {
         when (property) {
-            "paused-for-cache" -> emit(buffering = value)
+            "paused-for-cache" -> {
+                buffering = value
+                emit(buffering = value)
+            }
             "eof-reached" -> if (value) {
                 playing = false
                 emit(ended = true)
@@ -220,26 +260,29 @@ class MpvPlayerController(
     override fun event(eventId: Int) {
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
-                Log.i(TAG, "received FILE_LOADED")
+                fileLoaded = true
+                buffering = false
+                Log.i(TAG, "${timestamp()} received FILE_LOADED")
                 pendingSubtitles.forEach { mpv?.command(arrayOf("sub-add", it, "auto")) }
                 pendingSubtitles = emptyList()
+                emit(buffering = false)
             }
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
                 val firstReady = !ready
                 ready = true
                 handler.removeCallbacks(loadTimeout)
-                if (firstReady) Log.i(TAG, "first video playback restart (first frame ready)")
+                if (firstReady) Log.i(TAG, "${timestamp()} received PLAYBACK_RESTART (first frame ready)")
                 emit(buffering = false, ready = true)
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
-                Log.w(TAG, "END_FILE received (reason unavailable from observer API)")
+                Log.w(TAG, "${timestamp()} END_FILE received (reason unavailable from observer API)")
                 if (!ready) onLoadTimeout()
             }
         }
     }
 
     private fun emit(
-        buffering: Boolean = false,
+        buffering: Boolean = this.buffering,
         ready: Boolean = this.ready,
         ended: Boolean = false,
         error: String? = null,
@@ -251,5 +294,8 @@ class MpvPlayerController(
         const val TAG = "MpvPlayerController"
         const val LOAD_TIMEOUT_MS = 12_000L
         const val SOFTWARE_RETRY_TIMEOUT_MS = 6_000L
+        const val MAX_DIAGNOSTIC_LINES = 2_000
     }
+
+    private fun timestamp(): Long = System.currentTimeMillis()
 }

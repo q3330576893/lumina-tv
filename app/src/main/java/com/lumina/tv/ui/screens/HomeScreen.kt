@@ -143,6 +143,7 @@ fun HomeScreen(
     var librarySort by rememberSaveable { mutableStateOf("date") }
     var librarySortOrder by rememberSaveable { mutableStateOf("Descending") }
     var sortMenuOpen by remember { mutableStateOf(false) }
+    var libraryServerMenuOpen by remember { mutableStateOf(false) }
     var gridItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var gridLoading by remember { mutableStateOf(false) }
     var gridAppending by remember { mutableStateOf(false) }
@@ -451,7 +452,7 @@ fun HomeScreen(
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
                 }
                 tab == HomeTab.Recommend -> LazyColumn(state = recListState, modifier = Modifier.fillMaxSize()) {
-                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, client?.backdropUrl(hero ?: MediaItem("", ""), 1920), onPlay, onOpenDetail) { heroIndex = it } }
+                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, client?.backdropUrl(hero ?: MediaItem("", ""), 2560), onPlay, onOpenDetail) { heroIndex = it } }
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, trapUp = true, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onPlay(it) } }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, trapUp = resume.isEmpty(), onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, trapUp = resume.isEmpty() && favorites.isEmpty(), onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
@@ -483,16 +484,44 @@ fun HomeScreen(
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
-                        Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 6.dp, bottom = 4.dp),
+                        Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 12.dp, bottom = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        FocusSurface(modifier = Modifier.height(40.dp).width(96.dp), corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
+                        FocusSurface(modifier = Modifier.height(40.dp).width(44.dp), corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text("‹ 返回", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Text("‹", color = if (focused) Accent else TextMain, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
-                        Spacer(Modifier.width(14.dp))
-                        Column {
+                        Spacer(Modifier.width(16.dp))
+                        Box {
+                            FocusSurface(modifier = Modifier.height(40.dp).widthIn(min = 112.dp, max = 180.dp), corner = 20.dp,
+                                onClick = { libraryServerMenuOpen = !libraryServerMenuOpen }) { focused ->
+                                Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(AppRuntime.prefs?.serverName ?: "Emby", color = if (focused) Accent else TextMain,
+                                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false))
+                                    Text(" ▾", color = if (focused) Accent else TextSub, fontSize = 11.sp)
+                                }
+                            }
+                            if (libraryServerMenuOpen) Popup(
+                                alignment = Alignment.TopStart,
+                                offset = IntOffset(0, with(LocalDensity.current) { 46.dp.roundToPx() }),
+                                onDismissRequest = { libraryServerMenuOpen = false },
+                                properties = PopupProperties(focusable = true),
+                            ) {
+                                Column(Modifier.width(240.dp).clip(RoundedCornerShape(18.dp))
+                                    .background(Brush.verticalGradient(listOf(Color(0xF51C2638), Color(0xEA121A28))))
+                                    .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(18.dp)).padding(12.dp)) {
+                                    Text("当前服务器", color = TextSub, fontSize = 10.sp)
+                                    Text(AppRuntime.session?.serverName ?: "未连接", color = TextMain, fontSize = 13.sp,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
+                                    Text("切换服务器 / 账号", color = TextMain, fontSize = 12.sp,
+                                        modifier = Modifier.fillMaxWidth().clickable { libraryServerMenuOpen = false; onSwitchServer() }.padding(vertical = 8.dp))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Column(Modifier.weight(1f)) {
                             Text(
                                 selectedLibrary?.name.orEmpty(),
                                 color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold,
@@ -500,8 +529,8 @@ fun HomeScreen(
                             )
                             Text("共 ${gridItems.size} 部", color = TextSub, fontSize = 11.sp)
                         }
-                        Spacer(Modifier.weight(1f))
-                        Box(Modifier.wrapContentSize(Alignment.TopEnd)) {
+                        Spacer(Modifier.width(16.dp))
+                        Box {
                             FocusSurface(
                                 modifier = Modifier.height(40.dp).width(112.dp),
                                 corner = 20.dp, scaleTo = 1.03f,
@@ -646,6 +675,7 @@ NavBar(
                 onSwitchServer = onSwitchServer,
                 onLogout = onLogout,
                 navFocus = navFocus,
+                showServerHeader = selectedLibrary == null,
             )
         }
     }
@@ -660,6 +690,7 @@ private fun NavBar(
     onSwitchServer: () -> Unit,
     onLogout: () -> Unit,
     navFocus: FocusRequester,
+    showServerHeader: Boolean,
 ) {
     var serverMenuOpen by remember { mutableStateOf(false) }
     val glassShape = RoundedCornerShape(28.dp)
@@ -677,7 +708,7 @@ private fun NavBar(
                     ) { serverMenuOpen = false },
             )
         }
-        Row(
+        if (showServerHeader) Row(
             Modifier.align(Alignment.TopCenter).fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color(0xEE070A12), Color(0x00070A12))))
                 .padding(horizontal = 24.dp, vertical = 12.dp),
@@ -700,19 +731,6 @@ private fun NavBar(
                     }
                 }
             }
-            Spacer(Modifier.width(12.dp))
-            GlassPanel(Modifier.height(46.dp).weight(1f), corner = 23.dp) {
-                Box(Modifier.fillMaxSize().padding(horizontal = 14.dp), contentAlignment = Alignment.CenterStart) {
-                    Column {
-                        Text("当前服务器", color = TextSub, fontSize = 9.sp, lineHeight = 11.sp)
-                        Text(
-                            AppRuntime.session?.serverName ?: "未连接",
-                            color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            }
         }
         if (serverMenuOpen) {
             Column(
@@ -731,7 +749,7 @@ private fun NavBar(
                     }
                     Spacer(Modifier.width(10.dp))
                     Column {
-                        Text("Lumina · Emby", color = TextSub, fontSize = 9.sp)
+                        Text("当前服务器", color = TextSub, fontSize = 9.sp)
                         Text(
                             AppRuntime.session?.userName ?: "未登录",
                             color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
@@ -1004,15 +1022,20 @@ private fun Hero(
     Box(
         Modifier
             .fillMaxWidth()
-            .height(320.dp)
+            .height(300.dp)
             .clip(RoundedCornerShape(bottomEnd = 34.dp))
     ) {
-        AsyncImage(
-            model = backdrop,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-        )
+        if (!backdrop.isNullOrBlank()) {
+            AsyncImage(
+                model = backdrop,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                alignment = Alignment.TopCenter,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF174C58), Color(0xFF111827), Color(0xFF462B3D)))))
+        }
         Box(
             Modifier.fillMaxSize().background(
                 Brush.horizontalGradient(listOf(Color(0xF2070A12), Color(0xB3070A12), Color(0x00070A12)))

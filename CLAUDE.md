@@ -1,4 +1,4 @@
-# LuminaTV（Lumina）项目说明
+﻿# LuminaTV（Lumina）项目说明
 
 Android TV 端 Emby 播放器。Kotlin + Jetpack Compose + Media3，另有 mpv、IJK 两套可选播放内核。
 

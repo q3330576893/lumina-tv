@@ -72,6 +72,13 @@ data class MediaStream(
     val isDefault: Boolean,
     val isExternal: Boolean,
     val displayTitle: String?,
+    val profile: String? = null,
+    val level: Int? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val bitRate: Long? = null,
+    val channels: Int? = null,
+    val sampleRate: Int? = null,
 ) {
     val label: String
         get() = displayTitle ?: listOfNotNull(language?.uppercase(), title, codec?.uppercase()).joinToString(" ")

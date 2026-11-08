@@ -320,9 +320,9 @@ fun QrCode(content: String, size: Dp = 200.dp) {
     Box(
         Modifier
             .size(size)
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(Color.White)
-            .padding(10.dp),
+            .padding(12.dp),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {

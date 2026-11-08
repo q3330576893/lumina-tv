@@ -10,6 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import android.net.Uri
 import java.util.concurrent.TimeUnit
 
 class EmbyException(message: String) : Exception(message)
@@ -23,6 +24,8 @@ class EmbyClient(
     val userName: String = "",
     val serverName: String = "Emby",
 ) {
+    @Volatile var lastPlaybackInfoJson: String? = null
+        private set
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -432,9 +435,8 @@ class EmbyClient(
 
     fun backdropUrl(item: MediaItem, maxWidth: Int = 1920): String? {
         val tag = item.backdropTag
-        if (tag != null) return url("/Items/${item.id}/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
-        val primaryTag = item.imageTag ?: return null
-        return url("/Items/${item.id}/Images/Primary", mapOf("maxWidth" to maxWidth.toString(), "tag" to primaryTag, "quality" to "90"))
+        if (tag == null) return null
+        return url("/Items/${item.id}/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
     fun backdropUrl(id: String, tag: String?, maxWidth: Int = 1920): String? {
@@ -469,6 +471,13 @@ data class PlaybackTarget(
                     isDefault = s.optBoolean("IsDefault", false),
                     isExternal = s.optBoolean("IsExternal", false),
                     displayTitle = s.optString("DisplayTitle").ifBlank { null },
+                    profile = s.optString("Profile").ifBlank { null },
+                    level = s.optInt("Level").takeIf { s.has("Level") },
+                    width = s.optInt("Width").takeIf { s.has("Width") },
+                    height = s.optInt("Height").takeIf { s.has("Height") },
+                    bitRate = s.optLong("BitRate").takeIf { s.has("BitRate") },
+                    channels = s.optInt("Channels").takeIf { s.has("Channels") },
+                    sampleRate = s.optInt("SampleRate").takeIf { s.has("SampleRate") },
                 )
                 if (s.optString("Type") == "Video" && resolution == null) {
                     val h = s.optInt("Height", 0)
@@ -576,6 +585,7 @@ data class PlaybackTarget(
         forceTranscode: Boolean = false,
         mediaSourceId: String? = null,
         startPositionMs: Long = item.positionTicks / 10_000,
+        audioStreamIndex: Int? = null,
     ): PlaybackTarget =
         withContext(Dispatchers.IO) {
             val infoBody = JSONObject()
@@ -584,10 +594,16 @@ data class PlaybackTarget(
                 .put("IsPlayback", true)
                 .put("AutoOpenLiveStream", false)
                 .put("MaxStreamingBitrate", 120_000_000)
+                .put("DeviceProfile", deviceProfile())
+            if (audioStreamIndex != null) infoBody.put("AudioStreamIndex", audioStreamIndex)
             if (mediaSourceId != null) infoBody.put("MediaSourceId", mediaSourceId)
             val info = try {
                 postSync(url("/Items/${item.id}/PlaybackInfo", mapOf("UserId" to userId)), infoBody.toString())
-            } catch (_: Exception) { JSONObject() }
+                    .also { lastPlaybackInfoJson = it.toString() }
+            } catch (failure: Exception) {
+                lastPlaybackInfoJson = JSONObject().put("reason", failure.message ?: "PlaybackInfo request failed").toString()
+                JSONObject()
+            }
             val sources = info.optJSONArray("MediaSources")
             val chosen = if (mediaSourceId != null) {
                 (0 until (sources?.length() ?: 0)).mapNotNull { i -> sources?.optJSONObject(i) }
@@ -599,9 +615,14 @@ data class PlaybackTarget(
                 id = msId, name = "源", container = null,
                 supportsDirectPlay = true, supportsDirectStream = true, streams = emptyList(),
             )
+            val audioStream = source.audioStreams.firstOrNull { it.isDefault } ?: source.audioStreams.firstOrNull()
+            val audioCodec = listOfNotNull(audioStream?.codec, audioStream?.profile).joinToString(" ").lowercase()
+            val unsupportedAudio = listOf("truehd", "dts", "dca", "mlp", "atmos").any(audioCodec::contains)
+            val needTranscode = forceTranscode || unsupportedAudio || !source.supportsDirectPlay
             val directUrl = url(
                 "/Videos/${item.id}/stream",
-                mapOf("static" to "true", "MediaSourceId" to msId, "DeviceId" to deviceId)
+                mapOf("static" to "true", "MediaSourceId" to msId, "DeviceId" to deviceId,
+                    "AudioStreamIndex" to audioStreamIndex?.toString())
             )
             val hlsUrl = url(
                 "/Videos/${item.id}/master.m3u8",
@@ -614,9 +635,12 @@ data class PlaybackTarget(
                     "SegmentContainer" to "ts",
                     "MinSegments" to "1",
                     "BreakOnNonKeyFrames" to "true",
+                    "AudioStreamIndex" to audioStreamIndex?.toString(),
                 )
             )
-            val useDirect = !forceTranscode && source.supportsDirectPlay
+            val useDirect = !needTranscode
+            val transcodingUrl = first?.optString("TranscodingUrl")?.takeIf { it.startsWith("http", true) }
+                ?.let { addPlaybackQuery(it, audioStreamIndex) }
             // --- STRM 处理 ---
             // 只在确实是 STRM 条目时读一次文本，URL 与请求头都从这里出，避免重复请求。
             val strmText: String? =
@@ -637,7 +661,7 @@ data class PlaybackTarget(
             ) {
                 throw EmbyException("该 STRM 条目没有可用地址（文件为空或内容不是 http 链接）")
             }
-            val finalUrl = if (isStrm) strmUrl!! else if (useDirect) directUrl else hlsUrl
+            val finalUrl = if (isStrm) strmUrl!! else if (useDirect) directUrl else transcodingUrl ?: hlsUrl
             // 请求头：#EXTVLCOPT / #EXTHTTP 既可能来自 MediaSources.AdditionalOptions，也可能在 .strm 文本里
             val headers = buildMap {
                 putAll(parseStrmOptions(source.additionalOptions))
@@ -652,6 +676,27 @@ data class PlaybackTarget(
                 headers = headers,
             )
         }
+
+    private fun deviceProfile(): JSONObject = JSONObject()
+        .put("MaxAudioChannels", "2")
+        .put("DirectPlayProfiles", JSONArray()
+            .put(JSONObject().put("Type", "Video").put("Container", "mkv,mp4,m4v,ts,mov")
+                .put("VideoCodec", "h264,hevc").put("AudioCodec", "aac,ac3,eac3,mp3,opus,flac,vorbis"))
+            .put(JSONObject().put("Type", "Audio").put("Container", "mp3").put("AudioCodec", "mp3")))
+        .put("TranscodingProfiles", JSONArray()
+            .put(JSONObject().put("Container", "ts").put("Type", "Video").put("VideoCodec", "h264")
+                .put("AudioCodec", "aac").put("Protocol", "hls").put("MaxAudioChannels", "2"))
+            .put(JSONObject().put("Container", "ts").put("Type", "Audio").put("AudioCodec", "aac")
+                .put("Protocol", "hls").put("MaxAudioChannels", "2")))
+
+    private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
+        val builder = Uri.parse(url).buildUpon()
+        val names = Uri.parse(url).queryParameterNames
+        if ("DeviceId" !in names) builder.appendQueryParameter("DeviceId", deviceId)
+        if ("api_key" !in names && token.isNotEmpty()) builder.appendQueryParameter("api_key", token)
+        if (audioStreamIndex != null) builder.appendQueryParameter("AudioStreamIndex", audioStreamIndex.toString())
+        return builder.build().toString()
+    }
 
     fun subtitleUrl(itemId: String, mediaSourceId: String, index: Int, format: String = "srt"): String =
         url("/Videos/$itemId/$mediaSourceId/Subtitles/$index/Stream.$format")
