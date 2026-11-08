@@ -19,6 +19,7 @@ data class MediaItem(
     val playedPercentage: Double = 0.0,
     val primaryImageAspectRatio: Double? = null,
     val backdropTag: String? = null,
+    val logoTag: String? = null,
     val communityRating: Double? = null,
     val genres: List<String> = emptyList(),
     val isFavorite: Boolean = false,

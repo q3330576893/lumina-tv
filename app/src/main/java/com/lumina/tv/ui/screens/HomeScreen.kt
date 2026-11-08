@@ -70,7 +70,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,6 +85,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -102,6 +106,7 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.LoadingView
@@ -474,11 +479,14 @@ fun HomeScreen(
         viewContents = viewContents + result
     }
 
-    val heroItems = (latest + movies + series).distinctBy { it.id }.take(6)
+    val heroPool = (latest + movies + series + favorites).distinctBy { it.id }
+    val heroItems = remember(heroPool) { pickHeroItems(heroPool, latest.map { it.id }.toHashSet(), 6) }
     LaunchedEffect(heroItems) {
+        heroIndex = 0
         if (heroItems.size < 2) return@LaunchedEffect
         while (true) {
-            delay(7000)
+            // 10 秒一换：太短看不清，太长显得卡住
+            delay(10_000)
             heroIndex = (heroIndex + 1) % heroItems.size
         }
     }
@@ -1204,6 +1212,41 @@ private fun TopButton(icon: androidx.compose.ui.graphics.vector.ImageVector, lab
     }
 }
 
+/**
+ * 轮播选片：打分排序后，用「当天日期」做随机种子从前 20 里抽 6 个。
+ * 同一天内保持稳定，隔天自动换一批，不需要联网。
+ */
+private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: Int = 6): List<MediaItem> {
+    if (pool.isEmpty()) return emptyList()
+    val calendar = java.util.Calendar.getInstance()
+    val daySeed = (calendar.get(java.util.Calendar.YEAR) * 367L + calendar.get(java.util.Calendar.DAY_OF_YEAR))
+    fun score(item: MediaItem): Double {
+        var s = 0.0
+        val hasBackdrop = !item.backdropTag.isNullOrBlank()
+        if (hasBackdrop) s += 3.0
+        if (!item.logoTag.isNullOrBlank()) s += 2.0
+        if (item.positionTicks > 0 && !item.played) s += 3.0
+        if (item.id in recentIds) s += 2.0
+        if (item.played) s -= 2.0
+        // 60 分钟以内多半是花絮/预告，不该占轮播位
+        val minutes = (item.runtimeTicks ?: 0L) / 600_000_000L
+        if (minutes in 1..59) s -= 3.0
+        val rating = item.communityRating ?: item.rating ?: 0.0
+        s += (rating / 3.0).coerceAtMost(3.0)
+        return s
+    }
+    val ranked = pool.sortedByDescending { score(it) }
+    val shuffled = ranked.take(20).shuffled(java.util.Random(daySeed))
+    // 没有横版剧照的片子裁出来一定难看，优先只放有 backdrop 的
+    val withBackdrop = shuffled.filter { !it.backdropTag.isNullOrBlank() }
+    val picked = withBackdrop.take(size)
+    return when {
+        picked.size >= 3 -> picked
+        withBackdrop.isNotEmpty() -> (withBackdrop + shuffled.filterNot { it in withBackdrop }).distinctBy { it.id }.take(size)
+        else -> shuffled.take(size)
+    }
+}
+
 @Composable
 private fun Hero(
     items: List<MediaItem>,
@@ -1219,6 +1262,16 @@ private fun Hero(
         return
     }
     val context = LocalContext.current
+    // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
+    val embyLogo = remember(item.id, item.logoTag) {
+        AppRuntime.client?.logoUrl(item)?.takeIf { it.isNotBlank() }
+    }
+    var tmdbInfo by remember(item.id) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
+    LaunchedEffect(item.id) {
+        if (embyLogo != null && (item.communityRating ?: item.rating) != null) return@LaunchedEffect
+        tmdbInfo = TmdbClient.lookup(item.type, item.seriesName ?: item.name, item.year)
+    }
+    val titleLogo = embyLogo ?: tmdbInfo?.logoUrl
     LaunchedEffect(currentIndex, items) {
         if (items.size < 2) return@LaunchedEffect
         val next = items[(currentIndex + 1) % items.size]
@@ -1238,19 +1291,32 @@ private fun Hero(
                 .clip(RoundedCornerShape(bottomEnd = 34.dp))
                 .background(Brush.linearGradient(listOf(Color(0xFF174C58), Color(0xFF111827))))
         ) {
-            Crossfade(targetState = currentIndex, animationSpec = tween(300), label = "hero-backdrop") { index ->
+            Crossfade(targetState = currentIndex, animationSpec = tween(420), label = "hero-backdrop") { index ->
                 val heroItem = items.getOrNull(index)
                 val client = AppRuntime.client
                 val image = heroItem?.let { client?.backdropUrl(it, 1280) }
                     ?.takeIf { it.isNotBlank() }
                     ?: heroItem?.let { client?.imageUrl(it, 720) }
+                var zoomStart by remember(index) { mutableStateOf(0f) }
+                LaunchedEffect(index) { zoomStart = 1f }
+                val zoom by animateFloatAsState(
+                    targetValue = zoomStart,
+                    animationSpec = tween(14_000, easing = LinearEasing),
+                    label = "hero-zoom",
+                )
                 if (!image.isNullOrBlank()) {
                     AsyncImage(
                         model = ImageRequest.Builder(context).data(image).crossfade(false).build(),
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         alignment = Alignment.TopCenter,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize().graphicsLayer {
+                            // 14 秒缓慢推近 7%，静态图也有呼吸感
+                            val z = 1f + zoom * 0.07f
+                            scaleX = z
+                            scaleY = z
+                            transformOrigin = TransformOrigin(0.5f, 0.32f)
+                        },
                     )
                 }
             }
@@ -1274,14 +1340,27 @@ private fun Hero(
         ) {
             Text("为你推荐", color = Accent, fontSize = 11.sp, letterSpacing = 2.sp)
             Spacer(Modifier.height(6.dp))
-            Text(
-                item.seriesName ?: item.name,
-                color = TextMain, style = TypeScale.display,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-            )
+            if (!titleLogo.isNullOrBlank()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context).data(titleLogo).crossfade(true).build(),
+                    contentDescription = item.seriesName ?: item.name,
+                    contentScale = ContentScale.Fit,
+                    alignment = Alignment.BottomStart,
+                    modifier = Modifier.heightIn(max = 66.dp).widthIn(max = 430.dp),
+                )
+            } else {
+                Text(
+                    item.seriesName ?: item.name,
+                    color = TextMain, style = TypeScale.display,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            val ratingText = (item.communityRating ?: item.rating)?.let { "★ %.1f".format(it) }
+                ?: tmdbInfo?.rating?.let { "TMDB ★ %.1f".format(it) }
             val sub = listOfNotNull(
                 item.subtitle.takeIf { it.isNotBlank() },
                 item.genres.take(2).joinToString(" / ").takeIf { it.isNotBlank() },
+                ratingText,
             ).joinToString("   ")
             if (sub.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))

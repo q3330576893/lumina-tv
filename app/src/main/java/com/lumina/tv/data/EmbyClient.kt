@@ -222,7 +222,7 @@ class EmbyClient(
             "SortOrder" to sortOrder,
             "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
             "ImageTypeLimit" to "1",
-            "EnableImageTypes" to "Primary,Backdrop,Thumb",
+            "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo",
         )
         if (parentId != null) params["ParentId"] = parentId
         if (types != null) params["IncludeItemTypes"] = types
@@ -262,7 +262,7 @@ class EmbyClient(
             "Limit" to limit.toString(),
             "MediaTypes" to "Video",
             "Fields" to "Overview,PrimaryImageAspectRatio,UserData,ProductionYear",
-            "EnableImageTypes" to "Primary,Thumb,Backdrop",
+            "EnableImageTypes" to "Primary,Thumb,Backdrop,Logo",
         )
         val arr = getSync(url("/Users/$userId/Items/Resume", params)).optJSONArray("Items") ?: JSONArray()
         parseItems(arr)
@@ -322,7 +322,7 @@ class EmbyClient(
         runCatching {
             val params = mapOf("UserId" to userId, "Limit" to limit.toString(),
                 "Fields" to "Overview,PrimaryImageAspectRatio,Genres,ProductionYear,UserData",
-                "EnableImageTypes" to "Primary,Backdrop,Thumb")
+                "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo")
             val arr = getSync(url("/Items/$itemId/Similar", params)).optJSONArray("Items") ?: JSONArray()
             parseItems(arr).filterNot { it.id == itemId }.take(limit)
         }.getOrDefault(emptyList())
@@ -395,6 +395,7 @@ class EmbyClient(
             type = o.optString("Type"),
             imageTag = tags?.optString("Primary")?.ifBlank { null },
             backdropTag = backdrops?.optString("0")?.ifBlank { null },
+            logoTag = tags?.optString("Logo")?.ifBlank { null },
             overview = o.optString("Overview").ifBlank { null },
             year = o.optInt("ProductionYear", 0).takeIf { it > 0 },
             runtimeTicks = o.optLong("RunTimeTicks", 0L).takeIf { it > 0 },
@@ -455,6 +456,12 @@ class EmbyClient(
         val tag = item.backdropTag
         if (tag == null) return null
         return url("/Items/${item.id}/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
+    }
+
+    /** 透明标题图（Emby Logo 图），没有就返回 null 由调用方退回文字标题。 */
+    fun logoUrl(item: MediaItem, maxWidth: Int = 900): String? {
+        val tag = item.logoTag ?: return null
+        return url("/Items/${item.id}/Images/Logo", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
     fun backdropUrl(id: String, tag: String?, maxWidth: Int = 1920): String? {
