@@ -5,6 +5,7 @@ package com.lumina.tv.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.KeyEventType
@@ -47,6 +48,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
@@ -106,6 +108,7 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
 import com.lumina.tv.ui.theme.Space
+import com.lumina.tv.ui.theme.ShapeScale
 import com.lumina.tv.ui.theme.TypeScale
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
@@ -443,6 +446,11 @@ fun HomeScreen(
             navFocus.requestFocus()
             true
         } else false
+    }.onKeyEvent { event ->
+        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
+            navFocus.requestFocus()
+            true
+        } else false
     }) {
         when {
             loading -> LoadingView(text = "正在读取影库…")
@@ -455,7 +463,10 @@ fun HomeScreen(
                     Spacer(Modifier.height(6.dp))
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
                 }
-                tab == HomeTab.Recommend -> LazyColumn(state = recListState, modifier = Modifier.fillMaxSize()) {
+                tab == HomeTab.Recommend -> LazyColumn(
+                    state = recListState,
+                    modifier = Modifier.fillMaxSize(),
+                ) {
                     item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, onPlay, onOpenDetail, heroPlayFocus, hazeState) }
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onPlay(it) } }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
@@ -484,6 +495,7 @@ fun HomeScreen(
                     onItemFocused = { focusedMediaId = it },
                     onOpenDetail = onOpenDetail,
                     onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null },
+                    contentFocus = heroPlayFocus,
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
@@ -496,35 +508,7 @@ fun HomeScreen(
                             }
                         }
                         Spacer(Modifier.width(16.dp))
-                        Box {
-                            FocusSurface(modifier = Modifier.height(40.dp).widthIn(min = 112.dp, max = 180.dp), corner = 20.dp,
-                                onClick = { libraryServerMenuOpen = !libraryServerMenuOpen }) { focused ->
-                                Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Text(AppRuntime.prefs?.serverName ?: "Emby", color = if (focused) Accent else TextMain,
-                                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false))
-                                    Text(" ▾", color = if (focused) Accent else TextSub, fontSize = 11.sp)
-                                }
-                            }
-                            if (libraryServerMenuOpen) Popup(
-                                alignment = Alignment.TopStart,
-                                offset = IntOffset(0, with(LocalDensity.current) { 46.dp.roundToPx() }),
-                                onDismissRequest = { libraryServerMenuOpen = false },
-                                properties = PopupProperties(focusable = true),
-                            ) {
-                                Column(Modifier.width(240.dp).clip(RoundedCornerShape(18.dp))
-                                    .background(Brush.verticalGradient(listOf(Color(0xF51C2638), Color(0xEA121A28))))
-                                    .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(18.dp)).padding(12.dp)) {
-                                    Text("当前服务器", color = TextSub, fontSize = 10.sp)
-                                    Text(AppRuntime.session?.serverName ?: "未连接", color = TextMain, fontSize = 13.sp,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
-                                    Text("切换服务器 / 账号", color = TextMain, fontSize = 12.sp,
-                                        modifier = Modifier.fillMaxWidth().clickable { libraryServerMenuOpen = false; onSwitchServer() }.padding(vertical = 8.dp))
-                                }
-                            }
-                        }
-                        Spacer(Modifier.width(16.dp))
-                        Column(Modifier.weight(1f)) {
+                        Column(Modifier.widthIn(max = 260.dp)) {
                             Text(
                                 selectedLibrary?.name.orEmpty(),
                                 color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold,
@@ -532,7 +516,6 @@ fun HomeScreen(
                             )
                             Text(libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextSub, fontSize = 11.sp)
                         }
-                        Spacer(Modifier.width(16.dp))
                         Box {
                             FocusSurface(
                                 modifier = Modifier.height(40.dp).width(112.dp),
@@ -630,7 +613,7 @@ fun HomeScreen(
                         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 80.dp, bottom = 160.dp),
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2),
                     ) {
                         itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
                             PosterCard(item = media, imageUrl = client?.imageUrl(media), requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0), onFocused = { focusedMediaId = media.id }, onClick = { onOpenDetail(media.id) })
@@ -650,7 +633,7 @@ fun HomeScreen(
                     contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 80.dp, bottom = 160.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2),
                 ) {
                     itemsIndexed(gridItems, key = { _, item -> item.id }) { index, it ->
                         PosterCard(
@@ -665,10 +648,7 @@ fun HomeScreen(
             }
 
         NavBar(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .zIndex(2f)
-                .padding(top = 16.dp, end = 24.dp),
+            modifier = Modifier.fillMaxSize().zIndex(2f),
                 tab = tab,
                 onSelect = { t, _ -> tab = t; selectedLibraryId = null },
                 onSearch = onSearch,
@@ -692,6 +672,7 @@ fun HomeScreen(
                     reloadToken++
                 },
                 navFocus = navFocus,
+                contentFocus = heroPlayFocus,
                 hazeState = hazeState,
             )
     }
@@ -708,16 +689,48 @@ private fun NavBar(
     onLogout: () -> Unit,
     onServerSwitched: () -> Unit,
     navFocus: FocusRequester,
+    contentFocus: FocusRequester,
+    hazeState: HazeState,
+) {
+    Box(modifier.fillMaxSize()) {
+        ServerCapsule(
+            modifier = Modifier.align(Alignment.TopStart).padding(start = Space.l + Space.xs, top = Space.m + Space.xs),
+            onSwitchServer = onSwitchServer,
+            onLogout = onLogout,
+            onServerSwitched = onServerSwitched,
+            contentFocus = contentFocus,
+            hazeState = hazeState,
+        )
+        SideRail(
+            modifier = Modifier.align(Alignment.CenterEnd).padding(end = Space.m),
+            tab = tab,
+            onSelect = onSelect,
+            onSettings = onSettings,
+            onSearch = onSearch,
+            navFocus = navFocus,
+            contentFocus = contentFocus,
+            hazeState = hazeState,
+        )
+    }
+}
+
+@Composable
+private fun ServerCapsule(
+    modifier: Modifier,
+    onSwitchServer: () -> Unit,
+    onLogout: () -> Unit,
+    onServerSwitched: () -> Unit,
+    contentFocus: FocusRequester,
     hazeState: HazeState,
 ) {
     val context = LocalContext.current
     var serverMenuOpen by remember { mutableStateOf(false) }
-    val glassShape = RoundedCornerShape(26.dp)
-    val menuShape = RoundedCornerShape(24.dp)
+    val glassShape = RoundedCornerShape(Space.l - Space.xs / 2)
+    val menuShape = ShapeScale.panel
     Box(modifier.wrapContentSize()) {
         Row(
             Modifier
-                .height(48.dp)
+                .height(Space.section + Space.m)
                 .clip(glassShape)
                 .then(
                     if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
@@ -728,20 +741,23 @@ private fun NavBar(
                             blurRadius = ThemeRuntime.blurRadiusDp,
                             noiseFactor = 0f,
                         ),
-                    ) else Modifier.background(
-                        Brush.horizontalGradient(listOf(Color(0xCC1A2233), Color(0xE6151B2A)))
-                    )
+                    ) else Modifier.background(Color(0xD9151B2A))
                 )
                 .border(1.dp, Color(0x44FFFFFF), glassShape)
-                .padding(horizontal = 8.dp)
-                .focusGroup(),
+                .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box {
                 FocusSurface(
-                    modifier = Modifier.height(40.dp).widthIn(min = 96.dp, max = 150.dp),
-                    corner = 20.dp,
+                    modifier = Modifier.height(Space.section + Space.m).widthIn(min = 172.dp, max = 240.dp)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                                runCatching { contentFocus.requestFocus() }
+                                true
+                            } else false
+                        },
+                    corner = Space.l - Space.xs,
                     onClick = { serverMenuOpen = true },
                 ) { focused ->
                     Row(
@@ -749,15 +765,22 @@ private fun NavBar(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
+                            "Lumina",
+                            color = if (focused) Accent else Color(0xFFD6DEEB),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(Modifier.width(Space.s))
+                        Text(
                             AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() }
-                                ?: AppRuntime.session?.serverName ?: "Lumina",
+                                ?: AppRuntime.session?.serverName ?: "Emby",
                             modifier = Modifier.weight(1f),
                             color = if (focused) Accent else Color(0xFFD6DEEB),
                             fontSize = 12.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Spacer(Modifier.width(6.dp))
+                        Spacer(Modifier.width(Space.xs))
                         Text("▾", color = if (focused) Accent else Color(0xFFD6DEEB), fontSize = 12.sp)
                     }
                 }
@@ -862,7 +885,6 @@ private fun NavBar(
                     }
                 }
             }
-            itemsNav(tab, onSelect, onSettings, onSearch, navFocus)
         }
     }
 }
@@ -895,55 +917,81 @@ private fun MenuRowGlass(title: String, sub: String, danger: Boolean = false, on
 }
 
 @Composable
-private fun RowScope.itemsNav(
+private fun SideRail(
+    modifier: Modifier,
     tab: HomeTab,
     onSelect: (HomeTab, String?) -> Unit,
     onSettings: () -> Unit,
     onSearch: () -> Unit,
     navFocus: FocusRequester,
+    contentFocus: FocusRequester,
+    hazeState: HazeState,
 ) {
-    val entries = listOf(
-        Triple(HomeTab.Recommend, "首页", Icons.Rounded.Home),
-        Triple(HomeTab.Favorites, "收藏", Icons.Rounded.Favorite),
-        Triple(HomeTab.Media, "媒体库", Icons.Rounded.Movie),
-    )
-    entries.forEachIndexed { index, (entry, label, icon) ->
-        val active = tab == entry
-        val itemModifier = if (index == 0) {
-            Modifier.size(40.dp).focusRequester(navFocus)
-        } else {
-            Modifier.size(40.dp)
-        }
-        FocusSurface(modifier = itemModifier, corner = 20.dp, scaleTo = 1.08f, onClick = { onSelect(entry, null) }) { focused ->
-            Box(
-                Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).background(
-                    when {
-                        active -> Color(0x40FFFFFF)
-                        focused -> Color(0x33FFFFFF)
-                        else -> Color.Transparent
+    val glassShape = RoundedCornerShape(Space.l + Space.xs / 2)
+    Column(
+        modifier.width(72.dp)
+            .clip(glassShape)
+            .then(
+                if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
+                    state = hazeState,
+                    style = HazeStyle(
+                        backgroundColor = Color(0xD9151B2A),
+                        tint = HazeTint(Color(0x38FFFFFF)),
+                        blurRadius = ThemeRuntime.blurRadiusDp,
+                        noiseFactor = 0f,
+                    ),
+                ) else Modifier.background(Color(0xD9151B2A))
+            )
+            .border(1.dp, Color(0x44FFFFFF), glassShape)
+            .padding(vertical = Space.s, horizontal = Space.xs),
+        verticalArrangement = Arrangement.spacedBy(Space.xs),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        val entries = listOf(
+            Triple("首页", Icons.Rounded.Home, tab == HomeTab.Recommend),
+            Triple("收藏", Icons.Rounded.Favorite, tab == HomeTab.Favorites),
+            Triple("媒体库", Icons.Rounded.Movie, tab == HomeTab.Media),
+            Triple("设置", Icons.Rounded.Settings, false),
+            Triple("搜索", Icons.Rounded.Search, false),
+        )
+        entries.forEachIndexed { index, (label, icon, active) ->
+            FocusSurface(
+                modifier = Modifier.size(56.dp)
+                    .then(if (active) Modifier.focusRequester(navFocus) else Modifier)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft) {
+                            runCatching { contentFocus.requestFocus() }
+                            true
+                        } else false
                     },
-                ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(icon, contentDescription = label, tint = if (active || focused) Accent else Color(0xFFD6DEEB), modifier = Modifier.size(20.dp))
-            }
-        }
-    }
-    listOf(
-        "设置" to Icons.Rounded.Settings,
-        "搜索" to Icons.Rounded.Search,
-    ).forEach { (label, icon) ->
-        FocusSurface(
-            modifier = Modifier.size(40.dp),
-            corner = 20.dp,
-            scaleTo = 1.08f,
-            onClick = if (label == "设置") onSettings else onSearch,
-        ) { focused ->
-            Box(
-                Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).background(if (focused) Color(0x33FFFFFF) else Color.Transparent),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(icon, contentDescription = label, tint = if (focused) Accent else Color(0xFFD6DEEB), modifier = Modifier.size(20.dp))
+                corner = Space.m - Space.xs / 2,
+                scaleTo = 1f,
+                onClick = {
+                    when (index) {
+                        0 -> onSelect(HomeTab.Recommend, null)
+                        1 -> onSelect(HomeTab.Favorites, null)
+                        2 -> onSelect(HomeTab.Media, null)
+                        3 -> onSettings()
+                        else -> onSearch()
+                    }
+                },
+            ) { focused ->
+                Box(Modifier.fillMaxSize()) {
+                    Box(
+                        Modifier.fillMaxSize().clip(RoundedCornerShape(Space.m - Space.xs / 2))
+                            .background(if (active) Color(0x26FFFFFF) else Color.Transparent),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+                            Icon(icon, contentDescription = label, tint = if (active || focused) Accent else Color(0xFFD6DEEB), modifier = Modifier.size(24.dp))
+                            Text(label, color = if (active || focused) Accent else Color(0xFFD6DEEB), fontSize = 12.sp, maxLines = 1)
+                        }
+                    }
+                    if (active) Box(
+                        Modifier.align(Alignment.CenterStart).width(3.dp).height(28.dp)
+                            .clip(RoundedCornerShape(2.dp)).background(Accent),
+                    )
+                }
             }
         }
     }
@@ -1028,6 +1076,7 @@ private fun MediaLibrary(
     onItemFocused: (String) -> Unit,
     onOpenDetail: (String) -> Unit,
     onOpenLibrary: (LibraryView) -> Unit,
+    contentFocus: FocusRequester,
 ) {
     val client = AppRuntime.client
     if (views.isEmpty()) {
@@ -1036,7 +1085,7 @@ private fun MediaLibrary(
         }
         return
     }
-    LazyColumn(state = state, modifier = Modifier.fillMaxSize()) {
+    LazyColumn(state = state, modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2)) {
         item {
             Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 8.dp, bottom = 6.dp)) {
         Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -1066,7 +1115,7 @@ private fun MediaLibrary(
                             contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                         ) {
-                            items(items, key = { it.id }) { it ->
+                            itemsIndexed(items, key = { _, item -> item.id }) { index, it ->
                                 PosterCard(item = it, imageUrl = client?.imageUrl(it), requestInitialFocus = it.id == focusedItemId, onFocused = { onItemFocused(it.id) }, onClick = { onOpenDetail(it.id) })
                             }
                         }
@@ -1263,7 +1312,7 @@ private fun RowSection(
         SectionTitle(title, Modifier.padding(start = 34.dp, bottom = 10.dp))
         LazyRow(
             modifier = Modifier.focusGroup(),
-            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
+            contentPadding = PaddingValues(start = 34.dp, end = 34.dp + Space.xl + Space.section * 2),
             horizontalArrangement = Arrangement.spacedBy(Space.m),
         ) {
             items(items, key = { it.id }) { it ->

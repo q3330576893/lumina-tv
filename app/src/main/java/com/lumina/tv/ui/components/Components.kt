@@ -202,24 +202,26 @@ fun PosterCard(
     imageUrl: String?,
     width: Dp = 200.dp,
     requestInitialFocus: Boolean = false,
+    focusRequester: FocusRequester? = null,
     upFocus: FocusRequester? = null,
     onFocused: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val focusRequester = remember { FocusRequester() }
+    val initialFocusRequester = remember { FocusRequester() }
     val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(180), label = "posterScale")
     LaunchedEffect(requestInitialFocus) {
         if (requestInitialFocus) {
             kotlinx.coroutines.delay(120)
-            runCatching { focusRequester.requestFocus() }
+            runCatching { initialFocusRequester.requestFocus() }
         }
     }
     Column(
         Modifier
             .width(width)
-            .then(if (requestInitialFocus) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (requestInitialFocus) Modifier.focusRequester(initialFocusRequester) else Modifier)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusProperties { if (upFocus != null) up = upFocus }
             .onFocusChanged { if (it.isFocused) onFocused?.invoke() }
             .graphicsLayer {
