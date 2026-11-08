@@ -86,6 +86,11 @@ fun DetailScreen(
     var sourcesLoading by remember { mutableStateOf(false) }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var showSourceMenu by remember { mutableStateOf(false) }
+    // 单集的版本选择
+    var episodeTarget by remember { mutableStateOf<MediaItem?>(null) }
+    var episodeSources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
+    var episodeSourcesLoading by remember { mutableStateOf(false) }
+    var showEpisodeSourceMenu by remember { mutableStateOf(false) }
     var isFav by remember { mutableStateOf(false) }
     var isPlayed by remember { mutableStateOf(false) }
     var focusedRelatedId by rememberSaveable(id) { mutableStateOf<String?>(null) }
@@ -191,6 +196,22 @@ fun DetailScreen(
         if (item == null) return@LaunchedEffect
         delay(240)
         runCatching { playFocus.requestFocus() }
+    }
+
+    /** 单集有多个版本时先选版本，只有一个版本才直接播。 */
+    fun pickEpisode(ep: MediaItem) {
+        if (ep.sourceCount <= 1) {
+            onPlay(ep)
+            return
+        }
+        episodeTarget = ep
+        episodeSources = emptyList()
+        episodeSourcesLoading = true
+        showEpisodeSourceMenu = true
+        scope.launch {
+            episodeSources = runCatching { client?.getMediaSources(ep.id) }.getOrDefault(emptyList()).orEmpty()
+            episodeSourcesLoading = false
+        }
     }
 
     // 部分服务器在剧集条目上不带 People：换列表接口再取一次，避免"主演"整块消失
@@ -476,7 +497,7 @@ fun DetailScreen(
                     Spacer(Modifier.height(14.dp))
                     LazyRow(state = castRowState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(episodes, key = { it.id }) { ep ->
-                            EpisodeCard(ep, client?.imageUrl(ep, 360)) { onPlay(ep) }
+                            EpisodeCard(ep, client?.imageUrl(ep, 360)) { pickEpisode(ep) }
                         }
                     }
                 }
@@ -524,6 +545,22 @@ fun DetailScreen(
 
                 Spacer(Modifier.height(28.dp))
             }
+        }
+
+        // 单集版本选择
+        if (showEpisodeSourceMenu && episodeTarget != null) {
+            val ep = episodeTarget!!
+            SourceMenu(
+                sources = episodeSources,
+                sourcesLoading = episodeSourcesLoading,
+                currentSourceId = episodeSources.firstOrNull()?.id,
+                title = "选择版本 · ${ep.name}",
+                onPick = { sid ->
+                    showEpisodeSourceMenu = false
+                    onPlayWithSource(ep, sid)
+                },
+                onClose = { showEpisodeSourceMenu = false },
+            )
         }
 
         // 版本选择菜单
@@ -579,6 +616,7 @@ private fun SourceMenu(
     currentSourceId: String?,
     onPick: (String) -> Unit,
     onClose: () -> Unit,
+    title: String = "选择版本",
 ) {
     androidx.activity.compose.BackHandler { onClose() }
     Box(
@@ -587,7 +625,7 @@ private fun SourceMenu(
     ) {
         com.lumina.tv.ui.components.GlassPanel(Modifier.width(560.dp), corner = 22.dp) {
             Column(Modifier.padding(22.dp).verticalScroll(rememberScrollState())) {
-                Text("选择版本", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(title, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(14.dp))
                 if (sourcesLoading) {
                     Text("正在读取版本列表…", color = TextSub, fontSize = 12.sp)
@@ -677,6 +715,15 @@ private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
                 )
                 if (ep.positionTicks > 0 && !ep.played) {
                     Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(0.45f).height(3.dp).background(Accent))
+                }
+                if (ep.sourceCount > 1) {
+                    Box(
+                        Modifier.align(Alignment.TopEnd).padding(6.dp)
+                            .clip(RoundedCornerShape(6.dp)).background(Color(0xCC000000))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    ) {
+                        Text("${ep.sourceCount} 版本", color = Accent, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
             Spacer(Modifier.height(6.dp))

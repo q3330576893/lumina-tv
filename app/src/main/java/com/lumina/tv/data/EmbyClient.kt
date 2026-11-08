@@ -337,7 +337,7 @@ class EmbyClient(
     suspend fun getEpisodes(seriesId: String, seasonId: String?): List<MediaItem> = withContext(Dispatchers.IO) {
         val params = mutableMapOf(
             "UserId" to userId,
-            "Fields" to "Overview,PrimaryImageAspectRatio,UserData",
+            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,MediaSources",
         )
         if (seasonId != null) params["SeasonId"] = seasonId
         val arr = getSync(url("/Shows/$seriesId/Episodes", params)).optJSONArray("Items") ?: JSONArray()
@@ -396,6 +396,8 @@ class EmbyClient(
             imageTag = tags?.optString("Primary")?.ifBlank { null },
             backdropTag = backdrops?.optString("0")?.ifBlank { null },
             logoTag = tags?.optString("Logo")?.ifBlank { null },
+            // 请求了 Fields=MediaSources 才有值，用来判断"这一集有几个版本"
+            sourceCount = o.optJSONArray("MediaSources")?.length() ?: 0,
             overview = o.optString("Overview").ifBlank { null },
             year = o.optInt("ProductionYear", 0).takeIf { it > 0 },
             runtimeTicks = o.optLong("RunTimeTicks", 0L).takeIf { it > 0 },
