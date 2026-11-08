@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -50,6 +51,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -79,6 +81,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -485,13 +488,9 @@ fun HomeScreen(
 
     val heroPlayFocus = remember { FocusRequester() }
 
+    // 导航在顶部，右键不再劫持（原来的右键跳竖栏逻辑会让影片行无法继续右移）
     Box(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
         if (event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
-            navFocus.requestFocus()
-            true
-        } else false
-    }.onKeyEvent { event ->
-        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
             navFocus.requestFocus()
             true
         } else false
@@ -662,7 +661,7 @@ fun HomeScreen(
                         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 160.dp),
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
-                        modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2),
+                        modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
                             PosterCard(item = media, imageUrl = client?.imageUrl(media), requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0), onFocused = { focusedMediaId = media.id }, onClick = { onOpenDetail(media.id) })
@@ -682,7 +681,7 @@ fun HomeScreen(
                     contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 76.dp, bottom = 160.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
-                    modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2),
+                    modifier = Modifier.fillMaxSize(),
                 ) {
                     itemsIndexed(gridItems, key = { _, item -> item.id }) { index, it ->
                         PosterCard(
@@ -750,8 +749,8 @@ private fun NavBar(
             contentFocus = contentFocus,
             hazeState = hazeState,
         )
-        SideRail(
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = Space.m, end = Space.m),
+        TopNavBar(
+            modifier = Modifier.align(Alignment.TopEnd).padding(top = Space.m, end = Space.l),
             tab = tab,
             onSelect = onSelect,
             onSettings = onSettings,
@@ -780,6 +779,7 @@ private fun ServerCapsule(
         Row(
             Modifier
                 .height(Space.section + Space.m)
+                .shadow(16.dp, glassShape, clip = false)
                 .clip(glassShape)
                 .then(
                     if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
@@ -960,7 +960,7 @@ private fun MenuRowGlass(title: String, sub: String, danger: Boolean = false, on
 }
 
 @Composable
-private fun SideRail(
+private fun TopNavBar(
     modifier: Modifier,
     tab: HomeTab,
     onSelect: (HomeTab, String?) -> Unit,
@@ -971,8 +971,16 @@ private fun SideRail(
     hazeState: HazeState,
 ) {
     val glassShape = RoundedCornerShape(Space.l + Space.xs / 2)
-    Column(
-        modifier.width(72.dp)
+    val entries = listOf(
+        Triple("首页", Icons.Rounded.Home, tab == HomeTab.Recommend),
+        Triple("收藏", Icons.Rounded.Favorite, tab == HomeTab.Favorites),
+        Triple("媒体库", Icons.Rounded.Movie, tab == HomeTab.Media),
+        Triple("设置", Icons.Rounded.Settings, false),
+        Triple("搜索", Icons.Rounded.Search, false),
+    )
+    Row(
+        modifier
+            .shadow(18.dp, glassShape, clip = false)
             .clip(glassShape)
             .then(
                 if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
@@ -986,29 +994,22 @@ private fun SideRail(
                 ) else Modifier.background(Color(0xD9151B2A))
             )
             .border(1.dp, Color(0x44FFFFFF), glassShape)
-            .padding(vertical = Space.s, horizontal = Space.xs),
-        verticalArrangement = Arrangement.spacedBy(Space.xs),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .padding(Space.xs),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Space.xs),
     ) {
-        val entries = listOf(
-            Triple("首页", Icons.Rounded.Home, tab == HomeTab.Recommend),
-            Triple("收藏", Icons.Rounded.Favorite, tab == HomeTab.Favorites),
-            Triple("媒体库", Icons.Rounded.Movie, tab == HomeTab.Media),
-            Triple("设置", Icons.Rounded.Settings, false),
-            Triple("搜索", Icons.Rounded.Search, false),
-        )
         entries.forEachIndexed { index, (label, icon, active) ->
             FocusSurface(
-                modifier = Modifier.size(56.dp)
+                modifier = Modifier.size(Space.l + Space.m + Space.xs)
                     .then(if (active) Modifier.focusRequester(navFocus) else Modifier)
                     .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft) {
-                            // 同上：内容区拿不到焦点就放行，避免左键被吞死在竖栏里
+                        // 导航在顶部，下键应当直接进内容区；内容区没目标时放行让系统自己找
+                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                             runCatching { contentFocus.requestFocus() }.isSuccess
                         } else false
                     },
-                corner = Space.m - Space.xs / 2,
-                scaleTo = 1f,
+                corner = (Space.l + Space.m + Space.xs) / 2,
+                scaleTo = 1.06f,
                 onClick = {
                     when (index) {
                         0 -> onSelect(HomeTab.Recommend, null)
@@ -1019,20 +1020,27 @@ private fun SideRail(
                     }
                 },
             ) { focused ->
-                Box(Modifier.fillMaxSize()) {
-                    Box(
-                        Modifier.fillMaxSize().clip(RoundedCornerShape(Space.m - Space.xs / 2))
-                            .background(if (active) Color(0x26FFFFFF) else Color.Transparent),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Space.xs)) {
-                            Icon(icon, contentDescription = label, tint = if (active || focused) Accent else Color(0xFFD6DEEB), modifier = Modifier.size(24.dp))
-                            Text(label, color = if (active || focused) Accent else Color(0xFFD6DEEB), fontSize = 12.sp, maxLines = 1)
-                        }
-                    }
-                    if (active) Box(
-                        Modifier.align(Alignment.CenterStart).width(3.dp).height(28.dp)
-                            .clip(RoundedCornerShape(2.dp)).background(Accent),
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            when {
+                                active -> Accent.copy(alpha = 0.88f)
+                                focused -> Color(0x33FFFFFF)
+                                else -> Color.Transparent
+                            },
+                            CircleShape,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        icon, contentDescription = label,
+                        tint = when {
+                            active -> Color(0xFF06101F)
+                            focused -> Accent
+                            else -> Color(0xFFD6DEEB)
+                        },
+                        modifier = Modifier.size(22.dp),
                     )
                 }
             }
@@ -1137,7 +1145,7 @@ private fun MediaLibrary(
         }
         return
     }
-    LazyColumn(state = state, modifier = Modifier.fillMaxSize().padding(end = Space.xl + Space.section * 2)) {
+    LazyColumn(state = state, modifier = Modifier.fillMaxSize()) {
         item {
             Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 76.dp, bottom = 6.dp)) {
         Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -1332,8 +1340,7 @@ private fun Hero(
         }
         
             Row(
-                // end 要给右侧竖栏让位，否则轮播指示点会被压在竖栏底下
-                Modifier.align(Alignment.BottomEnd).padding(end = 34.dp + Space.xl + Space.section * 2, bottom = 34.dp),
+                Modifier.align(Alignment.BottomEnd).padding(end = 34.dp, bottom = 34.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1365,7 +1372,7 @@ private fun RowSection(
         SectionTitle(title, Modifier.padding(start = 34.dp, bottom = 10.dp))
         LazyRow(
             modifier = Modifier.focusGroup(),
-            contentPadding = PaddingValues(start = 34.dp, end = 34.dp + Space.xl + Space.section * 2),
+            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
             horizontalArrangement = Arrangement.spacedBy(Space.m),
         ) {
             items(items, key = { it.id }) { it ->

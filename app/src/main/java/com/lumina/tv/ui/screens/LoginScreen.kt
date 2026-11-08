@@ -10,7 +10,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.clickable
@@ -39,6 +41,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
@@ -64,6 +67,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -76,9 +80,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import coil.compose.AsyncImage
 import com.google.zxing.integration.android.IntentIntegrator
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.EmbyClient
+import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.SavedServer
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.ui.components.FocusSurface
@@ -366,13 +372,10 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         confirmButton = { TextButton(onClick = { scanError = null }) { Text("关闭") } },
     )
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF090810))) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF07060C))) {
         val wide = maxWidth >= 720.dp
-        Box(Modifier.fillMaxSize().background(Color(0xFF090810)))
-        Box(Modifier.align(Alignment.TopStart).offset(x = (-110).dp, y = (-170).dp).size(520.dp)
-            .background(Brush.radialGradient(listOf(Color(0x143DB8B0), Color.Transparent))))
-        Box(Modifier.align(Alignment.BottomEnd).offset(x = 140.dp, y = 190.dp).size(520.dp)
-            .background(Brush.radialGradient(listOf(Color(0x103B79D8), Color.Transparent))))
+        PosterBackdrop()
+
         val savedServers = remember { AppRuntime.prefs?.savedServerList().orEmpty() }
         fun fillFromSaved(server: SavedServer) {
             val u = runCatching { Uri.parse(server.url) }.getOrNull()
@@ -386,46 +389,65 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
             error = null
             runCatching { passFocusRequester.requestFocus() }
         }
-        val maxCardHeight = maxHeight - 64.dp
+        val maxCardHeight = maxHeight - 40.dp
+        val goHome: (() -> Unit)? = if (AppRuntime.session != null) onCancel else null
+
         if (wide) {
             Row(
-                Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 32.dp),
+                Modifier.fillMaxSize().padding(horizontal = 26.dp, vertical = 22.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                BrandPanel(
+                LoginRail(onHome = goHome, onHelp = { helpOpen = true })
+                Spacer(Modifier.width(30.dp))
+                BrandHero(
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     savedServers = savedServers,
                     onPickServer = { fillFromSaved(it) },
-                    expand = true,
-                    onBackHome = if (AppRuntime.session != null) onCancel else null,
                 )
-                Spacer(Modifier.width(44.dp))
-                LoginCard(
-                    Modifier.widthIn(min = 560.dp, max = 720.dp).heightIn(max = maxCardHeight)
-                        .verticalScroll(rememberScrollState()),
-                    host, { host = it }, port, { port = it.filter(Char::isDigit).take(5) }, path, { path = it }, user, { user = it }, pass, { pass = it },
-                    scheme, { scheme = it }, loading || probing, probing, error, AppRuntime.pairingUrl,
-                    { submit() }, { launchScan() }, { helpOpen = true }, pairNotice, { pairNotice = null }, loginFocusRequester,
-                    onRefreshQr = { AppRuntime.refreshPairingUrl() },
-                    passFocus = passFocusRequester,
-                )
+                Spacer(Modifier.width(30.dp))
+                Box(Modifier.weight(0.92f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    LoginCard(
+                        modifier = Modifier.widthIn(max = 620.dp).fillMaxWidth()
+                            .heightIn(max = maxCardHeight).verticalScroll(rememberScrollState()),
+                        host = host, onHost = { host = it },
+                        port = port, onPort = { port = it.filter(Char::isDigit).take(5) },
+                        path = path, onPath = { path = it },
+                        user = user, onUser = { user = it },
+                        pass = pass, onPass = { pass = it },
+                        scheme = scheme, onScheme = { scheme = it },
+                        busy = loading || probing, probing = probing, error = error,
+                        pairingUrl = AppRuntime.pairingUrl,
+                        onLogin = { submit() }, onScan = { launchScan() }, onHelp = { helpOpen = true },
+                        pairNotice = pairNotice, onNoticeDismiss = { pairNotice = null },
+                        loginFocusRequester = loginFocusRequester,
+                        onRefreshQr = { AppRuntime.refreshPairingUrl() },
+                        passFocus = passFocusRequester,
+                    )
+                }
             }
         } else {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp)) {
                 LoginCard(
-                    Modifier.fillMaxWidth(),
-                    host, { host = it }, port, { port = it.filter(Char::isDigit).take(5) }, path, { path = it }, user, { user = it }, pass, { pass = it },
-                    scheme, { scheme = it }, loading || probing, probing, error, AppRuntime.pairingUrl,
-                    { submit() }, { launchScan() }, { helpOpen = true }, pairNotice, { pairNotice = null }, loginFocusRequester,
+                    modifier = Modifier.fillMaxWidth(),
+                    host = host, onHost = { host = it },
+                    port = port, onPort = { port = it.filter(Char::isDigit).take(5) },
+                    path = path, onPath = { path = it },
+                    user = user, onUser = { user = it },
+                    pass = pass, onPass = { pass = it },
+                    scheme = scheme, onScheme = { scheme = it },
+                    busy = loading || probing, probing = probing, error = error,
+                    pairingUrl = AppRuntime.pairingUrl,
+                    onLogin = { submit() }, onScan = { launchScan() }, onHelp = { helpOpen = true },
+                    pairNotice = pairNotice, onNoticeDismiss = { pairNotice = null },
+                    loginFocusRequester = loginFocusRequester,
                     onRefreshQr = { AppRuntime.refreshPairingUrl() },
                     passFocus = passFocusRequester,
                 )
                 Spacer(Modifier.height(24.dp))
-                BrandPanel(
+                BrandHero(
                     modifier = Modifier.fillMaxWidth(),
                     savedServers = savedServers,
                     onPickServer = { fillFromSaved(it) },
-                    onBackHome = if (AppRuntime.session != null) onCancel else null,
                 )
             }
         }
@@ -433,7 +455,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     if (unsupportedScan) AlertDialog(
         onDismissRequest = { unsupportedScan = false },
         title = { Text("无法读取此二维码") },
-        text = { Text("请使用 Lumina 登录配置码。其他设备同步请点击卡片下方的“从其他设备同步”。") },
+        text = { Text("请使用 Lumina 登录配置码。其他设备同步请点击卡片下方的“扫描配置二维码”。") },
         confirmButton = { TextButton(onClick = { unsupportedScan = false }) { Text("关闭") } },
     )
     if (successDialogServer != null) AlertDialog(
@@ -444,227 +466,140 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     )
 }
 
+/** 背景：有历史服务器时用它的海报拼一面墙，首登时退回深色渐层。 */
 @Composable
-private fun LoginCard(
-    modifier: Modifier, host: String, onHost: (String) -> Unit, port: String, onPort: (String) -> Unit,
-    path: String, onPath: (String) -> Unit,
-    user: String, onUser: (String) -> Unit, pass: String, onPass: (String) -> Unit,
-    scheme: String, onScheme: (String) -> Unit, busy: Boolean, probing: Boolean, error: String?,
-    pairingUrl: String, onLogin: () -> Unit, onScan: () -> Unit, onHelp: () -> Unit,
-    pairNotice: String?, onNoticeDismiss: () -> Unit, loginFocusRequester: FocusRequester,
-    onRefreshQr: () -> Unit,
-    passFocus: FocusRequester,
-) {
-    var qrOpen by remember { mutableStateOf(false) }
-    var cardFocused by remember { mutableStateOf(false) }
-    val hostFocusRequester = remember { FocusRequester() }
-    val clipboard = LocalClipboardManager.current
-    val context = LocalContext.current
-    val shape = RoundedCornerShape(30.dp)
-    Column(
-        modifier.clip(shape).background(Glass)
-            .border(1.dp, Brush.verticalGradient(listOf(if (cardFocused) Color(0x9994FFF0) else Color(0x55FFFFFF), Color(0x11FFFFFF))), shape)
-            .onFocusChanged { cardFocused = it.hasFocus }
-            .padding(horizontal = 32.dp, vertical = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        LaunchedEffect(Unit) {
-            delay(150)
-            runCatching { hostFocusRequester.requestFocus() }
+private fun PosterBackdrop() {
+    val urls = remember {
+        val home = LibraryCache.home
+        (home?.let { it.resume + it.movies + it.series + it.latest } ?: emptyList())
+            .mapNotNull { AppRuntime.client?.imageUrl(it, 360) }
+            .distinct()
+            .take(9)
+    }
+    if (urls.isEmpty()) {
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.linearGradient(listOf(Color(0xFF0B0A16), Color(0xFF141024), Color(0xFF07060C)))
+            )
+        ) {
+            Box(Modifier.align(Alignment.TopStart).offset(x = (-120).dp, y = (-160).dp).size(560.dp)
+                .background(Brush.radialGradient(listOf(Color(0x243DB8B0), Color.Transparent))))
+            Box(Modifier.align(Alignment.BottomEnd).offset(x = 150.dp, y = 170.dp).size(560.dp)
+                .background(Brush.radialGradient(listOf(Color(0x2A657DE8), Color.Transparent))))
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("连接媒体服务器", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            FocusSurface(Modifier.height(32.dp), corner = 16.dp, onClick = { qrOpen = !qrOpen }) { focused ->
-                Row(Modifier.height(32.dp).background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(16.dp)).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.QrCodeScanner, null, tint = if (focused) VioletBright else InkSub, modifier = Modifier.size(15.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("扫码配对", color = Ink, fontSize = 11.sp)
-                }
-            }
-        }
-        pairNotice?.let { notice ->
-            Row(Modifier.fillMaxWidth().height(34.dp).clip(RoundedCornerShape(12.dp)).background(Color(0x222BD9C0)).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(notice, color = Ink, fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 1)
-                TextButton(onClick = onNoticeDismiss) { Text("知道了", color = VioletBright, fontSize = 10.sp) }
-            }
-        }
-        if (qrOpen) {
-            if (pairingUrl.isNotBlank()) {
-                Box(Modifier.align(Alignment.CenterHorizontally).clip(RoundedCornerShape(16.dp)).background(Color.White).padding(10.dp)) {
-                    QrCode(pairingUrl, size = 200.dp)
-                }
-                Text("手机扫码 → 填写 → 点『同步到电视』", color = InkSub, fontSize = 10.sp)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        pairingUrl, color = VioletBright, fontSize = 10.sp, maxLines = 2,
-                        modifier = Modifier.weight(1f).clickable {
-                            clipboard.setText(AnnotatedString(pairingUrl))
-                            android.widget.Toast.makeText(context, "配对地址已复制", android.widget.Toast.LENGTH_SHORT).show()
-                        },
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    FocusSurface(Modifier.height(30.dp), corner = 15.dp, onClick = onRefreshQr) { focused ->
-                        Box(
-                            Modifier.height(30.dp).background(
-                                if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
-                                RoundedCornerShape(15.dp),
-                            ).padding(horizontal = 12.dp),
-                            contentAlignment = Alignment.Center,
-                        ) { Text("刷新二维码", color = if (focused) VioletBright else Ink, fontSize = 10.sp) }
-                    }
-                }
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        AppRuntime.pairingError ?: "未连接局域网，配对服务暂不可用",
-                        color = InkSub, fontSize = 11.sp, modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    FocusSurface(Modifier.height(30.dp), corner = 15.dp, onClick = onRefreshQr) { focused ->
-                        Box(
-                            Modifier.height(30.dp).background(
-                                if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
-                                RoundedCornerShape(15.dp),
-                            ).padding(horizontal = 12.dp),
-                            contentAlignment = Alignment.Center,
-                        ) { Text("重试", color = if (focused) VioletBright else Ink, fontSize = 10.sp) }
-                    }
-                }
-            }
-            TextButton(onClick = { qrOpen = false }, modifier = Modifier.align(Alignment.End)) { Text("收起", color = VioletBright, fontSize = 11.sp) }
-        }
-        // 分割线独占一行；之前把协议 Row 写成了这个 1dp Box 的内容，导致整行被压成 1dp 高、压在下面的输入框上
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x33FFFFFF))) { }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                Text("协议", color = InkSub, fontSize = 11.sp)
-                listOf("http", "https").forEach { candidate ->
-                    FocusSurface(Modifier.width(66.dp).height(36.dp), corner = 13.dp, onClick = { onScheme(candidate) }) { focused ->
-                        Box(Modifier.fillMaxSize().background(if (scheme == candidate) Color(0x552B9D9A) else if (focused) Color(0x33FFFFFF) else Color(0x1DFFFFFF), RoundedCornerShape(13.dp)), contentAlignment = Alignment.Center) {
-                            Text(candidate, color = if (scheme == candidate) VioletBright else InkSub, fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                GlassField(host, onHost, "IP 或域名", Modifier.weight(1f), ImeAction.Next, focusRequester = hostFocusRequester)
-                GlassField(port, onPort, "端口", Modifier.width(86.dp), ImeAction.Next, keyboardType = KeyboardType.Number)
-            }
-            GlassField(path, onPath, "路径（可选）", Modifier.fillMaxWidth(), ImeAction.Next)
-            GlassField(user, onUser, "Emby 用户名", Modifier.fillMaxWidth(), ImeAction.Next)
-            GlassField(pass, onPass, "密码", Modifier.fillMaxWidth(), ImeAction.Done, password = true, onDone = onLogin, focusRequester = passFocus)
-            FocusSurface(Modifier.fillMaxWidth().height(48.dp).focusRequester(loginFocusRequester), corner = 16.dp, scaleTo = 1.02f, onClick = onLogin) { focused ->
-                Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(if (focused) listOf(Color(0xFF58D9C7), Color(0xFF2694A0)) else listOf(Color(0xFF34B8AE), Color(0xFF207C8F))), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
-                    if (busy) Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(17.dp), color = Color.White, strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text(if (probing) "正在探测服务器…" else "正在登录…", color = Color.White, fontSize = 13.sp) }
-                    else Text("连接并登录", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FocusSurface(Modifier.weight(1f).height(40.dp), corner = 14.dp, onClick = onScan) { focused ->
-                Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(14.dp)), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.QrCodeScanner, null, tint = if (focused) VioletBright else InkSub, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp)); Text("扫描配置二维码", color = Ink, fontSize = 11.sp)
-                }
-            }
-            FocusSurface(Modifier.width(104.dp).height(40.dp), corner = 14.dp, onClick = onHelp) { focused ->
-                Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) { Text("帮助", color = if (focused) VioletBright else InkSub, fontSize = 11.sp) }
-            }
-        }
-        Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("v${com.lumina.tv.BuildConfig.VERSION_NAME} · Lumina for Emby", color = InkSub.copy(alpha = 0.65f), fontSize = 10.sp)
-            Spacer(Modifier.weight(1f))
-            Box(
-                Modifier.size(6.dp).background(
-                    if (pairingUrl.isNotBlank()) Color(0xFF35E0C0) else Color(0xFF6B7280),
-                    CircleShape,
+        return
+    }
+    Row(Modifier.fillMaxSize()) {
+        urls.forEach { url ->
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                AsyncImage(
+                    model = url,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().alpha(0.32f),
                 )
-            )
-            Spacer(Modifier.width(5.dp))
-            Text(
-                if (pairingUrl.isNotBlank()) "局域网配对就绪" else "局域网未就绪",
-                color = InkSub.copy(alpha = 0.65f), fontSize = 10.sp,
-            )
+            }
         }
-        error?.let { Text(it, color = Color(0xFFFF929D), fontSize = 11.sp) }
+    }
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xE607060C), Color(0xF207060C)))))
+    Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0x9907060C), Color(0xCC07060C)))))
+}
+
+/** 左侧极简导航条：Logo + 主页 / 帮助 + 版本号，仿 Flux 的悬浮胶囊。 */
+@Composable
+private fun LoginRail(onHome: (() -> Unit)?, onHelp: () -> Unit) {
+    val shape = RoundedCornerShape(26.dp)
+    Column(
+        Modifier.width(78.dp).fillMaxHeight()
+            .shadow(20.dp, shape, clip = false)
+            .clip(shape)
+            .background(Color(0x9910121A))
+            .border(1.dp, Color(0x26FFFFFF), shape)
+            .padding(vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.size(46.dp).clip(RoundedCornerShape(15.dp))
+                .background(Brush.linearGradient(listOf(Color(0xFF49C8B7), Color(0xFF657DE8)))),
+            contentAlignment = Alignment.Center,
+        ) { Text("L", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold) }
+        Spacer(Modifier.height(20.dp))
+        if (onHome != null) RailItem(Icons.Filled.Home, "主页", onHome)
+        Spacer(Modifier.height(6.dp))
+        RailItem(Icons.Filled.Info, "帮助", onHelp)
+        Spacer(Modifier.weight(1f))
+        Text("v${com.lumina.tv.BuildConfig.VERSION_NAME}", color = InkSub.copy(alpha = 0.45f), fontSize = 9.sp)
     }
 }
 
 @Composable
-private fun BrandPanel(
+private fun RailItem(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    FocusSurface(
+        modifier = Modifier.size(58.dp),
+        corner = 18.dp,
+        scaleTo = 1.06f,
+        onClick = onClick,
+    ) { focused ->
+        Column(
+            Modifier.fillMaxSize().background(if (focused) Color(0x24FFFFFF) else Color.Transparent, RoundedCornerShape(18.dp)),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Icon(icon, contentDescription = label, tint = if (focused) VioletBright else InkSub, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.height(3.dp))
+            Text(label, color = if (focused) VioletBright else InkSub, fontSize = 9.sp)
+        }
+    }
+}
+
+/** 品牌区：LUMINA·EMBY / Lumina / 三个特性 / 最近连接。 */
+@Composable
+private fun BrandHero(
     modifier: Modifier,
     savedServers: List<SavedServer>,
     onPickServer: (SavedServer) -> Unit,
     expand: Boolean = false,
-    onBackHome: (() -> Unit)? = null,
 ) {
-    Column(modifier.padding(horizontal = 10.dp)) {
-        if (onBackHome != null) {
-            FocusSurface(Modifier.height(42.dp), corner = 21.dp, scaleTo = 1.02f, onClick = onBackHome) { focused ->
-                Row(
-                    Modifier.height(42.dp).background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(21.dp))
-                        .padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Filled.Home, null, tint = if (focused) VioletBright else InkSub, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("返回主页", color = if (focused) VioletBright else Ink, fontSize = 12.sp)
-                    Spacer(Modifier.width(6.dp))
-                    Text("· 当前服务器仍在运行", color = InkSub.copy(alpha = 0.7f), fontSize = 10.sp)
-                }
-            }
-            Spacer(Modifier.height(18.dp))
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)).background(Brush.linearGradient(listOf(Color(0xFF49C8B7), Color(0xFF657DE8)))), contentAlignment = Alignment.Center) {
-                Text("L", color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold)
-            }
-            Text("LUMINA · EMBY", color = VioletBright, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-            Text("Lumina", color = Ink, fontSize = 42.sp, fontWeight = FontWeight.Bold)
-            Text("把 Emby 内容带到客厅屏幕", color = InkSub, fontSize = 15.sp)
-        }
-        Spacer(Modifier.height(18.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
-            Text("本地解码 · 支持 TrueHD / DTS", color = InkSub, fontSize = 12.sp, modifier = Modifier.height(22.dp))
-            Text("手机扫码配对，无需遥控输入", color = InkSub, fontSize = 12.sp, modifier = Modifier.height(22.dp))
-            Text("多服务器一键切换", color = InkSub, fontSize = 12.sp, modifier = Modifier.height(22.dp))
-        }
+    Column(modifier.padding(horizontal = 6.dp), verticalArrangement = Arrangement.Center) {
+        Text("LUMINA · EMBY", color = VioletBright, fontSize = 11.sp, letterSpacing = 3.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            FeaturePill("4K HDR 直连")
-            FeaturePill("多内核播放")
-            FeaturePill("局域网同步")
+        Text("Lumina", color = Ink, fontSize = 54.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text("连接你的 Emby 服务器", color = InkSub, fontSize = 15.sp)
+        Spacer(Modifier.height(18.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FeaturePill("扫码 30 秒配好")
+            FeaturePill("自动探测端口")
+            FeaturePill("账号不落明文")
         }
-
         if (savedServers.isNotEmpty()) {
             Spacer(Modifier.height(26.dp))
-            Text("最近连接", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text("最近连接", color = InkSub.copy(alpha = 0.9f), fontSize = 11.sp)
             Spacer(Modifier.height(8.dp))
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 savedServers.sortedByDescending { it.lastUsed }.take(3).forEach { server ->
                     FocusSurface(
-                        modifier = Modifier.fillMaxWidth().height(58.dp),
-                        corner = 16.dp,
-                        scaleTo = 1.01f,
+                        modifier = Modifier.widthIn(max = 380.dp).fillMaxWidth().height(52.dp),
+                        corner = 15.dp,
+                        scaleTo = 1.02f,
                         onClick = { onPickServer(server) },
                     ) { focused ->
                         Row(
                             Modifier.fillMaxSize()
-                                .background(if (focused) Color(0x1FFFFFFF) else Color(0x0DFFFFFF), RoundedCornerShape(16.dp))
-                                .padding(horizontal = 14.dp),
+                                .background(if (focused) Color(0x24FFFFFF) else Color(0x0FFFFFFF), RoundedCornerShape(15.dp))
+                                .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box(
-                                Modifier.size(30.dp).clip(CircleShape)
+                                Modifier.size(28.dp).clip(CircleShape)
                                     .background(if (focused) Color(0x3335E0C0) else Color(0x1FFFFFFF)),
                                 contentAlignment = Alignment.Center,
-                            ) {
-                                Text("L", color = if (focused) VioletBright else InkSub, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                            }
+                            ) { Text("L", color = if (focused) VioletBright else InkSub, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(server.name, color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(
-                                    "${server.userName.ifBlank { "未记录账号" }} · ${server.url.substringAfter("://").trimEnd('/')}",
+                                    server.url.substringAfter("://").trimEnd('/'),
                                     color = InkSub, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 )
                             }
@@ -674,60 +609,244 @@ private fun BrandPanel(
                 }
             }
         }
-
-        // 宽屏才把版本号压到底部；窄屏是可滚动的 wrap 高度，不能有 weight
         if (expand) Spacer(Modifier.weight(1f)) else Spacer(Modifier.height(20.dp))
-        Text("版本 ${com.lumina.tv.BuildConfig.VERSION_NAME}", color = InkSub.copy(alpha = 0.6f), fontSize = 10.sp)
     }
 }
 
 @Composable
-private fun GlassField(value: String, onValue: (String) -> Unit, label: String, modifier: Modifier, action: ImeAction, keyboardType: KeyboardType = KeyboardType.Text, password: Boolean = false, onDone: (() -> Unit)? = null, focusRequester: FocusRequester? = null) {
+private fun LoginCard(
+    modifier: Modifier,
+    host: String, onHost: (String) -> Unit,
+    port: String, onPort: (String) -> Unit,
+    path: String, onPath: (String) -> Unit,
+    user: String, onUser: (String) -> Unit,
+    pass: String, onPass: (String) -> Unit,
+    scheme: String, onScheme: (String) -> Unit,
+    busy: Boolean, probing: Boolean, error: String?,
+    pairingUrl: String,
+    onLogin: () -> Unit, onScan: () -> Unit, onHelp: () -> Unit,
+    pairNotice: String?, onNoticeDismiss: () -> Unit,
+    loginFocusRequester: FocusRequester,
+    onRefreshQr: () -> Unit,
+    passFocus: FocusRequester,
+) {
+    var qrOpen by remember { mutableStateOf(false) }
+    var cardFocused by remember { mutableStateOf(false) }
+    val hostFocusRequester = remember { FocusRequester() }
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val shape = RoundedCornerShape(28.dp)
+    Column(
+        modifier.clip(shape)
+            .background(Color(0xE60C0E16))
+            .border(1.dp, if (cardFocused) Color(0x55B69CFF) else Color(0x1FFFFFFF), shape)
+            .onFocusChanged { cardFocused = it.hasFocus }
+            .padding(horizontal = 24.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        LaunchedEffect(Unit) { delay(150); runCatching { hostFocusRequester.requestFocus() } }
+
+        // 标题 + 扫码
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Text("连接服务器", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(3.dp))
+                Text("输入账号，或扫码从手机同步配置", color = InkSub, fontSize = 11.sp)
+            }
+            FocusSurface(Modifier.height(38.dp), corner = 19.dp, scaleTo = 1.04f, onClick = { qrOpen = !qrOpen }) { focused ->
+                Row(
+                    Modifier.height(38.dp)
+                        .background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp))
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.QrCodeScanner, null, tint = if (focused) VioletBright else InkSub, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("扫码登录", color = Ink, fontSize = 11.sp)
+                }
+            }
+        }
+
+        pairNotice?.let { notice ->
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0x222BD9C0))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(notice, color = Ink, fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 2)
+                TextButton(onClick = onNoticeDismiss) { Text("知道了", color = VioletBright, fontSize = 10.sp) }
+            }
+        }
+
+        if (qrOpen) {
+            if (pairingUrl.isNotBlank()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.clip(RoundedCornerShape(14.dp)).background(Color.White).padding(8.dp)) {
+                        QrCode(pairingUrl, size = 132.dp)
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("手机扫码 → 填写 → 同步到电视", color = Ink, fontSize = 11.sp)
+                        Text(
+                            pairingUrl, color = VioletBright, fontSize = 9.sp, maxLines = 3,
+                            modifier = Modifier.clickable {
+                                clipboard.setText(AnnotatedString(pairingUrl))
+                                android.widget.Toast.makeText(context, "配对地址已复制", android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                        )
+                        FocusSurface(Modifier.height(30.dp), corner = 15.dp, onClick = onRefreshQr) { focused ->
+                            Box(
+                                Modifier.height(30.dp)
+                                    .background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(15.dp))
+                                    .padding(horizontal = 12.dp),
+                                contentAlignment = Alignment.Center,
+                            ) { Text("刷新二维码", color = if (focused) VioletBright else Ink, fontSize = 10.sp) }
+                        }
+                    }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        AppRuntime.pairingError ?: "未连接局域网，配对服务暂不可用",
+                        color = InkSub, fontSize = 11.sp, modifier = Modifier.weight(1f),
+                    )
+                    FocusSurface(Modifier.height(30.dp), corner = 15.dp, onClick = onRefreshQr) { focused ->
+                        Box(
+                            Modifier.height(30.dp)
+                                .background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(15.dp))
+                                .padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) { Text("重试", color = if (focused) VioletBright else Ink, fontSize = 10.sp) }
+                    }
+                }
+            }
+        }
+
+        // 协议
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("协议", color = InkSub, fontSize = 11.sp)
+            listOf("http", "https").forEach { candidate ->
+                FocusSurface(Modifier.width(74.dp).height(34.dp), corner = 17.dp, scaleTo = 1.03f, onClick = { onScheme(candidate) }) { focused ->
+                    Box(
+                        Modifier.fillMaxSize().background(
+                            when {
+                                scheme == candidate -> Color(0xFF6C5CE7)
+                                focused -> Color(0x2EFFFFFF)
+                                else -> Color(0x14FFFFFF)
+                            },
+                            RoundedCornerShape(17.dp),
+                        ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(candidate, color = if (scheme == candidate) Color.White else InkSub, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            GlassField(host, onHost, "IP 或域名", Modifier.weight(1f), ImeAction.Next, focusRequester = hostFocusRequester)
+            GlassField(port, onPort, "端口", Modifier.width(92.dp), ImeAction.Next, keyboardType = KeyboardType.Number)
+        }
+        GlassField(path, onPath, "路径（可选）", Modifier.fillMaxWidth(), ImeAction.Next)
+        GlassField(user, onUser, "Emby 用户名", Modifier.fillMaxWidth(), ImeAction.Next)
+        GlassField(pass, onPass, "密码", Modifier.fillMaxWidth(), ImeAction.Done, password = true, onDone = onLogin, focusRequester = passFocus)
+
+        Spacer(Modifier.height(2.dp))
+        FocusSurface(Modifier.fillMaxWidth().height(46.dp).focusRequester(loginFocusRequester), corner = 23.dp, scaleTo = 1.02f, onClick = onLogin) { focused ->
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.horizontalGradient(
+                        if (focused) listOf(Color(0xFF8E7DFF), Color(0xFF5F4BE0))
+                        else listOf(Color(0xFF7C6BFF), Color(0xFF5544D6))
+                    ),
+                    RoundedCornerShape(23.dp),
+                ),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (busy) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text(if (probing) "正在探测服务器…" else "正在登录…", color = Color.White, fontSize = 13.sp)
+                    }
+                } else {
+                    Text("连接并登录", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FocusSurface(Modifier.weight(1f).height(34.dp), corner = 17.dp, onClick = onScan) { focused ->
+                Row(
+                    Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(17.dp)),
+                    horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.QrCodeScanner, null, tint = if (focused) VioletBright else InkSub, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("扫描配置二维码", color = Ink, fontSize = 11.sp)
+                }
+            }
+            FocusSurface(Modifier.width(96.dp).height(34.dp), corner = 17.dp, onClick = onHelp) { focused ->
+                Box(
+                    Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(17.dp)),
+                    contentAlignment = Alignment.Center,
+                ) { Text("帮助", color = if (focused) VioletBright else InkSub, fontSize = 11.sp) }
+            }
+        }
+
+        error?.let { Text(it, color = Color(0xFFFF929D), fontSize = 11.sp, maxLines = 3) }
+
+        Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("v${com.lumina.tv.BuildConfig.VERSION_NAME} · Lumina for Emby", color = InkSub.copy(alpha = 0.55f), fontSize = 9.sp)
+            Spacer(Modifier.weight(1f))
+            Box(Modifier.size(5.dp).background(if (pairingUrl.isNotBlank()) Color(0xFF35E0C0) else Color(0xFF6B7280), CircleShape))
+            Spacer(Modifier.width(5.dp))
+            Text(
+                if (pairingUrl.isNotBlank()) "局域网配对就绪" else "局域网未就绪",
+                color = InkSub.copy(alpha = 0.55f), fontSize = 9.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun GlassField(
+    value: String, onValue: (String) -> Unit, label: String, modifier: Modifier, action: ImeAction,
+    keyboardType: KeyboardType = KeyboardType.Text, password: Boolean = false,
+    onDone: (() -> Unit)? = null, focusRequester: FocusRequester? = null,
+) {
     var focused by remember { mutableStateOf(false) }
     OutlinedTextField(
         value = value, onValueChange = onValue, singleLine = true,
-        placeholder = { Text(label, color = InkSub.copy(alpha = 0.78f), fontSize = 13.sp) },
+        placeholder = { Text(label, color = InkSub.copy(alpha = 0.72f), fontSize = 13.sp) },
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = action),
         keyboardActions = KeyboardActions(onDone = { onDone?.invoke() }),
-        shape = RoundedCornerShape(15.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = Ink, unfocusedTextColor = Ink,
-            focusedBorderColor = VioletBright, unfocusedBorderColor = Color(0x30FFFFFF),
-            cursorColor = VioletBright, focusedContainerColor = Color(0x2CFFFFFF), unfocusedContainerColor = Color(0x1CFFFFFF),
+            focusedBorderColor = VioletBright, unfocusedBorderColor = Color(0x24FFFFFF),
+            cursorColor = VioletBright,
+            focusedContainerColor = Color(0x1FFFFFFF), unfocusedContainerColor = Color(0x14FFFFFF),
         ),
-        modifier = modifier.height(56.dp)
+        modifier = modifier.height(46.dp)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .onFocusChanged { focused = it.isFocused }
-            .border(if (focused) 2.dp else 0.dp, if (focused) VioletBright else Color.Transparent, RoundedCornerShape(15.dp)),
+            .onFocusChanged { focused = it.isFocused },
     )
 }
 
 @Composable
 private fun FeaturePill(text: String) {
-    Row(Modifier.clip(CircleShape).background(Color(0x1DFFFFFF)).padding(horizontal = 9.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(5.dp).background(Violet, CircleShape)); Spacer(Modifier.width(5.dp)); Text(text, color = InkSub, fontSize = 9.sp)
-    }
-}
-
-@Composable
-private fun SideNavButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, tv: Boolean, enabled: Boolean, selected: Boolean, onClick: () -> Unit) {
-    var focused by remember { mutableStateOf(false) }
-    val interaction = remember { MutableInteractionSource() }
-    Column(
-        Modifier.width(if (tv) 58.dp else 46.dp).height(if (tv) 62.dp else 48.dp)
-            .clip(RoundedCornerShape(16.dp)).background(if (selected) Color(0x3D9B7DE1) else if (focused) Color(0x33FFFFFF) else Color.Transparent)
-            .border(if (focused) 2.dp else 1.dp, if (focused) VioletBright else if (selected) Color(0x669F80E8) else Color.Transparent, RoundedCornerShape(16.dp))
-            .onFocusChanged { focused = it.isFocused }
-            .clickable(enabled = enabled, interactionSource = interaction, indication = null, onClick = onClick)
-            .padding(4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+    Row(
+        Modifier.clip(CircleShape).background(Color(0x14FFFFFF)).padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = label, tint = if (selected) VioletBright else InkSub, modifier = Modifier.size(if (tv) 22.dp else 19.dp))
-        if (tv) Text(label, color = if (selected) Ink else InkSub, fontSize = 8.sp)
+        Box(Modifier.size(5.dp).background(Violet, CircleShape))
+        Spacer(Modifier.width(5.dp))
+        Text(text, color = InkSub, fontSize = 9.sp)
     }
 }
-
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
