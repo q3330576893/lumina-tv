@@ -719,7 +719,11 @@ fun PlayerScreen(
                         .take(4).mapNotNull { it.message?.takeIf(String::isNotBlank) }.joinToString(" · ")
                     val srcInfo = playbackSource
                     val vCodec = srcInfo?.streams?.firstOrNull { it.type == "Video" }?.codec
+                    val playbackUrlPath = runCatching {
+                        android.net.Uri.parse(currentPlaybackUrl).path.orEmpty().takeLast(40)
+                    }.getOrDefault("")
                     error = buildString {
+                        append("URL=").append(playbackUrlPath).append("\n")
                         append("${failurePhase}阶段失败：")
                         append("播放失败：${err.errorCodeName}")
                         if (cause.isNotBlank()) append("\n").append(cause.take(180))
@@ -728,6 +732,9 @@ fun PlayerScreen(
                             .append(" 编码=").append(vCodec ?: "?")
                             .append(" 版本=")
                             .append(mediaSources.firstOrNull { it.id == currentSourceId }?.displayLabel ?: "默认")
+                    }.let { message ->
+                        val urlLine = message.substringBefore('\n')
+                        message.substringAfter('\n') + "\n" + urlLine
                     }
                 }
             }
@@ -799,11 +806,22 @@ fun PlayerScreen(
                 val remembered = AppRuntime.prefs?.subtitleTrackFor(item.id)
                 val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
                 if (textGroups.isEmpty()) return
+                if (remembered == "-1") {
+                    subtitleSelectionApplied = true
+                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .build()
+                    return
+                }
                 val all = textGroups.flatMap { group ->
                     (0 until group.length).map { index -> Triple(group, index, group.getTrackFormat(index)) }
                 }
                 val selected = remembered?.let { key ->
                     all.firstOrNull { (group, index, _) -> group.mediaTrackGroup.id + ":" + index == key }
+                        ?: key.substringBefore(':').toIntOrNull()?.let { streamIndex ->
+                            all.firstOrNull { (_, index, format) -> format.id?.toIntOrNull() == streamIndex || index == streamIndex }
+                        }
                 }
                 val chinese = all.firstOrNull { (_, _, format) ->
                     val description = listOfNotNull(format.language, format.label, format.id).joinToString(" ")

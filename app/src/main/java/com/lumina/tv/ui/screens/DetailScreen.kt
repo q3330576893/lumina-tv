@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -40,6 +41,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -65,6 +68,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.lumina.tv.ui.components.GlassPanel
 
 @Composable
 fun DetailScreen(
@@ -86,6 +92,15 @@ fun DetailScreen(
     var sourcesLoading by remember { mutableStateOf(false) }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var showSourceMenu by remember { mutableStateOf(false) }
+    var sourceMenuWasOpen by remember { mutableStateOf(false) }
+    var selectedSourceId by remember(id) { mutableStateOf<String?>(null) }
+    var showSettingsPicker by remember { mutableStateOf(false) }
+    var pickerTitle by remember { mutableStateOf("") }
+    var pickerOptions by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var pickerCurrentKey by remember { mutableStateOf<String?>(null) }
+    var pickerAction by remember { mutableStateOf<(String) -> Unit>({}) }
+    var selectedAudioIndex by remember(id) { mutableStateOf(AppRuntime.prefs?.audioTrackFor(id)) }
+    var selectedSubtitleKey by remember(id) { mutableStateOf(AppRuntime.prefs?.subtitleTrackFor(id)) }
     // 单集的版本选择
     var episodeTarget by remember { mutableStateOf<MediaItem?>(null) }
     var episodeSources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
@@ -97,6 +112,7 @@ fun DetailScreen(
     val castRowState = rememberLazyListState()
     val similarRowState = rememberLazyListState()
     val playFocus = remember { FocusRequester() }
+    val sourceFocus = remember { FocusRequester() }
 
     LaunchedEffect(id) {
         similar = emptyList()
@@ -198,6 +214,16 @@ fun DetailScreen(
         runCatching { playFocus.requestFocus() }
     }
 
+    LaunchedEffect(showSourceMenu) {
+        if (showSourceMenu) {
+            sourceMenuWasOpen = true
+        } else if (sourceMenuWasOpen) {
+            delay(120)
+            runCatching { sourceFocus.requestFocus() }
+            sourceMenuWasOpen = false
+        }
+    }
+
     /** 单集有多个版本时先选版本，只有一个版本才直接播。 */
     fun pickEpisode(ep: MediaItem) {
         if (ep.sourceCount <= 1) {
@@ -211,6 +237,10 @@ fun DetailScreen(
         scope.launch {
             episodeSources = runCatching { client?.getMediaSources(ep.id) }.getOrDefault(emptyList()).orEmpty()
             episodeSourcesLoading = false
+            if (episodeSources.isEmpty()) {
+                showEpisodeSourceMenu = false
+                onPlay(ep)
+            }
         }
     }
 
@@ -337,7 +367,11 @@ fun DetailScreen(
                                             ?: episodes.firstOrNull { !it.played }
                                             ?: episodes.firstOrNull()
                                     } else it0
-                                    if (target != null) onPlay(target)
+                                    if (target != null) {
+                                        val sourceId = selectedSourceId
+                                        if (target.id == it0.id && sourceId != null) onPlayWithSource(target, sourceId)
+                                        else onPlay(target)
+                                    }
                                 },
                             ) { focused ->
                                 Row(
@@ -357,11 +391,12 @@ fun DetailScreen(
                                     Text("播放", color = Color(0xFF06101F), fontSize = 14.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
-                            if (sources.size > 1) {
+                            if (sources.isNotEmpty()) {
                                 Spacer(Modifier.width(12.dp))
                                 FocusSurface(
                                     modifier = Modifier.height(46.dp).width(210.dp),
                                     corner = 23.dp,
+                                    focusRequester = sourceFocus,
                                     onClick = { showSourceMenu = true },
                                 ) { focused ->
                                     Row(
@@ -459,6 +494,48 @@ fun DetailScreen(
                                     Text("返回", color = TextMain, fontSize = 13.sp)
                                 }
                             }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+                val currentItem = it0!!
+                val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
+                GlassPanel(Modifier.fillMaxWidth(), corner = 12.dp) {
+                    Column(Modifier.padding(6.dp)) {
+                        SettingRow("版本", activeSource?.displayLabel ?: "默认", enabled = sources.size > 1) {
+                            if (sources.size > 1) {
+                                pickerTitle = "选择版本"
+                                pickerOptions = sources.map { it.id to it.displayLabel }
+                                pickerCurrentKey = activeSource?.id
+                                pickerAction = { key -> selectedSourceId = key }
+                                showSettingsPicker = true
+                            }
+                        }
+                        val audioTracks = activeSource?.streams.orEmpty().filter { it.type == "Audio" }
+                        SettingRow("音频", audioTracks.firstOrNull { it.index == selectedAudioIndex }?.let(::audioLabel)
+                            ?: audioTracks.firstOrNull()?.let(::audioLabel) ?: "默认", enabled = audioTracks.size > 1) {
+                            if (audioTracks.isNotEmpty()) {
+                                pickerTitle = "选择音频"
+                                pickerOptions = audioTracks.map { it.index.toString() to audioLabel(it) }
+                                pickerCurrentKey = (selectedAudioIndex ?: audioTracks.firstOrNull()?.index)?.toString()
+                                pickerAction = { key ->
+                                    selectedAudioIndex = key.toIntOrNull()
+                                    key.toIntOrNull()?.let { AppRuntime.prefs?.rememberAudioTrack(currentItem.id, it) }
+                                }
+                                showSettingsPicker = true
+                            }
+                        }
+                        val subtitleTracks = activeSource?.streams.orEmpty().filter { it.type == "Text" || it.type == "Subtitle" }
+                        SettingRow("字幕", if (selectedSubtitleKey == "-1") "关闭" else subtitleTracks.firstOrNull { subtitleKey(it) == selectedSubtitleKey }?.language ?: subtitleTracks.firstOrNull()?.language ?: "默认", enabled = subtitleTracks.isNotEmpty()) {
+                            pickerTitle = "选择字幕"
+                            pickerOptions = listOf("-1" to "关闭") + subtitleTracks.map { subtitleKey(it) to (it.language ?: "未知语言") }
+                            pickerCurrentKey = selectedSubtitleKey
+                            pickerAction = { key ->
+                                selectedSubtitleKey = key
+                                AppRuntime.prefs?.rememberSubtitleTrack(currentItem.id, key)
+                            }
+                            showSettingsPicker = true
                         }
                     }
                 }
@@ -565,14 +642,13 @@ fun DetailScreen(
 
         // 版本选择菜单
         if (showSourceMenu) {
-            val it0 = item
             SourceMenu(
                 sources = sources,
                 sourcesLoading = sourcesLoading,
-                currentSourceId = sources.firstOrNull()?.id,
+                currentSourceId = selectedSourceId ?: sources.firstOrNull()?.id,
                 onPick = { sid ->
+                    selectedSourceId = sid
                     showSourceMenu = false
-                    if (it0 != null) onPlayWithSource(it0, sid)
                 },
                 onClose = { showSourceMenu = false },
             )
@@ -618,69 +694,76 @@ private fun SourceMenu(
     onClose: () -> Unit,
     title: String = "选择版本",
 ) {
-    androidx.activity.compose.BackHandler { onClose() }
-    Box(
-        Modifier.fillMaxSize().background(Color(0xB3000000)),
-        contentAlignment = Alignment.Center,
-    ) {
-        com.lumina.tv.ui.components.GlassPanel(Modifier.width(560.dp), corner = 22.dp) {
-            Column(Modifier.padding(22.dp).verticalScroll(rememberScrollState())) {
-                Text(title, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(14.dp))
-                if (sourcesLoading) {
-                    Text("正在读取版本列表…", color = TextSub, fontSize = 12.sp)
-                } else if (sources.isEmpty()) {
-                    Text("该影片只有一个版本", color = TextSub, fontSize = 12.sp)
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    sources.forEach { s ->
-                        FocusSurface(
-                            modifier = Modifier.fillMaxWidth().height(46.dp),
-                            corner = 12.dp, scaleTo = 1.0f,
-                            onClick = { onPick(s.id) },
-                        ) { focused ->
-                            Row(
-                                Modifier.fillMaxSize()
-                                    .background(
-                                        if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
-                                        RoundedCornerShape(12.dp)
-                                    )
-                                    .padding(horizontal = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(
-                                    if (s.id == currentSourceId) Icons.Rounded.CheckCircle else Icons.Rounded.Layers,
-                                    null,
-                                    tint = if (s.id == currentSourceId) Accent else TextSub,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                                Spacer(Modifier.width(10.dp))
-                                Text(
-                                    s.displayLabel,
-                                    color = TextMain,
-                                    fontSize = 13.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+    PickerDialog(title, sources.map { it.id to it.displayLabel }, currentSourceId, onPick, onClose, loading = sourcesLoading)
+}
+
+@Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+private fun PickerDialog(
+    title: String,
+    options: List<Pair<String, String>>,
+    currentKey: String?,
+    onPick: (String) -> Unit,
+    onClose: () -> Unit,
+    loading: Boolean = false,
+) {
+    val requesters = remember(options) { options.map { FocusRequester() } }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        LaunchedEffect(options) {
+            if (options.isNotEmpty()) {
+                delay(120)
+                runCatching { requesters.first().requestFocus() }
+            }
+        }
+        Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
+            GlassPanel(Modifier.width(560.dp), corner = 22.dp) {
+                Column(Modifier.padding(22.dp)) {
+                    Text(title, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(14.dp))
+                    if (loading) Text("正在读取列表…", color = TextSub, fontSize = 12.sp)
+                    else if (options.isEmpty()) Text("没有可选项", color = TextSub, fontSize = 12.sp)
+                    Column(
+                        Modifier.verticalScroll(rememberScrollState()).heightIn(max = 46.dp * 8 + 40.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        options.forEachIndexed { index, (key, label) ->
+                            FocusSurface(
+                                modifier = Modifier.fillMaxWidth().height(46.dp)
+                                    .focusRequester(requesters[index])
+                                    .focusProperties {
+                                        up = requesters.getOrNull(index - 1) ?: FocusRequester.Cancel
+                                        down = requesters.getOrNull(index + 1) ?: FocusRequester.Cancel
+                                    },
+                                corner = 12.dp, scaleTo = 1f, onClick = { onPick(key) },
+                            ) { focused ->
+                                Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(if (key == currentKey) Icons.Rounded.CheckCircle else Icons.Rounded.Layers, null, tint = if (key == currentKey) Accent else TextSub, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(label, color = TextMain, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
                             }
                         }
                     }
-                }
-                Spacer(Modifier.height(16.dp))
-                FocusSurface(
-                    modifier = Modifier.width(120.dp).height(42.dp),
-                    corner = 21.dp,
-                    onClick = onClose,
-                ) { focused ->
-                    Box(
-                        Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("取消", color = TextMain, fontSize = 13.sp) }
                 }
             }
         }
     }
 }
+
+@Composable
+private fun SettingRow(label: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
+    FocusSurface(Modifier.fillMaxWidth().height(52.dp), corner = 10.dp, scaleTo = 1f, onClick = onClick) { focused ->
+        Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(10.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("$label：$value", color = if (enabled) TextMain else TextSub.copy(alpha = 0.65f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text("›", color = if (enabled) Accent else TextSub.copy(alpha = 0.5f), fontSize = 20.sp)
+        }
+    }
+}
+
+private fun audioLabel(stream: com.lumina.tv.data.MediaStream): String =
+    listOfNotNull(stream.language ?: "未知语言", stream.codec, stream.channels?.let { "${it}ch" }).joinToString(" ")
+
+private fun subtitleKey(stream: com.lumina.tv.data.MediaStream): String = "${stream.index}:0"
 
 @Composable
 private fun Poster(item: MediaItem, url: String?) {
