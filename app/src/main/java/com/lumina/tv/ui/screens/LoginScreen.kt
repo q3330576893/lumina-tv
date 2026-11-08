@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -51,6 +52,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -407,7 +410,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                 Spacer(Modifier.width(30.dp))
                 Box(Modifier.weight(0.92f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                     LoginCard(
-                        modifier = Modifier.widthIn(max = 620.dp).fillMaxWidth()
+                        modifier = Modifier.widthIn(max = 560.dp).fillMaxWidth()
                             .heightIn(max = maxCardHeight).verticalScroll(rememberScrollState()),
                         host = host, onHost = { host = it },
                         port = port, onPort = { port = it.filter(Char::isDigit).take(5) },
@@ -563,7 +566,7 @@ private fun BrandHero(
     Column(modifier.padding(horizontal = 6.dp), verticalArrangement = Arrangement.Center) {
         Text("LUMINA · EMBY", color = VioletBright, fontSize = 11.sp, letterSpacing = 3.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(10.dp))
-        Text("Lumina", color = Ink, fontSize = 54.sp, fontWeight = FontWeight.Bold)
+        Text("Lumina", color = Ink, fontSize = 44.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("连接你的 Emby 服务器", color = InkSub, fontSize = 15.sp)
         Spacer(Modifier.height(18.dp))
@@ -577,7 +580,7 @@ private fun BrandHero(
             Text("最近连接", color = InkSub.copy(alpha = 0.9f), fontSize = 11.sp)
             Spacer(Modifier.height(8.dp))
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                savedServers.sortedByDescending { it.lastUsed }.take(3).forEach { server ->
+                savedServers.sortedByDescending { it.lastUsed }.take(2).forEach { server ->
                     FocusSurface(
                         modifier = Modifier.widthIn(max = 380.dp).fillMaxWidth().height(52.dp),
                         corner = 15.dp,
@@ -631,17 +634,22 @@ private fun LoginCard(
     passFocus: FocusRequester,
 ) {
     var qrOpen by remember { mutableStateOf(false) }
+    var advancedOpen by remember { mutableStateOf(false) }
     var cardFocused by remember { mutableStateOf(false) }
     val hostFocusRequester = remember { FocusRequester() }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val shape = RoundedCornerShape(28.dp)
     Column(
-        modifier.clip(shape)
+        modifier.shadow(20.dp, shape, clip = false).clip(shape)
             .background(Color(0xE60C0E16))
             .border(1.dp, if (cardFocused) Color(0x55B69CFF) else Color(0x1FFFFFFF), shape)
             .onFocusChanged { cardFocused = it.hasFocus }
-            .padding(horizontal = 24.dp, vertical = 18.dp),
+            .padding(horizontal = 22.dp, vertical = 18.dp)
+            .drawWithContent {
+                drawContent()
+                drawRect(Brush.horizontalGradient(listOf(com.lumina.tv.ui.theme.Accent, com.lumina.tv.ui.theme.Accent2)), size = androidx.compose.ui.geometry.Size(size.width, 3.dp.toPx()))
+            },
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         LaunchedEffect(Unit) { delay(150); runCatching { hostFocusRequester.requestFocus() } }
@@ -653,7 +661,7 @@ private fun LoginCard(
                 Spacer(Modifier.height(3.dp))
                 Text("输入账号，或扫码从手机同步配置", color = InkSub, fontSize = 11.sp)
             }
-            FocusSurface(Modifier.height(38.dp), corner = 19.dp, scaleTo = 1.04f, onClick = { qrOpen = !qrOpen }) { focused ->
+            FocusSurface(Modifier.height(38.dp), corner = 19.dp, scaleTo = 1.04f, onClick = { qrOpen = true }) { focused ->
                 Row(
                     Modifier.height(38.dp)
                         .background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp))
@@ -678,11 +686,13 @@ private fun LoginCard(
             }
         }
 
-        if (qrOpen) {
+        if (qrOpen) Dialog(onDismissRequest = { qrOpen = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+          Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
+           Column(Modifier.widthIn(max = 520.dp).fillMaxWidth().padding(24.dp).shadow(20.dp, RoundedCornerShape(20.dp)).clip(RoundedCornerShape(20.dp)).background(Color(0xF20C0E16)).border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp)).padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (pairingUrl.isNotBlank()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.clip(RoundedCornerShape(14.dp)).background(Color.White).padding(8.dp)) {
-                        QrCode(pairingUrl, size = 132.dp)
+                        QrCode(pairingUrl, size = 220.dp)
                     }
                     Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -720,6 +730,13 @@ private fun LoginCard(
                     }
                 }
             }
+            FocusSurface(Modifier.height(34.dp), corner = 17.dp, onClick = { qrOpen = false }) { focused ->
+                Box(Modifier.height(34.dp).background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)).padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
+                    Text("关闭", color = if (focused) VioletBright else Ink, fontSize = 11.sp)
+                }
+            }
+           }
+          }
         }
 
         // 协议
@@ -753,14 +770,14 @@ private fun LoginCard(
         GlassField(pass, onPass, "密码", Modifier.fillMaxWidth(), ImeAction.Done, password = true, onDone = onLogin, focusRequester = passFocus)
 
         Spacer(Modifier.height(2.dp))
-        FocusSurface(Modifier.fillMaxWidth().height(46.dp).focusRequester(loginFocusRequester), corner = 23.dp, scaleTo = 1.02f, onClick = onLogin) { focused ->
+        FocusSurface(Modifier.fillMaxWidth().height(50.dp).focusRequester(loginFocusRequester), corner = 25.dp, scaleTo = 1.02f, onClick = onLogin) { focused ->
             Box(
-                Modifier.fillMaxSize().background(
+                Modifier.fillMaxSize().shadow(if (focused) 18.dp else 0.dp, RoundedCornerShape(25.dp), ambientColor = com.lumina.tv.ui.theme.Accent.copy(alpha = 0.45f), spotColor = com.lumina.tv.ui.theme.Accent.copy(alpha = 0.45f)).background(
                     Brush.horizontalGradient(
                         if (focused) listOf(Color(0xFF8E7DFF), Color(0xFF5F4BE0))
                         else listOf(Color(0xFF7C6BFF), Color(0xFF5544D6))
                     ),
-                    RoundedCornerShape(23.dp),
+                    RoundedCornerShape(25.dp),
                 ),
                 contentAlignment = Alignment.Center,
             ) {
@@ -795,7 +812,10 @@ private fun LoginCard(
             }
         }
 
-        error?.let { Text(it, color = Color(0xFFFF929D), fontSize = 11.sp, maxLines = 3) }
+        Row(Modifier.fillMaxWidth().height(34.dp).clip(RoundedCornerShape(10.dp)).background(if (error.isNullOrBlank()) Color.Transparent else Color(0x33FF6B81)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (error.isNullOrBlank()) "" else "!", color = Color(0xFFFF929D), fontSize = 11.sp, modifier = Modifier.width(14.dp))
+            Text(error.orEmpty(), color = Color(0xFFFF929D), fontSize = 11.sp, maxLines = 2, modifier = Modifier.weight(1f))
+        }
 
         Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("v${com.lumina.tv.BuildConfig.VERSION_NAME} · Lumina for Emby", color = InkSub.copy(alpha = 0.55f), fontSize = 9.sp)

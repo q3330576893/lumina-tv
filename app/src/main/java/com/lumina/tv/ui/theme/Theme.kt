@@ -140,6 +140,27 @@ object ShapeScale {
     val chip = RoundedCornerShape(10.dp)
 }
 
+object Radius {
+    val xs = 6.dp
+    val s = 10.dp
+    val m = 14.dp
+    val l = 20.dp
+    val xl = 26.dp
+    val pill = 999.dp
+}
+
+object Elev {
+    val s = 4.dp
+    val m = 12.dp
+    val l = 20.dp
+}
+
+object Motion {
+    const val fast = 120
+    const val base = 180
+    const val slow = 300
+}
+
 object Space {
     val xs = 4.dp
     val s = 8.dp

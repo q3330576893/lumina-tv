@@ -753,7 +753,7 @@ private fun NavBar(
 ) {
     Box(modifier.fillMaxSize()) {
         ServerCapsule(
-            modifier = Modifier.align(Alignment.TopStart).padding(start = Space.l + Space.xs, top = Space.m + Space.xs),
+            modifier = Modifier.align(Alignment.TopStart).padding(start = Space.l + Space.xs, top = 16.dp),
             onSwitchServer = onSwitchServer,
             onLogout = onLogout,
             onServerSwitched = onServerSwitched,
@@ -761,7 +761,7 @@ private fun NavBar(
             hazeState = hazeState,
         )
         TopNavBar(
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = Space.m, end = Space.l),
+            modifier = Modifier.align(Alignment.TopEnd).padding(top = 16.dp, end = Space.l),
             tab = tab,
             onSelect = onSelect,
             onSettings = onSettings,
@@ -784,12 +784,12 @@ private fun ServerCapsule(
 ) {
     val context = LocalContext.current
     var serverMenuOpen by remember { mutableStateOf(false) }
-    val glassShape = RoundedCornerShape(Space.l - Space.xs / 2)
+    val glassShape = RoundedCornerShape(24.dp)
     val menuShape = ShapeScale.panel
     Box(modifier.wrapContentSize()) {
         Row(
             Modifier
-                .height(Space.section + Space.m)
+                .height(48.dp)
                 .shadow(16.dp, glassShape, clip = false)
                 .clip(glassShape)
                 .then(
@@ -810,7 +810,7 @@ private fun ServerCapsule(
         ) {
             Box {
                 FocusSurface(
-                    modifier = Modifier.height(Space.section + Space.m).widthIn(min = 92.dp, max = 168.dp)
+                    modifier = Modifier.height(48.dp).widthIn(min = 92.dp, max = 168.dp)
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                                 // 内容区没有可聚焦目标时（如媒体库标签页）不要吞掉按键，交给系统继续找
@@ -981,7 +981,7 @@ private fun TopNavBar(
     contentFocus: FocusRequester,
     hazeState: HazeState,
 ) {
-    val glassShape = RoundedCornerShape(Space.l + Space.xs / 2)
+    val glassShape = RoundedCornerShape(24.dp)
     val entries = listOf(
         Triple("首页", Icons.Rounded.Home, tab == HomeTab.Recommend),
         Triple("收藏", Icons.Rounded.Favorite, tab == HomeTab.Favorites),
@@ -1005,13 +1005,22 @@ private fun TopNavBar(
                 ) else Modifier.background(Color(0xD9151B2A))
             )
             .border(1.dp, Color(0x44FFFFFF), glassShape)
-            .padding(Space.xs),
+            .height(48.dp)
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Space.xs),
     ) {
         entries.forEachIndexed { index, (label, icon, active) ->
+            Box(Modifier.width(44.dp).height(40.dp)) {
+            var focusedState by remember { mutableStateOf(false) }
+            var labelVisible by remember { mutableStateOf(false) }
+            LaunchedEffect(focusedState) {
+                if (focusedState) {
+                    delay(220)
+                    labelVisible = true
+                } else labelVisible = false
+            }
             FocusSurface(
-                modifier = Modifier.size(Space.l + Space.m + Space.xs)
+                modifier = Modifier.fillMaxSize()
                     .then(if (active) Modifier.focusRequester(navFocus) else Modifier)
                     .onPreviewKeyEvent { event ->
                         // 导航在顶部，下键应当直接进内容区；内容区没目标时放行让系统自己找
@@ -1019,8 +1028,8 @@ private fun TopNavBar(
                             runCatching { contentFocus.requestFocus() }.isSuccess
                         } else false
                     },
-                corner = (Space.l + Space.m + Space.xs) / 2,
-                scaleTo = 1.06f,
+                corner = 20.dp,
+                scaleTo = 1.08f,
                 onClick = {
                     when (index) {
                         0 -> onSelect(HomeTab.Recommend, null)
@@ -1031,30 +1040,44 @@ private fun TopNavBar(
                     }
                 },
             ) { focused ->
+                focusedState = focused
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .background(
-                            when {
-                                active -> Accent.copy(alpha = 0.88f)
-                                focused -> Color(0x33FFFFFF)
-                                else -> Color.Transparent
-                            },
-                            CircleShape,
-                        ),
+                        .background(if (focused) Color(0x1FFFFFFF) else Color.Transparent, RoundedCornerShape(20.dp))
+                        .then(if (focused) Modifier.border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(20.dp)) else Modifier),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(
-                        icon, contentDescription = label,
-                        tint = when {
-                            active -> Color(0xFF06101F)
-                            focused -> Accent
-                            else -> Color(0xFFD6DEEB)
-                        },
-                        modifier = Modifier.size(22.dp),
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                        Icon(icon, contentDescription = label, tint = if (active || focused) Accent else Color(0xFFD6DEEB), modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.height(4.dp))
+                        Box(Modifier.width(12.dp).height(3.dp).background(if (active) Accent.copy(alpha = 0.9f) else Color.Transparent, RoundedCornerShape(2.dp)))
+                    }
+                }
+            }
+            if (labelVisible) {
+                Popup(
+                    alignment = Alignment.TopCenter,
+                    offset = IntOffset(0, with(LocalDensity.current) { 66.dp.roundToPx() }),
+                    properties = PopupProperties(focusable = false, dismissOnBackPress = false, dismissOnClickOutside = false),
+                ) {
+                    Text(
+                        label,
+                        modifier = Modifier.shadow(8.dp, RoundedCornerShape(8.dp))
+                            .background(Color(0xE610141D), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        maxLines = 1,
                     )
                 }
             }
+            }
+            if (index == 2) {
+                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(1.dp).height(16.dp).background(Color(0x26FFFFFF)))
+                Spacer(Modifier.width(6.dp))
+            } else if (index < entries.lastIndex) Spacer(Modifier.width(4.dp))
         }
     }
 }
