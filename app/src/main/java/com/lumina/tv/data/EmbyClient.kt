@@ -611,6 +611,7 @@ data class PlaybackTarget(
         mediaSourceId: String? = null,
         startPositionMs: Long = item.positionTicks / 10_000,
         audioStreamIndex: Int? = null,
+        forceDirect: Boolean = false,
     ): PlaybackTarget =
         withContext(Dispatchers.IO) {
             val infoBody = JSONObject()
@@ -668,7 +669,8 @@ data class PlaybackTarget(
                     "AudioStreamIndex" to audioStreamIndex?.toString(),
                 )
             )
-            val useDirect = !needTranscode
+            // forceDirect：服务端转码流坏了（HLS 解析失败）时的兜底，直接拉原文件
+            val useDirect = forceDirect || !needTranscode
             val transcodingUrl = first?.optString("TranscodingUrl")?.takeIf { it.startsWith("http", true) }
                 ?.let { addPlaybackQuery(it, audioStreamIndex) }
             // --- STRM 处理 ---

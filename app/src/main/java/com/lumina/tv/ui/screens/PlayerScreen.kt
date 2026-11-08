@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -63,6 +64,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -75,6 +77,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import coil.compose.AsyncImage
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
@@ -181,6 +184,9 @@ fun PlayerScreen(
     var mpvState by remember(item.id) { mutableStateOf(MpvPlayerController.State()) }
     var currentSurface by remember(item.id) { mutableStateOf<Surface?>(null) }
     var reloadKey by remember { mutableIntStateOf(0) }
+    // 转码流（HLS）解析失败时改拉原文件直连
+    var forceDirectNext by remember(item.id) { mutableStateOf(false) }
+    var directFallbackTried by remember(item.id) { mutableStateOf(false) }
     var reloadForceTranscode by remember { mutableStateOf(true) }
     var playbackSource by remember(item.id) { mutableStateOf<MediaSource?>(null) }
     var noAudioRetryTried by remember(item.id) { mutableStateOf(false) }
@@ -208,6 +214,14 @@ fun PlayerScreen(
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
 
     val introSeconds = remember(item.id) { AppRuntime.prefs?.introSecondsFor(item.id) ?: 0 }
+
+    // 片名优先用透明 Logo：电影取自身，剧集取详情页缓存的剧集信息（通常已命中）
+    val titleLogo = remember(item.id) {
+        val c = AppRuntime.client
+        val own = c?.logoUrl(item)
+        if (own != null) own
+        else item.seriesId?.let { sid -> LibraryCache.detailStale(sid)?.item?.let { c?.logoUrl(it) } }
+    }
 
     val hideFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
@@ -312,7 +326,10 @@ fun PlayerScreen(
             buffering = true
             failurePhase = "解析"
             try {
-                val target = c.resolvePlayback(item, forceTranscode, sourceId, resumePosition, audioStreamIndex)
+                val target = c.resolvePlayback(
+                    item, forceTranscode, sourceId, resumePosition, audioStreamIndex,
+                    forceDirect = forceDirectNext,
+                )
                 failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
@@ -639,6 +656,20 @@ fun PlayerScreen(
                     audioDecodeNotice = "本机解码不支持该音轨，已自动切到 mpv 本地软解"
                     enginePinned = "mpv"
                     activeEngine = "mpv"
+                } else if (containerUnsupported && !directFallbackTried &&
+                    (degraded || currentPlaybackUrl?.contains("master.m3u8", true) == true)
+                ) {
+                    // 失败的是服务端转码流（master.m3u8 解析不了），改拉原文件直连
+                    directFallbackTried = true
+                    forceDirectNext = true
+                    degraded = false
+                    enginePinned = null
+                    reloadForceTranscode = false
+                    buffering = true
+                    error = null
+                    audioDecodeNotice = "转码流不可用，已改用直连播放"
+                    engineSwitchTrace.add("direct-fallback:${err.errorCodeName}")
+                    reloadKey++
                 } else if (!degraded) {
                     degraded = true
                     error = "直连失败，自动切换转码…"
@@ -1173,13 +1204,23 @@ fun PlayerScreen(
                         .padding(start = 36.dp, end = 36.dp, top = 22.dp, bottom = 30.dp),
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(
-                            item.seriesName ?: item.name,
-                            color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
+                        if (!titleLogo.isNullOrBlank()) {
+                            AsyncImage(
+                                model = titleLogo,
+                                contentDescription = item.seriesName ?: item.name,
+                                contentScale = ContentScale.Fit,
+                                alignment = Alignment.BottomStart,
+                                modifier = Modifier.heightIn(max = 44.dp).widthIn(max = 300.dp),
+                            )
+                        } else {
+                            Text(
+                                item.seriesName ?: item.name,
+                                color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         if (item.seriesName != null) {
-                            Text(item.name, color = TextSub, fontSize = 12.sp)
+                            Text(item.name, color = TextSub, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                     Text(

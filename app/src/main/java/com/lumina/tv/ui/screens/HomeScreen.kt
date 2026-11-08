@@ -67,6 +67,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -495,12 +496,14 @@ fun HomeScreen(
     val navFocus = remember { FocusRequester() }
 
     val heroPlayFocus = remember { FocusRequester() }
+    // Hero 在 LazyColumn 里，滚出屏幕会被回收 → heroPlayFocus 变成未挂载，
+    // 此时其它行的 focusProperties.up 指向它就会抛 "FocusRequester is not initialized" 而闪退。
+    var heroComposed by remember { mutableStateOf(false) }
 
     // 导航在顶部，右键不再劫持（原来的右键跳竖栏逻辑会让影片行无法继续右移）
     Box(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
         if (event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
-            navFocus.requestFocus()
-            true
+            runCatching { navFocus.requestFocus() }.isSuccess
         } else false
     }) {
         when {
@@ -518,12 +521,12 @@ fun HomeScreen(
                     state = recListState,
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, onPlay, onOpenDetail, heroPlayFocus, hazeState) }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
-                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
-                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
-                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
-                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty(), focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
+                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, onPlay, onOpenDetail, heroPlayFocus, hazeState, onComposed = { heroComposed = it }) }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
+                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
+                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
+                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty(), focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
@@ -1255,11 +1258,16 @@ private fun Hero(
     onOpenDetail: (String) -> Unit,
     playFocus: FocusRequester,
     hazeState: HazeState,
+    onComposed: (Boolean) -> Unit = {},
 ) {
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
     if (item == null) {
         Box(Modifier.fillMaxWidth().height(180.dp))
         return
+    }
+    DisposableEffect(Unit) {
+        onComposed(true)
+        onDispose { onComposed(false) }
     }
     val context = LocalContext.current
     // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
