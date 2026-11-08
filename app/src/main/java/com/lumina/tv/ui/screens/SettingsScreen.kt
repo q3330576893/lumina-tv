@@ -147,11 +147,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 }
                 Spacer(Modifier.height(18.dp))
 
-                if (!wide) {
-                    AboutPanel(Modifier.fillMaxWidth(), onLicenses = { licensesOpen = true }, onDiagnostics = { showDiagExport = true })
-                    Spacer(Modifier.height(14.dp))
-                }
-
                 // ---------- 账号与服务器 ----------
                 GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
                     Column(Modifier.padding(22.dp)) {
@@ -751,14 +746,14 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                     }
                 }
 
+                Spacer(Modifier.height(14.dp))
+                // ---------- 关于（放在整页最后） ----------
+                AboutPanel(Modifier.fillMaxWidth(), onLicenses = { licensesOpen = true }, onDiagnostics = { showDiagExport = true })
+
                 Spacer(Modifier.height(20.dp))
             }
 
-            // 窄屏配对面板放在主列末尾，宽屏保留独立右栏。
-            if (wide) {
-                Spacer(Modifier.width(36.dp))
-                AboutPanel(Modifier.width(320.dp), onLicenses = { licensesOpen = true }, onDiagnostics = { showDiagExport = true })
-            }
+            // 关于统一放在主列最后（见下方），不再单独占右栏
         }
     }
     if (licensesOpen) AlertDialog(

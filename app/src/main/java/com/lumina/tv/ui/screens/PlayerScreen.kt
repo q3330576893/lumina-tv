@@ -597,6 +597,15 @@ fun PlayerScreen(
         }
     }
 
+    // mpv 侧的错误只存在 State 里，不显示出来就会一直黑屏，这里兜底提示
+    LaunchedEffect(activeEngine, mpvState.error) {
+        val mpvErr = mpvState.error
+        if (activeEngine == "mpv" && !mpvErr.isNullOrBlank()) {
+            buffering = false
+            error = "mpv 内核也无法播放：${mpvErr.take(160)}\n可导出诊断包反馈。"
+        }
+    }
+
     DisposableEffect(exo, item.id) {
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
@@ -616,6 +625,10 @@ fun PlayerScreen(
                         generateSequence(err as Throwable?) { it.cause }.take(5)
                             .forEach { put(it.message ?: it::class.java.name) }
                     }).toString(2)
+                // 容器/解封装级失败：转码通常能救一次，但再转第二次基本无意义，直接交给 mpv 更快
+                val containerUnsupported = err.errorCodeName.contains("PARSING", true) ||
+                    err.errorCodeName.contains("DEMUX", true) ||
+                    err.errorCodeName.contains("CONTAINER", true)
                 if (audioDecodeMode == "passthrough" && err.errorCodeName.contains("DECOD", true)) {
                     buffering = false
                     audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
@@ -630,22 +643,21 @@ fun PlayerScreen(
                     degraded = true
                     error = "直连失败，自动切换转码…"
                     reloadKey++
-                } else if (!ffmpegFallback) {
+                } else if (!ffmpegFallback && !containerUnsupported) {
                     error = "媒体服务器转码流失败，重试转码路径…"
                     ffmpegFallback = true
                     reloadForceTranscode = true
                     engineSwitchTrace.add("server-transcode-retry:${err.errorCodeName}")
                     reloadKey++
-                } else if (AppRuntime.prefs?.playerEngine == "auto" && !mpvFallbackTried) {
-                    val networkFailure = err.errorCodeName.contains("IO", true) || err.errorCodeName.contains("TIMEOUT", true)
-                    val elapsedMs = android.os.SystemClock.elapsedRealtime() - playStartAt
-                    buffering = false
-                    error = "Media3 播放失败：${err.errorCodeName}。可导出诊断包。"
-                    if (!networkFailure && elapsedMs >= 15_000L) {
-                        mpvFallbackTried = true
-                        showMpvConfirm = true
-                        engineSwitchTrace.add("mpv-confirmation-offered:${err.errorCodeName}")
-                    }
+                } else if (!mpvFallbackTried) {
+                    // Media3 已经把直连、转码都试过还不行 —— 直接换 mpv，不再让用户停在错误页
+                    mpvFallbackTried = true
+                    enginePinned = "mpv"
+                    buffering = true
+                    error = null
+                    audioDecodeNotice = "Media3 无法播放该文件（${err.errorCodeName}），已自动切换 mpv"
+                    engineSwitchTrace.add("mpv-auto-fallback:${err.errorCodeName}")
+                    activeEngine = "mpv"
                 } else {
                     buffering = false
                     val cause = generateSequence(err as Throwable?) { it.cause }

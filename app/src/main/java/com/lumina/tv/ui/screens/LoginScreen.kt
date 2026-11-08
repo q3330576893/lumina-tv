@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -338,6 +339,9 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         loginFocusRequester.requestFocus()
     }
 
+    // 从主页切服务器进来时，遥控器返回应该回到主页；首次登录（无 session）才允许系统退出
+    BackHandler(enabled = AppRuntime.session != null) { onCancel() }
+
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "登录"
         if (AppRuntime.pairing == null) AppRuntime.startPairing(context)
@@ -393,6 +397,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                     savedServers = savedServers,
                     onPickServer = { fillFromSaved(it) },
                     expand = true,
+                    onBackHome = if (AppRuntime.session != null) onCancel else null,
                 )
                 Spacer(Modifier.width(44.dp))
                 LoginCard(
@@ -420,6 +425,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                     modifier = Modifier.fillMaxWidth(),
                     savedServers = savedServers,
                     onPickServer = { fillFromSaved(it) },
+                    onBackHome = if (AppRuntime.session != null) onCancel else null,
                 )
             }
         }
@@ -589,8 +595,25 @@ private fun BrandPanel(
     savedServers: List<SavedServer>,
     onPickServer: (SavedServer) -> Unit,
     expand: Boolean = false,
+    onBackHome: (() -> Unit)? = null,
 ) {
     Column(modifier.padding(horizontal = 10.dp)) {
+        if (onBackHome != null) {
+            FocusSurface(Modifier.height(42.dp), corner = 21.dp, scaleTo = 1.02f, onClick = onBackHome) { focused ->
+                Row(
+                    Modifier.height(42.dp).background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(21.dp))
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Home, null, tint = if (focused) VioletBright else InkSub, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("返回主页", color = if (focused) VioletBright else Ink, fontSize = 12.sp)
+                    Spacer(Modifier.width(6.dp))
+                    Text("· 当前服务器仍在运行", color = InkSub.copy(alpha = 0.7f), fontSize = 10.sp)
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+        }
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Box(Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)).background(Brush.linearGradient(listOf(Color(0xFF49C8B7), Color(0xFF657DE8)))), contentAlignment = Alignment.Center) {
                 Text("L", color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold)

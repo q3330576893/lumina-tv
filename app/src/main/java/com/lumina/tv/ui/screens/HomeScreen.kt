@@ -751,7 +751,7 @@ private fun NavBar(
             hazeState = hazeState,
         )
         SideRail(
-            modifier = Modifier.align(Alignment.CenterEnd).padding(end = Space.m),
+            modifier = Modifier.align(Alignment.TopEnd).padding(top = Space.m, end = Space.m),
             tab = tab,
             onSelect = onSelect,
             onSettings = onSettings,
@@ -799,7 +799,7 @@ private fun ServerCapsule(
         ) {
             Box {
                 FocusSurface(
-                    modifier = Modifier.height(Space.section + Space.m).widthIn(min = 172.dp, max = 240.dp)
+                    modifier = Modifier.height(Space.section + Space.m).widthIn(min = 92.dp, max = 168.dp)
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                                 // 内容区没有可聚焦目标时（如媒体库标签页）不要吞掉按键，交给系统继续找
@@ -814,16 +814,10 @@ private fun ServerCapsule(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            "Lumina",
-                            color = if (focused) Accent else Color(0xFFD6DEEB),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Spacer(Modifier.width(Space.s))
-                        Text(
                             AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() }
                                 ?: AppRuntime.session?.serverName ?: "Emby",
-                            modifier = Modifier.weight(1f),
+                            // 不撑满：名字短则胶囊短，长名字最多到 116dp 再省略
+                            modifier = Modifier.widthIn(max = 116.dp),
                             color = if (focused) Accent else Color(0xFFD6DEEB),
                             fontSize = 12.sp,
                             maxLines = 1,
