@@ -66,6 +66,8 @@ import com.lumina.tv.ui.theme.Ink
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
+import com.lumina.tv.ui.theme.ShapeScale
+import com.lumina.tv.ui.theme.TypeScale
 
 /** 极光背景：深空底 + 两团缓慢漂移的光晕，营造 iOS 玻璃质感的空间感。 */
 @Composable
@@ -130,19 +132,19 @@ fun AuroraBackground(modifier: Modifier = Modifier, content: @Composable BoxScop
 @Composable
 fun GlassPanel(
     modifier: Modifier = Modifier,
-    corner: Dp = 24.dp,
+    corner: Dp? = null,
     focused: Boolean = false,
     fillColor: Color? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     Box(
         modifier
-            .clip(RoundedCornerShape(corner))
+            .clip(corner?.let { RoundedCornerShape(it) } ?: ShapeScale.panel)
             .background(fillColor ?: if (focused) ThemeRuntime.glassFill(true).copy(alpha = 1.4f) else ThemeRuntime.glassFill(false))
             .border(
                 width = if (focused) 1.5.dp else 1.dp,
                 color = ThemeRuntime.glassLine(focused),
-                shape = RoundedCornerShape(corner),
+                shape = corner?.let { RoundedCornerShape(it) } ?: ShapeScale.panel,
             )
     ) { content() }
 }
@@ -230,12 +232,12 @@ fun PosterCard(
             Modifier
                 .fillMaxWidth()
                 .height(width * 1.5f)
-                .clip(RoundedCornerShape(16.dp))
+                .clip(ShapeScale.card)
                 .background(Color(0xFF141B2B))
                 .border(
                     if (focused) 2.dp else 1.dp,
                     if (focused) Accent else GlassLine,
-                    RoundedCornerShape(16.dp),
+                    ShapeScale.card,
                 )
         ) {
             AsyncImage(
@@ -267,15 +269,14 @@ fun PosterCard(
         Text(
             text = item.name,
             color = if (focused) TextMain else TextMain.copy(alpha = 0.92f),
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
+            style = TypeScale.title,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
             text = item.subtitle,
             color = TextSub,
-            fontSize = 11.sp,
+            style = TypeScale.caption,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -288,9 +289,7 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier, trailing: String? 
         Text(
             text = text,
             color = TextMain,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp,
+            style = TypeScale.section,
         )
         if (trailing != null) {
             Text(text = trailing, color = TextSub, fontSize = 11.sp)

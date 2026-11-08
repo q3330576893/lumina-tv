@@ -1,6 +1,7 @@
 package com.lumina.tv.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -11,6 +12,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 val Ink = Color(0xFF070A12)
@@ -64,6 +67,12 @@ object ThemeRuntime {
         glassStyle = if (styleKey in listOf("frosted", "clear", "off")) styleKey else "frosted"
     }
 
+    val trueBlurEnabled: Boolean
+        get() = android.os.Build.VERSION.SDK_INT >= 31 && glassStyle != "off"
+
+    val blurRadiusDp: Dp
+        get() = if (glassStyle == "clear") 12.dp else 24.dp
+
     /** 玻璃面板填充色 */
     fun glassFill(focused: Boolean): Color = when (glassStyle) {
         "clear" -> if (focused) Color(0x1FFFFFFF) else Color(0x0AFFFFFF)
@@ -109,4 +118,33 @@ fun LuminaTheme(content: @Composable () -> Unit) {
         ),
         content = content,
     )
+}
+
+object TypeScale {
+    val display = TextStyle(fontSize = 34.sp, lineHeight = 42.sp,
+        fontWeight = FontWeight.SemiBold, letterSpacing = 0.2.sp)
+    val section = TextStyle(fontSize = 19.sp, lineHeight = 26.sp,
+        fontWeight = FontWeight.SemiBold)
+    val title = TextStyle(fontSize = 14.sp, lineHeight = 19.sp,
+        fontWeight = FontWeight.Medium)
+    val body = TextStyle(fontSize = 13.sp, lineHeight = 19.sp,
+        fontWeight = FontWeight.Normal)
+    val caption = TextStyle(fontSize = 11.sp, lineHeight = 15.sp,
+        fontWeight = FontWeight.Normal)
+}
+
+object ShapeScale {
+    val capsule = RoundedCornerShape(26.dp)
+    val panel = RoundedCornerShape(20.dp)
+    val card = RoundedCornerShape(14.dp)
+    val chip = RoundedCornerShape(10.dp)
+}
+
+object Space {
+    val xs = 4.dp
+    val s = 8.dp
+    val m = 16.dp
+    val l = 24.dp
+    val xl = 32.dp
+    val section = 28.dp
 }

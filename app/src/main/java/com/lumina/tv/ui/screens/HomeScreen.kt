@@ -105,6 +105,14 @@ import com.lumina.tv.ui.components.SectionTitle
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
+import com.lumina.tv.ui.theme.ThemeRuntime
+import com.lumina.tv.ui.theme.Space
+import com.lumina.tv.ui.theme.TypeScale
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -136,6 +144,7 @@ fun HomeScreen(
     onLogout: () -> Unit,
 ) {
     val client = AppRuntime.client
+    val hazeState = remember { HazeState() }
 
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -448,7 +457,7 @@ fun HomeScreen(
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
                 }
                 tab == HomeTab.Recommend -> LazyColumn(state = recListState, modifier = Modifier.fillMaxSize()) {
-                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, onPlay, onOpenDetail, heroPlayFocus) }
+                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, onPlay, onOpenDetail, heroPlayFocus, hazeState) }
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onPlay(it) } }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
@@ -684,6 +693,7 @@ fun HomeScreen(
                     reloadToken++
                 },
                 navFocus = navFocus,
+                hazeState = hazeState,
             )
     }
 }
@@ -699,6 +709,7 @@ private fun NavBar(
     onLogout: () -> Unit,
     onServerSwitched: () -> Unit,
     navFocus: FocusRequester,
+    hazeState: HazeState,
 ) {
     val context = LocalContext.current
     var serverMenuOpen by remember { mutableStateOf(false) }
@@ -709,7 +720,19 @@ private fun NavBar(
             Modifier
                 .height(48.dp)
                 .clip(glassShape)
-                .background(Brush.horizontalGradient(listOf(Color(0xCC1A2233), Color(0xE6151B2A))))
+                .then(
+                    if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
+                        state = hazeState,
+                        style = HazeStyle(
+                            backgroundColor = Color(0xD9151B2A),
+                            tint = HazeTint(Color(0x38FFFFFF)),
+                            blurRadius = ThemeRuntime.blurRadiusDp,
+                            noiseFactor = 0f,
+                        ),
+                    ) else Modifier.background(
+                        Brush.horizontalGradient(listOf(Color(0xCC1A2233), Color(0xE6151B2A)))
+                    )
+                )
                 .border(1.dp, Color(0x44FFFFFF), glassShape)
                 .padding(horizontal = 8.dp)
                 .focusGroup(),
@@ -1017,7 +1040,7 @@ private fun MediaLibrary(
     LazyColumn(state = state, modifier = Modifier.fillMaxSize()) {
         item {
             Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 8.dp, bottom = 6.dp)) {
-                Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Text("服务器自带的全部分类· 可在设置里增删", color = TextSub, fontSize = 11.sp)
             }
         }
@@ -1080,6 +1103,7 @@ private fun Hero(
     onPlay: (MediaItem) -> Unit,
     onOpenDetail: (String) -> Unit,
     playFocus: FocusRequester,
+    hazeState: HazeState,
 ) {
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
     if (item == null) {
@@ -1094,7 +1118,7 @@ private fun Hero(
         val request = ImageRequest.Builder(context).data(nextBackdrop).crossfade(false).build()
         context.imageLoader.enqueue(request)
     }
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    BoxWithConstraints(Modifier.hazeSource(hazeState).fillMaxWidth()) {
         val heroHeight = minOf(420.dp, maxHeight * 0.52f)
         Box(
             Modifier
@@ -1132,7 +1156,7 @@ private fun Hero(
             Spacer(Modifier.height(6.dp))
             Text(
                 item.seriesName ?: item.name,
-                color = TextMain, fontSize = 30.sp, fontWeight = FontWeight.Bold,
+                color = TextMain, style = TypeScale.display,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
             val sub = listOfNotNull(
@@ -1141,7 +1165,7 @@ private fun Hero(
             ).joinToString("   ")
             if (sub.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
-                Text(sub, color = TextSub, fontSize = 12.sp)
+                Text(sub, color = TextSub, style = TypeScale.body)
             }
             item.overview?.let {
                 Spacer(Modifier.height(8.dp))
@@ -1224,12 +1248,12 @@ private fun RowSection(
     onClick: (MediaItem) -> Unit,
 ) {
     val client = AppRuntime.client
-    Column(Modifier.padding(top = 16.dp)) {
+    Column(Modifier.padding(top = Space.section)) {
         SectionTitle(title, Modifier.padding(start = 34.dp, bottom = 10.dp))
         LazyRow(
             modifier = Modifier.focusGroup(),
             contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(Space.m),
         ) {
             items(items, key = { it.id }) { it ->
                 PosterCard(

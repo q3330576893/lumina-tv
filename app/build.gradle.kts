@@ -72,6 +72,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.foundation:foundation")
+    implementation("dev.chrisbanes.haze:haze:1.5.0")
 
     implementation("androidx.media3:media3-exoplayer:1.7.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.7.1")
