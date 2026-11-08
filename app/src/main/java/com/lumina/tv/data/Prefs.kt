@@ -3,6 +3,15 @@ package com.lumina.tv.data
 import android.content.Context
 import java.util.UUID
 
+data class SavedServer(
+    val name: String,
+    val url: String,
+    val userName: String,
+    val userId: String,
+    val token: String,
+    val lastUsed: Long,
+)
+
 /** 极轻量的本地配置存储：服务器、凭证、播放内核偏好。 */
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE)
@@ -56,47 +65,69 @@ class Prefs(context: Context) {
         get() = sp.getString("saved_servers", "[]") ?: "[]"
         set(v) = sp.edit().putString("saved_servers", v).apply()
 
-    fun savedServers(): List<Pair<String, String>> = runCatching {
+    fun savedServerList(): List<SavedServer> = runCatching {
         val array = org.json.JSONArray(savedServersJson)
         (0 until array.length()).mapNotNull { index ->
-            array.optJSONObject(index)?.let { it.optString("name") to it.optString("url") }
-                ?.takeIf { it.second.isNotBlank() }
+            array.optJSONObject(index)?.let { item ->
+                SavedServer(
+                    name = item.optString("name", ""),
+                    url = item.optString("url", ""),
+                    userName = item.optString("userName", ""),
+                    userId = item.optString("userId", ""),
+                    token = item.optString("token", ""),
+                    lastUsed = item.optLong("lastUsed", 0L),
+                )
+            }?.takeIf { it.url.isNotBlank() }
         }
     }.getOrDefault(emptyList())
+
+    fun savedServers(): List<Pair<String, String>> = savedServerList().map { it.name to it.url }
+
+    fun upsertServer(s: SavedServer) {
+        val url = s.url.trim().trimEnd('/')
+        if (url.isBlank()) return
+        val servers = savedServerList().filterNot { it.url.trimEnd('/').equals(url, ignoreCase = true) }
+        val updated = s.copy(url = url, lastUsed = System.currentTimeMillis())
+        savedServersJson = org.json.JSONArray().apply {
+            (servers + updated).forEach { server -> put(server.toJson()) }
+        }.toString()
+    }
+
+    fun currentSavedServer(): SavedServer? = savedServerList().firstOrNull {
+        it.url.trimEnd('/').equals(baseUrl.trimEnd('/'), ignoreCase = true)
+    }
 
     fun saveCurrentServer() {
         val url = baseUrl.trim().trimEnd('/')
         if (url.isBlank()) return
-        val existing = savedServers().filterNot { it.second.equals(url, ignoreCase = true) }
-        val name = serverName.ifBlank { url }
-        savedServersJson = org.json.JSONArray().apply {
-            (existing + (name to url)).forEach { (serverName, serverUrl) ->
-                put(org.json.JSONObject().put("name", serverName).put("url", serverUrl))
-            }
-        }.toString()
+        upsertServer(SavedServer(serverName.ifBlank { url }, url, userName, userId, token, System.currentTimeMillis()))
     }
 
     fun removeSavedServer(url: String) {
+        val normalized = url.trimEnd('/')
         savedServersJson = org.json.JSONArray().apply {
-            savedServers().filterNot { it.second == url }.forEach { (name, serverUrl) ->
-                put(org.json.JSONObject().put("name", name).put("url", serverUrl))
-            }
+            savedServerList().filterNot { it.url.trimEnd('/').equals(normalized, ignoreCase = true) }
+                .forEach { put(it.toJson()) }
         }.toString()
     }
 
     fun renameSavedServer(url: String, name: String) {
         val normalized = url.trimEnd('/')
         savedServersJson = org.json.JSONArray().apply {
-            savedServers().forEach { (oldName, serverUrl) ->
-                put(
-                    org.json.JSONObject()
-                        .put("name", if (serverUrl.trimEnd('/').equals(normalized, true)) name.trim().ifBlank { serverUrl } else oldName)
-                        .put("url", serverUrl),
-                )
+            savedServerList().forEach { server ->
+                put(server.copy(name = if (server.url.trimEnd('/').equals(normalized, true)) name.trim().ifBlank { server.url } else server.name).toJson())
             }
         }.toString()
         if (baseUrl.trimEnd('/').equals(normalized, true)) serverName = name.trim().ifBlank { "Emby" }
     }
+
+    private fun SavedServer.toJson() = org.json.JSONObject()
+        .put("name", name)
+        .put("url", url)
+        .put("userName", userName)
+        .put("userId", userId)
+        .put("token", token)
+        .put("lastUsed", lastUsed)
 
     fun subtitleTrackFor(itemId: String): String? = sp.getString("subtitle_track_$itemId", null)
 

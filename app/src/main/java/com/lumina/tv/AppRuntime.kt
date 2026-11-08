@@ -98,6 +98,29 @@ object AppRuntime {
         prefs?.saveSession(s)
     }
 
+    fun switchToServer(url: String): Boolean {
+        val p = prefs ?: return false
+        val saved = p.savedServerList().firstOrNull {
+            it.url.trimEnd('/').equals(url.trimEnd('/'), ignoreCase = true)
+        } ?: return false
+        if (saved.token.isBlank()) return false
+        val switched = Session(
+            baseUrl = saved.url,
+            token = saved.token,
+            userId = saved.userId,
+            userName = saved.userName,
+            serverName = saved.name,
+        )
+        applySession(switched)
+        p.baseUrl = switched.baseUrl
+        p.token = switched.token
+        p.userId = switched.userId
+        p.userName = switched.userName
+        p.serverName = switched.serverName
+        p.upsertServer(saved)
+        return true
+    }
+
     fun logout() {
         session = null
         client = null
