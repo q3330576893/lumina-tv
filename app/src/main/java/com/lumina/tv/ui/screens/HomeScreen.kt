@@ -1113,12 +1113,15 @@ private fun Hero(
     LaunchedEffect(currentIndex, items) {
         if (items.size < 2) return@LaunchedEffect
         val next = items[(currentIndex + 1) % items.size]
-        val nextBackdrop = AppRuntime.client?.backdropUrl(next, 1280) ?: return@LaunchedEffect
-        val request = ImageRequest.Builder(context).data(nextBackdrop).crossfade(false).build()
+        val nextImage = AppRuntime.client?.backdropUrl(next, 1280)
+            ?.takeIf { it.isNotBlank() }
+            ?: AppRuntime.client?.imageUrl(next, 720)
+            ?: return@LaunchedEffect
+        val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
         context.imageLoader.enqueue(request)
     }
     BoxWithConstraints(Modifier.hazeSource(hazeState).fillMaxWidth()) {
-        val heroHeight = minOf(420.dp, maxHeight * 0.52f)
+        val heroHeight = minOf(560.dp, maxHeight * 0.66f)
         Box(
             Modifier
                 .fillMaxWidth()
@@ -1127,10 +1130,14 @@ private fun Hero(
                 .background(Brush.linearGradient(listOf(Color(0xFF174C58), Color(0xFF111827))))
         ) {
             Crossfade(targetState = currentIndex, animationSpec = tween(300), label = "hero-backdrop") { index ->
-                val backdrop = items.getOrNull(index)?.let { AppRuntime.client?.backdropUrl(it, 1280) }
-                if (!backdrop.isNullOrBlank()) {
+                val heroItem = items.getOrNull(index)
+                val client = AppRuntime.client
+                val image = heroItem?.let { client?.backdropUrl(it, 1280) }
+                    ?.takeIf { it.isNotBlank() }
+                    ?: heroItem?.let { client?.imageUrl(it, 720) }
+                if (!image.isNullOrBlank()) {
                     AsyncImage(
-                        model = ImageRequest.Builder(context).data(backdrop).crossfade(false).build(),
+                        model = ImageRequest.Builder(context).data(image).crossfade(false).build(),
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         alignment = Alignment.TopCenter,
@@ -1145,7 +1152,12 @@ private fun Hero(
         )
         Box(
             Modifier.fillMaxSize().background(
-                Brush.verticalGradient(listOf(Color(0x00070A12), Color(0x66070A12), Color(0xF2070A12)))
+                Brush.verticalGradient(
+                    0f to Color(0x00070A12),
+                    0.66f to Color(0x00070A12),
+                    0.82f to Color(0x66070A12),
+                    1f to Color(0xF2070A12),
+                )
             )
         )
         Column(
