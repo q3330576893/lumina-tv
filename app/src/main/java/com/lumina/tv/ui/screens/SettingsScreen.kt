@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Switch
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
@@ -43,14 +44,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
-import com.lumina.tv.player.IjkPlayerController
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.BuildConfig
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.DiagExportDialog
 import com.lumina.tv.ui.components.GlassPanel
-import com.lumina.tv.ui.components.QrCode
 import com.lumina.tv.ui.components.SectionTitle
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.GlassLine
@@ -70,6 +69,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     val prefs = AppRuntime.prefs
     val scope = rememberCoroutineScope()
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
+    var audioDecodeMode by remember { mutableStateOf(prefs?.audioDecodeMode ?: "auto") }
     var autoNext by remember { mutableStateOf(prefs?.autoNextEpisode ?: false) }
     var bootLaunch by remember { mutableStateOf(prefs?.bootLaunch ?: false) }
     var subtitleBg by remember { mutableStateOf(prefs?.subtitleBg ?: false) }
@@ -81,7 +81,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var introSeconds by remember { mutableStateOf(prefs?.globalIntroSeconds ?: 0) }
     var themeKey by remember { mutableStateOf(prefs?.themeColor ?: "blue") }
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
-    var qrUrl by remember { mutableStateOf(AppRuntime.pairingUrl) }
+    var licensesOpen by remember { mutableStateOf(false) }
     var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
     var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
     val mpvBroken = prefs?.mpvBroken ?: false
@@ -121,8 +121,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "设置"
-        if (AppRuntime.pairing == null) AppRuntime.startPairing(context)
-        qrUrl = AppRuntime.pairingUrl
         if (views.isEmpty()) {
             views = runCatching { AppRuntime.client?.getViews() }.getOrNull().orEmpty()
         }
@@ -150,7 +148,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 Spacer(Modifier.height(18.dp))
 
                 if (!wide) {
-                    PairingPanel(Modifier.fillMaxWidth(), qrUrl, wide = false)
+                    AboutPanel(Modifier.fillMaxWidth(), onLicenses = { licensesOpen = true }, onDiagnostics = { showDiagExport = true })
                     Spacer(Modifier.height(14.dp))
                 }
 
@@ -160,7 +158,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Text("服务器与账号", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(10.dp))
                         Text("当前服务器", color = TextSub, fontSize = 11.sp)
-                        Spacer(Modifier.height(6.dp))
                         Text(AppRuntime.session?.serverName ?: "-", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(4.dp))
                         Text(AppRuntime.session?.baseUrl ?: "-", color = Accent, fontSize = 12.sp)
@@ -702,7 +699,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 add("auto" to "自动")
                                 add("media3" to "Media3")
                                 add("mpv" to if (mpvBroken) "mpv（已禁用）" else "mpv")
-                                if (IjkPlayerController.isAvailable(context)) add("ijk" to "IJK")
                             }.forEach { (key, label) ->
                                 val active = playerEngine == key
                                 FocusSurface(Modifier.widthIn(min = 76.dp, max = if (mpvBroken && key == "mpv") 126.dp else 94.dp).height(36.dp), corner = 18.dp, scaleTo = 1.04f, onClick = {
@@ -713,6 +709,27 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                     Box(Modifier.fillMaxSize().background(if (active && !mpvBroken) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
                                         Text(label, color = if (active && !mpvBroken) Color(0xFF06101F) else if (mpvBroken && key == "mpv") TextSub.copy(alpha = .6f) else TextMain, fontSize = 11.sp)
                                     }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(12.dp))
+                        listOf(
+                            Triple("auto", "自动", "仅不支持的音轨本地软解"),
+                            Triple("soft", "强制本地软解", "全部解码成 PCM"),
+                            Triple("passthrough", "强制直通", "交给功放"),
+                        ).forEach { (mode, title, description) ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                RadioButton(
+                                    selected = audioDecodeMode == mode,
+                                    onClick = {
+                                        audioDecodeMode = mode
+                                        prefs?.audioDecodeMode = mode
+                                    },
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text(title, color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                    Text(description, color = TextSub, fontSize = 10.sp)
                                 }
                             }
                         }
@@ -740,10 +757,16 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
             // 窄屏配对面板放在主列末尾，宽屏保留独立右栏。
             if (wide) {
                 Spacer(Modifier.width(36.dp))
-                PairingPanel(Modifier.width(320.dp), qrUrl, wide = true)
+                AboutPanel(Modifier.width(320.dp), onLicenses = { licensesOpen = true }, onDiagnostics = { showDiagExport = true })
             }
         }
     }
+    if (licensesOpen) AlertDialog(
+        onDismissRequest = { licensesOpen = false },
+        title = { Text("开源许可") },
+        text = { Text("Media3\nmpv\n本机 FFmpeg") },
+        confirmButton = { TextButton(onClick = { licensesOpen = false }) { Text("关闭") } },
+    )
     DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
         withContext(Dispatchers.IO) {
             DiagExporter.export(context, DiagExporter.environmentPayload(context, outcome), "environment")
@@ -752,42 +775,20 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 }
 
 @Composable
-private fun PairingPanel(modifier: Modifier, qrUrl: String, wide: Boolean) {
-    val pairingStatus = AppRuntime.pairingStatus
-    val pairingSucceeded = pairingStatus.contains("成功")
-    val pairingFailed = pairingStatus.contains("失败") || pairingStatus.contains("错误")
-    val statusColor = when {
-        pairingSucceeded -> Color(0xFF72D89A)
-        pairingFailed -> Color(0xFFFF7777)
-        else -> TextSub
-    }
-    val statusText = if (pairingSucceeded) "手机已连接 ✓" else pairingStatus
-
+private fun AboutPanel(modifier: Modifier, onLicenses: () -> Unit, onDiagnostics: () -> Unit) {
     GlassPanel(modifier, corner = 26.dp) {
-        Column(Modifier.padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("手机遥控 / 换服务器", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp))
-            Text("扫码后填表单 → 自动登录本机", color = TextSub, fontSize = 11.sp)
-            Spacer(Modifier.height(14.dp))
-            if (qrUrl.isNotEmpty()) {
-                QrCode(qrUrl, size = if (wide) 200.dp else 180.dp)
-                Spacer(Modifier.height(10.dp))
-                Text(qrUrl.removePrefix("http://").removeSuffix("/"), color = Accent, fontSize = 12.sp)
-            } else {
-                Box(
-                    Modifier.height(200.dp).fillMaxWidth()
-                        .background(Color(0x14FFFFFF), RoundedCornerShape(18.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        AppRuntime.pairingError ?: "未连接局域网",
-                        color = TextSub, fontSize = 11.sp,
-                    )
+        Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("关于", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Lumina TV ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", color = TextSub, fontSize = 12.sp)
+            FocusSurface(Modifier.fillMaxWidth().height(40.dp), corner = 12.dp, onClick = onLicenses) { focused ->
+                Box(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent), contentAlignment = Alignment.CenterStart) {
+                    Text("开源许可", Modifier.padding(horizontal = 12.dp), color = TextMain, fontSize = 12.sp)
                 }
             }
-            if (pairingStatus.isNotBlank()) {
-                Spacer(Modifier.height(8.dp))
-                Text(statusText, color = statusColor, fontSize = 12.sp)
+            FocusSurface(Modifier.fillMaxWidth().height(40.dp), corner = 12.dp, onClick = onDiagnostics) { focused ->
+                Box(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent), contentAlignment = Alignment.CenterStart) {
+                    Text("导出诊断包", Modifier.padding(horizontal = 12.dp), color = TextMain, fontSize = 12.sp)
+                }
             }
         }
     }

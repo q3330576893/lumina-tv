@@ -103,7 +103,6 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.player.SubtitleRenderersFactory
 import com.lumina.tv.player.MpvPlayerController
-import com.lumina.tv.player.IjkPlayerController
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.ui.components.DiagExportDialog
@@ -124,6 +123,26 @@ private fun formatTime(ms: Long): String {
 }
 
 private val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
+
+private fun media3AudioTracks(tracks: Tracks): List<MediaStream> = tracks.groups
+    .filter { it.type == C.TRACK_TYPE_AUDIO }
+    .flatMap { group ->
+        (0 until group.length).map { index ->
+            val format = group.getTrackFormat(index)
+            MediaStream(
+                index = format.id?.toIntOrNull() ?: index,
+                type = "Audio",
+                codec = format.sampleMimeType?.substringAfter('/') ?: format.codecs,
+                language = format.language,
+                title = format.label,
+                isDefault = group.isTrackSelected(index),
+                isExternal = false,
+                displayTitle = format.label,
+                channels = format.channelCount.takeIf { it > 0 },
+                sampleRate = format.sampleRate.takeIf { it > 0 },
+            )
+        }
+    }
 
 @Composable
 fun PlayerScreen(
@@ -146,29 +165,33 @@ fun PlayerScreen(
     var speed by remember { mutableFloatStateOf(AppRuntime.prefs?.defaultSpeed ?: 1.0f) }
     var optionMenu by remember { mutableStateOf(false) }
     var degraded by remember { mutableStateOf(false) }
+    var audioDecodeMode by remember { mutableStateOf(AppRuntime.prefs?.audioDecodeMode ?: "auto") }
+    var audioDecodeNotice by remember { mutableStateOf<String?>(null) }
+    var softDecodeNoticeShown by remember(item.id) { mutableStateOf(false) }
     var mpvFallbackTried by remember(item.id) { mutableStateOf(false) }
-    var ijkFallbackTried by remember(item.id) { mutableStateOf(false) }
     var ffmpegFallback by remember(item.id) { mutableStateOf(false) }
     var activeEngine by remember(item.id) {
-        mutableStateOf(when (AppRuntime.prefs?.playerEngine) {
-            "mpv" -> "mpv"
-            "ijk" -> "ijk"
-            else -> "media3"
+        mutableStateOf(when (AppRuntime.prefs?.audioDecodeMode) {
+            "soft" -> "mpv"
+            "passthrough" -> "media3"
+            else -> if (AppRuntime.prefs?.playerEngine == "mpv") "mpv" else "media3"
         })
     }
     var mpvBackend by remember(item.id) { mutableStateOf<MpvPlayerController?>(null) }
     var mpvState by remember(item.id) { mutableStateOf(MpvPlayerController.State()) }
     var currentSurface by remember(item.id) { mutableStateOf<Surface?>(null) }
-    var ijkBackend by remember(item.id) { mutableStateOf<IjkPlayerController?>(null) }
-    var ijkState by remember(item.id) { mutableStateOf(IjkPlayerController.State()) }
     var reloadKey by remember { mutableIntStateOf(0) }
     var reloadForceTranscode by remember { mutableStateOf(true) }
     var playbackSource by remember(item.id) { mutableStateOf<MediaSource?>(null) }
     var noAudioRetryTried by remember(item.id) { mutableStateOf(false) }
     var bufferingTimedOut by remember(item.id) { mutableStateOf(false) }
     var showDiagExport by remember { mutableStateOf(false) }
+    var showMpvConfirm by remember { mutableStateOf(false) }
+    var playStartAt by remember(item.id) { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
+    var engineSwitchTrace by remember(item.id) { mutableStateOf(mutableListOf<String>()) }
     var currentPlaybackUrl by remember(item.id) { mutableStateOf<String?>(null) }
     var lastPlaybackErrorJson by remember(item.id) { mutableStateOf<String?>(null) }
+    var failurePhase by remember(item.id) { mutableStateOf("未知") }
     var currentSourceId by remember { mutableStateOf(initialSourceId) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     var boosting by remember { mutableStateOf(false) }
@@ -176,7 +199,7 @@ fun PlayerScreen(
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var seekHint by remember { mutableStateOf<String?>(null) }
     var currentResolution by remember { mutableStateOf<String?>(null) }
-    var subScale by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitleScale ?: 1.0f) }
+    var subScale by remember { mutableFloatStateOf(when (AppRuntime.prefs?.subtitleScale) { null -> 1.3f; 1.5f -> 2.0f; else -> AppRuntime.prefs?.subtitleScale ?: 1.3f }) }
     var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
     var nextEpisode by remember { mutableStateOf<MediaItem?>(null) }
     var nextCountdown by remember { mutableIntStateOf(0) }
@@ -277,7 +300,6 @@ fun PlayerScreen(
         val c = client ?: return
         val resumePosition = when (activeEngine) {
             "mpv" -> mpvBackend?.positionMs()?.takeIf { it > 0 } ?: position.takeIf { it > 0 } ?: item.positionTicks / 10_000
-            "ijk" -> ijkBackend?.positionMs()?.takeIf { it > 0 } ?: position.takeIf { it > 0 } ?: item.positionTicks / 10_000
             else -> if (exo.mediaItemCount > 0) {
             exo.currentPosition.coerceAtLeast(0L).let { current ->
                 val total = exo.duration
@@ -288,11 +310,30 @@ fun PlayerScreen(
         scope.launch {
             error = null
             buffering = true
+            failurePhase = "解析"
             try {
                 val target = c.resolvePlayback(item, forceTranscode, sourceId, resumePosition, audioStreamIndex)
+                failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
                 currentPlaybackUrl = target.url
+                val defaultAudio = target.source?.audioStreams?.firstOrNull { it.isDefault }
+                    ?: target.source?.audioStreams?.firstOrNull()
+                val audioCodec = listOfNotNull(defaultAudio?.codec, defaultAudio?.profile).joinToString(" ").lowercase()
+                val unsupportedAudio = listOf("truehd", "dts", "dca", "mlp", "atmos", "eac3").any(audioCodec::contains)
+                val selectedEngine = when (audioDecodeMode) {
+                    "soft" -> "mpv"
+                    "passthrough" -> "media3"
+                    else -> if (unsupportedAudio) "mpv" else if (AppRuntime.prefs?.playerEngine == "mpv") "mpv" else "media3"
+                }
+                if (audioDecodeMode == "auto" && unsupportedAudio && !softDecodeNoticeShown) {
+                    audioDecodeNotice = "该音轨已用 mpv 本地软解"
+                    softDecodeNoticeShown = true
+                }
+                if (activeEngine != selectedEngine) {
+                    activeEngine = selectedEngine
+                    return@launch
+                }
                 currentResolution = target.source?.resolution
                     ?: if (target.direct) null else "转码"
                 // 透传 STRM 的 Referer/User-Agent 等请求头
@@ -359,6 +400,9 @@ fun PlayerScreen(
                             reloadKey++
                         }
                     }.also { mpvBackend = it }
+                    val subtitleSp = when { subScale >= 2.3f -> 38.4f; subScale >= 1.9f -> 32f; subScale >= 1.5f -> 25.6f; subScale >= 1.2f -> 20.8f; else -> 16f }
+                    backend.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
+                    backend.setAudioTrack(audioStreamIndex ?: defaultAudio?.index ?: -1)
                     val unavailable = backend.unavailableReason
                     if (unavailable != null) {
                         AppRuntime.prefs?.mpvBroken = true
@@ -397,64 +441,6 @@ fun PlayerScreen(
                     }
                     backend.setSpeed(if (boosting) 3f else speed)
                     backend.load(target.url, target.startPositionMs, externalSubtitles, target.headers)
-                } else if (activeEngine == "ijk") {
-                    val backend = ijkBackend ?: IjkPlayerController(context) { state ->
-                        ijkState = state
-                        position = state.positionMs
-                        if (state.durationMs > 0L) duration = state.durationMs
-                        buffering = state.buffering
-                        isPlaying = state.playing
-                        if (state.ended) startAutoNext()
-                        state.error?.let {
-                            error = if (AppRuntime.prefs?.playerEngine == "auto") {
-                                "该设备不支持 IJK 内核，已回退 Media3"
-                            } else {
-                                "IJK 内核不可用（$it），已临时回退 Media3，可在设置里重选"
-                            }
-                            ijkBackend?.release()
-                            ijkBackend = null
-                            degraded = true
-                            activeEngine = "media3"
-                            ffmpegFallback = true
-                            reloadKey++
-                        }
-                    }.also { ijkBackend = it }
-                    // 内核构造阶段就失败（so 缺失 / ABI 不支持 / JNI 初始化异常）时立刻降级，
-                    // 不要等到 prepareAsync 才报错，避免上层空等或闪退。
-                    val unavailable = backend.unavailableReason
-                    if (unavailable != null) {
-                        ijkBackend = null
-                        runCatching { backend.release() }
-                        degraded = true
-                        ffmpegFallback = true
-                        error = if (AppRuntime.prefs?.playerEngine == "auto") {
-                            "该设备不支持 IJK 内核，已回退 Media3"
-                        } else {
-                            "IJK 内核不可用（$unavailable），已临时回退 Media3，可在设置里重选"
-                        }
-                        activeEngine = "media3"
-                        reloadKey++
-                    } else {
-                        var waitedMs = 0
-                        while (currentSurface?.isValid != true && waitedMs < 1_500) {
-                            delay(50)
-                            waitedMs += 50
-                        }
-                        val surface = currentSurface?.takeIf { it.isValid }
-                        if (surface == null) {
-                            backend.release()
-                            ijkBackend = null
-                            error = "播放画面未就绪（Surface 未创建），已回退 Media3"
-                            degraded = true
-                            ffmpegFallback = true
-                            activeEngine = "media3"
-                            reloadKey++
-                            return@launch
-                        }
-                        backend.attachSurface(surface)
-                        backend.setSpeed(if (boosting) 3f else speed)
-                        backend.load(target.url, target.startPositionMs, target.headers)
-                    }
                 } else {
                     exo.setMediaSource(merged)
                     exo.prepare()
@@ -465,9 +451,9 @@ fun PlayerScreen(
                 c.reportStart(item.id, target.startPositionMs, target.source?.id, if (target.direct) "DirectPlay" else "Transcode")
             } catch (e: Exception) {
                 buffering = false
+                if (failurePhase == "未知") failurePhase = "解析"
                 val reason = e.message ?: "播放失败"
                 if (activeEngine == "mpv") {
-                    ijkFallbackTried = true
                     mpvBackend?.release()
                     mpvBackend = null
                     error = "mpv 初始化失败，正在回退 Media3：$reason"
@@ -475,11 +461,6 @@ fun PlayerScreen(
                     degraded = true
                     ffmpegFallback = true
                     reloadKey++
-                } else if (activeEngine == "ijk") {
-                    error = "IJK 不可用，正在回退 Media3：$reason"
-                    activeEngine = "media3"
-                    degraded = true
-                    ffmpegFallback = true
                 } else {
                     error = reason
                 }
@@ -493,13 +474,24 @@ fun PlayerScreen(
                 .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
                 .put("active", activeEngine)
                 .put("mpvAvailable", mpvBackend?.unavailableReason == null && mpvBackend != null)
-                .put("ijkAvailable", IjkPlayerController.isAvailable(context)))
+                .put("kernels", JSONArray().put("media3").put("mpv")))
             .put("media", JSONObject()
                 .put("id", item.id).put("name", item.name).put("seriesName", item.seriesName ?: JSONObject.NULL)
                 .put("container", playbackSource?.container ?: JSONObject.NULL)
                 .put("size", playbackSource?.size ?: 0L)
                 .put("isStrm", playbackSource?.container?.contains("strm", true) == true))
             .put("playback", JSONObject().put("url", currentPlaybackUrl ?: JSONObject.NULL))
+            .put("audioDecode", JSONObject()
+                .put("audioDecodeMode", audioDecodeMode)
+                .put("audioDecodePath", when {
+                    audioDecodeMode == "passthrough" -> "passthrough"
+                    activeEngine == "mpv" -> "local-soft-mpv"
+                    else -> "direct"
+                })
+                .put("audioCodec", playbackSource?.audioStreams?.firstOrNull { it.isDefault }?.codec ?: playbackSource?.audioStreams?.firstOrNull()?.codec ?: JSONObject.NULL)
+                .put("channels", playbackSource?.audioStreams?.firstOrNull { it.isDefault }?.channels ?: playbackSource?.audioStreams?.firstOrNull()?.channels ?: JSONObject.NULL)
+                .put("transcoded", playbackSource?.let { !it.supportsDirectPlay || degraded } ?: false))
+            .put("engineSwitchTrace", JSONArray(engineSwitchTrace))
         val streams = JSONArray().apply {
             playbackSource?.streams.orEmpty().forEach { stream ->
                 put(JSONObject()
@@ -528,11 +520,10 @@ fun PlayerScreen(
             }
         }
         val errors = JSONObject()
+            .put("failurePhase", failurePhase)
             .put("media3", lastPlaybackErrorJson?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject.NULL)
             .put("mpv", mpvState.error ?: "No mpv error recorded")
             .put("mpvSoftwareRetryCount", mpvBackend?.softwareRetryCount() ?: 0)
-            .put("ijk", ijkState.error ?: "No IJK error recorded")
-            .put("ijkPreloadStack", IjkPlayerController.preloadFailureStack())
             .put("audioDecodeFailure", AppRuntime.prefs?.lastPlaybackAudioFailure ?: "")
         return DiagPayload(
             metaJson = meta.toString(2),
@@ -575,17 +566,10 @@ fun PlayerScreen(
         when (activeEngine) {
             "mpv" -> {
                 exo.pause()
-                ijkBackend?.pause()
                 loadSource(forceTranscode = false)
             }
-            "ijk" -> {
-                exo.pause()
+            "media3" -> if (mpvBackend != null) {
                 mpvBackend?.pause()
-                loadSource(forceTranscode = false)
-            }
-            "media3" -> if (mpvBackend != null || ijkBackend != null) {
-                mpvBackend?.pause()
-                ijkBackend?.pause()
                 loadSource(forceTranscode = ffmpegFallback)
             }
         }
@@ -594,7 +578,6 @@ fun PlayerScreen(
     fun seekPlayerTo(targetMs: Long) {
         when (activeEngine) {
             "mpv" -> mpvBackend?.seekTo(targetMs)
-            "ijk" -> ijkBackend?.seekTo(targetMs)
             else -> exo.seekTo(targetMs)
         }
         position = targetMs.coerceAtLeast(0L)
@@ -603,7 +586,6 @@ fun PlayerScreen(
     fun togglePlayback() {
         when (activeEngine) {
             "mpv" -> if (mpvState.playing) mpvBackend?.pause() else mpvBackend?.play()
-            "ijk" -> if (ijkState.playing) ijkBackend?.pause() else ijkBackend?.play()
             else -> if (exo.isPlaying) exo.pause() else exo.play()
         }
     }
@@ -612,7 +594,6 @@ fun PlayerScreen(
         speed = value
         when (activeEngine) {
             "mpv" -> mpvBackend?.setSpeed(value)
-            "ijk" -> ijkBackend?.setSpeed(value)
             else -> exo.setPlaybackSpeed(value)
         }
     }
@@ -621,6 +602,13 @@ fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
                 if (activeEngine != "media3") return
+                failurePhase = when {
+                    err.errorCodeName.contains("IO", true) -> "连接"
+                    err.errorCodeName.contains("DEMUX", true) || err.errorCodeName.contains("PARSING", true) -> "解封装"
+                    err.errorCodeName.contains("DECOD", true) -> "解码"
+                    err.errorCodeName.contains("RENDER", true) -> "渲染"
+                    else -> "解码"
+                }
                 lastPlaybackErrorJson = JSONObject()
                     .put("errorCodeName", err.errorCodeName)
                     .put("errorCode", err.errorCode)
@@ -629,22 +617,41 @@ fun PlayerScreen(
                         generateSequence(err as Throwable?) { it.cause }.take(5)
                             .forEach { put(it.message ?: it::class.java.name) }
                     }).toString(2)
-                if (!degraded) {
+                if (audioDecodeMode == "passthrough" && err.errorCodeName.contains("DECOD", true)) {
+                    buffering = false
+                    audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
+                    error = "设备不支持该音轨直通，建议改回自动"
+                } else if (audioDecodeMode == "auto" && err.errorCodeName.contains("DECOD", true) && !mpvFallbackTried) {
+                    buffering = false
+                    mpvFallbackTried = true
+                    audioDecodeNotice = "该音轨已用 mpv 本地软解"
+                    activeEngine = "mpv"
+                } else if (!degraded) {
                     degraded = true
                     error = "直连失败，自动切换转码…"
                     reloadKey++
-                } else if (AppRuntime.prefs?.playerEngine == "auto" && !mpvFallbackTried) {
-                    mpvFallbackTried = true
-                    activeEngine = "mpv"
-                    error = "Media3 播放失败，切换至 mpv…"
                 } else if (!ffmpegFallback) {
-                    error = "媒体服务器流解码失败，切换 FFmpeg 软件解码…"
+                    error = "媒体服务器转码流失败，重试转码路径…"
                     ffmpegFallback = true
+                    reloadForceTranscode = true
+                    engineSwitchTrace.add("server-transcode-retry:${err.errorCodeName}")
+                    reloadKey++
+                } else if (AppRuntime.prefs?.playerEngine == "auto" && !mpvFallbackTried) {
+                    val networkFailure = err.errorCodeName.contains("IO", true) || err.errorCodeName.contains("TIMEOUT", true)
+                    val elapsedMs = android.os.SystemClock.elapsedRealtime() - playStartAt
+                    buffering = false
+                    error = "Media3 播放失败：${err.errorCodeName}。可导出诊断包。"
+                    if (!networkFailure && elapsedMs >= 15_000L) {
+                        mpvFallbackTried = true
+                        showMpvConfirm = true
+                        engineSwitchTrace.add("mpv-confirmation-offered:${err.errorCodeName}")
+                    }
                 } else {
                     buffering = false
                     val cause = generateSequence(err as Throwable?) { it.cause }
                         .take(4).mapNotNull { it.message?.takeIf(String::isNotBlank) }.joinToString(" · ")
                     error = buildString {
+                        append("${failurePhase}阶段失败：")
                         append("播放失败：${err.errorCodeName}")
                         if (cause.isNotBlank()) append("\n").append(cause.take(220))
                     }
@@ -654,7 +661,10 @@ fun PlayerScreen(
             override fun onPlaybackStateChanged(state: Int) {
                 if (activeEngine != "media3") return
                 buffering = state == Player.STATE_BUFFERING
-                if (state == Player.STATE_READY && degraded && error?.startsWith("直连失败") == true) error = null
+                if (state == Player.STATE_READY) {
+                    playStartAt = android.os.SystemClock.elapsedRealtime()
+                    if (degraded) error = null
+                }
                 if (state == Player.STATE_ENDED && !nextTriggered &&
                     AppRuntime.prefs?.autoNextEpisode == true && item.seriesId != null
                 ) {
@@ -698,7 +708,15 @@ fun PlayerScreen(
                                 ?: playbackSource?.audioStreams?.firstOrNull()?.codec ?: "音轨"
                             error = "该音轨（$codec）本机无法解码，正在尝试转码播放"
                             AppRuntime.prefs?.lastPlaybackAudioFailure = "$codec 音频解码失败"
-                            loadSource(forceTranscode = true)
+                            if (audioDecodeMode == "passthrough") {
+                                audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
+                                error = "设备不支持该音轨直通，建议改回自动"
+                            } else if (audioDecodeMode == "auto" && activeEngine == "media3") {
+                                audioDecodeNotice = "该音轨已用 mpv 本地软解"
+                                activeEngine = "mpv"
+                            } else {
+                                error = "该音轨（$codec）无法播放"
+                            }
                         }
                     }
                 }
@@ -757,9 +775,6 @@ fun PlayerScreen(
     DisposableEffect(mpvBackend, item.id) {
         onDispose { mpvBackend?.release(); mpvBackend = null }
     }
-    DisposableEffect(ijkBackend, item.id) {
-        onDispose { ijkBackend?.release(); ijkBackend = null }
-    }
 
     LaunchedEffect(seekHint) {
         if (seekHint != null) {
@@ -774,7 +789,6 @@ fun PlayerScreen(
         val to = (current + delta).coerceIn(0L, max)
         when (activeEngine) {
             "mpv" -> mpvBackend?.seekTo(to)
-            "ijk" -> ijkBackend?.seekTo(to)
             else -> exo.seekTo(to)
         }
         position = to
@@ -790,12 +804,10 @@ fun PlayerScreen(
             delay(1000)
             position = when (activeEngine) {
                 "mpv" -> mpvBackend?.positionMs() ?: position
-                "ijk" -> ijkBackend?.positionMs() ?: position
                 else -> exo.currentPosition
             }
             duration = when (activeEngine) {
                 "mpv" -> mpvBackend?.durationMs() ?: duration
-                "ijk" -> ijkBackend?.durationMs() ?: duration
                 else -> exo.duration.coerceAtLeast(0)
             }
             if (activeEngine == "media3" && exo.playbackState == Player.STATE_BUFFERING) {
@@ -813,9 +825,9 @@ fun PlayerScreen(
                 bufferingPosition = exo.currentPosition
             }
             sinceReport++
-            if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "ijk" && ijkState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
+            if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
                 sinceReport = 0
-                val paused = when (activeEngine) { "mpv" -> !mpvState.playing; "ijk" -> !ijkState.playing; else -> !exo.isPlaying }
+                val paused = if (activeEngine == "mpv") !mpvState.playing else !exo.isPlaying
                 AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId)
             }
         }
@@ -844,7 +856,7 @@ fun PlayerScreen(
             showControls -> showControls = false
             else -> {
                 scope.launch { AppRuntime.client?.reportStop(item.id, position.coerceAtLeast(0L)) }
-                when (activeEngine) { "mpv" -> mpvBackend?.pause(); "ijk" -> ijkBackend?.pause(); else -> exo.stop() }
+                if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
                 onBack()
             }
         }
@@ -864,7 +876,14 @@ fun PlayerScreen(
                 pv.resizeMode = resizeMode
                 val prefs = AppRuntime.prefs
                 pv.subtitleView?.apply {
-                    setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * subScale)
+                    val subtitleSp = when {
+                        subScale >= 2.3f -> 38.4f
+                        subScale >= 1.9f -> 32f
+                        subScale >= 1.5f -> 25.6f
+                        subScale >= 1.2f -> 20.8f
+                        else -> 16f
+                    }
+                    setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, subtitleSp)
                     setBackgroundColor(if (prefs?.subtitleBg == true) 0x99000000.toInt() else android.graphics.Color.TRANSPARENT)
                     setStyle(androidx.media3.ui.CaptionStyleCompat(
                         prefs?.subtitleColor ?: android.graphics.Color.WHITE,
@@ -874,7 +893,7 @@ fun PlayerScreen(
                         android.graphics.Color.BLACK,
                         null,
                     ))
-                    setBottomPaddingFraction(prefs?.subtitlePosition ?: 0.08f)
+                    setBottomPaddingFraction((prefs?.subtitlePosition ?: 0.08f) + if (subtitleSp >= 38f) 0.05f else if (subtitleSp >= 32f) 0.035f else 0f)
                 }
             },
             modifier = Modifier.fillMaxSize(),
@@ -888,17 +907,14 @@ fun PlayerScreen(
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             currentSurface = holder.surface
                             mpvBackend?.attachSurface(holder.surface, holder.surfaceFrame.width(), holder.surfaceFrame.height())
-                            ijkBackend?.attachSurface(holder.surface)
                         }
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                             currentSurface = holder.surface
                             mpvBackend?.attachSurface(holder.surface, width, height)
-                            ijkBackend?.attachSurface(holder.surface)
                         }
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
                             if (currentSurface === holder.surface) currentSurface = null
                             mpvBackend?.detachSurface()
-                            ijkBackend?.detachSurface()
                         }
                     })
                 }
@@ -906,7 +922,6 @@ fun PlayerScreen(
             update = { view -> if (view.holder.surface.isValid) {
                 currentSurface = view.holder.surface
                 mpvBackend?.attachSurface(view.holder.surface, view.width, view.height)
-                ijkBackend?.attachSurface(view.holder.surface)
             } },
             modifier = Modifier.fillMaxSize(),
         )
@@ -1234,9 +1249,10 @@ fun PlayerScreen(
                 currentSourceId = currentSourceId,
                 episodes = episodes,
                 subScale = subScale,
+                audioDecodeMode = audioDecodeMode,
                 subtitleOffsetMs = subtitleOffsetMs,
                 activeEngine = activeEngine,
-                audioStreams = playbackSource?.audioStreams.orEmpty(),
+                audioStreams = if (activeEngine == "media3") media3AudioTracks(exo.currentTracks) else emptyList(),
                 selectedAudioStreamIndex = AppRuntime.prefs?.audioTrackFor(item.id),
                 onAudioStreamSelected = { streamIndex, override ->
                     AppRuntime.prefs?.rememberAudioTrack(item.id, streamIndex)
@@ -1249,6 +1265,7 @@ fun PlayerScreen(
                         reloadForceTranscode = false
                         reloadKey++
                     }
+                    if (activeEngine == "mpv") mpvBackend?.setAudioTrack(streamIndex)
                 },
                 onSubtitleSelected = { AppRuntime.prefs?.rememberSubtitleTrack(item.id, it) },
                 onSubtitleOffset = {
@@ -1258,22 +1275,32 @@ fun PlayerScreen(
                 onSubScale = {
                     subScale = it
                     AppRuntime.prefs?.subtitleScale = it
+                    val subtitleSp = when { it >= 2.3f -> 38.4f; it >= 1.9f -> 32f; it >= 1.5f -> 25.6f; it >= 1.2f -> 20.8f; else -> 16f }
+                    mpvBackend?.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
+                },
+                onAudioDecodeMode = { mode ->
+                    audioDecodeMode = mode
+                    AppRuntime.prefs?.audioDecodeMode = mode
+                    audioDecodeNotice = when (mode) {
+                        "soft" -> "全部音轨将在本地软解"
+                        "passthrough" -> "已切换到音频直通"
+                        else -> "已切换到自动音频解码"
+                    }
+                    engineSwitchTrace.add("audio-decode-mode=$mode")
+                    reloadForceTranscode = false
+                    reloadKey++
                 },
                 onSpeed = {
                     setPlaybackSpeed(it)
                 },
                 onSwitchEngine = {
                     error = "正在切换播放内核…"
-                    val engines = buildList {
-                        add("media3")
-                        if (AppRuntime.prefs?.mpvBroken != true) add("mpv")
-                        if (IjkPlayerController.isAvailable(context)) add("ijk")
-                    }
+                    val engines = listOf("media3", "mpv")
                     if (engines.size > 1) {
                         activeEngine = engines[(engines.indexOf(activeEngine).coerceAtLeast(0) + 1) % engines.size]
                     }
                 },
-                onlyMedia3Available = AppRuntime.prefs?.mpvBroken == true && !IjkPlayerController.isAvailable(context),
+                onlyMedia3Available = false,
                 onResizeMode = { resizeMode = it },
                 onSwitchSource = { sid ->
                     optionMenu = false
@@ -1291,6 +1318,39 @@ fun PlayerScreen(
                 },
                 onClose = { optionMenu = false },
             )
+        }
+        audioDecodeNotice?.let { notice ->
+            Text(notice, Modifier.align(Alignment.BottomEnd).padding(24.dp).background(Color(0xAA10141D), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 8.dp), color = TextMain, fontSize = 11.sp)
+            LaunchedEffect(notice) { delay(3_000); audioDecodeNotice = null }
+        }
+    }
+    if (showMpvConfirm) {
+        Box(Modifier.fillMaxSize().background(Color(0xCC000000)), contentAlignment = Alignment.Center) {
+            GlassPanel(Modifier.width(480.dp), corner = 18.dp, fillColor = Color(0xF018202B)) {
+                Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text("Media3 无法播放该片，是否尝试 mpv 内核？", color = TextMain, fontSize = 17.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        FocusSurface(Modifier.width(130.dp).height(42.dp), corner = 10.dp, onClick = {
+                            engineSwitchTrace.add("user-confirmed-mpv")
+                            showMpvConfirm = false
+                            activeEngine = "mpv"
+                        }) { focused ->
+                            Box(Modifier.fillMaxSize().background(if (focused) Accent else Color(0x22FFFFFF), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                                Text("尝试", color = if (focused) Color(0xFF06101F) else TextMain)
+                            }
+                        }
+                        FocusSurface(Modifier.width(130.dp).height(42.dp), corner = 10.dp, onClick = {
+                            engineSwitchTrace.add("user-declined-mpv")
+                            showMpvConfirm = false
+                            error = "Media3 播放失败。可导出诊断包或手动切换播放内核。"
+                        }) { focused ->
+                            Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                                Text("取消", color = TextMain)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
@@ -1348,6 +1408,7 @@ private fun OptionMenu(
     currentSourceId: String?,
     episodes: List<MediaItem>,
     subScale: Float,
+    audioDecodeMode: String,
     subtitleOffsetMs: Long,
     activeEngine: String,
     audioStreams: List<MediaStream>,
@@ -1357,6 +1418,7 @@ private fun OptionMenu(
     onSubtitleSelected: (String?) -> Unit,
     onSubtitleOffset: (Long) -> Unit,
     onSubScale: (Float) -> Unit,
+    onAudioDecodeMode: (String) -> Unit,
     onSpeed: (Float) -> Unit,
     onSwitchEngine: () -> Unit,
     onResizeMode: (Int) -> Unit,
@@ -1477,7 +1539,7 @@ private fun OptionMenu(
                         Text("播放内核", color = if (focused) Accent else TextMain, fontSize = 12.sp)
                         Spacer(Modifier.weight(1f))
                         Text(
-                            when (activeEngine) { "mpv" -> "mpv"; "ijk" -> "IJK"; else -> "M3" },
+                            if (activeEngine == "mpv") "mpv" else "M3",
                             color = TextSub,
                             fontSize = 12.sp,
                         )
@@ -1486,6 +1548,15 @@ private fun OptionMenu(
 
                 // 倍速
                 MenuLabel("倍速播放")
+                Spacer(Modifier.height(8.dp))
+                MenuLabel("音频解码")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("auto" to "自动", "soft" to "本地软解", "passthrough" to "强制直通").forEach { (mode, label) ->
+                        MenuChip(label = label, width = 112.dp, active = audioDecodeMode == mode, activeColor = Accent,
+                            onClick = { onAudioDecodeMode(mode) })
+                    }
+                }
+
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SPEEDS.forEach { s ->
                         val active = kotlin.math.abs(speed - s) < 0.01f
@@ -1561,7 +1632,7 @@ private fun OptionMenu(
                 Spacer(Modifier.height(10.dp))
                 MenuLabel("字幕字号")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(0.85f to "小", 1.0f to "标准", 1.25f to "大", 1.5f to "特大").forEach { (s, label) ->
+                    listOf(1.0f to "小", 1.3f to "标准", 1.6f to "大", 2.0f to "特大", 2.4f to "超大").forEach { (s, label) ->
                         MenuChip(
                             label = label, width = 84.dp,
                             active = kotlin.math.abs(subScale - s) < 0.01f,

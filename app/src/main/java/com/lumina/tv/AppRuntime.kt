@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.Prefs
 import com.lumina.tv.data.Session
+import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.pair.PairingServer
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -29,6 +30,10 @@ object AppRuntime {
     var onRemoteKey: ((String) -> Unit)? = null
     var onSearch: ((String) -> Unit)? = null
     var onPairConfig: ((String, String, String) -> Boolean)? = null
+    var onPairRequest: ((PairConfig) -> Unit)? = null
+
+    fun resolvePairRequest(state: String): Boolean = pairing?.resolvePending(state) == true
+    fun pairRequestIsPending(): Boolean = pairing?.hasPendingRequest() == true
 
     @Volatile private var pairingToken: String? = null
     @Volatile private var pairingAccessToken: String? = null
@@ -107,6 +112,7 @@ object AppRuntime {
             onConfig = { token, server, user, pass ->
                 if (consumePairingToken(token)) onPairConfig?.invoke(server, user, pass) == true else false
             },
+            onPairRequest = { config -> onPairRequest?.invoke(config) },
             authorize = { token -> validatePairingAccess(token) },
             onRemote = { action -> onRemoteKey?.invoke(action) },
             onSearch = { keyword -> onSearch?.invoke(keyword) },

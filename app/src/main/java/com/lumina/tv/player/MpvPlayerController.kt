@@ -85,6 +85,7 @@ class MpvPlayerController(
                 engine.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 engine.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 engine.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+                engine.observeProperty("video-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
                 engine.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
                 engine.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
             }.onFailure { failure ->
@@ -124,6 +125,14 @@ class MpvPlayerController(
             if (attachedSurface != null) Log.d(TAG, "surface detached")
             attachedSurface = null
         }
+    }
+
+    fun setSubtitleFontSize(sizePx: Int) {
+        if (!released) runCatching { mpv?.setOptionString("sub-font-size", sizePx.coerceIn(16, 120).toString()) }
+    }
+
+    fun setAudioTrack(index: Int) {
+        if (!released) runCatching { mpv?.setPropertyInt("aid", index) }
     }
 
     fun load(url: String, startPositionMs: Long, subtitleUrls: List<String> = emptyList(), headers: Map<String, String> = emptyMap()) {
@@ -203,7 +212,8 @@ class MpvPlayerController(
         mpv?.let { engine ->
             runCatching { engine.removeObserver(this) }
             runCatching { engine.removeLogObserver(logObserver) }
-            runCatching { engine.detachSurface() }
+            if (attachedSurface != null) runCatching { engine.detachSurface() }
+            attachedSurface = null
             runCatching { engine.destroy() }
         }
     }
@@ -229,7 +239,15 @@ class MpvPlayerController(
 
     override fun eventProperty(property: String) = Unit
     override fun eventProperty(property: String, value: String) {
-        if (property == "end-file") Log.w(TAG, "${timestamp()} END_FILE reason: $value")
+        when (property) {
+            "end-file" -> Log.w(TAG, "${timestamp()} END_FILE reason: $value")
+            "video-out-params" -> {
+                ready = true
+                handler.removeCallbacks(loadTimeout)
+                Log.i(TAG, "${timestamp()} received video-out-params")
+                emit(buffering = false, ready = true)
+            }
+        }
     }
     override fun eventProperty(property: String, value: Long) = Unit
     override fun eventProperty(property: String, value: Double) {
@@ -252,6 +270,7 @@ class MpvPlayerController(
             }
             "pause" -> {
                 playing = !value
+                if (!value) buffering = false
                 emit()
             }
         }

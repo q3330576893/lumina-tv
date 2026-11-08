@@ -27,9 +27,20 @@ class Prefs(context: Context) {
         get() = sp.getString("server_name", "Emby") ?: "Emby"
         set(v) = sp.edit().putString("server_name", v).apply()
 
+    var serverNote: String?
+        get() = sp.getString("server_note", null)
+        set(v) = sp.edit().putString("server_note", v).apply()
+
     /** 播放内核：exo（硬解直连） / auto */
     var playerEngine: String
-        get() = sp.getString("engine", "auto") ?: "auto"
+        get() {
+            val stored = sp.getString("engine", "auto") ?: "auto"
+            if (stored == "ijk") {
+                sp.edit().putString("engine", "auto").apply()
+                return "auto"
+            }
+            return stored
+        }
         set(v) = sp.edit().putString("engine", v).apply()
 
     var mpvBroken: Boolean
@@ -39,6 +50,7 @@ class Prefs(context: Context) {
     var decoderPreference: String
         get() = sp.getString("decoder_preference", "auto") ?: "auto"
         set(v) = sp.edit().putString("decoder_preference", v).apply()
+
 
     var savedServersJson: String
         get() = sp.getString("saved_servers", "[]") ?: "[]"
@@ -105,6 +117,24 @@ class Prefs(context: Context) {
     var forceTranscode: Boolean
         get() = sp.getBoolean("force_transcode", false)
         set(v) = sp.edit().putBoolean("force_transcode", v).apply()
+
+    var audioDecodeMode: String
+        get() {
+            val stored = sp.getString("audio_decode_mode", null)
+            if (stored in setOf("auto", "soft", "passthrough")) return stored!!
+            val migrated = if (sp.getBoolean("force_audio_decode", false)) "soft" else "auto"
+            sp.edit().putString("audio_decode_mode", migrated).remove("force_audio_decode").apply()
+            return migrated
+        }
+        set(v) = sp.edit().putString("audio_decode_mode", v.takeIf { it in setOf("auto", "soft", "passthrough") } ?: "auto").apply()
+
+    var librarySort: String
+        get() = sp.getString("library_sort", "date") ?: "date"
+        set(v) = sp.edit().putString("library_sort", v).apply()
+
+    var librarySortOrder: String
+        get() = sp.getString("library_sort_order", "Descending") ?: "Descending"
+        set(v) = sp.edit().putString("library_sort_order", v).apply()
 
     var lastPlaybackAudioFailure: String
         get() = sp.getString("last_playback_audio_failure", "") ?: ""

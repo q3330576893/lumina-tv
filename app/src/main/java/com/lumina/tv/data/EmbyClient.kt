@@ -26,6 +26,8 @@ class EmbyClient(
 ) {
     @Volatile var lastPlaybackInfoJson: String? = null
         private set
+    @Volatile var lastTotalRecordCount: Int? = null
+        private set
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -227,7 +229,9 @@ class EmbyClient(
         if (searchTerm != null) params["SearchTerm"] = searchTerm
         if (genre != null) params["Genres"] = genre
         if (filters != null) params["Filters"] = filters
-        val arr = getSync(url("/Users/$userId/Items", params)).optJSONArray("Items") ?: JSONArray()
+        val response = getSync(url("/Users/$userId/Items", params))
+        lastTotalRecordCount = response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
+        val arr = response.optJSONArray("Items") ?: JSONArray()
         parseItems(arr)
     }
 
@@ -597,8 +601,9 @@ data class PlaybackTarget(
                 .put("DeviceProfile", deviceProfile())
             if (audioStreamIndex != null) infoBody.put("AudioStreamIndex", audioStreamIndex)
             if (mediaSourceId != null) infoBody.put("MediaSourceId", mediaSourceId)
+            val playbackInfoParams = mapOf("UserId" to userId)
             val info = try {
-                postSync(url("/Items/${item.id}/PlaybackInfo", mapOf("UserId" to userId)), infoBody.toString())
+                postSync(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
                     .also { lastPlaybackInfoJson = it.toString() }
             } catch (failure: Exception) {
                 lastPlaybackInfoJson = JSONObject().put("reason", failure.message ?: "PlaybackInfo request failed").toString()
@@ -615,10 +620,14 @@ data class PlaybackTarget(
                 id = msId, name = "源", container = null,
                 supportsDirectPlay = true, supportsDirectStream = true, streams = emptyList(),
             )
-            val audioStream = source.audioStreams.firstOrNull { it.isDefault } ?: source.audioStreams.firstOrNull()
-            val audioCodec = listOfNotNull(audioStream?.codec, audioStream?.profile).joinToString(" ").lowercase()
-            val unsupportedAudio = listOf("truehd", "dts", "dca", "mlp", "atmos").any(audioCodec::contains)
-            val needTranscode = forceTranscode || unsupportedAudio || !source.supportsDirectPlay
+            val videoStream = source.streams.firstOrNull { it.type == "Video" }
+            val videoCodec = videoStream?.codec.orEmpty().lowercase()
+            val sourceContainer = source.container.orEmpty().lowercase()
+            val videoNeedsTranscode = videoCodec.isNotBlank() && videoCodec !in setOf("h264", "avc", "hevc", "h265")
+            val containerNeedsTranscode = sourceContainer.isNotBlank() &&
+                sourceContainer !in setOf("mkv", "mp4", "m4v", "ts", "mov")
+            val needTranscode = forceTranscode || videoNeedsTranscode ||
+                containerNeedsTranscode || !source.supportsDirectPlay
             val directUrl = url(
                 "/Videos/${item.id}/stream",
                 mapOf("static" to "true", "MediaSourceId" to msId, "DeviceId" to deviceId,
@@ -661,7 +670,7 @@ data class PlaybackTarget(
             ) {
                 throw EmbyException("该 STRM 条目没有可用地址（文件为空或内容不是 http 链接）")
             }
-            val finalUrl = if (isStrm) strmUrl!! else if (useDirect) directUrl else transcodingUrl ?: hlsUrl
+            val finalUrl = if (isStrm && !forceTranscode) strmUrl!! else if (useDirect) directUrl else transcodingUrl ?: hlsUrl
             // 请求头：#EXTVLCOPT / #EXTHTTP 既可能来自 MediaSources.AdditionalOptions，也可能在 .strm 文本里
             val headers = buildMap {
                 putAll(parseStrmOptions(source.additionalOptions))
@@ -670,7 +679,7 @@ data class PlaybackTarget(
             PlaybackTarget(
                 url = finalUrl,
                 // STRM 直链本身就是直连播放，不参与转码判定
-                direct = if (isStrm) true else useDirect,
+                direct = if (isStrm && !forceTranscode) true else useDirect,
                 source = source,
                 startPositionMs = startPositionMs.coerceAtLeast(0L),
                 headers = headers,
@@ -688,7 +697,6 @@ data class PlaybackTarget(
                 .put("AudioCodec", "aac").put("Protocol", "hls").put("MaxAudioChannels", "2"))
             .put(JSONObject().put("Container", "ts").put("Type", "Audio").put("AudioCodec", "aac")
                 .put("Protocol", "hls").put("MaxAudioChannels", "2")))
-
     private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
         val builder = Uri.parse(url).buildUpon()
         val names = Uri.parse(url).queryParameterNames

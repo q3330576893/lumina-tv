@@ -19,8 +19,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "1.15.0"
+        versionCode = 24
+        versionName = "1.16.1"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
     }
@@ -79,9 +79,6 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.7.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.7.1")
     implementation("org.jellycine.mpv:libmpv:1.0.4")
-    implementation("io.github.jdpxiaoming:ijkplayer-java:0.0.26")
-    implementation("io.github.jdpxiaoming:ijkplayer-arm64:0.0.26")
-    implementation("io.github.jdpxiaoming:ijkplayer-armv7a:0.0.26")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")

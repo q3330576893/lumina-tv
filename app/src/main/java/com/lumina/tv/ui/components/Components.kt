@@ -154,23 +154,25 @@ fun FocusSurface(
     corner: Dp = 20.dp,
     scaleTo: Float = 1.06f,
     requestFocus: Boolean = false,
+    focusRequester: FocusRequester? = null,
     onFocused: (() -> Unit)? = null,
     onClick: () -> Unit,
     content: @Composable (focused: Boolean) -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) scaleTo else 1f, tween(180), label = "scale")
-    val focusRequester = remember { FocusRequester() }
+    val scale by animateFloatAsState(if (focused) scaleTo else 1f, tween(130), label = "scale")
+    val requestFocusRequester = remember { FocusRequester() }
     LaunchedEffect(requestFocus) {
         if (requestFocus) {
             kotlinx.coroutines.delay(100)
-            runCatching { focusRequester.requestFocus() }
+            runCatching { requestFocusRequester.requestFocus() }
         }
     }
     Box(
         modifier
-            .then(if (requestFocus) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (requestFocus) Modifier.focusRequester(requestFocusRequester) else Modifier)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { if (it.isFocused) onFocused?.invoke() }
             .graphicsLayer {
                 scaleX = scale
@@ -182,8 +184,8 @@ fun FocusSurface(
             .clip(RoundedCornerShape(corner))
             .background(ThemeRuntime.glassFill(focused))
             .border(
-                if (focused) 2.dp else 1.dp,
-                ThemeRuntime.glassLine(focused),
+                if (focused) 1.25.dp else 1.dp,
+                if (focused) Accent else ThemeRuntime.glassLine(false),
                 RoundedCornerShape(corner),
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
@@ -196,9 +198,9 @@ fun FocusSurface(
 fun PosterCard(
     item: MediaItem,
     imageUrl: String?,
-    width: Dp = 168.dp,
+    width: Dp = 200.dp,
     requestInitialFocus: Boolean = false,
-    trapUp: Boolean = false,
+    upFocus: FocusRequester? = null,
     onFocused: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
@@ -216,7 +218,7 @@ fun PosterCard(
         Modifier
             .width(width)
             .then(if (requestInitialFocus) Modifier.focusRequester(focusRequester) else Modifier)
-            .focusProperties { if (trapUp) up = FocusRequester.Cancel }
+            .focusProperties { if (upFocus != null) up = upFocus }
             .onFocusChanged { if (it.isFocused) onFocused?.invoke() }
             .graphicsLayer {
                 scaleX = scale
@@ -265,7 +267,7 @@ fun PosterCard(
         Text(
             text = item.name,
             color = if (focused) TextMain else TextMain.copy(alpha = 0.92f),
-            fontSize = 13.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

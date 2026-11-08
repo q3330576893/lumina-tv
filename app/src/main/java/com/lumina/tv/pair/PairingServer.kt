@@ -6,6 +6,21 @@ import fi.iki.elonen.NanoHTTPD
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import org.json.JSONObject
+
+data class PairConfig(
+    val alias: String,
+    val note: String,
+    val scheme: String,
+    val host: String,
+    val port: String,
+    val path: String,
+    val user: String,
+    val pass: String,
+    val directOnly: Boolean,
+    val strmDirect: Boolean,
+    val trustAllSsl: Boolean,
+)
 
 /**
  * TV 端内置的局域网小服务：
@@ -16,12 +31,15 @@ class PairingServer(
     port: Int,
     private val stateProvider: () -> String,
     private val onConfig: (token: String, server: String, user: String, pass: String) -> Boolean,
+    private val onPairRequest: (PairConfig) -> Unit,
     private val authorize: (token: String) -> Boolean,
     private val onRemote: (action: String) -> Unit,
     private val onSearch: (keyword: String) -> Unit,
 ) : NanoHTTPD(port) {
 
     private val main = Handler(Looper.getMainLooper())
+    private data class PendingRequest(val token: String, val config: PairConfig, val createdAt: Long, var state: String = "pending")
+    @Volatile private var pendingRequest: PendingRequest? = null
 
     private fun mainThread(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
@@ -36,6 +54,10 @@ class PairingServer(
                     Response.Status.OK, "application/json; charset=utf-8", stateProvider()
                 )
                 uri == "/api/config" -> handleConfig(session)
+                uri == "/api/pair/request" -> handlePairRequest(session)
+                uri == "/api/pair/pending" -> handlePairPending(session)
+                uri == "/api/pair/confirm" -> handlePairResolution(session, "confirmed")
+                uri == "/api/pair/cancel" -> handlePairResolution(session, "cancelled")
                 uri == "/api/remote" && authorized(session) -> handleRemote(session)
                 uri == "/api/search" && authorized(session) -> handleSearch(session)
                 uri.startsWith("/api/") -> json("{\"ok\":false,\"msg\":\"配对授权无效或已过期\"}")
@@ -77,6 +99,86 @@ class PairingServer(
         else json("{\"ok\":false,\"msg\":\"二维码已失效或已使用，请重新扫码\"}")
     }
 
+    private fun form(session: IHTTPSession): Map<String, String> {
+        val files = HashMap<String, String>()
+        session.parseBody(files)
+        return session.parameters.mapValues { it.value.firstOrNull().orEmpty() }
+    }
+
+    private fun handlePairRequest(session: IHTTPSession): Response {
+        if (session.method != Method.POST) return json(JSONObject().put("ok", false).put("msg", "仅支持 POST").toString())
+        val fields = form(session)
+        val token = fields["token"].orEmpty()
+        if (!authorize(token)) return json(JSONObject().put("ok", false).put("msg", "配对二维码无效或已过期").toString())
+        val config = PairConfig(
+            alias = fields["alias"].orEmpty().trim(),
+            note = fields["note"].orEmpty().trim(),
+            scheme = if (fields["scheme"] == "https") "https" else "http",
+            host = fields["host"].orEmpty().trim(),
+            port = fields["port"].orEmpty().trim().ifBlank { "8096" },
+            path = fields["path"].orEmpty().trim().ifBlank { "/" },
+            user = fields["user"].orEmpty().trim(),
+            pass = fields["pass"].orEmpty(),
+            directOnly = fields["directOnly"] == "true",
+            strmDirect = fields["strmDirect"] == "true",
+            trustAllSsl = fields["trustAllSsl"] == "true",
+        )
+        if (config.host.isBlank() || config.user.isBlank()) {
+            return json(JSONObject().put("ok", false).put("msg", "地址和用户名不能为空").toString())
+        }
+        synchronized(this) {
+            expirePending()
+            if (pendingRequest?.state == "pending") return json(JSONObject().put("ok", false).put("msg", "电视上已有待确认请求").toString())
+            pendingRequest = PendingRequest(token, config, System.currentTimeMillis())
+        }
+        mainThread { onPairRequest(config) }
+        return json(JSONObject().put("ok", true).put("state", "pending").toString())
+    }
+
+    private fun handlePairPending(session: IHTTPSession): Response {
+        val token = session.parameters["token"]?.firstOrNull().orEmpty()
+        val request = synchronized(this) { expirePending(); pendingRequest?.takeIf { it.token == token } }
+        val state = request?.state ?: "expired"
+        val msg = when (state) {
+            "pending" -> "已发送到电视，请在电视上确认…"
+            "confirmed" -> "已同步并登录"
+            "cancelled" -> "已在电视上取消"
+            else -> "请求已过期"
+        }
+        return json(JSONObject().put("state", state).put("msg", msg).toString())
+    }
+
+    private fun handlePairResolution(session: IHTTPSession, state: String): Response {
+        if (session.method != Method.POST) return json(JSONObject().put("ok", false).toString())
+        val token = form(session)["token"].orEmpty()
+        val resolved = resolvePending(state, token)
+        return json(JSONObject().put("ok", resolved).put("state", if (resolved) state else "expired").toString())
+    }
+
+    @Synchronized
+    private fun expirePending() {
+        val request = pendingRequest ?: return
+        if (request.state == "pending" && System.currentTimeMillis() - request.createdAt >= 10 * 60 * 1000L) {
+            request.state = "expired"
+        }
+    }
+
+    @Synchronized
+    fun resolvePending(state: String, token: String? = null): Boolean {
+        expirePending()
+        val request = pendingRequest ?: return false
+        if (request.state != "pending" || (token != null && request.token != token)) return false
+        if (state != "confirmed" && state != "cancelled") return false
+        request.state = state
+        return true
+    }
+
+    @Synchronized
+    fun hasPendingRequest(): Boolean {
+        expirePending()
+        return pendingRequest?.state == "pending"
+    }
+
     private fun handleRemote(session: IHTTPSession): Response {
         val action = param(session, "action")
         if (action.isNotEmpty()) mainThread { onRemote(action) }
@@ -101,6 +203,7 @@ class PairingServer(
         fun start(
             stateProvider: () -> String,
             onConfig: (String, String, String, String) -> Boolean,
+            onPairRequest: (PairConfig) -> Unit,
             authorize: (String) -> Boolean,
             onRemote: (String) -> Unit,
             onSearch: (String) -> Unit,
@@ -108,7 +211,7 @@ class PairingServer(
             var port = DEFAULT_PORT
             while (port < DEFAULT_PORT + 10) {
                 try {
-                    val s = PairingServer(port, stateProvider, onConfig, authorize, onRemote, onSearch)
+                    val s = PairingServer(port, stateProvider, onConfig, onPairRequest, authorize, onRemote, onSearch)
                     s.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
                     return s
                 } catch (_: IOException) {
@@ -146,7 +249,7 @@ class PairingServer(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>琉璃 TV · 手机配对</title>
+<title>Lumina TV · 手机配对</title>
 <style>
 :root{--bg:#070A12;--gl:#6EA8FF;--gl2:#9B8CFF;--txt:#EAF1FF;--sub:#8C9AB4}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -165,6 +268,11 @@ label{display:block;font-size:12px;color:var(--sub);margin:14px 2px 7px;letter-s
 input{width:100%;padding:14px;border-radius:14px;border:1px solid rgba(255,255,255,.12);
   background:rgba(0,0,0,.35);color:var(--txt);font-size:16px;outline:none;transition:.2s}
 input:focus{border-color:rgba(110,168,255,.8);box-shadow:0 0 0 3px rgba(110,168,255,.15)}
+select{width:100%;padding:14px;border-radius:14px;border:1px solid rgba(255,255,255,.12);background:#111522;color:var(--txt);font-size:16px;outline:none}
+.group{margin:18px 0 4px;color:var(--txt);font-size:14px;font-weight:600}
+.check{display:flex;align-items:center;gap:10px;margin:14px 2px 0;color:var(--txt);font-size:14px}
+.check input{width:20px;height:20px;margin:0;accent-color:#7FB4FF}
+.warning{color:#E9B66D;font-size:12px;margin:6px 2px}
 button{width:100%;margin-top:20px;padding:15px;border:none;border-radius:16px;font-size:16px;font-weight:600;
   color:#08101F;background:linear-gradient(135deg,#7FB4FF,#A79BFF);transition:transform .15s;box-shadow:0 10px 26px rgba(110,168,255,.28)}
 button:active{transform:scale(.97)}
@@ -185,8 +293,8 @@ button:active{transform:scale(.97)}
 </style>
 </head>
 <body>
-<h1>琉璃 TV</h1>
-<div class="sub" id="hint">扫码即可把服务器与账号写入电视</div>
+<h1>Lumina TV</h1>
+<div class="sub" id="hint">扫码填写配置，确认后在电视上登录</div>
 
 <div class="tabs">
   <div class="tab on" id="t1" onclick="showTab(1)">连接电视</div>
@@ -194,13 +302,30 @@ button:active{transform:scale(.97)}
 </div>
 
 <div class="card" id="pane1">
-  <label>服务器地址</label>
-  <input id="server" placeholder="192.168.1.100:8096" autocapitalize="off" autocorrect="off">
-  <label>用户名</label>
+  <div class="group">服务器</div>
+  <label for="alias">别名</label>
+  <input id="alias" placeholder="显示在首页的名称" autocapitalize="off">
+  <label for="note">备注</label>
+  <input id="note" placeholder="可选">
+  <label for="scheme">协议</label>
+  <select id="scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select>
+  <label for="host">地址</label>
+  <input id="host" placeholder="192.168.1.100" autocapitalize="off" autocorrect="off">
+  <label for="port">端口</label>
+  <input id="port" type="number" inputmode="numeric" value="8096" placeholder="8096">
+  <label for="path">路径</label>
+  <input id="path" value="/" placeholder="/" autocapitalize="off">
+  <div class="group">账号</div>
+  <label for="user">用户名</label>
   <input id="user" placeholder="Emby 用户名" autocapitalize="off" autocorrect="off">
-  <label>密码</label>
+  <label for="pass">密码</label>
   <input id="pass" type="password" placeholder="密码（可留空）">
-  <button onclick="sendConfig()">写入电视并登录</button>
+  <div class="group">高级</div>
+  <label class="check"><input id="directOnly" type="checkbox">仅直连</label>
+  <label class="check"><input id="strmDirect" type="checkbox">STRM 直链</label>
+  <label class="check"><input id="trustAllSsl" type="checkbox">信任所有 SSL</label>
+  <div class="warning">⚠ 信任所有 SSL 会忽略证书校验，存在安全风险。</div>
+  <button onclick="sendConfig()">同步到电视</button>
   <div class="status" id="cfgStatus"></div>
 </div>
 
@@ -239,23 +364,43 @@ function showTab(n){
 }
 function toast(t){var e=document.getElementById('toast');e.innerText=t;e.classList.add('on');setTimeout(()=>e.classList.remove('on'),1800);}
 function post(path,obj,cb){
+  obj.token=new URLSearchParams(location.search).get('token')||'';
   var body=Object.keys(obj).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(obj[k])).join('&');
-  if(path!='/api/config'){obj.token=new URLSearchParams(location.search).get('token')||'';body=Object.keys(obj).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(obj[k])).join('&');}
   fetch(path,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(r=>r.json()).then(cb).catch(e=>toast('连接失败，请确认手机与电视同一 WiFi'));
 }
 function sendConfig(){
-  var s=document.getElementById('server').value.trim();
+  var h=document.getElementById('host').value.trim();
   var u=document.getElementById('user').value.trim();
   var p=document.getElementById('pass').value;
-  if(!s||!u){toast('请填写服务器与用户名');return;}
-  document.getElementById('cfgStatus').innerText='发送中…';
-  var token=new URLSearchParams(location.search).get('token')||'';
-  post('/api/config',{token:token,server:s,user:u,pass:p},function(r){
+  if(!h||!u){toast('请填写地址与用户名');return;}
+  document.getElementById('cfgStatus').innerText='正在发送…';
+  post('/api/pair/request',{
+    alias:document.getElementById('alias').value,
+    note:document.getElementById('note').value,
+    scheme:document.getElementById('scheme').value,
+    host:h,
+    port:document.getElementById('port').value||'8096',
+    path:document.getElementById('path').value||'/',
+    user:u,pass:p,
+    directOnly:document.getElementById('directOnly').checked,
+    strmDirect:document.getElementById('strmDirect').checked,
+    trustAllSsl:document.getElementById('trustAllSsl').checked
+  },function(r){
     document.getElementById('cfgStatus').innerText=r.msg||'';
-    toast(r.ok?'已发送到电视':'发送失败');
-    if(r.ok)setTimeout(()=>document.getElementById('cfgStatus').innerText='电视端正在登录，请看电视屏幕',1200);
+    if(r.ok&&r.state==='pending'){
+      document.getElementById('cfgStatus').innerText='已发送到电视，请在电视上确认…';
+      pollPairStatus();
+      window.pairPoll=setInterval(pollPairStatus,2000);
+    }else toast(r.msg||'发送失败');
   });
+}
+function pollPairStatus(){
+  var token=encodeURIComponent(new URLSearchParams(location.search).get('token')||'');
+  fetch('/api/pair/pending?token='+token).then(r=>r.json()).then(function(r){
+    document.getElementById('cfgStatus').innerText=r.msg||'';
+    if(r.state==='confirmed'||r.state==='cancelled'||r.state==='expired')clearInterval(window.pairPoll);
+  }).catch(()=>{});
 }
 function k(a){
   post('/api/remote',{action:a},function(r){
@@ -273,7 +418,7 @@ setInterval(function(){
     }
   }).catch(()=>{});
 },2500);
-document.getElementById('server').addEventListener('paste',function(e){
+document.getElementById('host').addEventListener('paste',function(e){
   var t=(e.clipboardData||window.clipboardData).getData('text').trim();
   if(/^https?:\/\//i.test(t)){setTimeout(()=>toast('已识别服务器地址'),50);}
 });

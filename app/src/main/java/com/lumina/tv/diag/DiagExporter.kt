@@ -35,7 +35,7 @@ object DiagExporter {
             .put("prefs", prefs?.playerEngine ?: "unknown")
             .put("active", "unknown")
             .put("mpvAvailable", "not probed")
-            .put("ijkAvailable", "not probed"))
+            .put("kernels", JSONArray().put("media3").put("mpv")))
         return DiagPayload(
             metaJson = meta.toString(2),
             playbackInfoJson = JSONObject().put("reason", "No playback in progress; playback-info unavailable").toString(2),

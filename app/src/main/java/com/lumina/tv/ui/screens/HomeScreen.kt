@@ -14,14 +14,13 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.focusProperties
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -58,6 +57,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -140,11 +140,14 @@ fun HomeScreen(
     var selectedLibraryId by rememberSaveable { mutableStateOf<String?>(null) }
     val selectedLibrary = views.firstOrNull { it.id == selectedLibraryId }
     var libraryError by remember { mutableStateOf<String?>(null) }
-    var librarySort by rememberSaveable { mutableStateOf("date") }
-    var librarySortOrder by rememberSaveable { mutableStateOf("Descending") }
+    var librarySort by rememberSaveable { mutableStateOf(AppRuntime.prefs?.librarySort ?: "date") }
+    var librarySortOrder by rememberSaveable { mutableStateOf(AppRuntime.prefs?.librarySortOrder ?: "Descending") }
     var sortMenuOpen by remember { mutableStateOf(false) }
+    var restoreSortFocus by remember { mutableStateOf(false) }
+    val sortItemRequesters = remember { SORT_LABELS.keys.associateWith { FocusRequester() } }
     var libraryServerMenuOpen by remember { mutableStateOf(false) }
     var gridItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var libraryTotalCount by remember { mutableStateOf<Int?>(null) }
     var gridLoading by remember { mutableStateOf(false) }
     var gridAppending by remember { mutableStateOf(false) }
     var gridNextIndex by remember { mutableStateOf(0) }
@@ -166,6 +169,17 @@ fun HomeScreen(
         }
     }
     val scope = rememberCoroutineScope()
+    fun closeSortMenu() {
+        sortMenuOpen = false
+        restoreSortFocus = true
+        scope.launch { delay(180); restoreSortFocus = false }
+    }
+    LaunchedEffect(sortMenuOpen, librarySort) {
+        if (sortMenuOpen) {
+            delay(80)
+            runCatching { sortItemRequesters[librarySort]?.requestFocus() }
+        }
+    }
     LaunchedEffect(gridStateKey, gridState) {
         snapshotFlow { gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset }
             .collect { (index, offset) -> savedGridPosition = "$gridStateKey|$index|$offset" }
@@ -173,7 +187,6 @@ fun HomeScreen(
     // 各媒体库视图的横向内容（id → items）
     var viewContents by remember { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
     // 导航栏自动隐藏
-    var navHidden by remember { mutableStateOf(false) }
     var initialFocusPending by rememberSaveable { mutableStateOf(true) }
     var focusedMediaId by rememberSaveable { mutableStateOf<String?>(null) }
     var focusedMediaSection by rememberSaveable { mutableStateOf<String?>(null) }
@@ -320,6 +333,7 @@ fun HomeScreen(
             result.onSuccess { list ->
                 if (requestTab == HomeTab.Media) {
                     gridItems = list
+                    libraryTotalCount = AppRuntime.client?.lastTotalRecordCount
                     gridNextIndex = list.size
                     gridHasMore = list.size == 50
                 } else {
@@ -404,40 +418,12 @@ fun HomeScreen(
 
     val navFocus = remember { FocusRequester() }
 
-    LaunchedEffect(navHidden, tab, selectedLibrary) {
-        if (!navHidden) {
-            delay(3000)
-            navHidden = true
-        }
-    }
-
-    // 导航自动隐藏：往下滑离开顶部即隐藏，回到顶部/切换标签恢复
-    LaunchedEffect(tab, selectedLibrary) {
-        navHidden = false
-        snapshotFlow {
-            when {
-                tab == HomeTab.Recommend -> recListState.firstVisibleItemIndex to recListState.firstVisibleItemScrollOffset
-                tab == HomeTab.Movies || tab == HomeTab.Series || tab == HomeTab.Favorites -> gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
-                tab == HomeTab.Media -> gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
-                else -> 0 to 0
-            }
-        }.collect { (index, offset) ->
-            if (index == 0 && offset < 40) {
-                navHidden = false
-            } else if (index > 0 || offset > 100) {
-                // 向下滚离开顶部立刻隐藏，不挡视线
-                navHidden = true
-            }
-        }
-    }
+    val heroPlayFocus = remember { FocusRequester() }
 
     Box(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
-        if (event.type == KeyEventType.KeyDown &&
-            event.key in setOf(Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, Key.DirectionRight) &&
-            navHidden
-        ) {
-            navHidden = false
-            false
+        if (event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
+            navFocus.requestFocus()
+            true
         } else false
     }) {
         when {
@@ -452,12 +438,12 @@ fun HomeScreen(
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
                 }
                 tab == HomeTab.Recommend -> LazyColumn(state = recListState, modifier = Modifier.fillMaxSize()) {
-                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, client?.backdropUrl(hero ?: MediaItem("", ""), 2560), onPlay, onOpenDetail) { heroIndex = it } }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, trapUp = true, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onPlay(it) } }
-                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, trapUp = resume.isEmpty(), onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
-                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, trapUp = resume.isEmpty() && favorites.isEmpty(), onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
-                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, trapUp = resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
-                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty(), focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, trapUp = resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty(), onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
+                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, client?.backdropUrl(hero ?: MediaItem("", ""), 2560), onPlay, onOpenDetail, heroPlayFocus) { heroIndex = it } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onPlay(it) } }
+                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
+                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
+                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
+                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty(), focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
@@ -468,7 +454,6 @@ fun HomeScreen(
                             }
                         }
                     }
-                    item { OpenNavButton { navHidden = false; scope.launch { delay(220); runCatching { navFocus.requestFocus() } } } }
                     item { Spacer(Modifier.height(140.dp)) }
                 }
                 tab == HomeTab.Media && selectedLibrary == null -> MediaLibrary(
@@ -527,13 +512,14 @@ fun HomeScreen(
                                 color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
-                            Text("共 ${gridItems.size} 部", color = TextSub, fontSize = 11.sp)
+                            Text(libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextSub, fontSize = 11.sp)
                         }
                         Spacer(Modifier.width(16.dp))
                         Box {
                             FocusSurface(
                                 modifier = Modifier.height(40.dp).width(112.dp),
                                 corner = 20.dp, scaleTo = 1.03f,
+                                requestFocus = restoreSortFocus,
                                 onClick = { sortMenuOpen = true },
                             ) { focused ->
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -543,13 +529,10 @@ fun HomeScreen(
                                     }
                                 }
                             }
-                            if (sortMenuOpen) {
-                                Popup(
-                                    alignment = Alignment.TopEnd,
-                                    offset = IntOffset(0, with(LocalDensity.current) { 6.dp.roundToPx() }),
-                                    onDismissRequest = { sortMenuOpen = false },
-                                    properties = PopupProperties(focusable = true),
-                                ) {
+                            DropdownMenu(
+                                expanded = sortMenuOpen,
+                                onDismissRequest = { closeSortMenu() },
+                            ) {
                                     Column(
                                         modifier = Modifier
                                             .width(180.dp)
@@ -560,35 +543,48 @@ fun HomeScreen(
                                     ) {
                                         SORT_LABELS.forEach { (key, label) ->
                                             val selected = librarySort == key
+                                            var itemFocused by remember(key) { mutableStateOf(false) }
                                             Row(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
                                                     .height(44.dp)
+                                                    .focusRequester(sortItemRequesters.getValue(key))
+                                                    .onFocusChanged { itemFocused = it.isFocused }
+                                                    .focusable()
                                                     .clickable(
                                                         interactionSource = remember { MutableInteractionSource() },
                                                         indication = null,
                                                     ) {
                                                         librarySort = key
-                                                        sortMenuOpen = false
+                                                        AppRuntime.prefs?.librarySort = key
+                                                        closeSortMenu()
                                                     }
+                                                    .background(if (itemFocused) Color(0x26FFFFFF) else if (selected) Accent.copy(alpha = 0.20f) else Color.Transparent, RoundedCornerShape(10.dp))
+                                                    .border(if (selected) 1.5.dp else 0.dp, if (selected) Accent else Color.Transparent, RoundedCornerShape(10.dp))
                                                     .padding(horizontal = 18.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
                                                 Text(if (selected) "✓" else "", color = Accent, fontSize = 14.sp, modifier = Modifier.width(22.dp))
-                                                Text(label, color = if (selected) Accent else TextMain, fontSize = 14.sp)
+                                                Text(label, color = if (itemFocused || selected) TextMain else TextSub, fontSize = 14.sp)
                                             }
                                         }
+                                        var orderFocused by remember { mutableStateOf(false) }
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .height(44.dp)
+                                                .onFocusChanged { orderFocused = it.isFocused }
+                                                .focusable()
                                                 .clickable(
                                                     interactionSource = remember { MutableInteractionSource() },
                                                     indication = null,
                                                 ) {
-                                                    librarySortOrder = if (librarySortOrder == "Ascending") "Descending" else "Ascending"
-                                                    sortMenuOpen = false
+                                                    val nextOrder = if (librarySortOrder == "Ascending") "Descending" else "Ascending"
+                                                    librarySortOrder = nextOrder
+                                                    AppRuntime.prefs?.librarySortOrder = nextOrder
+                                                    closeSortMenu()
                                                 }
+                                                .background(if (orderFocused) Color(0x26FFFFFF) else Color.Transparent, RoundedCornerShape(10.dp))
                                                 .padding(horizontal = 18.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
@@ -600,7 +596,6 @@ fun HomeScreen(
                                             )
                                         }
                                     }
-                                }
                             }
                         }
                     }
@@ -613,20 +608,17 @@ fun HomeScreen(
                     }
                     else LazyVerticalGrid(
                         state = gridState,
-                        columns = GridCells.Adaptive(minSize = 112.dp),
+                        columns = GridCells.Adaptive(minSize = 140.dp),
                         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 160.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
-                            PosterCard(item = media, imageUrl = client?.imageUrl(media), requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0), trapUp = index < 5, onFocused = { focusedMediaId = media.id }, onClick = { onOpenDetail(media.id) })
+                            PosterCard(item = media, imageUrl = client?.imageUrl(media), requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0), onFocused = { focusedMediaId = media.id }, onClick = { onOpenDetail(media.id) })
                         }
                         if (gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
                             androidx.compose.material3.CircularProgressIndicator(Modifier.padding(20.dp).size(24.dp), color = Accent, strokeWidth = 2.dp)
-                        }
-                        item(span = { GridItemSpan(maxLineSpan) }) {
-                            OpenNavButton { navHidden = false; scope.launch { delay(220); runCatching { navFocus.requestFocus() } } }
                         }
                     }
                 }
@@ -636,9 +628,9 @@ fun HomeScreen(
                 }
                 else -> LazyVerticalGrid(
                     state = gridState,
-                            columns = GridCells.Adaptive(minSize = 112.dp),
+                            columns = GridCells.Adaptive(minSize = 140.dp),
                             contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 88.dp, bottom = 160.dp),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
@@ -647,27 +639,17 @@ fun HomeScreen(
                             item = it,
                             imageUrl = client?.imageUrl(it),
                             requestInitialFocus = focusedMediaId == it.id || (initialFocusPending && focusedMediaId == null && it == gridItems.firstOrNull()),
-                            trapUp = index < 5,
                             onFocused = { focusedMediaId = it.id },
                             onClick = { onOpenDetail(it.id) },
                         )
                     }
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        OpenNavButton { navHidden = false; scope.launch { delay(220); runCatching { navFocus.requestFocus() } } }
-                    }
                 }
             }
 
-        // 紧凑悬浮导航：盖在内容上方，下滑自动隐藏
-        AnimatedVisibility(
-            visible = !navHidden,
-            enter = slideInVertically { -it },
-            exit = slideOutVertically { -it },
+        NavBar(
             modifier = Modifier
-                .align(Alignment.TopCenter)
+                .align(Alignment.TopEnd)
                 .zIndex(2f),
-        ) {
-NavBar(
                 tab = tab,
                 onSelect = { t, _ -> tab = t; selectedLibraryId = null },
                 onSearch = onSearch,
@@ -677,12 +659,12 @@ NavBar(
                 navFocus = navFocus,
                 showServerHeader = selectedLibrary == null,
             )
-        }
     }
 }
 
 @Composable
 private fun NavBar(
+    modifier: Modifier = Modifier,
     tab: HomeTab,
     onSelect: (HomeTab, String?) -> Unit,
     onSearch: () -> Unit,
@@ -696,7 +678,7 @@ private fun NavBar(
     val glassShape = RoundedCornerShape(28.dp)
     val menuShape = RoundedCornerShape(24.dp)
     if (serverMenuOpen) BackHandler { serverMenuOpen = false }
-    Box(Modifier.fillMaxSize()) {
+    Box(modifier.fillMaxSize()) {
         if (serverMenuOpen) {
             Box(
                 Modifier
@@ -714,14 +696,14 @@ private fun NavBar(
                 .padding(horizontal = 24.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FocusSurface(modifier = Modifier.height(46.dp).widthIn(min = 150.dp, max = 260.dp), corner = 23.dp,
+            FocusSurface(modifier = Modifier.height(32.dp).widthIn(min = 72.dp, max = 96.dp), corner = 16.dp,
                 onClick = { serverMenuOpen = true }) { focused ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
                     Row(Modifier.padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() } ?: AppRuntime.session?.serverName ?: "Lumina",
+                            (AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() } ?: AppRuntime.session?.serverName ?: "Lumina").take(6),
                             color = if (focused) Accent else TextMain,
-                            fontSize = 15.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -826,7 +808,7 @@ private fun RowScope.itemsNav(
     entries.forEachIndexed { index, (entry, label, icon) ->
         val active = tab == entry
         val itemModifier = if (index == 0) {
-            Modifier.height(56.dp).width(76.dp).focusRequester(navFocus)
+            Modifier.height(40.dp).width(40.dp).focusRequester(navFocus)
         } else {
             Modifier.height(56.dp).width(76.dp)
         }
@@ -1012,6 +994,7 @@ private fun Hero(
     backdrop: String?,
     onPlay: (MediaItem) -> Unit,
     onOpenDetail: (String) -> Unit,
+    playFocus: FocusRequester,
     onSelect: (Int) -> Unit,
 ) {
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
@@ -1022,7 +1005,7 @@ private fun Hero(
     Box(
         Modifier
             .fillMaxWidth()
-            .height(300.dp)
+            .aspectRatio(16f / 9f)
             .clip(RoundedCornerShape(bottomEnd = 34.dp))
     ) {
         if (!backdrop.isNullOrBlank()) {
@@ -1078,6 +1061,7 @@ private fun Hero(
                     modifier = Modifier.height(42.dp).width(128.dp),
                     corner = 21.dp,
                     scaleTo = 1.05f,
+                    focusRequester = playFocus,
                     onClick = { onPlay(item) },
                 ) { focused ->
                     Row(
@@ -1174,7 +1158,7 @@ private fun RowSection(
     focusItemId: String? = null,
     sectionKey: String = title,
     focusedSection: String? = null,
-    trapUp: Boolean = false,
+    upFocus: FocusRequester? = null,
     onItemFocused: ((String) -> Unit)? = null,
     onClick: (MediaItem) -> Unit,
 ) {
@@ -1193,7 +1177,7 @@ private fun RowSection(
                     width = 128.dp,
                     requestInitialFocus = (focusedSection == sectionKey && it.id == focusItemId) ||
                         (requestInitialFocus && it == items.firstOrNull()),
-                    trapUp = trapUp,
+                    upFocus = upFocus,
                     onFocused = { onItemFocused?.invoke(it.id) },
                     onClick = { onClick(it) },
                 )

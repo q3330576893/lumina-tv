@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -74,6 +75,7 @@ import androidx.core.content.ContextCompat
 import com.google.zxing.integration.android.IntentIntegrator
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.EmbyClient
+import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.QrCode
 import kotlinx.coroutines.launch
@@ -109,11 +111,14 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     var pendingLoginBase by remember { mutableStateOf<String?>(null) }
     var scanLoginRequested by remember { mutableStateOf(false) }
     var paired by remember { mutableStateOf(false) }
+    var pairingAlias by remember { mutableStateOf<String?>(null) }
+    var pairingNote by remember { mutableStateOf<String?>(null) }
     var helpOpen by remember { mutableStateOf(false) }
     var syncOpen by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
     var unsupportedScan by remember { mutableStateOf(false) }
     var successDialogServer by remember { mutableStateOf<String?>(null) }
+    var pendingPairConfig by remember { mutableStateOf<PairConfig?>(null) }
 
     val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val parsed = IntentIntegrator.parseActivityResult(result.resultCode, result.data)
@@ -204,10 +209,15 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                 if (AppRuntime.session?.baseUrl?.trimEnd('/') != newSession.baseUrl.trimEnd('/')) {
                     com.lumina.tv.data.LibraryCache.clear()
                 }
-                AppRuntime.applySession(newSession)
+                val sessionToSave = newSession.copy(
+                    serverName = if (paired) pairingAlias?.ifBlank { newSession.serverName } ?: newSession.serverName else newSession.serverName,
+                )
+                AppRuntime.applySession(sessionToSave)
+                if (paired) prefs?.serverNote = pairingNote?.ifBlank { null }
                 AppRuntime.updatePairingStatus("登录成功，电视已连接")
+                if (paired) AppRuntime.resolvePairRequest("confirmed")
                 if (paired) {
-                    successDialogServer = newSession.serverName
+                    successDialogServer = sessionToSave.serverName
                     kotlinx.coroutines.delay(1200)
                 }
                 onLoggedIn()
@@ -295,7 +305,11 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
             true
         }
-        onDispose { AppRuntime.onPairConfig = null }
+        AppRuntime.onPairRequest = { config -> pendingPairConfig = config }
+        onDispose {
+            AppRuntime.onPairConfig = null
+            AppRuntime.onPairRequest = null
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -309,6 +323,61 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         text = { Text(loginErrorDialog.orEmpty()) },
         confirmButton = { TextButton(onClick = { loginErrorDialog = null }) { Text("确定") } },
     )
+    pendingPairConfig?.let { config ->
+        AlertDialog(
+            onDismissRequest = {
+                AppRuntime.resolvePairRequest("cancelled")
+                pendingPairConfig = null
+            },
+            title = { Text("手机请求同步配置") },
+            text = {
+                Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState())) {
+                    listOf(
+                        "别名" to config.alias,
+                        "备注" to config.note,
+                        "协议" to config.scheme.uppercase(),
+                        "地址" to config.host,
+                        "端口" to config.port,
+                        "路径" to config.path,
+                        "用户名" to config.user,
+                        "密码" to "******",
+                        "仅直连" to if (config.directOnly) "是" else "否",
+                        "STRM 直链" to if (config.strmDirect) "是" else "否",
+                        "信任所有 SSL" to if (config.trustAllSsl) "是（有安全风险）" else "否",
+                    ).forEach { (label, value) ->
+                        Text("$label：${value.ifBlank { "-" }}", color = Ink, fontSize = 13.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (!AppRuntime.pairRequestIsPending()) {
+                        pendingPairConfig = null
+                        return@TextButton
+                    }
+                    if (loading || probing) return@TextButton
+                    scheme = config.scheme
+                    host = config.host
+                    port = config.port
+                    path = config.path.trim('/').let { if (it.isBlank()) "" else it }
+                    user = config.user
+                    pass = config.pass
+                    pairingAlias = config.alias.ifBlank { config.host }
+                    pairingNote = config.note
+                    paired = true
+                    pendingLoginBase = "${config.scheme}://${config.host}:${config.port}${config.path.let { if (it.startsWith('/')) it else "/$it" }.let { if (it == "/") "" else it }}"
+                    pendingPairConfig = null
+                    submit(config.user, config.pass)
+                }) { Text("确认并登录") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    AppRuntime.resolvePairRequest("cancelled")
+                    pendingPairConfig = null
+                }) { Text("取消") }
+            },
+        )
+    }
     if (helpOpen) AlertDialog(
         onDismissRequest = { helpOpen = false },
         title = { Text("连接与同步") },
@@ -349,10 +418,11 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
             .background(Brush.radialGradient(listOf(Color(0x103B79D8), Color.Transparent))))
         if (wide) {
             Row(Modifier.fillMaxSize().padding(horizontal = 44.dp, vertical = 32.dp), verticalAlignment = Alignment.CenterVertically) {
-                LoginBrand(Modifier.weight(0.82f))
+                LoginBrand(Modifier.weight(0.82f).fillMaxHeight())
                 Spacer(Modifier.width(28.dp))
                 LoginCard(
-                    Modifier.weight(1.18f).widthIn(max = 620.dp).verticalScroll(rememberScrollState()),
+                    Modifier.weight(1.18f).widthIn(min = 520.dp, max = 600.dp)
+                        .fillMaxHeight().verticalScroll(rememberScrollState()),
                     host, { host = it }, port, { port = it.filter(Char::isDigit).take(5) }, path, { path = it }, user, { user = it }, pass, { pass = it },
                     scheme, { scheme = it }, loading || probing, probing, error, AppRuntime.pairingUrl,
                     { submit() }, { launchScan() }, { helpOpen = true },
@@ -408,7 +478,7 @@ private fun LoginCard(
         Text("手机扫码，一键登录", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         if (pairingUrl.isNotBlank()) {
             Box(Modifier.align(Alignment.CenterHorizontally).clip(RoundedCornerShape(16.dp)).background(Color.White).padding(12.dp)) {
-                QrCode(pairingUrl, size = 200.dp)
+                QrCode(pairingUrl, size = 220.dp)
             }
             Text("用手机相机或浏览器扫码 → 填写服务器与账号 → 点『同步到电视』", color = InkSub, fontSize = 11.sp)
             Text(pairingUrl, color = VioletBright, fontSize = 10.sp, maxLines = 2, modifier = Modifier
@@ -470,13 +540,23 @@ private fun LoginCard(
 @Composable
 private fun LoginBrand(modifier: Modifier) {
     Column(modifier.padding(horizontal = 10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)).background(Brush.linearGradient(listOf(Color(0xFF49C8B7), Color(0xFF657DE8)))), contentAlignment = Alignment.Center) {
+            Text("L", color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold)
+        }
         Text("LUMINA · EMBY", color = VioletBright, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         Text("Lumina", color = Ink, fontSize = 42.sp, fontWeight = FontWeight.Bold)
         Text("把 Emby 内容带到客厅屏幕", color = InkSub, fontSize = 15.sp)
         Spacer(Modifier.height(8.dp))
         Text("本地直连播放", color = Ink, fontSize = 13.sp)
-        Text("Media3、mpv 与 IJK 三种内核", color = Ink, fontSize = 13.sp)
+        Text("Media3 与 mpv 双内核", color = Ink, fontSize = 13.sp)
         Text("手机浏览器配对与遥控", color = Ink, fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FeaturePill("4K HDR 直连")
+            FeaturePill("多内核播放")
+            FeaturePill("局域网同步")
+        }
+        Spacer(Modifier.height(28.dp))
+        Text("版本 ${com.lumina.tv.BuildConfig.VERSION_NAME}", color = InkSub, fontSize = 10.sp)
     }
 }
 
