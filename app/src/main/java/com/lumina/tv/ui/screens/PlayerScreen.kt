@@ -187,6 +187,12 @@ fun PlayerScreen(
     // 转码流（HLS）解析失败时改拉原文件直连
     var forceDirectNext by remember(item.id) { mutableStateOf(false) }
     var directFallbackTried by remember(item.id) { mutableStateOf(false) }
+    // 同一部片可能有多个版本（不同压制/大小），一个播不了就换下一个
+    var mediaSources by remember(item.id) { mutableStateOf<List<MediaSource>>(emptyList()) }
+    var triedSources by remember(item.id) { mutableStateOf<Set<String>>(emptySet()) }
+    LaunchedEffect(item.id) {
+        mediaSources = runCatching { AppRuntime.client?.getMediaSources(item.id) }.getOrDefault(emptyList()).orEmpty()
+    }
     var reloadForceTranscode by remember { mutableStateOf(true) }
     var playbackSource by remember(item.id) { mutableStateOf<MediaSource?>(null) }
     var noAudioRetryTried by remember(item.id) { mutableStateOf(false) }
@@ -680,6 +686,24 @@ fun PlayerScreen(
                     reloadForceTranscode = true
                     engineSwitchTrace.add("server-transcode-retry:${err.errorCodeName}")
                     reloadKey++
+                } else if (mediaSources.size > 1 &&
+                    mediaSources.any { it.id != currentSourceId && it.id !in triedSources }
+                ) {
+                    val tried = triedSources + setOfNotNull(currentSourceId)
+                    val next = mediaSources.first { it.id != currentSourceId && it.id !in tried }
+                    triedSources = tried + next.id
+                    currentSourceId = next.id
+                    directFallbackTried = false
+                    degraded = false
+                    forceDirectNext = false
+                    enginePinned = null
+                    reloadForceTranscode = false
+                    buffering = true
+                    error = null
+                    playbackSource = next
+                    audioDecodeNotice = "当前版本播不了，换「${next.displayLabel}」再试"
+                    engineSwitchTrace.add("source-fallback:${next.id}:${err.errorCodeName}")
+                    reloadKey++
                 } else if (!mpvFallbackTried) {
                     // Media3 已经把直连、转码都试过还不行 —— 直接换 mpv，不再让用户停在错误页
                     mpvFallbackTried = true
@@ -693,10 +717,17 @@ fun PlayerScreen(
                     buffering = false
                     val cause = generateSequence(err as Throwable?) { it.cause }
                         .take(4).mapNotNull { it.message?.takeIf(String::isNotBlank) }.joinToString(" · ")
+                    val srcInfo = playbackSource
+                    val vCodec = srcInfo?.streams?.firstOrNull { it.type == "Video" }?.codec
                     error = buildString {
                         append("${failurePhase}阶段失败：")
                         append("播放失败：${err.errorCodeName}")
-                        if (cause.isNotBlank()) append("\n").append(cause.take(220))
+                        if (cause.isNotBlank()) append("\n").append(cause.take(180))
+                        // 把容器/编码/尝试次数带出来，截图就能定位问题
+                        append("\n容器=").append(srcInfo?.container ?: "?")
+                            .append(" 编码=").append(vCodec ?: "?")
+                            .append(" 版本=")
+                            .append(mediaSources.firstOrNull { it.id == currentSourceId }?.displayLabel ?: "默认")
                     }
                 }
             }
