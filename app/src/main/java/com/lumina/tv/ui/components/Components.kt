@@ -66,6 +66,7 @@ import com.lumina.tv.ui.theme.Ink
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
+import com.lumina.tv.ui.theme.Radius
 import com.lumina.tv.ui.theme.ShapeScale
 import com.lumina.tv.ui.theme.TypeScale
 
@@ -153,7 +154,7 @@ fun GlassPanel(
 @Composable
 fun FocusSurface(
     modifier: Modifier = Modifier,
-    corner: Dp = 20.dp,
+    corner: Dp = Radius.l,
     scaleTo: Float = 1.06f,
     requestFocus: Boolean = false,
     focusRequester: FocusRequester? = null,
@@ -323,7 +324,7 @@ fun QrCode(content: String, size: Dp = 200.dp) {
     Box(
         Modifier
             .size(size)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(Radius.m))
             .background(Color.White)
             .padding(12.dp),
         contentAlignment = Alignment.Center,

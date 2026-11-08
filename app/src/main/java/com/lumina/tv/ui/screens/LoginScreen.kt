@@ -573,7 +573,6 @@ private fun BrandHero(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FeaturePill("扫码 30 秒配好")
             FeaturePill("自动探测端口")
-            FeaturePill("账号不落明文")
         }
         if (savedServers.isNotEmpty()) {
             Spacer(Modifier.height(26.dp))
@@ -765,7 +764,26 @@ private fun LoginCard(
             GlassField(host, onHost, "IP 或域名", Modifier.weight(1f), ImeAction.Next, focusRequester = hostFocusRequester)
             GlassField(port, onPort, "端口", Modifier.width(92.dp), ImeAction.Next, keyboardType = KeyboardType.Number)
         }
-        GlassField(path, onPath, "路径（可选）", Modifier.fillMaxWidth(), ImeAction.Next)
+        FocusSurface(
+            Modifier.fillMaxWidth().height(34.dp),
+            corner = 17.dp,
+            scaleTo = 1.01f,
+            onClick = { advancedOpen = !advancedOpen },
+        ) { focused ->
+            Row(
+                Modifier.fillMaxSize()
+                    .background(if (focused) Color(0x2EFFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(17.dp))
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("高级选项（路径）", color = if (focused) VioletBright else InkSub, fontSize = 11.sp)
+                Spacer(Modifier.weight(1f))
+                Text(if (advancedOpen) "▾" else "▸", color = if (focused) VioletBright else InkSub, fontSize = 12.sp)
+            }
+        }
+        if (advancedOpen) {
+            GlassField(path, onPath, "路径（可选）", Modifier.fillMaxWidth(), ImeAction.Next)
+        }
         GlassField(user, onUser, "Emby 用户名", Modifier.fillMaxWidth(), ImeAction.Next)
         GlassField(pass, onPass, "密码", Modifier.fillMaxWidth(), ImeAction.Done, password = true, onDone = onLogin, focusRequester = passFocus)
 
@@ -793,6 +811,11 @@ private fun LoginCard(
             }
         }
 
+        Row(Modifier.fillMaxWidth().height(18.dp).clip(RoundedCornerShape(10.dp)).background(if (error.isNullOrBlank()) Color.Transparent else Color(0x33FF6B81)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (error.isNullOrBlank()) "" else "!", color = Color(0xFFFF929D), fontSize = 11.sp, modifier = Modifier.width(14.dp))
+            Text(error.orEmpty(), color = Color(0xFFFF929D), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FocusSurface(Modifier.weight(1f).height(34.dp), corner = 17.dp, onClick = onScan) { focused ->
                 Row(
@@ -810,11 +833,6 @@ private fun LoginCard(
                     contentAlignment = Alignment.Center,
                 ) { Text("帮助", color = if (focused) VioletBright else InkSub, fontSize = 11.sp) }
             }
-        }
-
-        Row(Modifier.fillMaxWidth().height(34.dp).clip(RoundedCornerShape(10.dp)).background(if (error.isNullOrBlank()) Color.Transparent else Color(0x33FF6B81)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (error.isNullOrBlank()) "" else "!", color = Color(0xFFFF929D), fontSize = 11.sp, modifier = Modifier.width(14.dp))
-            Text(error.orEmpty(), color = Color(0xFFFF929D), fontSize = 11.sp, maxLines = 2, modifier = Modifier.weight(1f))
         }
 
         Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
