@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -49,7 +51,9 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -64,6 +68,7 @@ import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
+import com.lumina.tv.ui.components.DetailVideoBackground
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
@@ -75,6 +80,8 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lumina.tv.ui.components.GlassPanel
+
+private val failedDetailBackgroundKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
 @Composable
 fun DetailScreen(
@@ -94,6 +101,11 @@ fun DetailScreen(
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
     var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
     var sourcesLoading by remember { mutableStateOf(false) }
+    var detailPreviewUrl by remember(id) { mutableStateOf<String?>(null) }
+    var detailPreviewKey by remember(id) { mutableStateOf("") }
+    var detailPreviewIsTrailer by remember(id) { mutableStateOf(false) }
+    var detailPreviewStartMs by remember(id) { mutableStateOf<Long?>(null) }
+    var detailBackgroundStatus by remember(id) { mutableStateOf("no-url") }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
@@ -213,6 +225,51 @@ fun DetailScreen(
         }
     }
 
+    LaunchedEffect(id, item?.type, sources, episodes) {
+        val current = item ?: return@LaunchedEffect
+        val c = client ?: return@LaunchedEffect
+        detailPreviewUrl = null
+        val previewItem = when (current.type) {
+            "Series" -> episodes.firstOrNull() ?: runCatching {
+                c.getEpisodes(current.id, selectedSeason?.id).firstOrNull()
+            }.getOrNull()
+            else -> current
+        } ?: run {
+            detailPreviewKey = "${current.id}:unknown"
+            detailBackgroundStatus = "skip=url"
+            failedDetailBackgroundKeys += detailPreviewKey
+            return@LaunchedEffect
+        }
+        if (failedDetailBackgroundKeys.any { it.startsWith("${previewItem.id}:") }) {
+            detailPreviewKey = failedDetailBackgroundKeys.first { it.startsWith("${previewItem.id}:") }
+            detailBackgroundStatus = "skip=err"
+            return@LaunchedEffect
+        }
+        val trailer = runCatching { c.getLocalTrailers(previewItem.id).firstOrNull() }.getOrNull()
+        val sourceItem = trailer ?: previewItem
+        val previewSource = if (sourceItem.id == current.id && sources.isNotEmpty()) {
+            sources.firstOrNull { source -> source.streams.any { it.type == "Video" } }
+        } else {
+            runCatching { c.getMediaSources(sourceItem.id) }.getOrDefault(emptyList())
+                .firstOrNull { source -> source.streams.any { it.type == "Video" } }
+        } ?: run {
+            detailPreviewKey = "${previewItem.id}:${sourceItem.id}:unknown"
+            detailBackgroundStatus = "skip=url"
+            failedDetailBackgroundKeys += detailPreviewKey
+            return@LaunchedEffect
+        }
+        detailPreviewIsTrailer = trailer != null
+        detailPreviewStartMs = if (trailer != null) 0L else {
+            AppRuntime.prefs?.introSecondsFor(previewItem.id)?.takeIf { it > 0 }?.times(1000L)
+        }
+        detailPreviewKey = "${previewItem.id}:${sourceItem.id}:${previewSource.id}"
+        detailPreviewUrl = c.resolveDetailPreviewUrl(sourceItem.id, previewSource.id)
+        if (detailPreviewUrl.isNullOrBlank()) {
+            detailBackgroundStatus = "skip=url"
+            failedDetailBackgroundKeys += detailPreviewKey
+        }
+    }
+
     LaunchedEffect(item?.id) {
         if (item == null) return@LaunchedEffect
         delay(240)
@@ -281,20 +338,41 @@ fun DetailScreen(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().blur(42.dp),
             )
+            DetailVideoBackground(
+                url = detailPreviewUrl,
+                mediaKey = detailPreviewKey,
+                playing = !loading,
+                onStatus = {
+                    detailBackgroundStatus = it
+                    if (it.startsWith("skip=") && detailPreviewKey.isNotBlank()) {
+                        failedDetailBackgroundKeys += detailPreviewKey
+                    }
+                },
+                startAtMs = detailPreviewStartMs,
+                loopWholeItem = detailPreviewIsTrailer,
+                modifier = Modifier.fillMaxSize(),
+            )
             // 模糊海报 → 主色铺满：重模糊后叠深色渐层，页面颜色随封面走
-            Box(
-                Modifier.fillMaxSize().background(
-                    Brush.verticalGradient(
-                        listOf(Color(0x4D000000), Color(0x99000000), Color(0xE6000000), Color(0xF20B0A09))
-                    )
-                )
-            )
-            Box(
-                Modifier.fillMaxSize().background(
-                    Brush.horizontalGradient(listOf(Color(0xCC000000), Color(0x4D000000), Color(0x00000000)))
-                )
-            )
+            val videoPlaying = detailBackgroundStatus == "play"
+            val v0 by animateColorAsState(if (videoPlaying) Color(0x00000000) else Color(0x4D000000), tween(500), label = "detailMaskTop")
+            val v1 by animateColorAsState(if (videoPlaying) Color(0x33000000) else Color(0x99000000), tween(500), label = "detailMaskUpper")
+            val v2 by animateColorAsState(Color(0x99000000), tween(500), label = "detailMaskLower")
+            val v3 by animateColorAsState(if (videoPlaying) Color(0xCC000000) else Color(0xF20B0A09), tween(500), label = "detailMaskBottom")
+            val h0 by animateColorAsState(if (videoPlaying) Color(0x99000000) else Color(0xCC000000), tween(500), label = "detailMaskLeft")
+            val h1 by animateColorAsState(if (videoPlaying) Color(0x33000000) else Color(0x4D000000), tween(500), label = "detailMaskCenter")
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(v0, v1, v2, v3))))
+            Box(Modifier.fillMaxWidth(if (videoPlaying) 0.7f else 1f).fillMaxSize().background(
+                Brush.horizontalGradient(listOf(h0, h1, Color(0x00000000)))
+            ))
         }
+
+        Text(
+            text = "bg:$detailBackgroundStatus",
+            color = Color(0xCCFFFFFF),
+            fontSize = 8.sp,
+            maxLines = 1,
+            modifier = Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 8.dp),
+        )
 
         if (loading) {
             LoadingView(text = "正在读取详情…")
@@ -318,6 +396,7 @@ fun DetailScreen(
                             it0.seriesName ?: it0.name,
                             color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Bold,
                             maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            style = androidx.compose.ui.text.TextStyle(shadow = Shadow(Color(0xE6000000), Offset(2f, 3f), 8f)),
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
@@ -358,6 +437,7 @@ fun DetailScreen(
                                 it, color = Color(0xFFC9D5E8), fontSize = 13.sp, lineHeight = 21.sp,
                                 maxLines = 8, overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.fillMaxWidth(),
+                                style = androidx.compose.ui.text.TextStyle(shadow = Shadow(Color(0xD9000000), Offset(1f, 2f), 6f)),
                             )
                         }
                         Spacer(Modifier.height(18.dp))

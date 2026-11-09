@@ -299,6 +299,22 @@ class EmbyClient(
         } catch (_: Exception) { null }
     }
 
+    suspend fun getLocalTrailers(itemId: String): List<MediaItem> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder()
+                .url(url("/Items/$itemId/LocalTrailers"))
+                .header("X-Emby-Authorization", authHeader())
+                .build()
+            http.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw EmbyException("HTTP ${response.code}")
+                val trailers = JSONArray(response.body?.string().orEmpty())
+                (0 until trailers.length()).mapNotNull { index ->
+                    trailers.optJSONObject(index)?.let(::parseItem)
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
     /** 换列表接口按 Ids 再取一次 People：部分服务器在单条目接口不回传 People（剧集尤甚）。 */
     suspend fun getItemPeople(itemId: String): List<MediaPerson> = withContext(Dispatchers.IO) {
         runCatching {
@@ -484,6 +500,44 @@ class EmbyClient(
         return url("/Items/$id/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
+    /** Resolves the server-created low-bitrate preview session, falling back to the original file. */
+    suspend fun resolveDetailPreviewUrl(itemId: String, mediaSourceId: String): String? =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject()
+                .put("UserId", userId)
+                .put("StartTimeTicks", 0)
+                .put("IsPlayback", true)
+                .put("AutoOpenLiveStream", false)
+                .put("EnableDirectPlay", false)
+                .put("EnableDirectStream", false)
+                .put("EnableTranscoding", true)
+                .put("MaxStreamingBitrate", DETAIL_PREVIEW_BITRATE)
+                .put("MediaSourceId", mediaSourceId)
+                .put("DeviceProfile", detailPreviewDeviceProfile())
+            val info = runCatching {
+                postSync(
+                    url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId)),
+                    body.toString(),
+                )
+            }.getOrNull()
+            val first = info?.optJSONArray("MediaSources")?.optJSONObject(0)
+            if (first != null && isStrmSource(first)) {
+                val strmUrl = first.optString("DirectStreamUrl")
+                    .takeIf { it.startsWith("http", true) }
+                    ?: extractStrmUrl(getTextSync(url("/Items/$itemId/Download", mapOf("UserId" to userId))))
+                return@withContext strmUrl?.takeIf { it.startsWith("http", true) }
+            }
+            first?.optString("TranscodingUrl")
+                ?.takeIf { it.startsWith("http", true) }
+                // The PlaybackInfo URL already contains the complete transcoding session query.
+                ?: (first?.optString("Id")?.ifBlank { null } ?: mediaSourceId.ifBlank { null })?.let { sourceId ->
+                    url(
+                        "/Videos/$itemId/stream",
+                        mapOf("static" to "true", "MediaSourceId" to sourceId),
+                    )
+                }
+        }
+
     // ---------------- 播放 ----------------
 
 data class PlaybackTarget(
@@ -550,15 +604,25 @@ data class PlaybackTarget(
     /** 拉取全部可选源（选源菜单用）。 */
     suspend fun getMediaSources(itemId: String): List<MediaSource> = withContext(Dispatchers.IO) {
         runCatching {
-            val infoBody = JSONObject()
+            fun playbackInfoBody(includeDeviceProfile: Boolean) = JSONObject()
                 .put("UserId", userId)
                 .put("IsPlayback", false)
                 .put("AutoOpenLiveStream", false)
-                .toString()
-            val info = postSync(url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId)), infoBody)
-            val sources = info.optJSONArray("MediaSources") ?: JSONArray()
-            (0 until sources.length()).mapNotNull { i ->
-                sources.optJSONObject(i)?.let { parseMediaSource(it) }
+                .apply { if (includeDeviceProfile) put("DeviceProfile", deviceProfile()) }
+            fun parseSources(info: JSONObject): List<MediaSource> {
+                val sources = info.optJSONArray("MediaSources") ?: JSONArray()
+                return (0 until sources.length()).mapNotNull { i ->
+                    sources.optJSONObject(i)?.let { parseMediaSource(it) }
+                }
+            }
+            val playbackUrl = url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId))
+            val initial = parseSources(postSync(playbackUrl, playbackInfoBody(false).toString()))
+            if (initial.any { source -> source.streams.any { it.type == "Video" } }) initial
+            else {
+                val retried = runCatching {
+                    parseSources(postSync(playbackUrl, playbackInfoBody(true).toString()))
+                }.getOrDefault(emptyList())
+                retried.ifEmpty { initial }
             }
         }.getOrDefault(emptyList())
     }
@@ -753,6 +817,22 @@ data class PlaybackTarget(
                 .put("AudioCodec", "aac").put("Protocol", "hls").put("MaxAudioChannels", "2"))
             .put(JSONObject().put("Container", "ts").put("Type", "Audio").put("AudioCodec", "aac")
                 .put("Protocol", "hls").put("MaxAudioChannels", "2")))
+
+    private fun detailPreviewDeviceProfile(): JSONObject = JSONObject()
+        .put("MaxStreamingBitrate", DETAIL_PREVIEW_BITRATE)
+        .put("MaxAudioChannels", "2")
+        .put("DirectPlayProfiles", JSONArray())
+        .put("TranscodingProfiles", JSONArray().put(
+            JSONObject()
+                .put("Container", "ts")
+                .put("Type", "Video")
+                .put("VideoCodec", "h264")
+                .put("AudioCodec", "aac")
+                .put("Protocol", "hls")
+                .put("MaxAudioChannels", "2")
+                .put("MaxWidth", "960")
+        ))
+
     private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
         val builder = Uri.parse(url).buildUpon()
         val names = Uri.parse(url).queryParameterNames
@@ -887,3 +967,5 @@ data class PlaybackTarget(
         }
     }
 }
+
+private const val DETAIL_PREVIEW_BITRATE = 1_200_000
