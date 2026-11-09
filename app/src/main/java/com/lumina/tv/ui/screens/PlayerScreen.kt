@@ -304,7 +304,7 @@ fun PlayerScreen(
             val next = list.getOrNull(idx + 1) ?: return@launch
             runCatching { c.reportStop(item.id, position) }
             nextEpisode = next
-            nextCountdown = 5
+            nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
             while (nextCountdown > 0) {
                 delay(1000)
                 if (nextEpisode?.id != next.id) return@launch
@@ -764,7 +764,7 @@ fun PlayerScreen(
                         if (next != null) {
                             runCatching { c.reportStop(item.id, position) }
                             nextEpisode = next
-                            nextCountdown = 5
+                            nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
                             while (nextCountdown > 0) {
                                 delay(1000)
                                 if (nextEpisode?.id != next.id) return@launch
@@ -950,7 +950,7 @@ fun PlayerScreen(
                     val index = list.indexOfFirst { it.id == item.id }
                     val next = list.getOrNull(index + 1) ?: return@launch
                     nextEpisode = next
-                    nextCountdown = 5
+                    nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
                     while (nextCountdown > 0) {
                         delay(1000)
                         if (nextEpisode?.id != next.id) return@launch

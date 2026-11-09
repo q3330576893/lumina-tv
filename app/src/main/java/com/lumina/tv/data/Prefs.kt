@@ -159,6 +159,10 @@ class Prefs(context: Context) {
         }
         set(v) = sp.edit().putString("audio_decode_mode", v.takeIf { it in setOf("auto", "soft", "passthrough") } ?: "auto").apply()
 
+    var endCreditsSkipSeconds: Int
+        get() = sp.getInt("end_credits_skip_seconds", 30)
+        set(v) = sp.edit().putInt("end_credits_skip_seconds", v).apply()
+
     var librarySort: String
         get() = sp.getString("library_sort", "date") ?: "date"
         set(v) = sp.edit().putString("library_sort", v).apply()

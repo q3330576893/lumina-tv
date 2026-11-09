@@ -79,6 +79,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var defaultSpeed by remember { mutableStateOf(prefs?.defaultSpeed ?: 1.0f) }
     var subtitleScale by remember { mutableStateOf(prefs?.subtitleScale ?: 1.0f) }
     var introSeconds by remember { mutableStateOf(prefs?.globalIntroSeconds ?: 0) }
+    var endCreditsSkipSeconds by remember { mutableStateOf(AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) }
     var themeKey by remember { mutableStateOf(prefs?.themeColor ?: "blue") }
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
     var licensesOpen by remember { mutableStateOf(false) }
@@ -509,6 +510,35 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp),
                         )
+                        Spacer(Modifier.height(10.dp))
+                        Text("片尾跳过", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(0 to "关闭", 30 to "30 秒", 60 to "60 秒").forEach { (seconds, label) ->
+                                val active = endCreditsSkipSeconds == seconds
+                                FocusSurface(
+                                    modifier = Modifier.width(84.dp).height(36.dp),
+                                    corner = 12.dp, scaleTo = 1.04f,
+                                    onClick = {
+                                        endCreditsSkipSeconds = seconds
+                                        AppRuntime.prefs?.endCreditsSkipSeconds = seconds
+                                    },
+                                ) { focused ->
+                                    Box(
+                                        Modifier.fillMaxSize().background(
+                                            when {
+                                                active -> Accent.copy(alpha = 0.9f)
+                                                focused -> Color(0x2EFFFFFF)
+                                                else -> Color(0x14FFFFFF)
+                                            }, RoundedCornerShape(12.dp)
+                                        ),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(10.dp))
                         Text("播放内核：ExoPlayer（硬解 · 支持 H.264/H.265/AV1 · 帧率自动匹配）", color = TextSub, fontSize = 11.sp)
                         Text("解码器优先级", color = TextSub, fontSize = 11.sp)

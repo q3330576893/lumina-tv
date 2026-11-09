@@ -811,9 +811,10 @@ private fun LoginCard(
             }
         }
 
-        Row(Modifier.fillMaxWidth().height(18.dp).clip(RoundedCornerShape(10.dp)).background(if (error.isNullOrBlank()) Color.Transparent else Color(0x33FF6B81)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (error.isNullOrBlank()) "" else "!", color = Color(0xFFFF929D), fontSize = 11.sp, modifier = Modifier.width(14.dp))
-            Text(error.orEmpty(), color = Color(0xFFFF929D), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Box(Modifier.fillMaxWidth().height(18.dp), contentAlignment = Alignment.CenterStart) {
+            if (error != null) {
+                Text(error, color = Color(0xFFFF929D), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

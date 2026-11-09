@@ -802,10 +802,10 @@ private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
                 if (ep.sourceCount > 1) {
                     Box(
                         Modifier.align(Alignment.TopEnd).padding(6.dp)
-                            .clip(RoundedCornerShape(6.dp)).background(Color(0xCC000000))
-                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                            .clip(RoundedCornerShape(10.dp)).background(Color(0xCC000000))
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
                     ) {
-                        Text("${ep.sourceCount} 版本", color = Accent, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                        Text("${ep.sourceCount} 版本", color = Accent, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
