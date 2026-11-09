@@ -80,6 +80,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lumina.tv.ui.components.GlassPanel
+import androidx.compose.ui.platform.LocalUriHandler
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
@@ -393,7 +394,7 @@ fun DetailScreen(
                     Spacer(Modifier.width(30.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
-                            it0.seriesName ?: it0.name,
+                            if (it0.type == "Episode" && it0.name.isNotBlank()) it0.name else it0.seriesName ?: it0.name,
                             color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Bold,
                             maxLines = 2, overflow = TextOverflow.Ellipsis,
                             style = androidx.compose.ui.text.TextStyle(shadow = Shadow(Color(0xE6000000), Offset(2f, 3f), 8f)),
@@ -599,6 +600,35 @@ fun DetailScreen(
                     }
                 }
 
+                val providerLinks = buildList {
+                    it0!!.providerIds["imdb"]?.takeIf(String::isNotBlank)?.let { add("IMDb" to "https://www.imdb.com/title/$it/") }
+                    it0.providerIds["tmdb"]?.takeIf(String::isNotBlank)?.let {
+                        val type = if (it0.type == "Series") "tv" else "movie"
+                        add("TMDB" to "https://www.themoviedb.org/$type/$it")
+                    }
+                    it0.providerIds["tvdb"]?.takeIf(String::isNotBlank)?.let {
+                        val type = if (it0.type == "Series") "series" else "movie"
+                        add("TVDB" to "https://thetvdb.com/dereferrer/$type/$it")
+                    }
+                }
+                if (providerLinks.isNotEmpty()) {
+                    Spacer(Modifier.height(18.dp))
+                    Text("外部链接", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    val uriHandler = LocalUriHandler.current
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        providerLinks.forEach { (label, uri) ->
+                            FocusSurface(Modifier.height(38.dp), corner = 8.dp, onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
+                                Box(
+                                    Modifier.background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 14.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) { Text(label, color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium) }
+                            }
+                        }
+                    }
+                }
+
                 if (seasons.isNotEmpty()) {
                     Spacer(Modifier.height(18.dp))
                     Text("季数与剧集", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -651,6 +681,52 @@ fun DetailScreen(
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
                             PersonCard(person = person, imageUrl = client?.personImageUrl(person))
+                        }
+                    }
+                }
+
+                val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
+                if (activeSource != null) {
+                    Spacer(Modifier.height(24.dp))
+                    Text("媒体信息${activeSource.name.takeIf { sources.size > 1 && it.isNotBlank() }?.let { " · $it" }.orEmpty()}", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    val video = activeSource.streams.firstOrNull { it.type == "Video" }
+                    val infoLines = buildList {
+                        activeSource.container?.takeIf(String::isNotBlank)?.let { add("容器：${it.uppercase()}") }
+                        activeSource.bitrate?.takeIf { it > 0 }?.let { add("总码率：${formatBitrate(it)}") }
+                        activeSource.size.takeIf { it > 0 }?.let { add("文件大小：${formatMediaSize(it)}") }
+                        activeSource.resolution?.takeIf(String::isNotBlank)?.let { add("分辨率：$it") }
+                        video?.let { stream ->
+                            listOfNotNull(stream.codec?.uppercase(), stream.profile?.takeIf(String::isNotBlank))
+                                .takeIf { it.isNotEmpty() }?.let { add("视频：${it.joinToString(" ")}") }
+                            stream.bitDepth?.takeIf { it > 0 }?.let { add("位深：${it} bit") }
+                            val color = listOfNotNull(
+                                stream.colorPrimaries?.let(::formatColor),
+                                stream.colorTransfer?.let(::formatColor),
+                                stream.colorSpace?.let(::formatColor),
+                            ).distinct()
+                            if (color.isNotEmpty()) add("色彩：${color.joinToString(" / ")}")
+                            val range = stream.videoRangeType.orEmpty().uppercase()
+                            when {
+                                stream.dvProfile != null || "DOVI" in range || "DOLBY" in range || stream.profile?.contains("DV", true) == true -> add("动态范围：Dolby Vision")
+                                "HDR" in range || "HLG" in range || stream.colorTransfer?.contains("2084", true) == true || stream.colorTransfer?.contains("PQ", true) == true ->
+                                    add("动态范围：${range.takeIf(String::isNotBlank)?.replace('_', ' ') ?: stream.colorTransfer}")
+                            }
+                        }
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        infoLines.forEach { Text(it, color = TextSub, fontSize = 12.sp) }
+                        activeSource.audioStreams.forEachIndexed { index, stream ->
+                            streamSummary(stream)?.let { summary ->
+                                val bitrate = stream.bitRate?.takeIf { it > 0 }?.let { " · ${formatBitrate(it)}" }.orEmpty()
+                                Text("音轨 ${index + 1}：$summary$bitrate", color = TextSub, fontSize = 12.sp)
+                            }
+                        }
+                        activeSource.subtitleStreams.forEachIndexed { index, stream ->
+                            streamSummary(stream)?.let {
+                                val sourceType = if (stream.isExternal) "外挂" else "内封"
+                                Text("字幕 ${index + 1}（$sourceType）：$it", color = TextSub, fontSize = 12.sp)
+                            }
                         }
                     }
                 }
@@ -863,6 +939,33 @@ private fun audioLabel(stream: com.lumina.tv.data.MediaStream): String =
     listOfNotNull(stream.language ?: "未知语言", stream.codec, stream.channels?.let { "${it}ch" }).joinToString(" ")
 
 private fun subtitleKey(stream: com.lumina.tv.data.MediaStream): String = "${stream.index}:0"
+
+private fun streamSummary(stream: com.lumina.tv.data.MediaStream): String? =
+    listOfNotNull(
+        stream.codec?.takeIf(String::isNotBlank)?.uppercase(),
+        stream.channels?.takeIf { it > 0 }?.let { "${it}ch" },
+        stream.language?.takeIf(String::isNotBlank),
+    ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+
+private fun formatBitrate(bitsPerSecond: Long): String = when {
+    bitsPerSecond >= 1_000_000 -> "%.1f Mbps".format(bitsPerSecond / 1_000_000.0)
+    bitsPerSecond >= 1_000 -> "%.0f kbps".format(bitsPerSecond / 1_000.0)
+    else -> "$bitsPerSecond bps"
+}
+
+private fun formatMediaSize(bytes: Long): String = when {
+    bytes >= 1_073_741_824 -> "%.1f GB".format(bytes / 1_073_741_824.0)
+    bytes >= 1_048_576 -> "%.0f MB".format(bytes / 1_048_576.0)
+    else -> "%.0f KB".format(bytes / 1_024.0)
+}
+
+private fun formatColor(value: String): String? = when (value.uppercase()) {
+    "BT2020", "BT.2020" -> "BT.2020"
+    "SMPTE2084", "SMPTE ST 2084", "PQ" -> "PQ"
+    "BT709", "BT.709" -> "BT.709"
+    "BT601", "BT.601" -> "BT.601"
+    else -> value.takeIf(String::isNotBlank)
+}
 
 @Composable
 private fun TrackSheet(

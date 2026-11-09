@@ -29,6 +29,7 @@ data class MediaItem(
     val isDolbyVision: Boolean = false,
     val audioFormat: String? = null,
     val people: List<MediaPerson> = emptyList(),
+    val providerIds: Map<String, String> = emptyMap(),
 ) {
     /** 规格胶囊徽标：4K / 1080P / HDR / DV / 5.1CH 等 */
     val tags: List<String>
@@ -85,6 +86,11 @@ data class MediaStream(
     val sampleRate: Int? = null,
     val videoRangeType: String? = null,
     val dvProfile: Int? = null,
+    val bitDepth: Int? = null,
+    val colorSpace: String? = null,
+    val colorTransfer: String? = null,
+    val colorPrimaries: String? = null,
+    val frameRate: Double? = null,
 ) {
     val label: String
         get() = displayTitle ?: listOfNotNull(language?.uppercase(), title, codec?.uppercase()).joinToString(" ")
@@ -98,6 +104,7 @@ data class MediaSource(
     val supportsDirectStream: Boolean,
     val streams: List<MediaStream>,
     val size: Long = 0L,
+    val bitrate: Long? = null,
     val resolution: String? = null,
     val directStreamUrl: String? = null,
     val additionalOptions: String? = null,

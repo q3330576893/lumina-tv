@@ -294,7 +294,7 @@ class EmbyClient(
     suspend fun getItem(id: String): MediaItem? = withContext(Dispatchers.IO) {
         try {
             val params = mapOf("UserId" to userId,
-                "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources")
+                "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds")
             parseItem(getSync(url("/Users/$userId/Items/$id", params)))
         } catch (_: Exception) { null }
     }
@@ -380,6 +380,16 @@ class EmbyClient(
         val ud = o.optJSONObject("UserData")
         val tags = o.optJSONObject("ImageTags")
         val backdrops = o.optJSONObject("BackdropImageTags")
+        val providerIds = buildMap {
+            o.optJSONObject("ProviderIds")?.let { ids ->
+                val names = ids.names() ?: JSONArray()
+                for (i in 0 until names.length()) {
+                    val originalKey = names.optString(i)
+                    val value = ids.optString(originalKey).trim()
+                    if (originalKey.isNotBlank() && value.isNotBlank()) put(originalKey.lowercase(), value)
+                }
+            }
+        }
         val streams = o.optJSONArray("MediaStreams")
         var w = 0
         var h = 0
@@ -462,6 +472,7 @@ class EmbyClient(
                     }
                 }
             } ?: emptyList(),
+            providerIds = providerIds,
         )
     }
 
@@ -574,6 +585,12 @@ data class PlaybackTarget(
                     sampleRate = s.optInt("SampleRate").takeIf { s.has("SampleRate") },
                     videoRangeType = s.optString("VideoRangeType").ifBlank { s.optString("VideoRange").ifBlank { null } },
                     dvProfile = s.optInt("DvProfile", -1).takeIf { it > 0 },
+                    bitDepth = s.optInt("BitDepth", 0).takeIf { it > 0 },
+                    colorSpace = s.optString("ColorSpace").ifBlank { null },
+                    colorTransfer = s.optString("ColorTransfer").ifBlank { null },
+                    colorPrimaries = s.optString("Color primaries").ifBlank { s.optString("ColorPrimaries").ifBlank { null } },
+                    frameRate = s.optDouble("RealFrameRate", 0.0).takeIf { it > 0 }
+                        ?: s.optDouble("AverageFrameRate", 0.0).takeIf { it > 0 },
                 )
                 if (s.optString("Type") == "Video" && resolution == null) {
                     val h = s.optInt("Height", 0)
@@ -595,6 +612,7 @@ data class PlaybackTarget(
             supportsDirectStream = o.optBoolean("SupportsDirectStream", true),
             streams = streams,
             size = o.optLong("Size", 0L),
+            bitrate = o.optLong("Bitrate", 0L).takeIf { it > 0 },
             resolution = resolution,
             directStreamUrl = o.optString("DirectStreamUrl").ifBlank { null },
             additionalOptions = o.optString("AdditionalOptions").ifBlank { null },
