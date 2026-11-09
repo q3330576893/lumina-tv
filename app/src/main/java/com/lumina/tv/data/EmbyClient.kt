@@ -45,6 +45,8 @@ class EmbyClient(
     private val trickplayMutex = Mutex()
     private val trickplayFiles = mutableMapOf<String, ByteArray>()
     private val unavailableTrickplay = ConcurrentHashMap.newKeySet<String>()
+    private val playbackTargetCache = ConcurrentHashMap<String, Pair<Long, PlaybackTarget>>()
+    private val chapterCache = ConcurrentHashMap<String, List<MediaChapter>>()
     private val trickplayFrames = object : LinkedHashMap<Pair<String, Int>, ByteArray>(24, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, Int>, ByteArray>?): Boolean = size > 24
     }
@@ -340,13 +342,18 @@ class EmbyClient(
     }
 
     suspend fun getChapters(itemId: String): List<MediaChapter> = withContext(Dispatchers.IO) {
+        chapterCache[itemId]?.let { return@withContext it }
         fun parseChapters(chapters: JSONArray): List<MediaChapter> =
             (0 until chapters.length()).mapNotNull { i ->
                 val chapter = chapters.optJSONObject(i) ?: return@mapNotNull null
                 val ticks = chapter.optLong("StartPositionTicks", -1L)
                 if (ticks < 0) return@mapNotNull null
+                val name = chapter.optString("Name").trim()
+                if (name.matches(Regex("(?i)(intro|opening)\\s*(start|end)|credits?\\s*(start|end)?|片头(开始|结束)|片尾(开始|结束)"))) {
+                    return@mapNotNull null
+                }
                 MediaChapter(
-                    name = chapter.optString("Name").ifBlank { "章节 ${i + 1}" },
+                    name = name.ifBlank { "章节 ${i + 1}" },
                     startMs = ticks / 10_000L,
                     imageTag = chapter.optString("ImageTag").ifBlank { null },
                 )
@@ -366,12 +373,63 @@ class EmbyClient(
             }
             parseChapters(chapters)
         }.getOrDefault(emptyList())
-        if (independent.isNotEmpty()) return@withContext independent
-
-        runCatching {
-            val response = getSync(url("/Users/$userId/Items/$itemId", mapOf("Fields" to "Chapters")))
+        (independent + runCatching {
+            val response = getSync(url("/Users/$userId/Items/$itemId", mapOf(
+                "Fields" to "Chapters",
+            )))
             parseChapters(response.optJSONArray("Chapters") ?: JSONArray())
-        }.getOrDefault(emptyList())
+        }.getOrDefault(emptyList()))
+            .distinctBy { it.name to it.startMs }.sortedBy { it.startMs }
+            .also { chapterCache[itemId] = it }
+    }
+
+    suspend fun getPlaybackMarkers(itemId: String): PlaybackMarkers = withContext(Dispatchers.IO) {
+        runCatching {
+            val response = getSync(url("/Users/$userId/Items/$itemId", mapOf(
+                "Fields" to "IntroStartPositionTicks,IntroEndPositionTicks,CreditsPositionTicks",
+            )))
+            fun marker(field: String): Long? = response.optLong(field, -1L)
+                .takeIf { it > 0L }?.div(10_000L)
+            PlaybackMarkers(
+                introStartMs = marker("IntroStartPositionTicks"),
+                introEndMs = marker("IntroEndPositionTicks"),
+                creditsStartMs = marker("CreditsPositionTicks"),
+            )
+        }.getOrDefault(PlaybackMarkers())
+    }
+
+    suspend fun getNextEpisode(item: MediaItem): MediaItem? {
+        val seriesId = item.seriesId ?: return null
+        val current = item.seasonId?.let { runCatching { getEpisodes(seriesId, it) }.getOrDefault(emptyList()) }.orEmpty()
+        val orderedCurrent = current.sortedWith(compareBy<MediaItem> { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
+        val currentIndex = orderedCurrent.indexOfFirst { it.id == item.id }
+        if (currentIndex >= 0) orderedCurrent.getOrNull(currentIndex + 1)?.let { return it }
+
+        val seasons = runCatching { getSeasons(seriesId) }.getOrDefault(emptyList())
+            .sortedWith(compareBy<MediaItem> { it.indexNumber ?: it.parentIndexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
+        val seasonIndex = seasons.indexOfFirst { it.id == item.seasonId }
+        if (seasonIndex < 0) return null
+        for (season in seasons.drop(seasonIndex + 1)) {
+            val seasonEpisodes = runCatching { getEpisodes(seriesId, season.id) }.getOrDefault(emptyList())
+                .sortedWith(compareBy<MediaItem> { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
+            seasonEpisodes.firstOrNull()?.let { return it }
+        }
+        return null
+    }
+
+    private fun playbackTargetKey(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean) =
+        "$itemId|$forceTranscode|${sourceId.orEmpty()}|${audioStreamIndex ?: ""}|$forceDirect"
+
+    fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean): PlaybackTarget? {
+        val cached = playbackTargetCache.remove(playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect)) ?: return null
+        return cached.second.takeIf { System.currentTimeMillis() - cached.first < 120_000L }
+    }
+
+    suspend fun prewarmPlayback(item: MediaItem, sourceId: String? = null, audioStreamIndex: Int? = null) {
+        runCatching {
+            resolvePlayback(item, mediaSourceId = sourceId, startPositionMs = item.positionTicks / 10_000L,
+                audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true)
+        }
     }
 
     /** Returns a JPEG frame from Emby's optional BIF file; failures are intentionally silent. */
@@ -800,6 +858,8 @@ data class PlaybackTarget(
         startPositionMs: Long = item.positionTicks / 10_000,
         audioStreamIndex: Int? = null,
         forceDirect: Boolean = false,
+        recordDiagnostics: Boolean = true,
+        cacheResult: Boolean = false,
     ): PlaybackTarget =
         withContext(Dispatchers.IO) {
             val infoBody = JSONObject()
@@ -814,9 +874,9 @@ data class PlaybackTarget(
             val playbackInfoParams = mapOf("UserId" to userId)
             val info = try {
                 postSync(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
-                    .also { lastPlaybackInfoJson = it.toString() }
+                    .also { if (recordDiagnostics) lastPlaybackInfoJson = it.toString() }
             } catch (failure: Exception) {
-                lastPlaybackInfoJson = JSONObject().put("reason", failure.message ?: "PlaybackInfo request failed").toString()
+                if (recordDiagnostics) lastPlaybackInfoJson = JSONObject().put("reason", failure.message ?: "PlaybackInfo request failed").toString()
                 JSONObject()
             }
             val sources = info.optJSONArray("MediaSources")
@@ -905,7 +965,10 @@ data class PlaybackTarget(
                 source = source,
                 startPositionMs = resolvedStartPositionMs,
                 headers = headers,
-            )
+            ).also { target ->
+                if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect)] =
+                    System.currentTimeMillis() to target
+            }
         }
 
     private fun deviceProfile(): JSONObject = JSONObject()

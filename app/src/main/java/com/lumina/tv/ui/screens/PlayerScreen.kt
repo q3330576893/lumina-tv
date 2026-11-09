@@ -56,6 +56,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -99,6 +100,7 @@ import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.DeviceCodecCapabilities
 import com.lumina.tv.data.MediaChapter
+import com.lumina.tv.data.PlaybackMarkers
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.ui.components.FocusSurface
@@ -224,6 +226,7 @@ fun PlayerScreen(
     var boosting by remember { mutableStateOf(false) }
     var nextTriggered by remember { mutableStateOf(false) }
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var prewarmedEpisodeId by remember(item.id) { mutableStateOf<String?>(null) }
     var seekHint by remember { mutableStateOf<String?>(null) }
     var currentResolution by remember { mutableStateOf<String?>(null) }
     var subScale by remember { mutableFloatStateOf(when (AppRuntime.prefs?.subtitleScale) { null -> 1.3f; 1.5f -> 2.0f; else -> AppRuntime.prefs?.subtitleScale ?: 1.3f }) }
@@ -240,6 +243,7 @@ fun PlayerScreen(
     var seekHoldDelta by remember { mutableLongStateOf(0L) }
     var seekHoldJob by remember { mutableStateOf<Job?>(null) }
     var chapters by remember { mutableStateOf<List<MediaChapter>>(emptyList()) }
+    var playbackMarkers by remember(item.id) { mutableStateOf<PlaybackMarkers?>(null) }
     var chapterPanel by remember { mutableStateOf(false) }
     var previewTargetMs by remember(item.id) { mutableStateOf<Long?>(null) }
     var previewFrame by remember(item.id) { mutableStateOf<ByteArray?>(null) }
@@ -248,7 +252,11 @@ fun PlayerScreen(
     var lastHoldPreviewAt by remember(item.id) { mutableLongStateOf(0L) }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
 
-    val introSeconds = remember(item.id) { AppRuntime.prefs?.introSecondsFor(item.id) ?: 0 }
+    val introSeconds = playbackMarkers?.introEndMs?.takeIf { it > 0L && (duration <= 0L || it < duration) }
+        ?.div(1000L)?.toInt()
+        ?: (AppRuntime.prefs?.introSecondsFor(item.id) ?: 0)
+    val creditsStartMs = playbackMarkers?.creditsStartMs
+    val currentCreditsStartMs by rememberUpdatedState(creditsStartMs)
 
     // 片名优先用透明 Logo：电影取自身，剧集取详情页缓存的剧集信息（通常已命中）
     val titleLogo = remember(item.id) {
@@ -325,7 +333,10 @@ fun PlayerScreen(
         LibraryCache.putEpisodes(sid, item.seasonId, episodes)
     }
 
-    LaunchedEffect(item.id) { chapters = runCatching { client?.getChapters(item.id) }.getOrNull().orEmpty() }
+    LaunchedEffect(item.id) {
+        chapters = runCatching { client?.getChapters(item.id) }.getOrNull().orEmpty()
+        playbackMarkers = runCatching { client?.getPlaybackMarkers(item.id) }.getOrNull()
+    }
 
     LaunchedEffect(item.id, previewTargetMs, previewActive) {
         val target = previewTargetMs ?: return@LaunchedEffect
@@ -339,10 +350,7 @@ fun PlayerScreen(
         nextTriggered = true
         scope.launch {
             val c = client ?: return@launch
-            val list = if (episodes.isNotEmpty()) episodes
-            else runCatching { c.getEpisodes(item.seriesId, item.seasonId) }.getOrDefault(emptyList())
-            val idx = list.indexOfFirst { it.id == item.id }
-            val next = list.getOrNull(idx + 1) ?: return@launch
+            val next = runCatching { c.getNextEpisode(item) }.getOrNull() ?: return@launch
             runCatching { c.reportStop(item.id, position) }
             nextEpisode = next
             nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
@@ -386,10 +394,12 @@ fun PlayerScreen(
             try {
                 invalidSourceDetected = false
                 if (forceTranscode) transcodeFallbackTried = true
-                val target = c.resolvePlayback(
-                    item, forceTranscode, sourceId, resumePosition, audioStreamIndex,
-                    forceDirect = forceDirectNext,
-                )
+                val target = c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext)
+                    ?.copy(startPositionMs = resumePosition)
+                    ?: c.resolvePlayback(
+                        item, forceTranscode, sourceId, resumePosition, audioStreamIndex,
+                        forceDirect = forceDirectNext,
+                    )
                 failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
@@ -857,10 +867,7 @@ fun PlayerScreen(
                     nextTriggered = true
                     scope.launch {
                         val c = client ?: return@launch
-                        val list = if (episodes.isNotEmpty()) episodes
-                        else runCatching { c.getEpisodes(item.seriesId!!, item.seasonId) }.getOrDefault(emptyList())
-                        val idx = list.indexOfFirst { it.id == item.id }
-                        val next = list.getOrNull(idx + 1)
+                        val next = runCatching { c.getNextEpisode(item) }.getOrNull()
                         if (next != null) {
                             runCatching { c.reportStop(item.id, position) }
                             nextEpisode = next
@@ -1066,17 +1073,17 @@ fun PlayerScreen(
                 else -> exo.duration.coerceAtLeast(0)
             }
             val endSkipSeconds = AppRuntime.prefs?.endSkipSeconds ?: 30
+            val validCreditsStart = currentCreditsStartMs?.takeIf { it > 0L && it < duration }
             if (endSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
-                position >= duration - endSkipSeconds * 1000L
+                ((validCreditsStart != null && position >= validCreditsStart) ||
+                    (validCreditsStart == null && endSkipSeconds > 0 && position >= duration - endSkipSeconds * 1000L))
             ) {
                 nextTriggered = true
                 scope.launch {
                     val c = client ?: return@launch
-                    val list = if (episodes.isNotEmpty()) episodes
-                    else runCatching { c.getEpisodes(item.seriesId!!, item.seasonId) }.getOrDefault(emptyList())
-                    val index = list.indexOfFirst { it.id == item.id }
-                    val next = list.getOrNull(index + 1) ?: return@launch
+                    val next = runCatching { c.getNextEpisode(item) }.getOrNull() ?: return@launch
                     nextEpisode = next
+                    c.prewarmPlayback(next, audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id))
                     nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
                     while (nextCountdown > 0) {
                         delay(1000)
@@ -1087,6 +1094,19 @@ fun PlayerScreen(
                         nextEpisode = null
                         onPlayNext?.invoke(next)
                     }
+                }
+            }
+            if (duration > 0 && item.seriesId != null && prewarmedEpisodeId == null &&
+                position >= duration - 90_000L
+            ) {
+                prewarmedEpisodeId = "pending"
+                scope.launch {
+                    val c = client ?: return@launch
+                    val next = runCatching { c.getNextEpisode(item) }.getOrNull()
+                    if (next != null) {
+                        prewarmedEpisodeId = next.id
+                        c.prewarmPlayback(next, audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id))
+                    } else prewarmedEpisodeId = "none"
                 }
             }
             if (activeEngine == "media3" && exo.playbackState == Player.STATE_BUFFERING) {
@@ -1475,7 +1495,7 @@ fun PlayerScreen(
                     .padding(end = 36.dp, bottom = 120.dp)
                     .height(40.dp).width(130.dp),
                 corner = 20.dp,
-                onClick = { seekPlayerTo(introSeconds * 1000L) },
+                onClick = { seekPlayerTo(maxOf(position, introSeconds * 1000L)) },
             ) { focused ->
                 Box(
                     Modifier.fillMaxSize().background(

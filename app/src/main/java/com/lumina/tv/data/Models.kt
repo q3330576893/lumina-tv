@@ -68,6 +68,12 @@ data class MediaPerson(
 
 data class MediaChapter(val name: String, val startMs: Long, val imageTag: String? = null)
 
+data class PlaybackMarkers(
+    val introStartMs: Long? = null,
+    val introEndMs: Long? = null,
+    val creditsStartMs: Long? = null,
+)
+
 data class MediaStream(
     val index: Int,
     val type: String,
