@@ -42,7 +42,8 @@ object DiagExporter {
             streamsJson = JSONObject().put("reason", "No playback in progress").toString(2),
             tracksJson = JSONObject().put("reason", "No playback in progress").toString(2),
             errorsJson = JSONObject().put("reason", prefs?.lastPlaybackAudioFailure?.ifBlank { null } ?: "No playback error recorded").toString(2),
-            mpvLog = "mpv log unavailable: no playback session",
+            mpvLog = runCatching { File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.readText(Charsets.UTF_8) }
+                .getOrNull()?.ifBlank { "No mpv log messages captured" } ?: "mpv log unavailable: no session log file",
             appLog = appLogTail(),
             uiText = "screen=${AppRuntime.screenLabel}\nplaying=${AppRuntime.nowPlaying}\nactiveEngine=unknown\nbuffering=unknown\ndegraded=unknown",
         )
@@ -94,7 +95,7 @@ object DiagExporter {
             files.forEach { (name, original) ->
                 val limit = when (name) {
                     "app.log" -> 300 * 1024
-                    "mpv.log" -> 250 * 1024
+                    "mpv.log" -> 512 * 1024
                     else -> 120 * 1024
                 }
                 val sanitized = sanitize(original).take(limit)

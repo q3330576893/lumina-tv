@@ -6,6 +6,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import org.jellycine.mpv.MPVLib
+import java.io.File
 import java.util.ArrayDeque
 
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
@@ -25,14 +26,12 @@ class MpvPlayerController(
 
     private val handler = Handler(Looper.getMainLooper())
     private val logLock = Any()
+    private val sessionLogFile = File(context.applicationContext.filesDir, "mpv-session.log")
     private val diagnosticLines = ArrayDeque<String>()
     private var softwareRetryCount = 0
     private val logObserver = object : MPVLib.LogObserver {
         override fun logMessage(prefix: String, level: Int, text: String) {
-            synchronized(logLock) {
-                if (diagnosticLines.size >= MAX_DIAGNOSTIC_LINES) diagnosticLines.removeFirst()
-                diagnosticLines.addLast("${timestamp()} $prefix/$level $text")
-            }
+            appendMpvLog("${timestamp()} $prefix/$level $text")
         }
     }
     private var mpv: MPVLib? = null
@@ -137,6 +136,7 @@ class MpvPlayerController(
 
     fun load(url: String, startPositionMs: Long, subtitleUrls: List<String> = emptyList(), headers: Map<String, String> = emptyMap()) {
         if (released || mpv == null) return
+        clearSessionLog()
         pendingUrl = url
         pendingPositionMs = startPositionMs.coerceAtLeast(0L)
         ready = false
@@ -202,8 +202,33 @@ class MpvPlayerController(
 
     fun positionMs(): Long = positionMs
     fun durationMs(): Long = durationMs
-    fun diagnosticLog(): String = synchronized(logLock) { diagnosticLines.joinToString("\n") }
+    fun diagnosticLog(): String = synchronized(logLock) {
+        runCatching { sessionLogFile.takeIf(File::exists)?.readText(Charsets.UTF_8) }
+            .getOrNull()?.ifBlank { diagnosticLines.joinToString("\n") }
+            ?: ""
+    }
     fun softwareRetryCount(): Int = softwareRetryCount
+
+    private fun clearSessionLog() {
+        synchronized(logLock) {
+            diagnosticLines.clear()
+            runCatching { sessionLogFile.writeText("", Charsets.UTF_8) }
+        }
+    }
+
+    private fun appendMpvLog(line: String) {
+        synchronized(logLock) {
+            if (diagnosticLines.size >= MAX_DIAGNOSTIC_LINES) diagnosticLines.removeFirst()
+            diagnosticLines.addLast(line)
+            runCatching {
+                sessionLogFile.appendText("$line\n", Charsets.UTF_8)
+                if (sessionLogFile.length() > MAX_SESSION_LOG_BYTES) {
+                    val bytes = sessionLogFile.readBytes()
+                    sessionLogFile.writeBytes(bytes.copyOfRange(bytes.size - MAX_SESSION_LOG_BYTES, bytes.size))
+                }
+            }.onFailure { Log.w(TAG, "Failed to persist mpv session log", it) }
+        }
+    }
 
     fun release() {
         if (released) return
@@ -314,6 +339,7 @@ class MpvPlayerController(
         const val LOAD_TIMEOUT_MS = 12_000L
         const val SOFTWARE_RETRY_TIMEOUT_MS = 6_000L
         const val MAX_DIAGNOSTIC_LINES = 2_000
+        const val MAX_SESSION_LOG_BYTES = 512 * 1024
     }
 
     private fun timestamp(): Long = System.currentTimeMillis()

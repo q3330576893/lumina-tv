@@ -8,6 +8,7 @@ import com.lumina.tv.data.MediaSource
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.player.MpvPlayerController
+import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -31,7 +32,14 @@ internal fun buildPlayerDiagPayload(
     buffering: Boolean,
     error: String?,
     position: Long,
+    activeVideoDecoder: String?,
+    dvDecoderPath: String?,
+    playbackStatusNotice: String?,
 ): DiagPayload {
+    val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
+    val isDolbyVision = videoStream?.let {
+        it.videoRangeType.orEmpty().contains("DOVI", true) || it.dvProfile != null
+    } ?: false
     val meta = DiagExporter.baseMeta(context, outcome)
         .put("engine", JSONObject()
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
@@ -42,7 +50,13 @@ internal fun buildPlayerDiagPayload(
             .put("id", item.id).put("name", item.name).put("seriesName", item.seriesName ?: JSONObject.NULL)
             .put("container", playbackSource?.container ?: JSONObject.NULL)
             .put("size", playbackSource?.size ?: 0L)
-            .put("isStrm", playbackSource?.container?.contains("strm", true) == true))
+            .put("isStrm", playbackSource?.container?.contains("strm", true) == true)
+            .put("video", JSONObject()
+                .put("dolbyVision", isDolbyVision)
+                .put("profile", videoStream?.dvProfile ?: JSONObject.NULL)
+                .put("videoRangeType", videoStream?.videoRangeType ?: JSONObject.NULL)
+                .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
+                .put("decoderPath", dvDecoderPath ?: JSONObject.NULL)))
         .put("playback", JSONObject().put("url", currentPlaybackUrl ?: JSONObject.NULL))
         .put("audioDecode", JSONObject()
             .put("audioDecodeMode", audioDecodeMode)
@@ -60,6 +74,7 @@ internal fun buildPlayerDiagPayload(
             put(JSONObject()
                 .put("Index", stream.index).put("Type", stream.type).put("Codec", stream.codec ?: JSONObject.NULL)
                 .put("Profile", stream.profile ?: JSONObject.NULL).put("Level", stream.level ?: JSONObject.NULL)
+                .put("DvProfile", stream.dvProfile ?: JSONObject.NULL).put("VideoRangeType", stream.videoRangeType ?: JSONObject.NULL)
                 .put("Width", stream.width ?: JSONObject.NULL).put("Height", stream.height ?: JSONObject.NULL)
                 .put("BitRate", stream.bitRate ?: JSONObject.NULL).put("Channels", stream.channels ?: JSONObject.NULL)
                 .put("SampleRate", stream.sampleRate ?: JSONObject.NULL).put("IsDefault", stream.isDefault)
@@ -83,8 +98,18 @@ internal fun buildPlayerDiagPayload(
         }
     }
     val errors = JSONObject()
+        .put("engine", activeEngine)
         .put("failurePhase", failurePhase)
         .put("media3", lastPlaybackErrorJson?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject.NULL)
+        .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
+        .put("dolbyVision", isDolbyVision)
+        .put("dvProfile", videoStream?.dvProfile ?: JSONObject.NULL)
+        .put("videoRangeType", videoStream?.videoRangeType ?: JSONObject.NULL)
+        .put("decoderPath", dvDecoderPath ?: JSONObject.NULL)
+        .put("lastPlaybackErrorCodeName", lastPlaybackErrorJson?.let {
+            runCatching { JSONObject(it).optString("errorCodeName") }.getOrNull()
+        } ?: JSONObject.NULL)
+        .put("finalReason", error ?: playbackStatusNotice ?: JSONObject.NULL)
         .put("mpv", mpvState.error ?: "No mpv error recorded")
         .put("mpvSoftwareRetryCount", mpvBackend?.softwareRetryCount() ?: 0)
         .put("audioDecodeFailure", AppRuntime.prefs?.lastPlaybackAudioFailure ?: "")
@@ -94,8 +119,11 @@ internal fun buildPlayerDiagPayload(
         streamsJson = JSONObject().put("MediaStreams", streams).toString(2),
         tracksJson = JSONObject().put("groups", tracks).toString(2),
         errorsJson = errors.toString(2),
-        mpvLog = mpvBackend?.diagnosticLog()?.ifBlank { "No mpv log messages captured" } ?: "mpv log unavailable: mpv backend was not active",
+        mpvLog = mpvBackend?.diagnosticLog()?.ifBlank { null }
+            ?: runCatching { File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.readText(Charsets.UTF_8) }
+                .getOrNull()?.ifBlank { "No mpv log messages captured" }
+            ?: "mpv log unavailable: no session log file",
         appLog = DiagExporter.appLogTail(),
-        uiText = "showControls=$showControls\nbuffering=$buffering\nerror=${error ?: "none"}\npositionMs=$position\nactiveEngine=$activeEngine\ndegraded=$degraded",
+        uiText = "showControls=$showControls\nbuffering=$buffering\nerror=${error ?: "none"}\nstatus=${playbackStatusNotice ?: "none"}\npositionMs=$position\nactiveEngine=$activeEngine\ndegraded=$degraded",
     )
 }

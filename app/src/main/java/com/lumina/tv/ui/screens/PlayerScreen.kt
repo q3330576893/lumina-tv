@@ -95,6 +95,7 @@ import androidx.media3.ui.PlayerView
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.DeviceCodecCapabilities
 import com.lumina.tv.data.MediaChapter
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
@@ -109,6 +110,7 @@ import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.ui.components.DiagExportDialog
+import com.lumina.tv.ui.components.VideoSourceProbe
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -187,6 +189,8 @@ fun PlayerScreen(
     // 转码流（HLS）解析失败时改拉原文件直连
     var forceDirectNext by remember(item.id) { mutableStateOf(false) }
     var directFallbackTried by remember(item.id) { mutableStateOf(false) }
+    var transcodeFallbackTried by remember(item.id) { mutableStateOf(false) }
+    var invalidSourceDetected by remember(item.id) { mutableStateOf(false) }
     // 同一部片可能有多个版本（不同压制/大小），一个播不了就换下一个
     var mediaSources by remember(item.id) { mutableStateOf<List<MediaSource>>(emptyList()) }
     var triedSources by remember(item.id) { mutableStateOf<Set<String>>(emptySet()) }
@@ -203,6 +207,11 @@ fun PlayerScreen(
     var engineSwitchTrace by remember(item.id) { mutableStateOf(mutableListOf<String>()) }
     var currentPlaybackUrl by remember(item.id) { mutableStateOf<String?>(null) }
     var lastPlaybackErrorJson by remember(item.id) { mutableStateOf<String?>(null) }
+    var dvDecoderPath by remember(item.id) { mutableStateOf<String?>(null) }
+    var activeVideoDecoder by remember(item.id) { mutableStateOf<String?>(null) }
+    var firstFrameRendered by remember(item.id) { mutableStateOf(false) }
+    var readyWithoutFrameSince by remember(item.id) { mutableLongStateOf(0L) }
+    var playbackStatusNotice by remember(item.id) { mutableStateOf<String?>(null) }
     var failurePhase by remember(item.id) { mutableStateOf("未知") }
     var currentSourceId by remember { mutableStateOf(initialSourceId) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
@@ -251,7 +260,17 @@ fun PlayerScreen(
     val exo = remember(item.id, ffmpegFallback) {
         val preference = AppRuntime.prefs?.decoderPreference ?: "auto"
         val codecSelector = MediaCodecSelector { mimeType, secure, tunneling ->
-            val decoders = MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, secure, tunneling)
+            val dvMime = mimeType.equals("video/dolby-vision", ignoreCase = true)
+            val dvDecoders = if (dvMime) {
+                MediaCodecSelector.DEFAULT.getDecoderInfos("video/dolby-vision", secure, tunneling)
+            } else emptyList()
+            val usedFallback = dvMime && dvDecoders.isEmpty()
+            val decoders = when {
+                dvMime && dvDecoders.isNotEmpty() -> dvDecoders
+                dvMime -> MediaCodecSelector.DEFAULT.getDecoderInfos("video/hevc", secure, tunneling)
+                else -> MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, secure, tunneling)
+            }
+            if (dvMime) dvDecoderPath = if (usedFallback) "hevc-fallback" else "dolby-vision"
             when (preference) {
                 "hardware" -> decoders.sortedByDescending { it.hardwareAccelerated }
                 "software" -> decoders.sortedByDescending { it.softwareOnly }
@@ -334,8 +353,16 @@ fun PlayerScreen(
         scope.launch {
             error = null
             buffering = true
+            firstFrameRendered = false
+            readyWithoutFrameSince = 0L
+            playbackStatusNotice = null
+            bufferingTimedOut = false
+            activeVideoDecoder = null
+            dvDecoderPath = null
             failurePhase = "解析"
             try {
+                invalidSourceDetected = false
+                if (forceTranscode) transcodeFallbackTried = true
                 val target = c.resolvePlayback(
                     item, forceTranscode, sourceId, resumePosition, audioStreamIndex,
                     forceDirect = forceDirectNext,
@@ -344,6 +371,23 @@ fun PlayerScreen(
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
                 currentPlaybackUrl = target.url
+                val targetIsHls = target.url.contains("master.m3u8", true) || target.url.contains(".m3u8", true)
+                if (targetIsHls) transcodeFallbackTried = true
+                if (VideoSourceProbe.shouldProbe(target.url)) {
+                    val probe = VideoSourceProbe.probe(target.url, target.headers)
+                    if (probe.valid == false) {
+                        invalidSourceDetected = true
+                        buffering = false
+                        error = buildString {
+                            append("片源不可用：这个地址返回的不是视频文件（网盘链接可能已失效或需要登录）")
+                            append("\nHTTP ").append(probe.statusCode ?: "未知")
+                            if (probe.prefix.isNotBlank()) append("\n响应开头：").append(probe.prefix.take(60))
+                        }
+                        failurePhase = "连接"
+                        engineSwitchTrace.add("source-probe-invalid:${probe.statusCode ?: "unknown"}")
+                        return@launch
+                    }
+                }
                 val defaultAudio = target.source?.audioStreams?.firstOrNull { it.isDefault }
                     ?: target.source?.audioStreams?.firstOrNull()
                 val audioCodec = listOfNotNull(defaultAudio?.codec, defaultAudio?.profile).joinToString(" ").lowercase()
@@ -353,18 +397,22 @@ fun PlayerScreen(
                 // DV Profile 7 是双层封装，media3 解不了基底+增强层，直接交给 mpv
                 val videoStreamForDv = target.source?.streams?.firstOrNull { it.type == "Video" }
                 val rangeType = videoStreamForDv?.videoRangeType.orEmpty().uppercase()
-                val isDvP7 = rangeType.contains("DOVI") &&
+                val isDolbyVision = rangeType.contains("DOVI") || videoStreamForDv?.dvProfile != null
+                val isDvP7 = isDolbyVision &&
                     (videoStreamForDv?.dvProfile == 7 || rangeType.contains("WITHEL") || rangeType.contains("WITH EL"))
-                val dvP7UseMpv = AppRuntime.prefs?.dvP7UseMpv ?: true
                 val selectedEngine = enginePinned
                     ?: when {
-                        isDvP7 && dvP7UseMpv -> "mpv"
+                        isDvP7 -> "mpv"
+                        isDolbyVision -> "media3"
                         AppRuntime.prefs?.playerEngine == "mpv" -> "mpv"
                         else -> "media3"
                     }
-                if (isDvP7 && dvP7UseMpv && !softDecodeNoticeShown) {
+                if (isDvP7 && !softDecodeNoticeShown) {
                     audioDecodeNotice = "Dolby Vision Profile 7，已用 mpv 软解"
                     softDecodeNoticeShown = true
+                }
+                if (isDolbyVision && !isDvP7 && !DeviceCodecCapabilities.supportsDolbyVision) {
+                    dvDecoderPath = "hevc-fallback"
                 }
                 if (audioDecodeMode == "auto" && unsupportedAudio && !softDecodeNoticeShown) {
                     audioDecodeNotice = "检测到 ${audioCodec.trim().ifBlank { "高级" }} 音轨，先试本机硬解，失败会自动转本地软解"
@@ -513,6 +561,7 @@ fun PlayerScreen(
             context, outcome, activeEngine, mpvBackend, item, playbackSource, currentPlaybackUrl,
             audioDecodeMode, degraded, engineSwitchTrace, exo, failurePhase, lastPlaybackErrorJson,
             mpvState, client?.lastPlaybackInfoJson, showControls, buffering, error, position,
+            activeVideoDecoder, dvDecoderPath, playbackStatusNotice,
         )
     }
 
@@ -582,6 +631,7 @@ fun PlayerScreen(
         val mpvErr = mpvState.error
         if (activeEngine == "mpv" && !mpvErr.isNullOrBlank()) {
             buffering = false
+            failurePhase = if (mpvErr.contains("首帧") || mpvErr.contains("出画")) "首帧" else "解码"
             error = "mpv 内核也无法播放：${mpvErr.take(160)}\n可导出诊断包反馈。"
         }
     }
@@ -590,6 +640,7 @@ fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
                 if (activeEngine != "media3") return
+                if (invalidSourceDetected) return
                 failurePhase = when {
                     err.errorCodeName.contains("IO", true) -> "连接"
                     err.errorCodeName.contains("DEMUX", true) || err.errorCodeName.contains("PARSING", true) -> "解封装"
@@ -598,17 +649,28 @@ fun PlayerScreen(
                     else -> "解码"
                 }
                 lastPlaybackErrorJson = JSONObject()
+                    .put("engine", activeEngine)
                     .put("errorCodeName", err.errorCodeName)
                     .put("errorCode", err.errorCode)
                     .put("message", err.message)
+                    .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
+                    .put("dolbyVision", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.let {
+                        it.videoRangeType.orEmpty().contains("DOVI", true) || it.dvProfile != null
+                    } ?: false)
+                    .put("dvProfile", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.dvProfile ?: JSONObject.NULL)
+                    .put("videoRangeType", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.videoRangeType ?: JSONObject.NULL)
+                    .put("decoderPath", dvDecoderPath ?: JSONObject.NULL)
                     .put("causes", JSONArray().apply {
                         generateSequence(err as Throwable?) { it.cause }.take(5)
                             .forEach { put(it.message ?: it::class.java.name) }
                     }).toString(2)
-                // 容器/解封装级失败：转码通常能救一次，但再转第二次基本无意义，直接交给 mpv 更快
                 val containerUnsupported = err.errorCodeName.contains("PARSING", true) ||
                     err.errorCodeName.contains("DEMUX", true) ||
                     err.errorCodeName.contains("CONTAINER", true)
+                val decodingUnsupported = err.errorCodeName.contains("DECOD", true)
+                val currentIsHls = currentPlaybackUrl?.let {
+                    it.contains("master.m3u8", true) || it.contains(".m3u8", true)
+                } == true
                 if (audioDecodeMode == "passthrough" && err.errorCodeName.contains("DECOD", true)) {
                     buffering = false
                     audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
@@ -619,10 +681,7 @@ fun PlayerScreen(
                     audioDecodeNotice = "本机解码不支持该音轨，已自动切到 mpv 本地软解"
                     enginePinned = "mpv"
                     activeEngine = "mpv"
-                } else if (containerUnsupported && !directFallbackTried &&
-                    (degraded || currentPlaybackUrl?.contains("master.m3u8", true) == true)
-                ) {
-                    // 失败的是服务端转码流（master.m3u8 解析不了），改拉原文件直连
+                } else if (containerUnsupported && currentIsHls && !directFallbackTried) {
                     directFallbackTried = true
                     forceDirectNext = true
                     degraded = false
@@ -633,8 +692,29 @@ fun PlayerScreen(
                     audioDecodeNotice = "转码流不可用，已改用直连播放"
                     engineSwitchTrace.add("direct-fallback:${err.errorCodeName}")
                     reloadKey++
+                } else if (containerUnsupported && currentIsHls) {
+                    buffering = false
+                    error = "该片源无法播放（转码流与直连都失败）"
+                    engineSwitchTrace.add("container-terminal:hls:${err.errorCodeName}")
+                } else if (containerUnsupported && !currentIsHls && !transcodeFallbackTried) {
+                    transcodeFallbackTried = true
+                    forceDirectNext = false
+                    degraded = true
+                    enginePinned = "media3"
+                    reloadForceTranscode = true
+                    buffering = true
+                    error = null
+                    audioDecodeNotice = "直连容器无法解析，正在尝试转码"
+                    engineSwitchTrace.add("transcode-fallback:${err.errorCodeName}")
+                    reloadKey++
+                } else if (containerUnsupported) {
+                    buffering = false
+                    error = "该片源容器不受支持，转码后仍失败"
+                    engineSwitchTrace.add("container-terminal:direct:${err.errorCodeName}")
                 } else if (!degraded) {
                     degraded = true
+                    transcodeFallbackTried = true
+                    reloadForceTranscode = true
                     error = "直连失败，自动切换转码…"
                     reloadKey++
                 } else if (!ffmpegFallback && !containerUnsupported) {
@@ -651,6 +731,8 @@ fun PlayerScreen(
                     triedSources = tried + next.id
                     currentSourceId = next.id
                     directFallbackTried = false
+                    transcodeFallbackTried = false
+                    invalidSourceDetected = false
                     degraded = false
                     forceDirectNext = false
                     enginePinned = null
@@ -661,13 +743,15 @@ fun PlayerScreen(
                     audioDecodeNotice = "当前版本播不了，换「${next.displayLabel}」再试"
                     engineSwitchTrace.add("source-fallback:${next.id}:${err.errorCodeName}")
                     reloadKey++
-                } else if (!mpvFallbackTried) {
-                    // Media3 已经把直连、转码都试过还不行 —— 直接换 mpv，不再让用户停在错误页
+                } else if (decodingUnsupported && !mpvFallbackTried) {
                     mpvFallbackTried = true
                     enginePinned = "mpv"
                     buffering = true
                     error = null
-                    audioDecodeNotice = "Media3 无法播放该文件（${err.errorCodeName}），已自动切换 mpv"
+                    val dvPathMessage = if (playbackSource?.streams?.firstOrNull { it.type == "Video" }?.let {
+                            it.videoRangeType.orEmpty().contains("DOVI", true) || it.dvProfile != null
+                        } == true) "；DV 解码路径=${dvDecoderPath ?: "待确认"}" else ""
+                    audioDecodeNotice = "Media3 无法播放该文件（${err.errorCodeName}$dvPathMessage），已自动切换 mpv"
                     engineSwitchTrace.add("mpv-auto-fallback:${err.errorCodeName}")
                     activeEngine = "mpv"
                 } else {
@@ -683,6 +767,11 @@ fun PlayerScreen(
                         append("URL=").append(playbackUrlPath).append("\n")
                         append("${failurePhase}阶段失败：")
                         append("播放失败：${err.errorCodeName}")
+                        if (playbackSource?.streams?.firstOrNull { it.type == "Video" }?.let {
+                                it.videoRangeType.orEmpty().contains("DOVI", true) || it.dvProfile != null
+                            } == true) {
+                            append("\nDV 解码路径=").append(dvDecoderPath ?: "待确认")
+                        }
                         if (cause.isNotBlank()) append("\n").append(cause.take(180))
                         // 把容器/编码/尝试次数带出来，截图就能定位问题
                         append("\n容器=").append(srcInfo?.container ?: "?")
@@ -704,7 +793,10 @@ fun PlayerScreen(
                 buffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY) {
                     playStartAt = android.os.SystemClock.elapsedRealtime()
+                    if (!firstFrameRendered) readyWithoutFrameSince = System.currentTimeMillis()
                     if (degraded) error = null
+                } else if (state == Player.STATE_BUFFERING) {
+                    playbackStatusNotice = null
                 }
                 if (state == Player.STATE_ENDED && !nextTriggered &&
                     AppRuntime.prefs?.autoNextEpisode == true && item.seriesId != null
@@ -812,6 +904,25 @@ fun PlayerScreen(
 
     DisposableEffect(exo) {
         val analytics = object : AnalyticsListener {
+            override fun onVideoDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long,
+            ) {
+                activeVideoDecoder = decoderName
+            }
+
+            override fun onRenderedFirstFrame(
+                eventTime: AnalyticsListener.EventTime,
+                output: Any,
+                renderTimeMs: Long,
+            ) {
+                firstFrameRendered = true
+                readyWithoutFrameSince = 0L
+                playbackStatusNotice = null
+            }
+
             override fun onBandwidthEstimate(
                 eventTime: AnalyticsListener.EventTime,
                 totalLoadTimeMs: Int,
@@ -882,7 +993,6 @@ fun PlayerScreen(
     LaunchedEffect(Unit) {
         var sinceReport = 0
         var bufferingSince = 0L
-        var bufferingPosition = -1L
         while (true) {
             delay(1000)
             position = when (activeEngine) {
@@ -919,17 +1029,22 @@ fun PlayerScreen(
             }
             if (activeEngine == "media3" && exo.playbackState == Player.STATE_BUFFERING) {
                 val now = System.currentTimeMillis()
-                val currentPosition = exo.currentPosition
-                if (bufferingSince == 0L || currentPosition != bufferingPosition) {
+                if (bufferingSince == 0L) {
                     bufferingSince = now
-                    bufferingPosition = currentPosition
-                } else if (!bufferingTimedOut && now - bufferingSince >= 20_000L) {
+                } else if (!bufferingTimedOut && !firstFrameRendered && now - bufferingSince >= 15_000L) {
                     bufferingTimedOut = true
-                    error = "缓冲超时，建议切换到转码播放"
+                    playbackStatusNotice = "缓冲超时：服务端未返回数据"
+                    failurePhase = "连接"
                 }
             } else {
                 bufferingSince = 0L
-                bufferingPosition = exo.currentPosition
+            }
+            if (activeEngine == "media3" && exo.playbackState == Player.STATE_READY &&
+                !firstFrameRendered && readyWithoutFrameSince > 0L &&
+                System.currentTimeMillis() - readyWithoutFrameSince >= 8_000L
+            ) {
+                playbackStatusNotice = "已就绪但未出画面，可能是解码器或显示层问题"
+                failurePhase = "首帧"
             }
             sinceReport++
             if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
@@ -1033,7 +1148,7 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        if ((if (activeEngine == "mpv") mpvState.buffering else buffering) && error == null) {
+        if ((if (activeEngine == "mpv") mpvState.buffering else buffering) && error == null && playbackStatusNotice == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Accent, strokeWidth = 2.5.dp, modifier = Modifier.size(36.dp))
@@ -1041,6 +1156,19 @@ fun PlayerScreen(
                     Text("正在缓冲…", color = TextSub, fontSize = 12.sp)
                 }
             }
+        }
+
+        playbackStatusNotice?.let { notice ->
+            Text(
+                notice,
+                color = Color(0xFFFFD28A),
+                fontSize = 12.sp,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 96.dp)
+                    .background(Color(0xAA10141D), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
 
         error?.let {
@@ -1453,6 +1581,10 @@ fun PlayerScreen(
                 onResizeMode = { resizeMode = it },
                 onSwitchSource = { sid ->
                     optionMenu = false
+                    directFallbackTried = false
+                    transcodeFallbackTried = false
+                    invalidSourceDetected = false
+                    forceDirectNext = false
                     degraded = false
                     loadSource(AppRuntime.prefs?.forceTranscode ?: false, sid)
                 },

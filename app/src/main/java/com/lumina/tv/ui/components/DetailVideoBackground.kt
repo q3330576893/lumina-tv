@@ -29,6 +29,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okio.Buffer
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /** Optional visual layer; callers keep their static artwork behind it as the fallback. */
@@ -52,7 +53,12 @@ fun DetailVideoBackground(
             val scheme = Uri.parse(url).scheme?.lowercase()
             probeResult = when {
                 scheme == "file" || scheme == "content" -> "valid"
-                scheme == "http" || scheme == "https" -> probeVideo(url)
+                scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url).let {
+                    if (it.valid == true) "valid" else when (it.reason) {
+                        "html" -> "skip=html"
+                        else -> "skip=err"
+                    }
+                }
                 else -> "skip=url"
             }
         }
@@ -219,54 +225,86 @@ private fun DetailVideoPlayback(
     }
 }
 
-private suspend fun probeVideo(url: String): String = withContext(Dispatchers.IO) {
-    runCatching {
-        val client = OkHttpClient.Builder()
+data class VideoSourceProbeResult(
+    val valid: Boolean?,
+    val statusCode: Int? = null,
+    val contentType: String? = null,
+    val prefix: String = "",
+    val reason: String = "unknown",
+)
+
+object VideoSourceProbe {
+    private data class Cached(val result: VideoSourceProbeResult, val atMs: Long)
+    private val cache = ConcurrentHashMap<String, Cached>()
+    private val client by lazy {
+        OkHttpClient.Builder()
             .connectTimeout(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
-        val request = Request.Builder()
-            .url(url)
-            .header("Range", "bytes=0-511")
-            .build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return@withContext "skip=err"
-            if (response.header("Content-Type").orEmpty().contains("text/html", ignoreCase = true)) {
-                return@withContext "skip=html"
-            }
-            val source = response.body?.source() ?: return@withContext "skip=err"
-            val buffer = Buffer()
-            while (buffer.size < PROBE_BYTES) {
-                val count = source.read(buffer, PROBE_BYTES - buffer.size)
-                if (count == -1L) break
-            }
-            val bytes = buffer.readByteArray()
-            val prefix = bytes.toString(Charsets.ISO_8859_1)
-                .removePrefix("\uFEFF")
-                .trimStart()
-                .lowercase()
-            val html = prefix.startsWith("<!doctype") || prefix.startsWith("<html") ||
-                prefix.startsWith("<a href")
-            if (html) return@withContext "skip=html"
-            val hls = prefix.startsWith("#extm3u")
-            val mp4 = bytes.indices.any { index ->
-                index + 4 <= bytes.size && bytes[index] == 'f'.code.toByte() &&
-                    bytes[index + 1] == 't'.code.toByte() && bytes[index + 2] == 'y'.code.toByte() &&
-                    bytes[index + 3] == 'p'.code.toByte()
-            }
-            val mkv = bytes.indices.any { index ->
-                index + 4 <= bytes.size && bytes[index] == 0x1A.toByte() &&
-                    bytes[index + 1] == 0x45.toByte() && bytes[index + 2] == 0xDF.toByte() &&
-                    bytes[index + 3] == 0xA3.toByte()
-            }
-            if (hls || mp4 || mkv) "valid" else "skip=err"
+    }
+
+    fun shouldProbe(url: String): Boolean {
+        val path = runCatching { Uri.parse(url).path.orEmpty().lowercase() }.getOrDefault("")
+        return path.endsWith(".m3u8") || !VIDEO_EXTENSION.matches(path)
+    }
+
+    suspend fun probe(url: String, headers: Map<String, String> = emptyMap()): VideoSourceProbeResult =
+        withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            cache[url]?.takeIf { now - it.atMs < CACHE_TTL_MS }?.let { return@withContext it.result }
+            val result = runCatching {
+                val builder = Request.Builder().url(url).header("Range", "bytes=0-511")
+                headers.forEach { (name, value) -> builder.header(name, value) }
+                client.newCall(builder.build()).execute().use { response ->
+                    val contentType = response.header("Content-Type").orEmpty()
+                    val source = response.body?.source()
+                    val buffer = Buffer()
+                    if (source != null) {
+                        while (buffer.size < PROBE_BYTES) {
+                            val count = source.read(buffer, PROBE_BYTES - buffer.size)
+                            if (count == -1L) break
+                        }
+                    }
+                    val bytes = buffer.readByteArray()
+                    val snippet = bytes.toString(Charsets.ISO_8859_1).take(60)
+                    val prefix = bytes.toString(Charsets.ISO_8859_1).removePrefix("\uFEFF").trimStart().lowercase()
+                    val htmlOrJsonType = contentType.contains("text/html", true) ||
+                        contentType.contains("application/json", true)
+                    val textInvalid = prefix.startsWith("<!doctype") || prefix.startsWith("<html") ||
+                        prefix.startsWith("<a href") || prefix.startsWith("{")
+                    val hls = prefix.startsWith("#extm3u")
+                    val mp4 = bytes.indices.any { i -> i + 4 <= bytes.size &&
+                        bytes[i] == 'f'.code.toByte() && bytes[i + 1] == 't'.code.toByte() &&
+                        bytes[i + 2] == 'y'.code.toByte() && bytes[i + 3] == 'p'.code.toByte() }
+                    val mkv = bytes.indices.any { i -> i + 4 <= bytes.size &&
+                        bytes[i] == 0x1A.toByte() && bytes[i + 1] == 0x45.toByte() &&
+                        bytes[i + 2] == 0xDF.toByte() && bytes[i + 3] == 0xA3.toByte() }
+                    val valid = response.isSuccessful && !htmlOrJsonType && !textInvalid && (hls || mp4 || mkv)
+                    VideoSourceProbeResult(
+                        valid = valid,
+                        statusCode = response.code,
+                        contentType = contentType,
+                        prefix = snippet,
+                        reason = when {
+                            !response.isSuccessful -> "http"
+                            htmlOrJsonType || textInvalid -> "html"
+                            valid -> "valid"
+                            else -> "format"
+                        },
+                    )
+                }
+            }.getOrElse { VideoSourceProbeResult(valid = null, reason = "unknown") }
+            if (result.valid != null) cache[url] = Cached(result, now)
+            result
         }
-    }.getOrDefault("skip=err")
+
+    private val VIDEO_EXTENSION = Regex(".*\\.(mkv|mp4|ts)$", RegexOption.IGNORE_CASE)
 }
 
 private const val LOOP_WINDOW_MS = 20_000L
 private const val PROBE_TIMEOUT_SECONDS = 3L
 private const val PROBE_BYTES = 512L
+private const val CACHE_TTL_MS = 120_000L
