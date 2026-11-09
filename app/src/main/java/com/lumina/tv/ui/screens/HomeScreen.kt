@@ -96,6 +96,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
@@ -582,7 +583,7 @@ fun HomeScreen(
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
-                        Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 76.dp, bottom = 12.dp),
+                        Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 92.dp, bottom = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         FocusSurface(modifier = Modifier.height(40.dp).width(44.dp), corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
@@ -607,7 +608,18 @@ fun HomeScreen(
                                 requestFocus = restoreSortFocus,
                                 onClick = { sortMenuOpen = true },
                             ) { focused ->
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Box(
+                                    Modifier.fillMaxSize()
+                                        .background(
+                                            if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
+                                            RoundedCornerShape(20.dp),
+                                        )
+                                        .then(
+                                            if (focused) Modifier.border(1.dp, Accent.copy(alpha = 0.7f), RoundedCornerShape(20.dp))
+                                            else Modifier.border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(20.dp))
+                                        ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text("排序", color = if (focused) Accent else TextSub, fontSize = 9.sp, lineHeight = 11.sp)
                                         Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
@@ -617,6 +629,7 @@ fun HomeScreen(
                             DropdownMenu(
                                 expanded = sortMenuOpen,
                                 onDismissRequest = { closeSortMenu() },
+                                offset = DpOffset(0.dp, 6.dp),
                             ) {
                                     Column(
                                         modifier = Modifier
@@ -1206,7 +1219,6 @@ private fun MediaLibrary(
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 76.dp, bottom = 6.dp)) {
             Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("服务器自带的全部分类· 可在设置里增删", color = TextSub, fontSize = 11.sp)
         }
         LazyVerticalGrid(
             columns = GridCells.Adaptive(300.dp),
@@ -1473,8 +1485,8 @@ private fun Hero(
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
-            val ratingText = (item.communityRating ?: item.rating)?.let { "★ %.1f".format(it) }
-                ?: tmdbInfo?.rating?.let { "TMDB ★ %.1f".format(it) }
+            val hasOwnRating = (item.rating ?: item.communityRating) != null
+            val ratingText = if (!hasOwnRating) tmdbInfo?.rating?.let { "TMDB ★ %.1f".format(it) } else null
             val sub = listOfNotNull(
                 item.subtitle.takeIf { it.isNotBlank() },
                 item.genres.take(2).joinToString(" / ").takeIf { it.isNotBlank() },

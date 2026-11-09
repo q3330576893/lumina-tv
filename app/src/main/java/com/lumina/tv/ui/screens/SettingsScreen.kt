@@ -559,50 +559,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                     }
                 }
 
-                Spacer(Modifier.height(14.dp))
-
-                GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
-                    Column(Modifier.padding(22.dp)) {
-                        Text("存储", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(6.dp))
-                        Text("清除图片与临时文件缓存，不会删除登录信息或播放记录", color = TextSub, fontSize = 11.sp)
-                        Spacer(Modifier.height(12.dp))
-                        FocusSurface(Modifier.height(38.dp).width(130.dp), corner = 19.dp, scaleTo = 1.04f, onClick = {
-                            runCatching { context.cacheDir.listFiles()?.forEach { it.deleteRecursively() } }
-                            android.widget.Toast.makeText(context, "缓存已清除", android.widget.Toast.LENGTH_SHORT).show()
-                        }) { focused ->
-                            Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp)), contentAlignment = Alignment.Center) {
-                                Text("清除缓存", color = TextMain, fontSize = 12.sp)
-                            }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(14.dp))
-                GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
-                    Column(Modifier.padding(22.dp)) {
-                        Text("观看记录", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(8.dp))
-                        Text("清除当前 Emby 用户的已观看标记", color = TextSub, fontSize = 11.sp)
-                        Spacer(Modifier.height(12.dp))
-                        FocusSurface(Modifier.height(38.dp).width(150.dp), corner = 19.dp, scaleTo = 1.04f,
-                            onClick = {
-                                if (!clearingHistory) {
-                                    clearingHistory = true
-                                    scope.launch {
-                                        val count = runCatching { AppRuntime.client?.clearWatchHistory() ?: 0 }.getOrDefault(0)
-                                        clearingHistory = false
-                                        android.widget.Toast.makeText(context, "已清除 $count 条观看记录", android.widget.Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            }) { focused ->
-                            Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp)), contentAlignment = Alignment.Center) {
-                                Text(if (clearingHistory) "正在清除…" else "清除观看记录", color = TextMain, fontSize = 12.sp)
-                            }
-                        }
-                    }
-                }
-
                 // ---------- 字幕 ----------
                 GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
                     Column(Modifier.padding(22.dp)) {
