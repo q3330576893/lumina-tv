@@ -14,6 +14,10 @@ import java.io.InterruptedIOException
 import java.net.URLEncoder
 import android.net.Uri
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class EmbyException(message: String) : Exception(message)
 
@@ -38,6 +42,12 @@ class EmbyClient(
         .build()
 
     private val jsonType = "application/json; charset=utf-8".toMediaType()
+    private val trickplayMutex = Mutex()
+    private val trickplayFiles = mutableMapOf<String, ByteArray>()
+    private val unavailableTrickplay = ConcurrentHashMap.newKeySet<String>()
+    private val trickplayFrames = object : LinkedHashMap<Pair<String, Int>, ByteArray>(24, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, Int>, ByteArray>?): Boolean = size > 24
+    }
 
     private fun authHeader(withToken: Boolean = true): String {
         val sb = StringBuilder()
@@ -330,9 +340,7 @@ class EmbyClient(
     }
 
     suspend fun getChapters(itemId: String): List<MediaChapter> = withContext(Dispatchers.IO) {
-        runCatching {
-            val response = getSync(url("/Users/$userId/Items/$itemId", mapOf("Fields" to "Chapters")))
-            val chapters = response.optJSONArray("Chapters") ?: JSONArray()
+        fun parseChapters(chapters: JSONArray): List<MediaChapter> =
             (0 until chapters.length()).mapNotNull { i ->
                 val chapter = chapters.optJSONObject(i) ?: return@mapNotNull null
                 val ticks = chapter.optLong("StartPositionTicks", -1L)
@@ -343,7 +351,83 @@ class EmbyClient(
                     imageTag = chapter.optString("ImageTag").ifBlank { null },
                 )
             }.sortedBy { it.startMs }
+
+        val independent = runCatching {
+            val request = Request.Builder()
+                .url(url("/Items/$itemId/Chapters"))
+                .header("X-Emby-Authorization", authHeader())
+                .build()
+            val body = http.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw EmbyException("HTTP ${response.code}")
+                response.body?.string().orEmpty()
+            }
+            val chapters = runCatching { JSONArray(body) }.getOrElse {
+                JSONObject(body).optJSONArray("Items") ?: JSONObject(body).optJSONArray("Chapters") ?: JSONArray()
+            }
+            parseChapters(chapters)
         }.getOrDefault(emptyList())
+        if (independent.isNotEmpty()) return@withContext independent
+
+        runCatching {
+            val response = getSync(url("/Users/$userId/Items/$itemId", mapOf("Fields" to "Chapters")))
+            parseChapters(response.optJSONArray("Chapters") ?: JSONArray())
+        }.getOrDefault(emptyList())
+    }
+
+    /** Returns a JPEG frame from Emby's optional BIF file; failures are intentionally silent. */
+    suspend fun getTrickplayFrame(itemId: String, positionMs: Long): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            if (itemId in unavailableTrickplay) return@withContext null
+            val file = trickplayMutex.withLock {
+                trickplayFiles[itemId] ?: if (itemId in unavailableTrickplay) null else run {
+                    val request = Request.Builder()
+                        .url(url("/Videos/$itemId/index.bif"))
+                        .header("X-Emby-Authorization", authHeader())
+                        .build()
+                    val bytes = http.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                        val body = response.body ?: throw IOException("Empty BIF")
+                        if (body.contentLength() > MAX_TRICKPLAY_BYTES) throw IOException("BIF too large")
+                        body.bytes().takeIf { it.size <= MAX_TRICKPLAY_BYTES } ?: throw IOException("BIF too large")
+                    }
+                    if (bytes.size < 72 || !bytes.copyOfRange(0, 8).contentEquals(BIF_MAGIC)) {
+                        throw IOException("Invalid BIF header")
+                    }
+                    val count = readLeInt(bytes, 12)
+                    val interval = readLeInt(bytes, 16)
+                    if (count <= 0 || count > MAX_TRICKPLAY_FRAMES || interval <= 0 || 64L + (count + 1L) * 8L > bytes.size) {
+                        throw IOException("Invalid BIF index")
+                    }
+                    trickplayFiles[itemId] = bytes
+                    bytes
+                }
+            } ?: return@withContext null
+            val interval = readLeInt(file, 16)
+            val frameIndex = (positionMs.coerceAtLeast(0L) / interval).toInt()
+                .coerceAtMost(readLeInt(file, 12) - 1)
+            synchronized(trickplayFrames) { trickplayFrames[itemId to frameIndex]?.let { return@withContext it } }
+            val entryOffset = 64 + frameIndex * 8
+            val start = readLeInt(file, entryOffset + 4)
+            val end = if (frameIndex == readLeInt(file, 12) - 1) file.size else readLeInt(file, entryOffset + 12)
+            if (start < 0 || end <= start || end > file.size) return@withContext null
+            val jpeg = file.copyOfRange(start, end)
+            if (jpeg.size < 4 || jpeg[0] != 0xFF.toByte() || jpeg[1] != 0xD8.toByte()) return@withContext null
+            synchronized(trickplayFrames) { trickplayFrames[itemId to frameIndex] = jpeg }
+            jpeg
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            unavailableTrickplay.add(itemId)
+            null
+        }
+    }
+
+    private fun readLeInt(bytes: ByteArray, offset: Int): Int {
+        if (offset < 0 || offset + 4 > bytes.size) return -1
+        return (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
     }
 
     /** Emby returns cast/crew in People when requested through Fields=People. */
@@ -973,6 +1057,9 @@ data class PlaybackTarget(
 
     companion object {
         private const val SEARCH_REQUEST_ATTEMPTS = 2
+        private val BIF_MAGIC = byteArrayOf(0x89.toByte(), 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A)
+        private const val MAX_TRICKPLAY_BYTES = 64L * 1024 * 1024
+        private const val MAX_TRICKPLAY_FRAMES = 1_000_000
 
         fun normalize(raw: String): String {
             var s = raw.trim()

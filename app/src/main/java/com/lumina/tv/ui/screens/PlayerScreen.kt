@@ -18,6 +18,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -230,6 +232,11 @@ fun PlayerScreen(
     var seekHoldJob by remember { mutableStateOf<Job?>(null) }
     var chapters by remember { mutableStateOf<List<MediaChapter>>(emptyList()) }
     var chapterPanel by remember { mutableStateOf(false) }
+    var previewTargetMs by remember(item.id) { mutableStateOf<Long?>(null) }
+    var previewFrame by remember(item.id) { mutableStateOf<ByteArray?>(null) }
+    var previewActive by remember(item.id) { mutableStateOf(false) }
+    var previewDisabled by remember(item.id) { mutableStateOf(false) }
+    var lastHoldPreviewAt by remember(item.id) { mutableLongStateOf(0L) }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
 
     val introSeconds = remember(item.id) { AppRuntime.prefs?.introSecondsFor(item.id) ?: 0 }
@@ -310,6 +317,13 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(item.id) { chapters = runCatching { client?.getChapters(item.id) }.getOrNull().orEmpty() }
+
+    LaunchedEffect(item.id, previewTargetMs, previewActive) {
+        val target = previewTargetMs ?: return@LaunchedEffect
+        if (!previewActive || previewDisabled || client == null) return@LaunchedEffect
+        delay(160)
+        previewFrame = runCatching { client.getTrickplayFrame(item.id, target) }.getOrNull()
+    }
 
     fun startAutoNext() {
         if (nextTriggered || AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null) return
@@ -609,6 +623,8 @@ fun PlayerScreen(
             else -> exo.seekTo(targetMs)
         }
         position = targetMs.coerceAtLeast(0L)
+        previewFrame = null
+        previewTargetMs = null
     }
 
     fun togglePlayback() {
@@ -956,6 +972,11 @@ fun PlayerScreen(
             else -> exo.seekTo(to)
         }
         position = to
+        if (seekHoldActive && android.os.SystemClock.elapsedRealtime() - lastHoldPreviewAt >= 700L) {
+            previewFrame = null
+            previewTargetMs = to
+            lastHoldPreviewAt = android.os.SystemClock.elapsedRealtime()
+        }
         seekHint = if (delta > 0) "»»  快进 ${delta / 1000} 秒    ${formatTime(to)}"
         else "««  快退 ${-delta / 1000} 秒    ${formatTime(to)}"
     }
@@ -970,6 +991,7 @@ fun PlayerScreen(
             delay(500)
             if (seekHoldDirection != direction) return@launch
             seekHoldActive = true
+            previewActive = true
             while (seekHoldDirection == direction) {
                 seekBy(direction * 5_000L)
                 seekHoldDelta += direction * 5_000L
@@ -985,6 +1007,9 @@ fun PlayerScreen(
         seekHoldJob?.cancel()
         seekHoldJob = null
         if (!seekHoldActive) seekBy(direction * 10_000L)
+        previewActive = false
+        previewFrame = null
+        previewTargetMs = null
         seekHoldDirection = 0
         seekHoldActive = false
         seekHoldDelta = 0L
@@ -1458,6 +1483,39 @@ fun PlayerScreen(
                         .padding(horizontal = 36.dp, vertical = 18.dp)
                 ) {
                     Column {
+                        val frame = previewFrame
+                        val target = previewTargetMs
+                        if (previewActive && frame != null && target != null && duration > 0) {
+                            BoxWithConstraints(Modifier.fillMaxWidth().height(100.dp)) {
+                                val previewWidth = 160.dp
+                                val x = (maxWidth * (target.toFloat() / duration).coerceIn(0f, 1f) - previewWidth / 2)
+                                    .coerceIn(0.dp, (maxWidth - previewWidth).coerceAtLeast(0.dp))
+                                Box(
+                                    Modifier.offset(x = x).width(previewWidth).height(90.dp)
+                                        .background(Color(0xE6070A12), RoundedCornerShape(6.dp)),
+                                ) {
+                                    AsyncImage(
+                                        model = frame,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        onError = {
+                                            previewDisabled = true
+                                            previewFrame = null
+                                        },
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                    Text(
+                                        formatTime(target),
+                                        color = TextMain,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                                            .background(Color(0xAA070A12)).padding(vertical = 3.dp),
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    )
+                                }
+                            }
+                        }
                         SeekBar(
                             position = position,
                             duration = duration,
