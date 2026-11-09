@@ -226,7 +226,7 @@ fun SearchScreen(
             OutlinedTextField(
                 value = keyword,
                 onValueChange = { keyword = it },
-                placeholder = { Text("搜索电影、剧集", color = TextSub.copy(alpha = 0.7f), fontSize = 13.sp) },
+                placeholder = { Text("按 OK 调出键盘，输入片名或拼音首字母", color = TextSub.copy(alpha = 0.7f), fontSize = 13.sp) },
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Search),

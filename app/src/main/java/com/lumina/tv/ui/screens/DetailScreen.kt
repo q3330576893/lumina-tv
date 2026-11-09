@@ -658,16 +658,11 @@ fun DetailScreen(
 
 @Composable
 private fun PersonCard(person: MediaPerson, imageUrl: String?) {
-    FocusSurface(
-        modifier = Modifier.width(112.dp),
-        corner = 14.dp,
-        scaleTo = 1.04f,
-        onClick = {},
-    ) { focused ->
+    Box(Modifier.width(112.dp)) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 Modifier.size(88.dp).clip(RoundedCornerShape(44.dp))
-                    .background(if (focused) Color(0x334C8DFF) else Color(0x1AFFFFFF)),
+                    .background(Color(0x1AFFFFFF)),
                 contentAlignment = Alignment.Center,
             ) {
                 if (imageUrl != null) {

@@ -70,6 +70,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -185,7 +186,6 @@ fun HomeScreen(
     var gridNextIndex by remember { mutableStateOf(0) }
     var gridHasMore by remember { mutableStateOf(true) }
     val recListState = rememberLazyListState()
-    val libraryListState = rememberLazyListState()
     val gridStates = remember { mutableMapOf<String, LazyGridState>() }
     val gridStateKey = when {
         tab == HomeTab.Media -> "library:${selectedLibraryId ?: "list"}"
@@ -482,15 +482,7 @@ fun HomeScreen(
 
     val heroPool = (latest + movies + series + favorites).distinctBy { it.id }
     val heroItems = remember(heroPool) { pickHeroItems(heroPool, latest.map { it.id }.toHashSet(), 6) }
-    LaunchedEffect(heroItems) {
-        heroIndex = 0
-        if (heroItems.size < 2) return@LaunchedEffect
-        while (true) {
-            // 10 秒一换：太短看不清，太长显得卡住
-            delay(10_000)
-            heroIndex = (heroIndex + 1) % heroItems.size
-        }
-    }
+    LaunchedEffect(heroItems) { heroIndex = 0 }
     val hero = heroItems.getOrNull(heroIndex) ?: resume.firstOrNull()
 
     val navFocus = remember { FocusRequester() }
@@ -521,7 +513,49 @@ fun HomeScreen(
                     state = recListState,
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    item { Hero(heroItems.ifEmpty { listOfNotNull(hero) }, heroIndex, onPlay, onOpenDetail, heroPlayFocus, hazeState, onComposed = { heroComposed = it }) }
+                    item {
+                        val displayedHeroItems = heroItems.ifEmpty { listOfNotNull(hero) }
+                        Hero(
+                            items = displayedHeroItems,
+                            currentIndex = heroIndex,
+                            onPrevious = {
+                                if (displayedHeroItems.isNotEmpty()) {
+                                    heroIndex = (heroIndex - 1 + displayedHeroItems.size) % displayedHeroItems.size
+                                }
+                            },
+                            onNext = {
+                                if (displayedHeroItems.isNotEmpty()) {
+                                    heroIndex = (heroIndex + 1) % displayedHeroItems.size
+                                }
+                            },
+                            onSelectIndex = { heroIndex = it },
+                            onPlay = onPlay,
+                            onOpenDetail = onOpenDetail,
+                            playFocus = heroPlayFocus,
+                            hazeState = hazeState,
+                            onComposed = { heroComposed = it },
+                        )
+                    }
+                    if (!loading && resume.isEmpty() && favorites.isEmpty()) {
+                        item {
+                            FocusSurface(
+                                modifier = Modifier.padding(horizontal = 34.dp, vertical = 12.dp)
+                                    .fillMaxWidth().height(56.dp),
+                                corner = 28.dp,
+                                scaleTo = 1.02f,
+                                requestFocus = initialFocusPending,
+                                onClick = { tab = HomeTab.Media; selectedLibraryId = null },
+                            ) { focused ->
+                                Box(
+                                    Modifier.fillMaxSize()
+                                        .background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(28.dp)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text("还没有观看记录 · 去媒体库逛逛", color = TextMain, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    }
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
@@ -540,16 +574,11 @@ fun HomeScreen(
                     item { Spacer(Modifier.height(140.dp)) }
                 }
                 tab == HomeTab.Media && selectedLibrary == null -> MediaLibrary(
-                    state = libraryListState,
                     views = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) },
                     contents = viewContents,
-                    focusedItemId = focusedMediaId,
                     focusedLibraryId = focusedLibraryId,
                     onLibraryFocused = { focusedLibraryId = it },
-                    onItemFocused = { focusedMediaId = it },
-                    onOpenDetail = onOpenDetail,
                     onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
-                    contentFocus = heroPlayFocus,
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
@@ -1161,63 +1190,86 @@ private fun TabChip(
 /** 媒体库：展示服务器自带的全部分类（按 setup 顺序），可一直往下滑；隐藏项由设置页控制。 */
 @Composable
 private fun MediaLibrary(
-    state: LazyListState,
     views: List<LibraryView>,
     contents: Map<String, List<MediaItem>>,
-    focusedItemId: String?,
     focusedLibraryId: String?,
     onLibraryFocused: (String) -> Unit,
-    onItemFocused: (String) -> Unit,
-    onOpenDetail: (String) -> Unit,
     onOpenLibrary: (LibraryView) -> Unit,
-    contentFocus: FocusRequester,
 ) {
-    val client = AppRuntime.client
     if (views.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("服务器暂无媒体库分类", color = TextSub, fontSize = 13.sp)
         }
         return
     }
-    LazyColumn(state = state, modifier = Modifier.fillMaxSize()) {
-        item {
-            Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 76.dp, bottom = 6.dp)) {
-        Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Text("服务器自带的全部分类· 可在设置里增删", color = TextSub, fontSize = 11.sp)
-            }
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 76.dp, bottom = 6.dp)) {
+            Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("服务器自带的全部分类· 可在设置里增删", color = TextSub, fontSize = 11.sp)
         }
-        views.forEach { v ->
-            val items = contents[v.id].orEmpty()
-            item(key = "view-${v.id}") {
-                Column(Modifier.padding(top = 16.dp)) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(300.dp),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 34.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            items(views, key = { it.id }) { v ->
+                val libraryItems = contents[v.id].orEmpty()
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     FocusSurface(
-                        modifier = Modifier.padding(start = 34.dp, bottom = 10.dp).height(34.dp),
-                        corner = 17.dp,
+                        modifier = Modifier.width(300.dp).height(132.dp),
+                        corner = 20.dp,
+                        scaleTo = 1.04f,
                         requestFocus = focusedLibraryId == v.id,
                         onFocused = { onLibraryFocused(v.id) },
                         onClick = { onOpenLibrary(v) },
                     ) { focused ->
-                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)).padding(horizontal = 12.dp), contentAlignment = Alignment.CenterStart) {
-                            Text("${v.name}  ›  查看全部", color = if (focused) Accent else TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                    }
-                    if (items.isEmpty()) {
-                        Text("正在加载…", color = TextSub, fontSize = 11.sp, modifier = Modifier.padding(start = 34.dp))
-                    } else {
-                        LazyRow(
-                            modifier = Modifier.focusGroup(),
-                            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        val shape = RoundedCornerShape(20.dp)
+                        Box(
+                            Modifier.fillMaxSize()
+                                .then(if (focused) Modifier.shadow(16.dp, shape, clip = false) else Modifier)
+                                .background(Color(0xFF141B2B), shape)
+                                .then(if (focused) Modifier.border(2.dp, Accent, shape) else Modifier)
+                                .clip(shape)
                         ) {
-                            itemsIndexed(items, key = { _, item -> item.id }) { index, it ->
-                                PosterCard(item = it, imageUrl = client?.imageUrl(it), requestInitialFocus = it.id == focusedItemId, onFocused = { onItemFocused(it.id) }, onClick = { onOpenDetail(it.id) })
+                            if (libraryItems.isNotEmpty()) {
+                                Row(Modifier.fillMaxSize()) {
+                                    repeat(2) { column ->
+                                        Column(Modifier.weight(1f).fillMaxHeight()) {
+                                            repeat(2) { row ->
+                                                val imageItem = libraryItems.getOrNull(column * 2 + row)
+                                                Box(Modifier.weight(1f).fillMaxWidth().background(Color(0xFF1A2233))) {
+                                                    imageItem?.let { media ->
+                                                        AsyncImage(
+                                                            model = AppRuntime.client?.imageUrl(media, 360),
+                                                            contentDescription = null,
+                                                            contentScale = ContentScale.Crop,
+                                                            modifier = Modifier.fillMaxSize(),
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x77000000) else Color(0x99000000)))
                             }
+                            Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x22FFFFFF)).align(Alignment.TopCenter))
+                            Column(Modifier.align(Alignment.BottomStart).padding(16.dp)) {
+                                Text(v.name, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    if (libraryItems.isEmpty()) "—" else "共 ${libraryItems.size} 部",
+                                    color = Color(0xCCFFFFFF),
+                                    fontSize = 11.sp,
+                                )
+                            }
+                            Text("›", color = Color(0xCCFFFFFF), fontSize = 24.sp, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp))
                         }
                     }
                 }
             }
         }
-        item { Spacer(Modifier.height(40.dp)) }
     }
 }
 
@@ -1277,6 +1329,9 @@ private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: I
 private fun Hero(
     items: List<MediaItem>,
     currentIndex: Int,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onSelectIndex: (Int) -> Unit,
     onPlay: (MediaItem) -> Unit,
     onOpenDetail: (String) -> Unit,
     playFocus: FocusRequester,
@@ -1293,6 +1348,22 @@ private fun Hero(
         onDispose { onComposed(false) }
     }
     val context = LocalContext.current
+    var heroFocused by remember { mutableStateOf(false) }
+    var focusedTargets by remember { mutableStateOf<Set<String>>(emptySet()) }
+    fun reportFocus(key: String, focused: Boolean) {
+        val next = if (focused) focusedTargets + key else focusedTargets - key
+        focusedTargets = next
+        heroFocused = next.isNotEmpty()
+    }
+    LaunchedEffect(items, heroFocused) {
+        if (heroFocused || items.size < 2) return@LaunchedEffect
+        delay(3000)
+        while (true) {
+            // 10 秒一换：太短看不清，太长显得卡住
+            delay(10_000)
+            onNext()
+        }
+    }
     // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
     val embyLogo = remember(item.id, item.logoTag) {
         AppRuntime.client?.logoUrl(item)?.takeIf { it.isNotBlank() }
@@ -1321,6 +1392,14 @@ private fun Hero(
                 .height(heroHeight)
                 .clip(RoundedCornerShape(bottomEnd = 34.dp))
                 .background(Brush.linearGradient(listOf(Color(0xFF174C58), Color(0xFF111827))))
+                .onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
+                    when (event.key) {
+                        Key.DirectionLeft -> { onPrevious(); true }
+                        Key.DirectionRight -> { onNext(); true }
+                        else -> false
+                    }
+                }
         ) {
             Crossfade(targetState = currentIndex, animationSpec = tween(420), label = "hero-backdrop") { index ->
                 val heroItem = items.getOrNull(index)
@@ -1366,6 +1445,13 @@ private fun Hero(
                 )
             )
         )
+        Box(
+            Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(0.46f)
+                .align(Alignment.CenterStart)
+                .background(Brush.horizontalGradient(listOf(Color(0x66000000), Color.Transparent)))
+        )
         Column(
             Modifier.align(Alignment.BottomStart).padding(start = 34.dp, bottom = 24.dp, end = 200.dp)
         ) {
@@ -1408,7 +1494,8 @@ private fun Hero(
             Spacer(Modifier.height(14.dp))
             Row {
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(128.dp),
+                    modifier = Modifier.height(42.dp).width(128.dp)
+                        .onFocusChanged { reportFocus("play", it.hasFocus || it.isFocused) },
                     corner = 21.dp,
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
@@ -1436,7 +1523,8 @@ private fun Hero(
                 }
                 Spacer(Modifier.width(12.dp))
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(108.dp),
+                    modifier = Modifier.height(42.dp).width(108.dp)
+                        .onFocusChanged { reportFocus("detail", it.hasFocus || it.isFocused) },
                     corner = 21.dp,
                     scaleTo = 1.05f,
                     onClick = { onOpenDetail(item.seriesId ?: item.id) },
@@ -1449,16 +1537,39 @@ private fun Hero(
             }
         }
         
-            Row(
+            Column(
                 Modifier.align(Alignment.BottomEnd).padding(end = 34.dp, bottom = 34.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalAlignment = Alignment.End,
             ) {
-                items.indices.forEach { index ->
-                    val width by animateDpAsState(if (index == currentIndex) 22.dp else 8.dp, label = "hero-indicator-width")
-                    Box(Modifier.width(width).height(8.dp).background(
-                        if (index == currentIndex) Accent else Color(0x99FFFFFF), RoundedCornerShape(4.dp),
-                    ))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    items.indices.forEach { index ->
+                        val width by animateDpAsState(if (index == currentIndex) 22.dp else 8.dp, label = "hero-indicator-width")
+                        FocusSurface(
+                            modifier = Modifier.width(width).height(8.dp)
+                                .onFocusChanged { reportFocus("indicator-$index", it.hasFocus || it.isFocused) },
+                            corner = 4.dp,
+                            scaleTo = 1f,
+                            onClick = { onSelectIndex(index) },
+                        ) { focused ->
+                            Box(
+                                Modifier.fillMaxSize()
+                                    .background(
+                                        if (index == currentIndex) Accent else Color(0x99FFFFFF),
+                                        RoundedCornerShape(4.dp),
+                                    )
+                                    .then(
+                                        if (focused) Modifier.border(1.dp, Accent, RoundedCornerShape(4.dp))
+                                        else Modifier
+                                    )
+                            )
+                        }
+                    }
+                }
+                AnimatedVisibility(visible = focusedTargets.any { it.startsWith("indicator-") }) {
+                    Text("${currentIndex + 1} / ${items.size}", color = TextSub, fontSize = 11.sp)
                 }
             }
         }
