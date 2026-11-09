@@ -66,6 +66,8 @@ import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 
+private const val SEARCH_REQUEST_TIMEOUT_SECONDS = 8
+
 @Composable
 fun SearchScreen(
     initialKeyword: String = "",
@@ -153,7 +155,7 @@ fun SearchScreen(
                 types = types, sortBy = "SortName", sortOrder = "Ascending",
                 limit = 40, startIndex = 0, searchTerm = query, filters = filters,
                 fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
-                requestTimeoutSeconds = 4,
+                requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
             )
             results = page
             pageStart = page.size
@@ -190,7 +192,7 @@ fun SearchScreen(
                         types = types, sortBy = "SortName", sortOrder = "Ascending",
                         limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
                         fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
-                        requestTimeoutSeconds = 4,
+                        requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
                     )
                     results = (results + page).distinctBy { it.id }
                     pageStart += page.size

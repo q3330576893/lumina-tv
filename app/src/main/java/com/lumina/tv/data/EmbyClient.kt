@@ -9,6 +9,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.URLEncoder
 import android.net.Uri
 import java.util.concurrent.TimeUnit
@@ -66,10 +68,19 @@ class EmbyClient(
 
     private fun getSync(url: String, withToken: Boolean = true, timeoutSeconds: Int? = null): JSONObject {
         val req = Request.Builder().url(url).header("X-Emby-Authorization", authHeader(withToken)).build()
-        http.newCall(req).apply { timeoutSeconds?.let { timeout().timeout(it.toLong(), TimeUnit.SECONDS) } }.execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${safeErrorBody(body)}")
-            return parseJsonObject(body)
+        var attempts = 0
+        while (true) {
+            try {
+                http.newCall(req).apply { timeoutSeconds?.let { timeout().timeout(it.toLong(), TimeUnit.SECONDS) } }.execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${safeErrorBody(body)}")
+                    return parseJsonObject(body)
+                }
+            } catch (e: IOException) {
+                attempts++
+                val timedOut = e is InterruptedIOException || e.message.orEmpty().contains("timeout", true)
+                if (timeoutSeconds == null || !timedOut || attempts >= SEARCH_REQUEST_ATTEMPTS) throw e
+            }
         }
     }
 
@@ -863,6 +874,8 @@ data class PlaybackTarget(
     }
 
     companion object {
+        private const val SEARCH_REQUEST_ATTEMPTS = 2
+
         fun normalize(raw: String): String {
             var s = raw.trim()
             if (s.isEmpty()) return s
