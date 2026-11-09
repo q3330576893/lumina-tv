@@ -1,5 +1,8 @@
 package com.lumina.tv.data
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+
 /**
  * 进程内媒体库缓存：避免每次返回首页 / 详情页都重新拉全套数据。
  * 命中缓存立即渲染，过期后在后台静默刷新。
@@ -42,6 +45,51 @@ object LibraryCache {
 
     fun putHome(data: HomeData) {
         synchronized(this) { home = data }
+    }
+
+    suspend fun prefetch(client: EmbyClient, onStep: (String) -> Unit = {}) {
+        if (homeFresh()) return
+        coroutineScope {
+            val resumeTask = async { runCatching { client.getResume(20) }.getOrDefault(emptyList()) }
+            val moviesTask = async {
+                runCatching {
+                    client.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 24)
+                }.getOrDefault(emptyList())
+            }
+            val seriesTask = async {
+                runCatching {
+                    client.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 24)
+                }.getOrDefault(emptyList())
+            }
+            val favoritesTask = async { runCatching { client.getFavorites(24) }.getOrDefault(emptyList()) }
+            val viewsTask = async { runCatching { client.getViews() }.getOrDefault(emptyList()) }
+            val latestTask = async {
+                runCatching { client.getLatest(null, 24) }
+                    .getOrDefault(emptyList())
+                    .distinctBy { it.id }
+                    .filter { it.type != "Movie" && it.type != "Series" }
+            }
+
+            val resume = resumeTask.await()
+            val movies = moviesTask.await()
+            val series = seriesTask.await()
+            val favorites = favoritesTask.await()
+            val views = viewsTask.await()
+            val latest = latestTask.await()
+            putHome(
+                HomeData(
+                    resume = resume,
+                    latest = latest,
+                    movies = movies,
+                    series = series,
+                    favorites = favorites,
+                    genres = emptyList(),
+                    views = views,
+                    at = System.currentTimeMillis(),
+                )
+            )
+        }
+        onStep("就绪")
     }
 
     fun detail(id: String, ttl: Long = DETAIL_TTL): DetailData? {

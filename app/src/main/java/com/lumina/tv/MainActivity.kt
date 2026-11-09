@@ -6,6 +6,7 @@ import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -29,10 +30,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntSize
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.ui.components.AuroraBackground
 import com.lumina.tv.ui.screens.DetailScreen
 import com.lumina.tv.ui.screens.HomeScreen
@@ -40,6 +46,7 @@ import com.lumina.tv.ui.screens.LoginScreen
 import com.lumina.tv.ui.screens.PlayerScreen
 import com.lumina.tv.ui.screens.SearchScreen
 import com.lumina.tv.ui.screens.SettingsScreen
+import com.lumina.tv.ui.screens.SplashScreen
 import com.lumina.tv.ui.theme.LuminaTheme
 
 sealed interface Screen {
@@ -87,12 +94,37 @@ class MainActivity : ComponentActivity() {
         setContent {
             LuminaTheme {
                 AuroraBackground {
-                    AppRoot(
-                        phoneSearch = phoneSearch,
-                        onConsumePhoneSearch = { phoneSearch = null },
-                        crashNotice = startupCrashNotice,
-                        onConsumeCrashNotice = { startupCrashNotice = null },
-                    )
+                    var bootDone by remember { mutableStateOf(AppRuntime.session == null) }
+                    val serverName = AppRuntime.prefs?.serverName
+                        ?: AppRuntime.session?.serverName
+                        ?: "Emby"
+                    LaunchedEffect(Unit) {
+                        if (!bootDone) {
+                            val startedAt = System.currentTimeMillis()
+                            AppRuntime.client?.let { client ->
+                                withTimeoutOrNull(2000) { LibraryCache.prefetch(client) { } }
+                            }
+                            val elapsed = System.currentTimeMillis() - startedAt
+                            if (elapsed < 1400) delay(1400 - elapsed)
+                            bootDone = true
+                        }
+                    }
+                    Crossfade(
+                        targetState = bootDone,
+                        animationSpec = tween(260),
+                        label = "boot-transition",
+                    ) { done ->
+                        if (done) {
+                            AppRoot(
+                                phoneSearch = phoneSearch,
+                                onConsumePhoneSearch = { phoneSearch = null },
+                                crashNotice = startupCrashNotice,
+                                onConsumeCrashNotice = { startupCrashNotice = null },
+                            )
+                        } else {
+                            SplashScreen(serverName = serverName, modifier = Modifier.fillMaxSize())
+                        }
+                    }
                 }
             }
         }
