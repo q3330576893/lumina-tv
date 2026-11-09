@@ -64,9 +64,9 @@ class EmbyClient(
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
-    private fun getSync(url: String, withToken: Boolean = true): JSONObject {
+    private fun getSync(url: String, withToken: Boolean = true, timeoutSeconds: Int? = null): JSONObject {
         val req = Request.Builder().url(url).header("X-Emby-Authorization", authHeader(withToken)).build()
-        http.newCall(req).execute().use { resp ->
+        http.newCall(req).apply { timeoutSeconds?.let { timeout().timeout(it.toLong(), TimeUnit.SECONDS) } }.execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${safeErrorBody(body)}")
             return parseJsonObject(body)
@@ -213,6 +213,8 @@ class EmbyClient(
         searchTerm: String? = null,
         genre: String? = null,
         filters: String? = null,
+        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
+        requestTimeoutSeconds: Int? = null,
     ): List<MediaItem> = withContext(Dispatchers.IO) {
         val params = mutableMapOf(
             "Recursive" to "true",
@@ -220,7 +222,7 @@ class EmbyClient(
             "StartIndex" to startIndex.toString(),
             "SortBy" to sortBy,
             "SortOrder" to sortOrder,
-            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
+            "Fields" to fields,
             "ImageTypeLimit" to "1",
             "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo",
         )
@@ -229,7 +231,7 @@ class EmbyClient(
         if (searchTerm != null) params["SearchTerm"] = searchTerm
         if (genre != null) params["Genres"] = genre
         if (filters != null) params["Filters"] = filters
-        val response = getSync(url("/Users/$userId/Items", params))
+        val response = getSync(url("/Users/$userId/Items", params), timeoutSeconds = requestTimeoutSeconds)
         lastTotalRecordCount = response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
         val arr = response.optJSONArray("Items") ?: JSONArray()
         parseItems(arr)

@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.github.promeg.pinyinhelper.Pinyin
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.data.EmbyException
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.ui.components.EmptyView
 import com.lumina.tv.ui.components.FocusSurface
@@ -58,8 +59,12 @@ import com.lumina.tv.ui.theme.GlassLine
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.launch
+import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 
 @Composable
 fun SearchScreen(
@@ -79,14 +84,13 @@ fun SearchScreen(
     var loadingMore by remember { mutableStateOf(false) }
     var hasMore by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
+    var searchError by remember { mutableStateOf<String?>(null) }
     var pageStart by remember { mutableIntStateOf(0) }
     var searchNow by remember { mutableIntStateOf(0) }
     var handledSearchNow by remember { mutableIntStateOf(0) }
     var history by remember { mutableStateOf(prefs?.searchHistory().orEmpty()) }
     var focusedItemId by rememberSaveable { mutableStateOf<String?>(null) }
     var typeFilter by rememberSaveable { mutableIntStateOf(0) }
-    var yearFilter by rememberSaveable { mutableIntStateOf(0) }
-    var ratingFilter by rememberSaveable { mutableIntStateOf(0) }
     var favoritesOnly by rememberSaveable { mutableStateOf(false) }
     var unwatchedOnly by rememberSaveable { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
@@ -116,16 +120,23 @@ fun SearchScreen(
             loading = false
             loadingMore = false
             searched = false
+            searchError = null
             gridState.scrollToItem(0)
             return@LaunchedEffect
         }
         if (searchNow != handledSearchNow) handledSearchNow = searchNow else delay(400)
-        val currentClient = client ?: return@LaunchedEffect
+        val currentClient = client ?: run {
+            searched = true
+            loading = false
+            searchError = "无法连接到媒体服务器：客户端未就绪"
+            return@LaunchedEffect
+        }
         loading = true
         loadingMore = false
         results = emptyList()
         pageStart = 0
         searched = true
+        searchError = null
         gridState.scrollToItem(0)
         val filters = listOfNotNull(
             "IsFavorite".takeIf { favoritesOnly },
@@ -136,16 +147,26 @@ fun SearchScreen(
             2 -> "Series"
             else -> null
         }
-        val page = runCatching {
-            currentClient.getItems(types = types, sortBy = "SortName", sortOrder = "Ascending", limit = 60,
-                startIndex = 0, searchTerm = query, filters = filters)
-        }.getOrDefault(emptyList())
-        results = page
-        pageStart = page.size
-        hasMore = page.size == 60 && pageStart < 300
-        loading = false
-        prefs?.rememberSearch(query)
-        history = prefs?.searchHistory().orEmpty()
+        try {
+            val page = currentClient.getItems(
+                types = types, sortBy = "SortName", sortOrder = "Ascending",
+                limit = 40, startIndex = 0, searchTerm = query, filters = filters,
+                fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
+                requestTimeoutSeconds = 8,
+            )
+            results = page
+            pageStart = page.size
+            hasMore = page.size == 40 && pageStart < 300
+            prefs?.rememberSearch(query)
+            history = prefs?.searchHistory().orEmpty()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            searchError = searchFailureMessage(e)
+            hasMore = false
+        } finally {
+            loading = false
+        }
     }
 
     LaunchedEffect(gridState, hasMore, loading, keyword, typeFilter, favoritesOnly, unwatchedOnly) {
@@ -163,14 +184,24 @@ fun SearchScreen(
                     "IsUnplayed".takeIf { unwatchedOnly },
                 ).joinToString(",").ifBlank { null }
                 val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
-                val page = runCatching {
-                    currentClient.getItems(types = types, sortBy = "SortName", sortOrder = "Ascending", limit = 60,
-                        startIndex = pageStart, searchTerm = keyword.trim(), filters = filters)
-                }.getOrDefault(emptyList())
-                results = (results + page).distinctBy { it.id }
-                pageStart += page.size
-                hasMore = page.size == 60 && pageStart < 300
-                loadingMore = false
+                try {
+                    val page = currentClient.getItems(
+                        types = types, sortBy = "SortName", sortOrder = "Ascending",
+                        limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
+                        fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
+                        requestTimeoutSeconds = 8,
+                    )
+                    results = (results + page).distinctBy { it.id }
+                    pageStart += page.size
+                    hasMore = page.size == 40 && pageStart < 300
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    searchError = searchFailureMessage(e)
+                    hasMore = false
+                } finally {
+                    loadingMore = false
+                }
             }
     }
 
@@ -178,7 +209,7 @@ fun SearchScreen(
         results.groupBy { if (it.type.equals("Episode", true)) it.seriesId ?: it.id else it.id }
             .values.map { group -> group.firstOrNull { it.type.equals("Series", true) } ?: group.first() }
     }
-    val visibleResults = remember(folded, keyword, yearFilter, ratingFilter) {
+    val visibleResults = remember(folded, keyword) {
         val query = keyword.trim()
         val needle = query.filterNot(Char::isWhitespace)
         fun matchRank(item: MediaItem): Int {
@@ -198,16 +229,8 @@ fun SearchScreen(
             }.getOrDefault(3)
             return pinyin
         }
-        folded.filter { item ->
-            val yearMatches = when (yearFilter) {
-                1 -> (item.year ?: 0) >= 2020
-                2 -> item.year in 2010..2019
-                3 -> (item.year ?: Int.MAX_VALUE) < 2020
-                else -> true
-            }
-            val score = item.rating ?: item.communityRating ?: 0.0
-            yearMatches && score >= listOf(0.0, 6.0, 7.0, 8.0)[ratingFilter] && matchRank(item) < 3
-        }.sortedWith(compareBy<MediaItem> { matchRank(it) }
+        folded.filter { item -> matchRank(item) < 3 }
+            .sortedWith(compareBy<MediaItem> { matchRank(it) }
             .thenByDescending { it.rating ?: it.communityRating ?: 0.0 }
             .thenByDescending { it.year ?: 0 })
     }
@@ -216,8 +239,6 @@ fun SearchScreen(
         add(when (typeFilter) { 1 -> "电影"; 2 -> "剧集"; else -> "全部类型" })
         if (favoritesOnly) add("收藏")
         if (unwatchedOnly) add("未看")
-        if (yearFilter != 0) add(listOf("", "2020+", "2010-2019", "2020 前")[yearFilter])
-        if (ratingFilter != 0) add("${listOf(0, 6, 7, 8)[ratingFilter]} 分以上")
     }.joinToString(" · ")
 
     Column(
@@ -266,12 +287,6 @@ fun SearchScreen(
             listOf("全部", "电影", "剧集").forEachIndexed { index, label ->
                 FilterChip(label, typeFilter == index) { typeFilter = index }
             }
-            listOf("全部年份", "2020+", "2010-19", "2020 前").forEachIndexed { index, label ->
-                FilterChip(label, yearFilter == index) { yearFilter = index }
-            }
-            listOf("不限分", "6+", "7+", "8+").forEachIndexed { index, label ->
-                FilterChip(label, ratingFilter == index) { ratingFilter = index }
-            }
             FilterChip("收藏", favoritesOnly) { favoritesOnly = !favoritesOnly }
             FilterChip("未看", unwatchedOnly) { unwatchedOnly = !unwatchedOnly }
         }
@@ -279,6 +294,17 @@ fun SearchScreen(
         Spacer(Modifier.height(10.dp))
         when {
             loading && results.isEmpty() -> LoadingView(text = "搜索中…")
+            keyword.isNotBlank() && searched && searchError != null -> {
+                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    EmptyView(searchError!!)
+                    FocusSurface(Modifier.padding(top = 8.dp).height(42.dp).width(112.dp), corner = 12.dp,
+                        onClick = { submitSearch() }) { focused ->
+                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                            Text("重试", color = TextMain, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
             keyword.isNotBlank() && searched -> {
                 Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("找到 ${visibleResults.size} 个结果", color = TextMain, fontSize = 14.sp)
@@ -350,6 +376,22 @@ fun SearchScreen(
                 }
             }
         }
+    }
+}
+
+private fun searchFailureMessage(error: Throwable): String {
+    val message = error.message.orEmpty().trim()
+    return when (error) {
+        is SocketTimeoutException -> "搜索超时，请检查服务器响应后重试。"
+        is UnknownHostException -> "无法连接服务器：找不到服务器地址，请检查地址和网络。"
+        is ConnectException -> "无法连接服务器：连接被拒绝或网络不可达。"
+        is IOException -> if (message.contains("timeout", true) || message.contains("timed out", true)) {
+            "搜索超时，请检查服务器响应后重试。"
+        } else {
+            "网络连接失败：${message.ifBlank { "请检查设备网络和服务器状态" }}"
+        }
+        is EmbyException -> "服务器返回错误：$message"
+        else -> "搜索失败：${message.ifBlank { error.javaClass.simpleName }}"
     }
 }
 
