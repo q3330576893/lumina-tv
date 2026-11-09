@@ -121,9 +121,17 @@ fun SearchScreen(
             loadingMore = false
             searched = false
             searchError = null
-            gridState.scrollToItem(0)
+            gridState.requestScrollToItem(0)
             return@LaunchedEffect
         }
+        loading = true
+        loadingMore = false
+        results = emptyList()
+        pageStart = 0
+        hasMore = false
+        searched = true
+        searchError = null
+        gridState.requestScrollToItem(0)
         if (searchNow != handledSearchNow) handledSearchNow = searchNow else delay(400)
         val currentClient = client ?: run {
             searched = true
@@ -131,13 +139,6 @@ fun SearchScreen(
             searchError = "无法连接到媒体服务器：客户端未就绪"
             return@LaunchedEffect
         }
-        loading = true
-        loadingMore = false
-        results = emptyList()
-        pageStart = 0
-        searched = true
-        searchError = null
-        gridState.scrollToItem(0)
         val filters = listOfNotNull(
             "IsFavorite".takeIf { favoritesOnly },
             "IsUnplayed".takeIf { unwatchedOnly },
@@ -152,7 +153,7 @@ fun SearchScreen(
                 types = types, sortBy = "SortName", sortOrder = "Ascending",
                 limit = 40, startIndex = 0, searchTerm = query, filters = filters,
                 fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
-                requestTimeoutSeconds = 8,
+                requestTimeoutSeconds = 4,
             )
             results = page
             pageStart = page.size
@@ -189,7 +190,7 @@ fun SearchScreen(
                         types = types, sortBy = "SortName", sortOrder = "Ascending",
                         limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
                         fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
-                        requestTimeoutSeconds = 8,
+                        requestTimeoutSeconds = 4,
                     )
                     results = (results + page).distinctBy { it.id }
                     pageStart += page.size

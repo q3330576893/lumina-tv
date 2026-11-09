@@ -46,10 +46,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -276,13 +278,12 @@ fun PosterCard(
                 val rating = item.communityRating ?: item.rating
                 if (rating != null && rating > 0) {
                     Text(
-                        "★ %.1f".format(rating),
-                        color = Color(0xFFFFD76A),
+                        "%.1f".format(rating),
+                        color = Color.White,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
-                            .background(Color(0xCC000000), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 5.dp, vertical = 2.dp),
+                        style = TextStyle(shadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 3f)),
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
                     )
                 }
             }
