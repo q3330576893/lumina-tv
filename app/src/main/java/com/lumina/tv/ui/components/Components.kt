@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +58,7 @@ import coil.compose.AsyncImage
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
+import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
@@ -249,6 +251,41 @@ fun PosterCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
+            if (AppRuntime.prefs?.showPosterWatchState ?: true) {
+                if (item.played) {
+                    Box(
+                        Modifier.align(Alignment.TopStart).padding(6.dp)
+                            .size(20.dp)
+                            .background(Color(0xCC000000), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("✓", color = Accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else if (item.playedPercentage >= 90.0) {
+                    Box(
+                        Modifier.align(Alignment.TopStart).padding(6.dp)
+                            .size(20.dp)
+                            .background(Color(0xCC000000), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("✓", color = Color(0x99FFFFFF), fontSize = 11.sp)
+                    }
+                }
+            }
+            if (AppRuntime.prefs?.showPosterRating ?: true) {
+                val rating = item.communityRating ?: item.rating
+                if (rating != null && rating > 0) {
+                    Text(
+                        "★ %.1f".format(rating),
+                        color = Color(0xFFFFD76A),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                            .background(Color(0xCC000000), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 5.dp, vertical = 2.dp),
+                    )
+                }
+            }
             if (item.positionTicks > 0 && !item.played) {
                 val total = item.runtimeTicks ?: 0L
                 val ratio = if (total > 0) (item.positionTicks.toFloat() / total).coerceIn(0f, 1f) else 0f

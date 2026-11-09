@@ -71,6 +71,8 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
     var audioDecodeMode by remember { mutableStateOf(prefs?.audioDecodeMode ?: "auto") }
     var autoNext by remember { mutableStateOf(prefs?.autoNextEpisode ?: false) }
+    var showPosterRating by remember { mutableStateOf(AppRuntime.prefs?.showPosterRating ?: true) }
+    var showPosterWatchState by remember { mutableStateOf(AppRuntime.prefs?.showPosterWatchState ?: true) }
     var bootLaunch by remember { mutableStateOf(prefs?.bootLaunch ?: false) }
     var subtitleBg by remember { mutableStateOf(prefs?.subtitleBg ?: false) }
     var subtitleColor by remember { mutableStateOf(prefs?.subtitleColor ?: android.graphics.Color.WHITE) }
@@ -298,6 +300,26 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             if (glassKey == "off") "已关闭玻璃效果：低配设备更流畅省电" else "磨砂更沉浸，清透更轻盈，关闭更省电",
                             color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        SwitchRow(
+                            title = "海报评分",
+                            desc = "在海报右上角显示 ★ 评分",
+                            checked = showPosterRating,
+                            onChange = {
+                                showPosterRating = it
+                                AppRuntime.prefs?.showPosterRating = it
+                            },
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        SwitchRow(
+                            title = "观看状态",
+                            desc = "在海报左上角标记已看",
+                            checked = showPosterWatchState,
+                            onChange = {
+                                showPosterWatchState = it
+                                AppRuntime.prefs?.showPosterWatchState = it
+                            },
                         )
                     }
                 }

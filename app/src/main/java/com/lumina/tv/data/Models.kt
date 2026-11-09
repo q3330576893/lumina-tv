@@ -39,7 +39,8 @@ data class MediaItem(
             audioFormat?.let { add(it) }
         }
     val subtitle: String
-        get() = buildString {
+        by lazy {
+            buildString {
             val y = year
             if (y != null) append(y)
             val r = rating ?: communityRating
@@ -51,6 +52,7 @@ data class MediaItem(
                 if (isNotEmpty()) append("  ·  ")
                 if (parentIndexNumber != null) append("S%02dE%02d".format(parentIndexNumber, indexNumber))
                 else append("第 %d 集".format(indexNumber))
+            }
             }
         }
 }

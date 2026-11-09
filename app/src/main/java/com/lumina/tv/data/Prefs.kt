@@ -198,6 +198,16 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putBoolean("dv_p7_use_mpv", v).apply()
 
     /** 自动连播下一集 */
+    /** 海报上显示观看状态（已看 ✓） */
+    var showPosterWatchState: Boolean
+        get() = sp.getBoolean("show_poster_watch_state", true)
+        set(v) = sp.edit().putBoolean("show_poster_watch_state", v).apply()
+
+    /** 海报上显示评分 */
+    var showPosterRating: Boolean
+        get() = sp.getBoolean("show_poster_rating", true)
+        set(v) = sp.edit().putBoolean("show_poster_rating", v).apply()
+
     var autoNextEpisode: Boolean
         get() = sp.getBoolean("auto_next", false)
         set(v) = sp.edit().putBoolean("auto_next", v).apply()
