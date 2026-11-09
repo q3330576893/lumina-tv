@@ -2,6 +2,7 @@ package com.lumina.tv.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -241,7 +242,7 @@ fun SearchScreen(
                 },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = TextMain, unfocusedTextColor = TextMain,
-                    focusedBorderColor = Accent, unfocusedBorderColor = GlassLine, cursorColor = Accent,
+                    focusedBorderColor = Accent.copy(alpha = 0.62f), unfocusedBorderColor = GlassLine, cursorColor = Accent,
                 ),
                 modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(inputFocus),
             )
@@ -356,9 +357,11 @@ fun SearchScreen(
 private fun FilterChip(label: String, active: Boolean, onClick: () -> Unit) {
     FocusSurface(Modifier.height(32.dp).widthIn(min = 54.dp).padding(horizontal = 0.dp), corner = 16.dp, scaleTo = 1f, onClick = onClick) { focused ->
         Box(Modifier.background(
-            if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
-            RoundedCornerShape(16.dp)).padding(horizontal = 12.dp, vertical = 7.dp), contentAlignment = Alignment.Center) {
-            Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 10.sp, maxLines = 1)
+            if (active) Accent.copy(alpha = 0.18f) else if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
+            RoundedCornerShape(16.dp))
+            .then(if (active) Modifier.border(1.dp, Accent.copy(alpha = 0.55f), RoundedCornerShape(16.dp)) else Modifier)
+            .padding(horizontal = 12.dp, vertical = 7.dp), contentAlignment = Alignment.Center) {
+            Text(label, color = if (active) Accent else TextMain, fontSize = 10.sp, maxLines = 1)
         }
     }
 }

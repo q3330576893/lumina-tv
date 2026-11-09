@@ -1,6 +1,7 @@
 package com.lumina.tv.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -95,6 +99,7 @@ fun DetailScreen(
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
     var selectedSourceId by remember(id) { mutableStateOf<String?>(null) }
     var showSettingsPicker by remember { mutableStateOf(false) }
+    var showTrackSheet by remember { mutableStateOf(false) }
     var pickerTitle by remember { mutableStateOf("") }
     var pickerOptions by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var pickerCurrentKey by remember { mutableStateOf<String?>(null) }
@@ -478,6 +483,22 @@ fun DetailScreen(
                             }
                             Spacer(Modifier.width(12.dp))
                             FocusSurface(
+                                Modifier.height(46.dp).width(46.dp),
+                                corner = 23.dp,
+                                onClick = { showTrackSheet = true },
+                            ) { focused ->
+                                Box(
+                                    Modifier.fillMaxSize().background(
+                                        if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF),
+                                        RoundedCornerShape(23.dp),
+                                    ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(Icons.Rounded.Tune, contentDescription = "播放设置", tint = TextMain, modifier = Modifier.size(20.dp))
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            FocusSurface(
                                 modifier = Modifier.height(46.dp).width(120.dp),
                                 corner = 23.dp,
                                 onClick = onBack,
@@ -494,48 +515,6 @@ fun DetailScreen(
                                     Text("返回", color = TextMain, fontSize = 13.sp)
                                 }
                             }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
-                val currentItem = it0!!
-                val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
-                GlassPanel(Modifier.fillMaxWidth(), corner = 12.dp) {
-                    Column(Modifier.padding(6.dp)) {
-                        SettingRow("版本", activeSource?.displayLabel ?: "默认", enabled = sources.size > 1) {
-                            if (sources.size > 1) {
-                                pickerTitle = "选择版本"
-                                pickerOptions = sources.map { it.id to it.displayLabel }
-                                pickerCurrentKey = activeSource?.id
-                                pickerAction = { key -> selectedSourceId = key }
-                                showSettingsPicker = true
-                            }
-                        }
-                        val audioTracks = activeSource?.streams.orEmpty().filter { it.type == "Audio" }
-                        SettingRow("音频", audioTracks.firstOrNull { it.index == selectedAudioIndex }?.let(::audioLabel)
-                            ?: audioTracks.firstOrNull()?.let(::audioLabel) ?: "默认", enabled = audioTracks.size > 1) {
-                            if (audioTracks.isNotEmpty()) {
-                                pickerTitle = "选择音频"
-                                pickerOptions = audioTracks.map { it.index.toString() to audioLabel(it) }
-                                pickerCurrentKey = (selectedAudioIndex ?: audioTracks.firstOrNull()?.index)?.toString()
-                                pickerAction = { key ->
-                                    selectedAudioIndex = key.toIntOrNull()
-                                    key.toIntOrNull()?.let { AppRuntime.prefs?.rememberAudioTrack(currentItem.id, it) }
-                                }
-                                showSettingsPicker = true
-                            }
-                        }
-                        val subtitleTracks = activeSource?.streams.orEmpty().filter { it.type == "Text" || it.type == "Subtitle" }
-                        SettingRow("字幕", if (selectedSubtitleKey == "-1") "关闭" else subtitleTracks.firstOrNull { subtitleKey(it) == selectedSubtitleKey }?.language ?: subtitleTracks.firstOrNull()?.language ?: "默认", enabled = subtitleTracks.isNotEmpty()) {
-                            pickerTitle = "选择字幕"
-                            pickerOptions = listOf("-1" to "关闭") + subtitleTracks.map { subtitleKey(it) to (it.language ?: "未知语言") }
-                            pickerCurrentKey = selectedSubtitleKey
-                            pickerAction = { key ->
-                                selectedSubtitleKey = key
-                                AppRuntime.prefs?.rememberSubtitleTrack(currentItem.id, key)
-                            }
-                            showSettingsPicker = true
                         }
                     }
                 }
@@ -621,6 +600,51 @@ fun DetailScreen(
                 }
 
                 Spacer(Modifier.height(28.dp))
+            }
+        }
+
+        if (showTrackSheet && it0 != null) {
+            val currentItem = it0!!
+            val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
+            TrackSheet(onDismiss = { showTrackSheet = false }) {
+                GlassPanel(Modifier.fillMaxWidth(), corner = 12.dp) {
+                    Column(Modifier.padding(6.dp)) {
+                        SettingRow("版本", activeSource?.displayLabel ?: "默认", enabled = sources.size > 1) {
+                            if (sources.size > 1) {
+                                pickerTitle = "选择版本"
+                                pickerOptions = sources.map { it.id to it.displayLabel }
+                                pickerCurrentKey = activeSource?.id
+                                pickerAction = { key -> selectedSourceId = key }
+                                showSettingsPicker = true
+                            }
+                        }
+                        val audioTracks = activeSource?.streams.orEmpty().filter { it.type == "Audio" }
+                        SettingRow("音频", audioTracks.firstOrNull { it.index == selectedAudioIndex }?.let(::audioLabel)
+                            ?: audioTracks.firstOrNull()?.let(::audioLabel) ?: "默认", enabled = audioTracks.size > 1) {
+                            if (audioTracks.isNotEmpty()) {
+                                pickerTitle = "选择音频"
+                                pickerOptions = audioTracks.map { it.index.toString() to audioLabel(it) }
+                                pickerCurrentKey = (selectedAudioIndex ?: audioTracks.firstOrNull()?.index)?.toString()
+                                pickerAction = { key ->
+                                    selectedAudioIndex = key.toIntOrNull()
+                                    key.toIntOrNull()?.let { AppRuntime.prefs?.rememberAudioTrack(currentItem.id, it) }
+                                }
+                                showSettingsPicker = true
+                            }
+                        }
+                        val subtitleTracks = activeSource?.streams.orEmpty().filter { it.type == "Text" || it.type == "Subtitle" }
+                        SettingRow("字幕", if (selectedSubtitleKey == "-1") "关闭" else subtitleTracks.firstOrNull { subtitleKey(it) == selectedSubtitleKey }?.language ?: subtitleTracks.firstOrNull()?.language ?: "默认", enabled = subtitleTracks.isNotEmpty()) {
+                            pickerTitle = "选择字幕"
+                            pickerOptions = listOf("-1" to "关闭") + subtitleTracks.map { subtitleKey(it) to (it.language ?: "未知语言") }
+                            pickerCurrentKey = selectedSubtitleKey
+                            pickerAction = { key ->
+                                selectedSubtitleKey = key
+                                AppRuntime.prefs?.rememberSubtitleTrack(currentItem.id, key)
+                            }
+                            showSettingsPicker = true
+                        }
+                    }
+                }
             }
         }
 
@@ -759,6 +783,35 @@ private fun audioLabel(stream: com.lumina.tv.data.MediaStream): String =
     listOfNotNull(stream.language ?: "未知语言", stream.codec, stream.channels?.let { "${it}ch" }).joinToString(" ")
 
 private fun subtitleKey(stream: com.lumina.tv.data.MediaStream): String = "${stream.index}:0"
+
+@Composable
+private fun TrackSheet(
+    onDismiss: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
+            Column(
+                Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(24.dp)
+                    .shadow(20.dp, RoundedCornerShape(20.dp))
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xF20C0E16))
+                    .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp))
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("播放设置", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                content()
+                Spacer(Modifier.height(2.dp))
+                FocusSurface(Modifier.fillMaxWidth().height(44.dp), corner = 22.dp, onClick = onDismiss) { focused ->
+                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
+                        Text("完成", color = TextMain, fontSize = 13.sp)
+                    }
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun Poster(item: MediaItem, url: String?) {

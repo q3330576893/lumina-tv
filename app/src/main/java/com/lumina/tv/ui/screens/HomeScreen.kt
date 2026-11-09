@@ -599,6 +599,7 @@ fun HomeScreen(
                             )
                             Text(libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextSub, fontSize = 11.sp)
                         }
+                        Spacer(Modifier.weight(1f))
                         Box {
                             FocusSurface(
                                 modifier = Modifier.height(40.dp).width(112.dp),
@@ -1348,20 +1349,20 @@ private fun Hero(
         onDispose { onComposed(false) }
     }
     val context = LocalContext.current
-    var heroFocused by remember { mutableStateOf(false) }
+    var lastInteractionAt by remember(items) { mutableStateOf(System.currentTimeMillis()) }
     var focusedTargets by remember { mutableStateOf<Set<String>>(emptySet()) }
     fun reportFocus(key: String, focused: Boolean) {
         val next = if (focused) focusedTargets + key else focusedTargets - key
         focusedTargets = next
-        heroFocused = next.isNotEmpty()
     }
-    LaunchedEffect(items, heroFocused) {
-        if (heroFocused || items.size < 2) return@LaunchedEffect
-        delay(3000)
+    LaunchedEffect(items) {
+        if (items.size < 2) return@LaunchedEffect
         while (true) {
-            // 10 秒一换：太短看不清，太长显得卡住
-            delay(10_000)
-            onNext()
+            delay(500)
+            if (System.currentTimeMillis() - lastInteractionAt >= 10_000L) {
+                onNext()
+                lastInteractionAt = System.currentTimeMillis()
+            }
         }
     }
     // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
@@ -1395,8 +1396,8 @@ private fun Hero(
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
                     when (event.key) {
-                        Key.DirectionLeft -> { onPrevious(); true }
-                        Key.DirectionRight -> { onNext(); true }
+                        Key.DirectionLeft -> { lastInteractionAt = System.currentTimeMillis(); onPrevious(); true }
+                        Key.DirectionRight -> { lastInteractionAt = System.currentTimeMillis(); onNext(); true }
                         else -> false
                     }
                 }
@@ -1499,7 +1500,7 @@ private fun Hero(
                     corner = 21.dp,
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
-                    onClick = { onPlay(item) },
+                    onClick = { lastInteractionAt = System.currentTimeMillis(); onPlay(item) },
                 ) { focused ->
                     Row(
                         Modifier.fillMaxSize().background(
@@ -1552,7 +1553,7 @@ private fun Hero(
                                 .onFocusChanged { reportFocus("indicator-$index", it.hasFocus || it.isFocused) },
                             corner = 4.dp,
                             scaleTo = 1f,
-                            onClick = { onSelectIndex(index) },
+                            onClick = { lastInteractionAt = System.currentTimeMillis(); onSelectIndex(index) },
                         ) { focused ->
                             Box(
                                 Modifier.fillMaxSize()
