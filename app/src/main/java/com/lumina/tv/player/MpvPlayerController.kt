@@ -130,6 +130,10 @@ class MpvPlayerController(
         if (!released) runCatching { mpv?.setOptionString("sub-font-size", sizePx.coerceIn(16, 120).toString()) }
     }
 
+    fun setSubtitleOffset(offsetMs: Long) {
+        if (!released) runCatching { mpv?.setPropertyDouble("sub-delay", offsetMs / 1000.0) }
+    }
+
     fun setAudioTrack(index: Int) {
         if (!released) runCatching { mpv?.setPropertyInt("aid", index) }
     }

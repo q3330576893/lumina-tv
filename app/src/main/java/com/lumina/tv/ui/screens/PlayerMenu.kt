@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -46,6 +47,7 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
+import com.lumina.tv.player.secondarySubtitleUnsupportedReason
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.theme.Accent
@@ -66,12 +68,14 @@ internal fun OptionMenu(
     subScale: Float,
     audioDecodeMode: String,
     subtitleOffsetMs: Long,
+    secondarySubtitleIndex: Int?,
     activeEngine: String,
     audioStreams: List<MediaStream>,
     selectedAudioStreamIndex: Int?,
     onAudioStreamSelected: (Int, TrackSelectionOverride?) -> Unit,
     onlyMedia3Available: Boolean,
     onSubtitleSelected: (String?) -> Unit,
+    onSecondarySubtitleSelected: (Int?) -> Unit,
     onSubtitleOffset: (Long) -> Unit,
     onSubScale: (Float) -> Unit,
     onAudioDecodeMode: (String) -> Unit,
@@ -249,7 +253,7 @@ internal fun OptionMenu(
 
                 // 字幕
                 MenuLabel("字幕")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MenuChip(
                         label = "关闭字幕", width = 104.dp,
                         active = textDisabled,
@@ -289,6 +293,33 @@ internal fun OptionMenu(
                 if (textGroups.isEmpty()) {
                     Spacer(Modifier.height(6.dp))
                     Text("没有检测到内嵌字幕轨道（外挂字幕会自动加载）", color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp)
+                }
+
+                Spacer(Modifier.height(12.dp))
+                MenuLabel("副字幕")
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MenuChip(
+                        label = "关闭副字幕", width = 120.dp,
+                        active = secondarySubtitleIndex == null,
+                        activeColor = Accent,
+                        onClick = { onSecondarySubtitleSelected(null) },
+                    )
+                    sources.firstOrNull { it.id == currentSourceId }?.subtitleStreams.orEmpty().forEach { stream ->
+                        val unsupported = stream.secondarySubtitleUnsupportedReason()
+                        val label = listOfNotNull(stream.displayTitle ?: stream.language ?: "字幕 ${stream.index}", unsupported?.let { "($it)" })
+                            .joinToString(" ")
+                        MenuChip(
+                            label = label,
+                            width = 190.dp,
+                            active = secondarySubtitleIndex == stream.index,
+                            activeColor = Accent,
+                            enabled = unsupported == null,
+                            onClick = { onSecondarySubtitleSelected(stream.index) },
+                        )
+                    }
+                }
+                if (sources.firstOrNull { it.id == currentSourceId }?.subtitleStreams.isNullOrEmpty()) {
+                    Text("当前片源没有可用字幕轨", color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp)
                 }
 
                 Spacer(Modifier.height(10.dp))
@@ -430,20 +461,18 @@ private fun MenuChip(
     activeColor: Color,
     height: Dp = 38.dp,
     focusRequester: FocusRequester? = null,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     var m = Modifier.width(width).height(height)
     if (focusRequester != null) m = m.focusRequester(focusRequester)
-    FocusSurface(
-        modifier = m,
-        corner = 12.dp, scaleTo = 1f,
-        onClick = onClick,
-    ) { focused ->
+    val content: @Composable (Boolean) -> Unit = { focused ->
         Box(
             Modifier.fillMaxSize().background(
                 when {
                     active -> activeColor.copy(alpha = 0.9f)
                     focused -> Color(0x2EFFFFFF)
+                    !enabled -> Color(0x0AFFFFFF)
                     else -> Color(0x14FFFFFF)
                 }, RoundedCornerShape(12.dp)
             ),
@@ -451,12 +480,17 @@ private fun MenuChip(
         ) {
             Text(
                 label,
-                color = if (active) Color(0xFF06101F) else TextMain,
+                color = if (active) Color(0xFF06101F) else if (enabled) TextMain else TextSub.copy(alpha = 0.55f),
                 fontSize = 12.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 8.dp),
             )
         }
     }
+    if (enabled) FocusSurface(
+        modifier = m,
+        corner = 12.dp, scaleTo = 1f,
+        onClick = onClick,
+    ) { focused -> content(focused) } else Box(m) { content(false) }
 }
 

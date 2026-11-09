@@ -109,11 +109,15 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.player.SubtitleRenderersFactory
 import com.lumina.tv.player.MpvPlayerController
+import com.lumina.tv.player.TextSubtitleCue
+import com.lumina.tv.player.findTextSubtitleCue
+import com.lumina.tv.player.parseTextSubtitle
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.ui.components.DiagExportDialog
 import com.lumina.tv.ui.components.VideoSourceProbe
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -224,6 +228,11 @@ fun PlayerScreen(
     var currentResolution by remember { mutableStateOf<String?>(null) }
     var subScale by remember { mutableFloatStateOf(when (AppRuntime.prefs?.subtitleScale) { null -> 1.3f; 1.5f -> 2.0f; else -> AppRuntime.prefs?.subtitleScale ?: 1.3f }) }
     var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
+    var secondarySubtitleIndex by remember(item.id) {
+        mutableStateOf(AppRuntime.prefs?.secondarySubtitleTrackFor(item.id))
+    }
+    var secondarySubtitleCues by remember(item.id) { mutableStateOf<List<TextSubtitleCue>>(emptyList()) }
+    var secondarySubtitleError by remember(item.id) { mutableStateOf<String?>(null) }
     var nextEpisode by remember { mutableStateOf<MediaItem?>(null) }
     var nextCountdown by remember { mutableIntStateOf(0) }
     var seekHoldDirection by remember { mutableIntStateOf(0) }
@@ -592,9 +601,37 @@ fun PlayerScreen(
         if (activeEngine == "media3") loadSource(AppRuntime.prefs?.forceTranscode ?: false, initialSourceId)
     }
 
-    LaunchedEffect(exo, subtitleOffsetMs) {
+    LaunchedEffect(exo, mpvBackend, subtitleOffsetMs) {
         subtitleRenderersFactory.subtitleOffsetMs = subtitleOffsetMs
+        mpvBackend?.setSubtitleOffset(subtitleOffsetMs)
         AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
+    }
+
+    LaunchedEffect(item.id, currentSourceId, secondarySubtitleIndex, playbackSource) {
+        secondarySubtitleCues = emptyList()
+        secondarySubtitleError = null
+        val index = secondarySubtitleIndex ?: return@LaunchedEffect
+        val sourceId = currentSourceId ?: return@LaunchedEffect
+        val source = playbackSource ?: return@LaunchedEffect
+        if (source.id != sourceId) return@LaunchedEffect
+        val stream = source.subtitleStreams.firstOrNull { it.index == index }
+        if (stream == null) {
+            secondarySubtitleIndex = null
+            AppRuntime.prefs?.rememberSecondarySubtitleTrack(item.id, null)
+            secondarySubtitleError = "当前片源中找不到这条字幕轨"
+            return@LaunchedEffect
+        }
+        try {
+            val text = withContext(Dispatchers.IO) { client?.getSubtitleText(item.id, sourceId, index) }
+                ?: throw IllegalStateException("字幕服务不可用")
+            val cues = parseTextSubtitle(text)
+            if (cues.isEmpty()) throw IllegalStateException("字幕文件没有可识别的文本时间轴")
+            secondarySubtitleCues = cues
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (failure: Exception) {
+            secondarySubtitleError = failure.message ?: "副字幕加载失败"
+        }
     }
 
     LaunchedEffect(reloadKey) {
@@ -1173,6 +1210,25 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
+        SecondarySubtitleOverlay(
+            enabled = secondarySubtitleIndex != null,
+            cues = secondarySubtitleCues,
+            subtitleOffsetMs = subtitleOffsetMs,
+            subtitleScale = subScale,
+            activeEngine = activeEngine,
+            exo = exo,
+            mpvBackend = mpvBackend,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
+        secondarySubtitleError?.let { message ->
+            Text(
+                "副字幕不可用：$message",
+                color = Color(0xFFFFD28A),
+                fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 18.dp),
+            )
+        }
+
         if ((if (activeEngine == "mpv") mpvState.buffering else buffering) && error == null && playbackStatusNotice == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1578,6 +1634,7 @@ fun PlayerScreen(
                 subScale = subScale,
                 audioDecodeMode = audioDecodeMode,
                 subtitleOffsetMs = subtitleOffsetMs,
+                secondarySubtitleIndex = secondarySubtitleIndex,
                 activeEngine = activeEngine,
                 audioStreams = if (activeEngine == "media3") media3AudioTracks(exo.currentTracks) else emptyList(),
                 selectedAudioStreamIndex = AppRuntime.prefs?.audioTrackFor(item.id),
@@ -1595,8 +1652,15 @@ fun PlayerScreen(
                     if (activeEngine == "mpv") mpvBackend?.setAudioTrack(streamIndex)
                 },
                 onSubtitleSelected = { AppRuntime.prefs?.rememberSubtitleTrack(item.id, it) },
+                onSecondarySubtitleSelected = { index ->
+                    secondarySubtitleIndex = index
+                    secondarySubtitleError = null
+                    secondarySubtitleCues = emptyList()
+                    AppRuntime.prefs?.rememberSecondarySubtitleTrack(item.id, index)
+                },
                 onSubtitleOffset = {
                     subtitleOffsetMs = it.coerceIn(-10_000L, 10_000L)
+                    mpvBackend?.setSubtitleOffset(subtitleOffsetMs)
                     AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
                 },
                 onSubScale = {
@@ -1695,6 +1759,52 @@ fun PlayerScreen(
     DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
         val payload = buildDiagPayload(outcome).copy(appLog = withContext(Dispatchers.IO) { DiagExporter.appLogTail() })
         withContext(Dispatchers.IO) { DiagExporter.export(context, payload, "playback") }
+    }
+}
+
+@Composable
+private fun SecondarySubtitleOverlay(
+    enabled: Boolean,
+    cues: List<TextSubtitleCue>,
+    subtitleOffsetMs: Long,
+    subtitleScale: Float,
+    activeEngine: String,
+    exo: ExoPlayer,
+    mpvBackend: MpvPlayerController?,
+    modifier: Modifier = Modifier,
+) {
+    if (!enabled) return
+
+    var activeCue by remember(cues, subtitleOffsetMs, activeEngine, exo, mpvBackend) {
+        val position = if (activeEngine == "mpv") mpvBackend?.positionMs() ?: 0L else exo.currentPosition
+        mutableStateOf(findTextSubtitleCue(cues, position - subtitleOffsetMs))
+    }
+
+    LaunchedEffect(cues, subtitleOffsetMs, activeEngine, exo, mpvBackend) {
+        while (true) {
+            delay(50)
+            val position = if (activeEngine == "mpv") mpvBackend?.positionMs() ?: 0L else exo.currentPosition
+            val cue = findTextSubtitleCue(cues, position - subtitleOffsetMs)
+            if (cue != activeCue) activeCue = cue
+        }
+    }
+
+    activeCue?.let { cue ->
+        Text(
+            text = cue.text,
+            color = Color.White,
+            fontSize = (subtitleScale * 16f).sp,
+            fontWeight = FontWeight.Medium,
+            lineHeight = (subtitleScale * 20f).sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            modifier = modifier
+                .padding(horizontal = 48.dp)
+                .offset(y = (-150).dp)
+                .background(Color(0x88000000), RoundedCornerShape(4.dp))
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        )
     }
 }
 

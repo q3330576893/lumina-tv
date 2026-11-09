@@ -947,6 +947,17 @@ data class PlaybackTarget(
     fun subtitleUrl(itemId: String, mediaSourceId: String, index: Int, format: String = "srt"): String =
         url("/Videos/$itemId/$mediaSourceId/Subtitles/$index/Stream.$format")
 
+    suspend fun getSubtitleText(itemId: String, mediaSourceId: String, index: Int): String = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(subtitleUrl(itemId, mediaSourceId, index, "vtt"))
+            .header("X-Emby-Authorization", authHeader())
+            .build()
+        http.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw EmbyException("字幕读取失败（HTTP ${response.code}）")
+            response.body?.string().orEmpty()
+        }
+    }
+
     // ---------------- 收藏 / 已看 ----------------
 
     suspend fun setFavorite(itemId: String, favorite: Boolean): Boolean = withContext(Dispatchers.IO) {
