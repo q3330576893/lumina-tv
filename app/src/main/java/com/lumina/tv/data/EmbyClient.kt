@@ -505,6 +505,8 @@ data class PlaybackTarget(
                     bitRate = s.optLong("BitRate").takeIf { s.has("BitRate") },
                     channels = s.optInt("Channels").takeIf { s.has("Channels") },
                     sampleRate = s.optInt("SampleRate").takeIf { s.has("SampleRate") },
+                    videoRangeType = s.optString("VideoRangeType").ifBlank { s.optString("VideoRange").ifBlank { null } },
+                    dvProfile = s.optInt("DvProfile", -1).takeIf { it > 0 },
                 )
                 if (s.optString("Type") == "Video" && resolution == null) {
                     val h = s.optInt("Height", 0)
@@ -599,13 +601,18 @@ data class PlaybackTarget(
 
     /** 判断 MediaSource 是否为 STRM 条目 */
     private fun isStrmSource(o: JSONObject): Boolean {
-        val size = o.optLong("Size", 0L)
         val container = o.optString("Container")
         val path = o.optString("Path")
-        val isStrmName = container.contains("strm", ignoreCase = true) ||
+        return container.contains("strm", ignoreCase = true) ||
             path.endsWith(".strm", ignoreCase = true)
-        return isStrmName && size <= 0L
     }
+
+    /** STRM 直链探活：只发 HEAD，2 秒超时，2xx/3xx 视为可达。 */
+    private fun strmUrlReachable(u: String): Boolean = runCatching {
+        val request = Request.Builder().url(u).head().build()
+        http.newCall(request).apply { timeout().timeout(2, TimeUnit.SECONDS) }
+            .execute().use { it.isSuccessful || it.code in 300..399 }
+    }.getOrDefault(false)
 
     suspend fun resolvePlayback(
         item: MediaItem,
@@ -696,6 +703,10 @@ data class PlaybackTarget(
                 else -> null
             }
             val isStrm = strmUrl?.isNotBlank() == true
+            val strmReachable = if (isStrm) strmUrlReachable(strmUrl!!) else true
+            if (isStrm && !strmReachable && !forceDirect) {
+                throw EmbyException("STRM 直链无法访问（网盘链接可能已失效或需要登录），路径：${strmUrl.take(80)}")
+            }
             // 是 STRM 条目却拿不到地址：直接报错，不要退化成转码流导致无限缓冲
             if (!isStrm && first != null && isStrmSource(first) &&
                 source.directStreamUrl?.startsWith("http") != true

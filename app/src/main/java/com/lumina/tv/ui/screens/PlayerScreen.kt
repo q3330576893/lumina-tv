@@ -351,8 +351,22 @@ fun PlayerScreen(
                 val unsupportedAudio = listOf("truehd", "dts", "dca", "mlp", "atmos", "eac3").any(audioCodec::contains)
                 // 统一走 media3 优先：不再因为音轨编码就提前把内核换成 mpv，
                 // 由 media3 真正解码失败后再自动回落，避免“什么都用 MPV 转圈”。
+                // DV Profile 7 是双层封装，media3 解不了基底+增强层，直接交给 mpv
+                val videoStreamForDv = target.source?.streams?.firstOrNull { it.type == "Video" }
+                val rangeType = videoStreamForDv?.videoRangeType.orEmpty().uppercase()
+                val isDvP7 = rangeType.contains("DOVI") &&
+                    (videoStreamForDv?.dvProfile == 7 || rangeType.contains("WITHEL") || rangeType.contains("WITH EL"))
+                val dvP7UseMpv = AppRuntime.prefs?.dvP7UseMpv ?: true
                 val selectedEngine = enginePinned
-                    ?: if (AppRuntime.prefs?.playerEngine == "mpv") "mpv" else "media3"
+                    ?: when {
+                        isDvP7 && dvP7UseMpv -> "mpv"
+                        AppRuntime.prefs?.playerEngine == "mpv" -> "mpv"
+                        else -> "media3"
+                    }
+                if (isDvP7 && dvP7UseMpv && !softDecodeNoticeShown) {
+                    audioDecodeNotice = "Dolby Vision Profile 7，已用 mpv 软解"
+                    softDecodeNoticeShown = true
+                }
                 if (audioDecodeMode == "auto" && unsupportedAudio && !softDecodeNoticeShown) {
                     audioDecodeNotice = "检测到 ${audioCodec.trim().ifBlank { "高级" }} 音轨，先试本机硬解，失败会自动转本地软解"
                     softDecodeNoticeShown = true
@@ -736,7 +750,10 @@ fun PlayerScreen(
                         append("\n容器=").append(srcInfo?.container ?: "?")
                             .append(" 编码=").append(vCodec ?: "?")
                             .append(" 版本=")
-                            .append(mediaSources.firstOrNull { it.id == currentSourceId }?.displayLabel ?: "默认")
+                        if (currentPlaybackUrl?.contains(".strm", true) == true || playbackSource?.directStreamUrl?.startsWith("http") == true) {
+                            append(" STRM")
+                        }
+                        append(mediaSources.firstOrNull { it.id == currentSourceId }?.displayLabel ?: "默认")
                     }.let { message ->
                         val urlLine = message.substringBefore('\n')
                         message.substringAfter('\n') + "\n" + urlLine

@@ -192,6 +192,11 @@ class Prefs(context: Context) {
         get() = sp.getFloat("default_speed", 1.0f)
         set(v) = sp.edit().putFloat("default_speed", v).apply()
 
+    /** DV Profile 7 直接用 mpv 软解 */
+    var dvP7UseMpv: Boolean
+        get() = sp.getBoolean("dv_p7_use_mpv", true)
+        set(v) = sp.edit().putBoolean("dv_p7_use_mpv", v).apply()
+
     /** 自动连播下一集 */
     var autoNextEpisode: Boolean
         get() = sp.getBoolean("auto_next", false)
