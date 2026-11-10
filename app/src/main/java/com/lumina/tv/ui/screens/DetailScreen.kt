@@ -68,12 +68,14 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -739,7 +741,7 @@ fun DetailScreen(
                         val type = if (it0.type == "Series") "series" else "movie"
                         add("THE TVDB" to "https://thetvdb.com/dereferrer/$type/$it")
                     }
-                    val title = (it0.seriesName ?: it0.name).takeIf(String::isNotBlank)
+                    val title = (it0.seriesName?.takeIf(String::isNotBlank) ?: it0.name).takeIf(String::isNotBlank)
                     title?.let {
                         val encoded = URLEncoder.encode(it, "UTF-8")
                         add("DOUBAN" to "https://search.douban.com/movie/subject_search?search_text=$encoded&cat=1002")
@@ -1085,7 +1087,26 @@ private fun SpecBadge(badge: MediaBadge) {
         when (badge) {
             MediaBadge.DolbyVision -> Icon(painterResource(R.drawable.badge_dolby_vision), "Dolby Vision", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
             MediaBadge.DolbyAtmos -> Icon(painterResource(R.drawable.badge_dolby_atmos), "Dolby Atmos", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
-            else -> Text(badgeText(badge), color = Color(0xEBFFFFFF), fontSize = 9.sp, fontWeight = FontWeight.W800, letterSpacing = 0.sp)
+            else -> {
+                val text = badgeText(badge)
+                val strokeWidth = with(LocalDensity.current) { 0.7.dp.toPx() }
+                val thickStyle = androidx.compose.ui.text.TextStyle(
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.sp,
+                    drawStyle = Stroke(width = strokeWidth),
+                )
+                Box(contentAlignment = Alignment.Center) {
+                    Text(text, color = Color(0xEBFFFFFF), style = thickStyle)
+                    Text(
+                        text,
+                        color = Color(0xEBFFFFFF),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.sp,
+                    )
+                }
+            }
         }
     }
 }
@@ -1104,15 +1125,30 @@ private fun badgeText(badge: MediaBadge): String = when (badge) {
 
 private fun videoBadges(stream: MediaStream): List<MediaBadge> = buildList {
     if ((stream.width ?: 0) >= 3840 || (stream.height ?: 0) >= 2160) add(MediaBadge.FourK)
-    val range = stream.videoRangeType.orEmpty().uppercase()
-    val profile = stream.profile.orEmpty().uppercase()
-    val display = stream.displayTitle.orEmpty().uppercase()
-    if (stream.dvProfile != null || "DOVI" in range || "DOLBY VISION" in range || profile.startsWith("DV") || "DOVI" in profile || "DOLBY VISION" in display) add(MediaBadge.DolbyVision)
+    val range = normalizeMediaTag(stream.videoRangeType)
+    val profile = normalizeMediaTag(stream.profile)
+    val display = normalizeMediaTag(stream.displayTitle)
+    val title = normalizeMediaTag(stream.title)
+    val rangeIsDolbyVision = range in setOf(
+        "DOVI", "DOVIWITHHDR10", "DOVIWITHHDR10PLUS", "DOVIWITHHLG", "DOVIWITHSDR",
+        "DOVIWITH", "DOVIWITHHDR10PLUS", "DOLBYVISION", "DOVIINVALID",
+    ) || range.startsWith("DOVI")
+    val profileIsDolbyVision = stream.dvProfile?.let { it > 0 } == true ||
+        profile.contains("DVHE") || profile.contains("DVH1") || profile.contains("DVPROFILE") || profile.contains("DOLBYVISION")
+    val displayIsDolbyVision = display.contains("DOLBYVISION") || display.contains("DOVI") ||
+        title.contains("DOLBYVISION") || title.contains("DOVI")
+    val isDolbyVision = rangeIsDolbyVision || profileIsDolbyVision || displayIsDolbyVision
+    if (isDolbyVision) add(MediaBadge.DolbyVision)
     when {
-        "HDR10+" in range || "HDR10PLUS" in range -> add(MediaBadge.Hdr10Plus)
+        isDolbyVision -> Unit
+        "HDR10PLUS" in range -> add(MediaBadge.Hdr10Plus)
         "HDR10" in range || range == "HDR" -> add(MediaBadge.Hdr10)
     }
 }
+
+private fun normalizeMediaTag(value: String?): String = value.orEmpty()
+    .uppercase()
+    .filter(Char::isLetterOrDigit)
 
 private fun videoResolution(source: MediaSource, stream: MediaStream?): String? = when {
     stream?.width != null && stream.height != null -> "${stream.width} × ${stream.height}"

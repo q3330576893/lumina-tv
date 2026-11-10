@@ -37,6 +37,9 @@ object TmdbClient {
     private val externalIdsNoHit = HashSet<String>()
     private val externalLinksCache = LinkedHashMap<String, ExternalLinks>()
     private val externalLinksNoHit = HashSet<String>()
+    @Volatile private var externalLinkDiagnostic = JSONObject().put("status", "not_attempted").toString()
+
+    fun externalLinkDiagnosticSnapshot(): String = externalLinkDiagnostic
 
     /** Resolve missing provider IDs for a detail item without blocking its first render. */
     suspend fun externalLinks(
@@ -53,13 +56,32 @@ object TmdbClient {
             if (key in externalLinksNoHit) return@withContext null
         }
 
-        val tmdbId = embyTmdbId?.takeIf(String::isNotBlank) ?: searchTmdbId(type, title, year)
+        val searchResult = if (embyTmdbId.isNullOrBlank()) searchTmdbId(type, title, year) else null
+        val tmdbId = embyTmdbId?.takeIf(String::isNotBlank) ?: searchResult
         val external = tmdbId?.let { externalIds(type, it) }
         val result = ExternalLinks(
             imdbId = embyImdbId?.takeIf(String::isNotBlank) ?: external?.imdbId,
             tmdbId = tmdbId,
             tvdbId = embyTvdbId?.takeIf(String::isNotBlank) ?: external?.tvdbId,
         ).takeIf { it.imdbId != null || it.tmdbId != null || it.tvdbId != null }
+        externalLinkDiagnostic = JSONObject()
+            .put("title", title)
+            .put("tmdbId", tmdbId ?: JSONObject.NULL)
+            .put("tmdbSearch", when {
+                !embyTmdbId.isNullOrBlank() -> "emby_provider_id"
+                searchResult != null -> "matched"
+                title.isBlank() -> "empty_title"
+                else -> lastRequestFailure ?: "no_results"
+            })
+            .put("externalIds", when {
+                !embyTmdbId.isNullOrBlank() && external == null -> lastRequestFailure ?: "no_external_ids"
+                tmdbId != null && external != null -> "matched"
+                tmdbId == null -> "not_requested"
+                else -> lastRequestFailure ?: "no_external_ids"
+            })
+            .put("imdbId", result?.imdbId ?: JSONObject.NULL)
+            .put("tvdbId", result?.tvdbId ?: JSONObject.NULL)
+            .toString()
         synchronized(externalLinksCache) {
             if (result == null) externalLinksNoHit.add(key) else externalLinksCache[key] = result
             if (externalLinksCache.size > 200) externalLinksCache.clear()
@@ -166,12 +188,19 @@ object TmdbClient {
         return fallback?.let { "https://image.tmdb.org/t/p/w500$it" }
     }
 
+    @Volatile private var lastRequestFailure: String? = null
+
     private fun getJson(url: String): JSONObject? = runCatching {
         val req = Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()
         http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return null
+            if (!resp.isSuccessful) {
+                lastRequestFailure = "http_${resp.code}"
+                return null
+            }
             val body = resp.body?.string() ?: return null
+            lastRequestFailure = null
             JSONObject(body)
         }
-    }.getOrNull()
+    }.onFailure { lastRequestFailure = if (it is java.net.SocketTimeoutException) "timeout" else "request_error:${it.javaClass.simpleName}" }
+        .getOrNull()
 }

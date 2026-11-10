@@ -158,6 +158,7 @@ fun HomeScreen(
     onLogout: () -> Unit,
 ) {
     val client = AppRuntime.client
+    val context = LocalContext.current
     val hazeState = remember { HazeState() }
 
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
@@ -342,6 +343,18 @@ fun HomeScreen(
         if (!loading && initialFocusPending && (resume.isNotEmpty() || favorites.isNotEmpty() || latest.isNotEmpty() || movies.isNotEmpty() || series.isNotEmpty())) {
             delay(240)
             initialFocusPending = false
+        }
+    }
+
+    LaunchedEffect(resume, favorites, latest, movies, series, viewContents) {
+        val c = client ?: return@LaunchedEffect
+        val preloadItems = (resume.take(8) + favorites.take(8) + latest.take(8) + movies.take(8) + series.take(8) +
+            viewContents.values.flatMap { it.take(4) }).distinctBy { it.id }
+        preloadItems.forEach { media ->
+            val url = c.imageUrl(media) ?: return@forEach
+            context.imageLoader.enqueue(
+                ImageRequest.Builder(context).data(url).crossfade(false).build()
+            )
         }
     }
 

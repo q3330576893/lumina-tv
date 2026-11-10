@@ -5,6 +5,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.MediaSource
+import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.player.MpvPlayerController
@@ -38,7 +39,13 @@ internal fun buildPlayerDiagPayload(
 ): DiagPayload {
     val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
     val isDolbyVision = videoStream?.let {
-        it.videoRangeType.orEmpty().contains("DOVI", true) || it.dvProfile != null
+        val range = it.videoRangeType.orEmpty().uppercase().filter(Char::isLetterOrDigit)
+        val profile = it.profile.orEmpty().uppercase().filter(Char::isLetterOrDigit)
+        val display = (it.displayTitle.orEmpty() + " " + it.title.orEmpty()).uppercase().filter(Char::isLetterOrDigit)
+        range.startsWith("DOVI") || range == "DOLBYVISION" || range == "DOVIINVALID" ||
+            (it.dvProfile ?: 0) > 0 || profile.contains("DVHE") || profile.contains("DVH1") ||
+            profile.contains("DVPROFILE") || profile.contains("DOLBYVISION") ||
+            display.contains("DOVI") || display.contains("DOLBYVISION")
     } ?: false
     val meta = DiagExporter.baseMeta(context, outcome)
         .put("engine", JSONObject()
@@ -53,8 +60,10 @@ internal fun buildPlayerDiagPayload(
             .put("isStrm", playbackSource?.container?.contains("strm", true) == true)
             .put("video", JSONObject()
                 .put("dolbyVision", isDolbyVision)
-                .put("profile", videoStream?.dvProfile ?: JSONObject.NULL)
+                .put("profile", videoStream?.profile ?: JSONObject.NULL)
                 .put("videoRangeType", videoStream?.videoRangeType ?: JSONObject.NULL)
+                .put("dvProfile", videoStream?.dvProfile ?: JSONObject.NULL)
+                .put("displayTitle", videoStream?.displayTitle ?: JSONObject.NULL)
                 .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
                 .put("decoderPath", dvDecoderPath ?: JSONObject.NULL)))
         .put("playback", JSONObject().put("url", currentPlaybackUrl ?: JSONObject.NULL))
@@ -105,6 +114,9 @@ internal fun buildPlayerDiagPayload(
         .put("dolbyVision", isDolbyVision)
         .put("dvProfile", videoStream?.dvProfile ?: JSONObject.NULL)
         .put("videoRangeType", videoStream?.videoRangeType ?: JSONObject.NULL)
+        .put("profile", videoStream?.profile ?: JSONObject.NULL)
+        .put("displayTitle", videoStream?.displayTitle ?: JSONObject.NULL)
+        .put("externalLinks", runCatching { JSONObject(TmdbClient.externalLinkDiagnosticSnapshot()) }.getOrNull() ?: JSONObject.NULL)
         .put("decoderPath", dvDecoderPath ?: JSONObject.NULL)
         .put("lastPlaybackErrorCodeName", lastPlaybackErrorJson?.let {
             runCatching { JSONObject(it).optString("errorCodeName") }.getOrNull()

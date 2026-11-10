@@ -726,7 +726,7 @@ data class PlaybackTarget(
                     channels = s.optInt("Channels").takeIf { s.has("Channels") },
                     sampleRate = s.optInt("SampleRate").takeIf { s.has("SampleRate") },
                     videoRangeType = s.optString("VideoRangeType").ifBlank { s.optString("VideoRange").ifBlank { null } },
-                    dvProfile = s.optInt("DvProfile", -1).takeIf { it > 0 },
+                    dvProfile = s.optNormalizedValue("dvprofile")?.toIntOrNull()?.takeIf { it > 0 },
                     bitDepth = s.optInt("BitDepth", 0).takeIf { it > 0 },
                     colorSpace = s.optString("ColorSpace").ifBlank { null },
                     colorTransfer = s.optString("ColorTransfer").ifBlank { null },
@@ -1134,6 +1134,13 @@ data class PlaybackTarget(
             return s
         }
     }
+}
+
+private fun JSONObject.optNormalizedValue(normalizedKey: String): String? {
+    val key = keys().asSequence().firstOrNull { candidate ->
+        candidate.filter(Char::isLetterOrDigit).equals(normalizedKey, ignoreCase = true)
+    } ?: return null
+    return opt(key)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
 }
 
 private const val DETAIL_PREVIEW_BITRATE = 1_200_000
