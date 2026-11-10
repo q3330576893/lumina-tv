@@ -16,6 +16,8 @@ import java.util.concurrent.TimeUnit
  */
 object TmdbClient {
 
+    data class ExternalIds(val imdbId: String?, val tvdbId: String?)
+
     data class TmdbInfo(
         val rating: Double?,
         val posterUrl: String?,
@@ -29,6 +31,33 @@ object TmdbClient {
 
     private val cache = LinkedHashMap<String, TmdbInfo?>()
     private val noHit = HashSet<String>()
+    private val externalIdsCache = LinkedHashMap<String, ExternalIds?>()
+    private val externalIdsNoHit = HashSet<String>()
+
+    /** Resolve IMDb and TVDB IDs from an Emby-provided TMDB ID without delaying detail rendering. */
+    suspend fun externalIds(type: String, tmdbId: String): ExternalIds? = withContext(Dispatchers.IO) {
+        val numericId = tmdbId.toLongOrNull()?.takeIf { it > 0 } ?: return@withContext null
+        val path = if (type == "Series") "tv" else "movie"
+        val key = "$path|$numericId"
+        synchronized(externalIdsCache) {
+            if (externalIdsCache.containsKey(key)) return@withContext externalIdsCache[key]
+            if (externalIdsNoHit.contains(key)) return@withContext null
+        }
+        val result = getJson(
+            "https://api.tmdb.org/3/$path/$numericId/external_ids?api_key=${BuildConfig.TMDB_API_KEY}"
+        )?.let { json ->
+            ExternalIds(
+                imdbId = json.optString("imdb_id").takeIf { it.isNotBlank() && it != "null" },
+                tvdbId = json.optLong("tvdb_id", 0L).takeIf { it > 0 }?.toString(),
+            )
+        }?.takeIf { it.imdbId != null || it.tvdbId != null }
+        synchronized(externalIdsCache) {
+            if (result == null) externalIdsNoHit.add(key) else externalIdsCache[key] = result
+            if (externalIdsCache.size > 200) externalIdsCache.clear()
+            if (externalIdsNoHit.size > 200) externalIdsNoHit.clear()
+        }
+        result
+    }
 
     /** 按名称(+年份)搜索，返回首个匹配；带进程内缓存。 */
     suspend fun lookup(type: String, name: String, year: Int?): TmdbInfo? = withContext(Dispatchers.IO) {

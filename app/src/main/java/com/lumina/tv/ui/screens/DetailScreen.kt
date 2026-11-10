@@ -28,6 +28,8 @@ import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Tune
@@ -81,6 +83,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lumina.tv.ui.components.GlassPanel
 import androidx.compose.ui.platform.LocalUriHandler
+import java.net.URLEncoder
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
@@ -100,6 +103,8 @@ fun DetailScreen(
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
+    var tmdbExternalIds by remember(id) { mutableStateOf<TmdbClient.ExternalIds?>(null) }
+    var mediaInfoExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
     var sourcesLoading by remember { mutableStateOf(false) }
     var detailPreviewUrl by remember(id) { mutableStateOf<String?>(null) }
@@ -224,6 +229,12 @@ fun DetailScreen(
             LibraryCache.putEpisodes(it0.id, sid, list)
             episodes = list
         }
+    }
+
+    LaunchedEffect(id, item?.providerIds?.get("tmdb")) {
+        val current = item ?: return@LaunchedEffect
+        val tmdbId = current.providerIds["tmdb"] ?: return@LaunchedEffect
+        tmdbExternalIds = runCatching { TmdbClient.externalIds(current.type, tmdbId) }.getOrNull()
     }
 
     LaunchedEffect(id, item?.type, sources, episodes) {
@@ -600,35 +611,6 @@ fun DetailScreen(
                     }
                 }
 
-                val providerLinks = buildList {
-                    it0!!.providerIds["imdb"]?.takeIf(String::isNotBlank)?.let { add("IMDb" to "https://www.imdb.com/title/$it/") }
-                    it0.providerIds["tmdb"]?.takeIf(String::isNotBlank)?.let {
-                        val type = if (it0.type == "Series") "tv" else "movie"
-                        add("TMDB" to "https://www.themoviedb.org/$type/$it")
-                    }
-                    it0.providerIds["tvdb"]?.takeIf(String::isNotBlank)?.let {
-                        val type = if (it0.type == "Series") "series" else "movie"
-                        add("TVDB" to "https://thetvdb.com/dereferrer/$type/$it")
-                    }
-                }
-                if (providerLinks.isNotEmpty()) {
-                    Spacer(Modifier.height(18.dp))
-                    Text("外部链接", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(10.dp))
-                    val uriHandler = LocalUriHandler.current
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        providerLinks.forEach { (label, uri) ->
-                            FocusSurface(Modifier.height(38.dp), corner = 8.dp, onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
-                                Box(
-                                    Modifier.background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 14.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) { Text(label, color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium) }
-                            }
-                        }
-                    }
-                }
-
                 if (seasons.isNotEmpty()) {
                     Spacer(Modifier.height(18.dp))
                     Text("季数与剧集", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -685,52 +667,6 @@ fun DetailScreen(
                     }
                 }
 
-                val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
-                if (activeSource != null) {
-                    Spacer(Modifier.height(24.dp))
-                    Text("媒体信息${activeSource.name.takeIf { sources.size > 1 && it.isNotBlank() }?.let { " · $it" }.orEmpty()}", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(10.dp))
-                    val video = activeSource.streams.firstOrNull { it.type == "Video" }
-                    val infoLines = buildList {
-                        activeSource.container?.takeIf(String::isNotBlank)?.let { add("容器：${it.uppercase()}") }
-                        activeSource.bitrate?.takeIf { it > 0 }?.let { add("总码率：${formatBitrate(it)}") }
-                        activeSource.size.takeIf { it > 0 }?.let { add("文件大小：${formatMediaSize(it)}") }
-                        activeSource.resolution?.takeIf(String::isNotBlank)?.let { add("分辨率：$it") }
-                        video?.let { stream ->
-                            listOfNotNull(stream.codec?.uppercase(), stream.profile?.takeIf(String::isNotBlank))
-                                .takeIf { it.isNotEmpty() }?.let { add("视频：${it.joinToString(" ")}") }
-                            stream.bitDepth?.takeIf { it > 0 }?.let { add("位深：${it} bit") }
-                            val color = listOfNotNull(
-                                stream.colorPrimaries?.let(::formatColor),
-                                stream.colorTransfer?.let(::formatColor),
-                                stream.colorSpace?.let(::formatColor),
-                            ).distinct()
-                            if (color.isNotEmpty()) add("色彩：${color.joinToString(" / ")}")
-                            val range = stream.videoRangeType.orEmpty().uppercase()
-                            when {
-                                stream.dvProfile != null || "DOVI" in range || "DOLBY" in range || stream.profile?.contains("DV", true) == true -> add("动态范围：Dolby Vision")
-                                "HDR" in range || "HLG" in range || stream.colorTransfer?.contains("2084", true) == true || stream.colorTransfer?.contains("PQ", true) == true ->
-                                    add("动态范围：${range.takeIf(String::isNotBlank)?.replace('_', ' ') ?: stream.colorTransfer}")
-                            }
-                        }
-                    }
-                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        infoLines.forEach { Text(it, color = TextSub, fontSize = 12.sp) }
-                        activeSource.audioStreams.forEachIndexed { index, stream ->
-                            streamSummary(stream)?.let { summary ->
-                                val bitrate = stream.bitRate?.takeIf { it > 0 }?.let { " · ${formatBitrate(it)}" }.orEmpty()
-                                Text("音轨 ${index + 1}：$summary$bitrate", color = TextSub, fontSize = 12.sp)
-                            }
-                        }
-                        activeSource.subtitleStreams.forEachIndexed { index, stream ->
-                            streamSummary(stream)?.let {
-                                val sourceType = if (stream.isExternal) "外挂" else "内封"
-                                Text("字幕 ${index + 1}（$sourceType）：$it", color = TextSub, fontSize = 12.sp)
-                            }
-                        }
-                    }
-                }
-
                 Spacer(Modifier.height(24.dp))
                 Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(10.dp))
@@ -751,6 +687,124 @@ fun DetailScreen(
                                 onFocused = { focusedRelatedId = related.id },
                                 onClick = { onOpenDetail(related.id) },
                             )
+                        }
+                    }
+                }
+
+                val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
+                if (activeSource != null) {
+                    Spacer(Modifier.height(24.dp))
+                    Text("媒体信息${activeSource.name.takeIf { sources.size > 1 && it.isNotBlank() }?.let { " · $it" }.orEmpty()}", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    val summary = listOfNotNull(
+                        activeSource.container?.takeIf(String::isNotBlank)?.uppercase(),
+                        activeSource.bitrate?.takeIf { it > 0 }?.let(::formatBitrate),
+                        activeSource.size.takeIf { it > 0 }?.let(::formatMediaSize),
+                        activeSource.resolution?.takeIf(String::isNotBlank),
+                    ).joinToString(" · ").ifBlank { activeSource.displayLabel }
+                    FocusSurface(
+                        Modifier.fillMaxWidth().height(46.dp),
+                        corner = 8.dp,
+                        scaleTo = 1.015f,
+                        onClick = { mediaInfoExpanded = !mediaInfoExpanded },
+                    ) { focused ->
+                        Row(
+                            Modifier.fillMaxSize().padding(horizontal = 14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                summary,
+                                color = TextMain,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                if (mediaInfoExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = if (mediaInfoExpanded) "收起媒体信息" else "展开媒体信息",
+                                tint = if (focused) Accent else TextSub,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                    if (mediaInfoExpanded) {
+                        Spacer(Modifier.height(10.dp))
+                        val video = activeSource.streams.firstOrNull { it.type == "Video" }
+                        val infoLines = buildList {
+                            activeSource.container?.takeIf(String::isNotBlank)?.let { add("容器：${it.uppercase()}") }
+                            activeSource.bitrate?.takeIf { it > 0 }?.let { add("总码率：${formatBitrate(it)}") }
+                            activeSource.size.takeIf { it > 0 }?.let { add("文件大小：${formatMediaSize(it)}") }
+                            activeSource.resolution?.takeIf(String::isNotBlank)?.let { add("分辨率：$it") }
+                            video?.let { stream ->
+                                listOfNotNull(stream.codec?.uppercase(), stream.profile?.takeIf(String::isNotBlank))
+                                    .takeIf { it.isNotEmpty() }?.let { add("视频：${it.joinToString(" ")}") }
+                                stream.bitDepth?.takeIf { it > 0 }?.let { add("位深：${it} bit") }
+                                val color = listOfNotNull(
+                                    stream.colorPrimaries?.let(::formatColor),
+                                    stream.colorTransfer?.let(::formatColor),
+                                    stream.colorSpace?.let(::formatColor),
+                                ).distinct()
+                                if (color.isNotEmpty()) add("色彩：${color.joinToString(" / ")}")
+                                val range = stream.videoRangeType.orEmpty().uppercase()
+                                when {
+                                    stream.dvProfile != null || "DOVI" in range || "DOLBY" in range || stream.profile?.contains("DV", true) == true -> add("动态范围：Dolby Vision")
+                                    "HDR" in range || "HLG" in range || stream.colorTransfer?.contains("2084", true) == true || stream.colorTransfer?.contains("PQ", true) == true ->
+                                        add("动态范围：${range.takeIf(String::isNotBlank)?.replace('_', ' ') ?: stream.colorTransfer}")
+                                }
+                            }
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            infoLines.forEach { Text(it, color = TextSub, fontSize = 12.sp) }
+                            activeSource.audioStreams.forEachIndexed { index, stream ->
+                                streamSummary(stream)?.let { track ->
+                                    val bitrate = stream.bitRate?.takeIf { it > 0 }?.let { " · ${formatBitrate(it)}" }.orEmpty()
+                                    Text("音轨 ${index + 1}：$track$bitrate", color = TextSub, fontSize = 12.sp)
+                                }
+                            }
+                            activeSource.subtitleStreams.forEachIndexed { index, stream ->
+                                streamSummary(stream)?.let { track ->
+                                    val sourceType = if (stream.isExternal) "外挂" else "内封"
+                                    Text("字幕 ${index + 1}（$sourceType）：$track", color = TextSub, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                val providerIds = it0!!.providerIds
+                val providerLinks = buildList {
+                    (providerIds["imdb"] ?: tmdbExternalIds?.imdbId)?.takeIf(String::isNotBlank)
+                        ?.let { add("IMDb" to "https://www.imdb.com/title/$it/") }
+                    providerIds["tmdb"]?.takeIf(String::isNotBlank)?.let {
+                        val type = if (it0.type == "Series") "tv" else "movie"
+                        add("TMDB" to "https://www.themoviedb.org/$type/$it")
+                    }
+                    (providerIds["tvdb"] ?: tmdbExternalIds?.tvdbId)?.takeIf(String::isNotBlank)?.let {
+                        val type = if (it0.type == "Series") "series" else "movie"
+                        add("TheTVDB" to "https://thetvdb.com/dereferrer/$type/$it")
+                    }
+                    val title = (it0.seriesName ?: it0.name).takeIf(String::isNotBlank)
+                    title?.let {
+                        val encoded = URLEncoder.encode(it, "UTF-8")
+                        add("豆瓣" to "https://search.douban.com/movie/subject_search?search_text=$encoded&cat=1002")
+                    }
+                }
+                if (providerLinks.isNotEmpty()) {
+                    Spacer(Modifier.height(24.dp))
+                    Text("外部链接", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    val uriHandler = LocalUriHandler.current
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        providerLinks.forEach { (label, uri) ->
+                            FocusSurface(Modifier.height(38.dp), corner = 8.dp, onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
+                                Box(
+                                    Modifier.background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 14.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) { Text(label, color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium) }
+                            }
                         }
                     }
                 }
