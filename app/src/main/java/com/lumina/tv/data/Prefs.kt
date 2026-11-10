@@ -138,16 +138,6 @@ class Prefs(context: Context) {
         }.apply()
     }
 
-    fun secondarySubtitleTrackFor(itemId: String): Int? =
-        sp.getInt("secondary_subtitle_track_$itemId", -1).takeIf { it >= 0 }
-
-    fun rememberSecondarySubtitleTrack(itemId: String, streamIndex: Int?) {
-        sp.edit().apply {
-            if (streamIndex == null || streamIndex < 0) remove("secondary_subtitle_track_$itemId")
-            else putInt("secondary_subtitle_track_$itemId", streamIndex)
-        }.apply()
-    }
-
     fun audioTrackFor(itemId: String): Int? = sp.getInt("audio_track_$itemId", -1).takeIf { it >= 0 }
 
     fun rememberAudioTrack(itemId: String, streamIndex: Int) {
