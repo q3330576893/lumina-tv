@@ -1,6 +1,8 @@
 package com.lumina.tv.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import com.lumina.tv.data.MediaChapter
 import okhttp3.MediaType.Companion.toMediaType
@@ -162,6 +164,65 @@ class EmbyClient(
         getItems(types = "Movie,Series,Episode", sortBy = "DateCreated", sortOrder = "Descending", limit = limit, filters = "IsFavorite")
     }
 
+    suspend fun getRecentlyAiring(limit: Int = 20): List<MediaItem> =
+        getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = limit)
+            .distinctBy { it.id }
+
+    suspend fun getTopRatedMovies(limit: Int = 20): List<MediaItem> =
+        getItems(
+            types = "Movie",
+            sortBy = "CommunityRating",
+            sortOrder = "Descending",
+            limit = limit,
+            minCommunityRating = 0.01,
+        ).filter { (it.communityRating ?: 0.0) > 0.0 }
+            .distinctBy { it.id }
+
+    suspend fun getPopularSeries(limit: Int = 20): List<MediaItem> {
+        val items = try {
+            getItems(types = "Series", sortBy = "PlayCount", sortOrder = "Descending", limit = limit)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = limit)
+        }
+        return items.distinctBy { it.id }
+    }
+
+    suspend fun getNewAnimation(limit: Int = 20): List<MediaItem> = coroutineScope {
+        val chinese = async {
+            runCatching {
+                getItems(
+                    types = "Movie,Series",
+                    sortBy = "DateCreated",
+                    sortOrder = "Descending",
+                    limit = limit,
+                    genre = "动画",
+                )
+            }.getOrDefault(emptyList())
+        }
+        val english = async {
+            runCatching {
+                getItems(
+                    types = "Movie,Series",
+                    sortBy = "DateCreated",
+                    sortOrder = "Descending",
+                    limit = limit,
+                    genre = "Animation",
+                )
+            }.getOrDefault(emptyList())
+        }
+        (chinese.await() + english.await())
+            .filter { item ->
+                item.genres.any { genre ->
+                    genre.contains("动画", ignoreCase = true) ||
+                        genre.contains("Animation", ignoreCase = true)
+                }
+            }
+            .distinctBy { it.id }
+            .sortedByDescending { it.dateCreated.orEmpty() }
+            .take(limit)
+    }
+
     /** 全部类型（题材）名称。多级兜底：/Genres → /Items/Filters → 本地汇总。 */
     suspend fun getGenres(): List<String> = withContext(Dispatchers.IO) {
         // 1) 标准 /Genres
@@ -236,7 +297,8 @@ class EmbyClient(
         searchTerm: String? = null,
         genre: String? = null,
         filters: String? = null,
-        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
+        minCommunityRating: Double? = null,
+        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,DateCreated",
         requestTimeoutSeconds: Int? = null,
     ): List<MediaItem> = withContext(Dispatchers.IO) {
         val params = mutableMapOf(
@@ -254,6 +316,7 @@ class EmbyClient(
         if (searchTerm != null) params["SearchTerm"] = searchTerm
         if (genre != null) params["Genres"] = genre
         if (filters != null) params["Filters"] = filters
+        if (minCommunityRating != null) params["MinCommunityRating"] = minCommunityRating.toString()
         val response = getSync(url("/Users/$userId/Items", params), timeoutSeconds = requestTimeoutSeconds)
         lastTotalRecordCount = response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
         val arr = response.optJSONArray("Items") ?: JSONArray()
@@ -615,6 +678,7 @@ class EmbyClient(
                 }
             } ?: emptyList(),
             providerIds = providerIds,
+            dateCreated = o.optString("DateCreated").ifBlank { null },
         )
     }
 

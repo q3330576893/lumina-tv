@@ -16,6 +16,10 @@ object LibraryCache {
         val series: List<MediaItem>,
         val favorites: List<MediaItem>,
         val genres: List<String>,
+        val airing: List<MediaItem> = emptyList(),
+        val topRatedMovies: List<MediaItem> = emptyList(),
+        val popularSeries: List<MediaItem> = emptyList(),
+        val newAnimation: List<MediaItem> = emptyList(),
         val views: List<LibraryView> = emptyList(),
         val at: Long,
     )
@@ -69,6 +73,10 @@ object LibraryCache {
                     .distinctBy { it.id }
                     .filter { it.type != "Movie" && it.type != "Series" }
             }
+            val airingTask = async { runCatching { client.getRecentlyAiring(20) }.getOrDefault(emptyList()) }
+            val topRatedTask = async { runCatching { client.getTopRatedMovies(20) }.getOrDefault(emptyList()) }
+            val popularSeriesTask = async { runCatching { client.getPopularSeries(20) }.getOrDefault(emptyList()) }
+            val animationTask = async { runCatching { client.getNewAnimation(20) }.getOrDefault(emptyList()) }
 
             val resume = resumeTask.await()
             val movies = moviesTask.await()
@@ -76,6 +84,10 @@ object LibraryCache {
             val favorites = favoritesTask.await()
             val views = viewsTask.await()
             val latest = latestTask.await()
+            val airing = airingTask.await()
+            val topRatedMovies = topRatedTask.await()
+            val popularSeries = popularSeriesTask.await()
+            val newAnimation = animationTask.await()
             putHome(
                 HomeData(
                     resume = resume,
@@ -84,6 +96,10 @@ object LibraryCache {
                     series = series,
                     favorites = favorites,
                     genres = emptyList(),
+                    airing = airing,
+                    topRatedMovies = topRatedMovies,
+                    popularSeries = popularSeries,
+                    newAnimation = newAnimation,
                     views = views,
                     at = System.currentTimeMillis(),
                 )

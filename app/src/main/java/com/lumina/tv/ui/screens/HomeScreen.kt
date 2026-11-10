@@ -167,6 +167,10 @@ fun HomeScreen(
     var movies by remember { mutableStateOf(LibraryCache.home?.movies ?: emptyList()) }
     var series by remember { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
     var favorites by remember { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
+    var airing by remember { mutableStateOf(LibraryCache.home?.airing ?: emptyList()) }
+    var topRatedMovies by remember { mutableStateOf(LibraryCache.home?.topRatedMovies ?: emptyList()) }
+    var popularSeries by remember { mutableStateOf(LibraryCache.home?.popularSeries ?: emptyList()) }
+    var newAnimation by remember { mutableStateOf(LibraryCache.home?.newAnimation ?: emptyList()) }
     var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
 
     var tab by rememberSaveable { mutableStateOf(HomeTab.Recommend) }
@@ -308,12 +312,20 @@ fun HomeScreen(
                 }
                 val fA = async { runCatching { c.getFavorites(24) }.getOrDefault(emptyList()) }
                 val vA = async { runCatching { c.getViews() }.getOrDefault(emptyList()) }
+                val airingA = async { runCatching { c.getRecentlyAiring(20) }.getOrDefault(emptyList()) }
+                val topRatedA = async { runCatching { c.getTopRatedMovies(20) }.getOrDefault(emptyList()) }
+                val popularSeriesA = async { runCatching { c.getPopularSeries(20) }.getOrDefault(emptyList()) }
+                val animationA = async { runCatching { c.getNewAnimation(20) }.getOrDefault(emptyList()) }
 
                 val r = rA.await()
                 val m = mA.await()
                 val s = sA.await()
                 val f = fA.await()
                 val v = vA.await()
+                val hot = airingA.await()
+                val topRated = topRatedA.await()
+                val popular = popularSeriesA.await()
+                val animation = animationA.await()
                 val l = runCatching { c.getLatest(null, 24) }.getOrDefault(emptyList())
                     .distinctBy { it.id }
                     .filter { it.type != "Movie" && it.type != "Series" }
@@ -323,11 +335,17 @@ fun HomeScreen(
                 movies = m
                 series = s
                 favorites = f
+                airing = hot
+                topRatedMovies = topRated
+                popularSeries = popular
+                newAnimation = animation
                 views = v
                 LibraryCache.putHome(
                     LibraryCache.HomeData(
                         resume = r, latest = l, movies = m, series = s,
                         favorites = f, genres = emptyList(), views = v, at = System.currentTimeMillis(),
+                        airing = hot, topRatedMovies = topRated,
+                        popularSeries = popular, newAnimation = animation,
                     )
                 )
             }
@@ -338,8 +356,8 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(loading, initialFocusPending, resume, favorites, latest, movies, series) {
-        if (!loading && initialFocusPending && (resume.isNotEmpty() || favorites.isNotEmpty() || latest.isNotEmpty() || movies.isNotEmpty() || series.isNotEmpty())) {
+    LaunchedEffect(loading, initialFocusPending, resume, favorites, latest, airing, topRatedMovies, popularSeries, newAnimation, movies, series) {
+        if (!loading && initialFocusPending && (resume.isNotEmpty() || favorites.isNotEmpty() || latest.isNotEmpty() || airing.size >= 4 || topRatedMovies.size >= 4 || popularSeries.size >= 4 || newAnimation.size >= 4 || movies.isNotEmpty() || series.isNotEmpty())) {
             delay(240)
             initialFocusPending = false
         }
@@ -537,7 +555,10 @@ fun HomeScreen(
                             onComposed = { heroComposed = it },
                         )
                     }
-                    if (!loading && resume.isEmpty() && favorites.isEmpty()) {
+                    if (!loading && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() &&
+                        airing.size < 4 && topRatedMovies.size < 4 && popularSeries.size < 4 &&
+                        newAnimation.size < 4 && movies.isEmpty() && series.isEmpty()
+                    ) {
                         item {
                             FocusSurface(
                                 modifier = Modifier.padding(horizontal = 34.dp, vertical = 12.dp)
@@ -560,8 +581,14 @@ fun HomeScreen(
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
-                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
-                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty(), focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
+                    val noRowsBeforeCharts = resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()
+                    if (airing.size >= 4) item { RowSection("正在热播", airing, requestInitialFocus = initialFocusPending && focusedMediaId == null && noRowsBeforeCharts, sectionKey = "airing", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && noRowsBeforeCharts) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "airing" }) { onOpenDetail(it.id) } }
+                    if (topRatedMovies.size >= 4) item { RowSection("高分电影", topRatedMovies, requestInitialFocus = initialFocusPending && focusedMediaId == null && noRowsBeforeCharts && airing.size < 4, sectionKey = "top-rated", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && noRowsBeforeCharts && airing.size < 4) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "top-rated" }) { onOpenDetail(it.id) } }
+                    if (popularSeries.size >= 4) item { RowSection("热门剧集", popularSeries, requestInitialFocus = initialFocusPending && focusedMediaId == null && noRowsBeforeCharts && airing.size < 4 && topRatedMovies.size < 4, sectionKey = "popular-series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && noRowsBeforeCharts && airing.size < 4 && topRatedMovies.size < 4) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "popular-series" }) { onOpenDetail(it.id) } }
+                    if (newAnimation.size >= 4) item { RowSection("动画新番", newAnimation, requestInitialFocus = initialFocusPending && focusedMediaId == null && noRowsBeforeCharts && airing.size < 4 && topRatedMovies.size < 4 && popularSeries.size < 4, sectionKey = "new-animation", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && noRowsBeforeCharts && airing.size < 4 && topRatedMovies.size < 4 && popularSeries.size < 4) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "new-animation" }) { onOpenDetail(it.id) } }
+                    val noEarlierRows = resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && airing.size < 4 && topRatedMovies.size < 4 && popularSeries.size < 4 && newAnimation.size < 4
+                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && noEarlierRows, focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && noEarlierRows) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
+                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && noEarlierRows && movies.isEmpty(), focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && noEarlierRows && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
