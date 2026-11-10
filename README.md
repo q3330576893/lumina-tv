@@ -3,7 +3,7 @@
 面向客厅大屏的 Emby 客户端。基于 Kotlin 与 Jetpack Compose 构建，遥控器优先操作，
 以播放可靠性与界面一致性为核心设计目标。
 
-**当前版本** v1.22.4（versionCode 44）· Android 8.0+（minSdk 26）
+**当前版本** v1.22.5（versionCode 45）· Android 8.0+（minSdk 26）
 
 ---
 
