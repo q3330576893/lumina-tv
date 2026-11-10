@@ -11,6 +11,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.Key
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.focus.FocusRequester
@@ -73,6 +74,7 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.getValue
@@ -105,17 +107,20 @@ import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import coil.imageLoader
 import coil.request.ImageRequest
+import coil.request.SuccessResult
+import androidx.core.graphics.drawable.toBitmap
+import androidx.core.graphics.ColorUtils
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
-import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.SectionTitle
 import com.lumina.tv.ui.theme.Accent
+import com.lumina.tv.ui.theme.Ink
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
@@ -130,7 +135,39 @@ import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+
+private val heroPageColorCache = LinkedHashMap<String, Color>(24, 0.75f, true)
+
+private fun averageHeroPageColor(drawable: android.graphics.drawable.Drawable): Color? {
+    val bitmap = drawable.toBitmap(width = 32, height = 18, config = android.graphics.Bitmap.Config.ARGB_8888)
+    val pixels = IntArray(bitmap.width * bitmap.height)
+    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    var red = 0L
+    var green = 0L
+    var blue = 0L
+    var count = 0L
+    pixels.forEach { pixel ->
+        if (android.graphics.Color.alpha(pixel) >= 32) {
+            red += android.graphics.Color.red(pixel)
+            green += android.graphics.Color.green(pixel)
+            blue += android.graphics.Color.blue(pixel)
+            count++
+        }
+    }
+    if (count == 0L) return null
+    val average = android.graphics.Color.rgb(
+        (red / count).toInt(),
+        (green / count).toInt(),
+        (blue / count).toInt(),
+    )
+    val hsl = FloatArray(3)
+    ColorUtils.colorToHSL(average, hsl)
+    hsl[2] = 0.10f
+    return Color(ColorUtils.HSLToColor(hsl))
+}
 
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
@@ -498,6 +535,49 @@ fun HomeScreen(
     val heroItems = remember(heroPool) { pickHeroItems(heroPool, latest.map { it.id }.toHashSet(), 6) }
     LaunchedEffect(heroItems) { heroIndex = 0 }
     val hero = heroItems.getOrNull(heroIndex) ?: resume.firstOrNull()
+    val heroImageUrl = hero?.let { item ->
+        AppRuntime.client?.backdropUrl(item, 1280)?.takeIf { it.isNotBlank() }
+            ?: AppRuntime.client?.imageUrl(item, 720)
+    }
+    var pageBackgroundTarget by remember { mutableStateOf(Ink) }
+    LaunchedEffect(heroImageUrl) {
+        val imageUrl = heroImageUrl
+        if (imageUrl == null) {
+            pageBackgroundTarget = Ink
+            return@LaunchedEffect
+        }
+        heroPageColorCache[imageUrl]?.let {
+            pageBackgroundTarget = it
+            return@LaunchedEffect
+        }
+        val sampledColor = runCatching {
+            val request = ImageRequest.Builder(context)
+                .data(imageUrl)
+                .size(32, 18)
+                .allowHardware(false)
+                .crossfade(false)
+                .build()
+            val result = context.imageLoader.execute(request) as? SuccessResult
+            result?.drawable?.let { drawable ->
+                withContext(Dispatchers.Default) { averageHeroPageColor(drawable) }
+            }
+        }.getOrNull()
+        currentCoroutineContext().ensureActive()
+        if (sampledColor != null) {
+            if (heroPageColorCache.size >= 24) {
+                heroPageColorCache.remove(heroPageColorCache.keys.firstOrNull())
+            }
+            heroPageColorCache[imageUrl] = sampledColor
+            pageBackgroundTarget = sampledColor
+        } else {
+            pageBackgroundTarget = Ink
+        }
+    }
+    val pageBackground by animateColorAsState(
+        targetValue = pageBackgroundTarget,
+        animationSpec = tween(300),
+        label = "home-page-background",
+    )
 
     val navFocus = remember { FocusRequester() }
 
@@ -507,7 +587,7 @@ fun HomeScreen(
     var heroComposed by remember { mutableStateOf(false) }
 
     // 导航在顶部，右键不再劫持（原来的右键跳竖栏逻辑会让影片行无法继续右移）
-    Box(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+    Box(Modifier.fillMaxSize().background(pageBackground).onPreviewKeyEvent { event ->
         if (event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
             runCatching { navFocus.requestFocus() }.isSuccess
         } else false
@@ -547,6 +627,7 @@ fun HomeScreen(
                             onOpenDetail = onOpenDetail,
                             playFocus = heroPlayFocus,
                             hazeState = hazeState,
+                            pageBackground = pageBackground,
                             onComposed = { heroComposed = it },
                         )
                     }
@@ -814,7 +895,6 @@ private fun NavBar(
             onLogout = onLogout,
             onServerSwitched = onServerSwitched,
             contentFocus = contentFocus,
-            hazeState = hazeState,
         )
         TopNavBar(
             modifier = Modifier.align(Alignment.TopEnd).padding(top = 16.dp, end = Space.l),
@@ -836,65 +916,60 @@ private fun ServerCapsule(
     onLogout: () -> Unit,
     onServerSwitched: () -> Unit,
     contentFocus: FocusRequester,
-    hazeState: HazeState,
 ) {
     val context = LocalContext.current
     var serverMenuOpen by remember { mutableStateOf(false) }
-    val glassShape = RoundedCornerShape(24.dp)
+    val capsuleInteraction = remember { MutableInteractionSource() }
+    val capsuleFocused by capsuleInteraction.collectIsFocusedAsState()
+    val glassShape = RoundedCornerShape(20.dp)
     val menuShape = ShapeScale.panel
     Box(modifier.wrapContentSize()) {
-        Row(
+        Box(
             Modifier
-                .height(48.dp)
-                .shadow(16.dp, glassShape, clip = false)
+                .height(40.dp)
+                .widthIn(min = 92.dp, max = 204.dp)
                 .clip(glassShape)
-                .then(
-                    if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
-                        state = hazeState,
-                        style = HazeStyle(
-                            backgroundColor = Color(0xD9151B2A),
-                            tint = HazeTint(Color(0x38FFFFFF)),
-                            blurRadius = ThemeRuntime.blurRadiusDp,
-                            noiseFactor = 0f,
-                        ),
-                    ) else Modifier.background(Color(0xD9151B2A))
+                .background(Color.White.copy(alpha = if (capsuleFocused) 0.14f else 0.08f))
+                .border(
+                    width = if (capsuleFocused) 1.5.dp else 1.dp,
+                    color = if (capsuleFocused) Accent else Color.White.copy(alpha = 0.14f),
+                    shape = glassShape,
                 )
-                .border(1.dp, Color(0x44FFFFFF), glassShape)
-                .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box {
-                FocusSurface(
-                    modifier = Modifier.height(48.dp).widthIn(min = 92.dp, max = 168.dp)
-                        .onPreviewKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                                // 内容区没有可聚焦目标时（如媒体库标签页）不要吞掉按键，交给系统继续找
-                                runCatching { contentFocus.requestFocus() }.isSuccess
-                            } else false
-                        },
-                    corner = Space.l - Space.xs,
+                .clickable(
+                    interactionSource = capsuleInteraction,
+                    indication = null,
                     onClick = { serverMenuOpen = true },
-                ) { focused ->
-                    Row(
-                        Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() }
-                                ?: AppRuntime.session?.serverName ?: "Emby",
-                            // 不撑满：名字短则胶囊短，长名字最多到 116dp 再省略
-                            modifier = Modifier.widthIn(max = 116.dp),
-                            color = if (focused) Accent else Color(0xFFD6DEEB),
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(Modifier.width(Space.xs))
-                        Text("▾", color = if (focused) Accent else Color(0xFFD6DEEB), fontSize = 12.sp)
-                    }
+                )
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                        runCatching { contentFocus.requestFocus() }.isSuccess
+                    } else false
+                },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() }
+                        ?: AppRuntime.session?.serverName ?: "Emby",
+                    modifier = Modifier.weight(1f),
+                    color = Color.White.copy(alpha = 0.9f),
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Box(Modifier.size(8.dp), contentAlignment = Alignment.Center) {
+                    Text("▾", color = Color.White.copy(alpha = 0.9f), fontSize = 8.sp)
                 }
-                DropdownMenu(
+            }
+            Box(
+                Modifier.align(Alignment.TopCenter).fillMaxWidth().height(1.dp)
+                    .background(Color.White.copy(alpha = 0.06f))
+            )
+        }
+        DropdownMenu(
                     expanded = serverMenuOpen,
                     onDismissRequest = { serverMenuOpen = false },
                     modifier = Modifier.width(260.dp),
@@ -994,8 +1069,6 @@ private fun ServerCapsule(
                         MenuRowGlass("退出当前服务器", "清除登录状态并返回登录页", danger = true) { serverMenuOpen = false; onLogout() }
                     }
                 }
-            }
-        }
     }
 }
 
@@ -1362,6 +1435,7 @@ private fun Hero(
     onOpenDetail: (String) -> Unit,
     playFocus: FocusRequester,
     hazeState: HazeState,
+    pageBackground: Color,
     onComposed: (Boolean) -> Unit = {},
 ) {
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
@@ -1417,7 +1491,7 @@ private fun Hero(
                 .fillMaxWidth()
                 .height(heroHeight)
                 .clip(RoundedCornerShape(bottomEnd = 34.dp))
-                .background(Brush.linearGradient(listOf(Color(0xFF174C58), Color(0xFF111827))))
+                .background(pageBackground)
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
                     when (event.key) {
@@ -1477,6 +1551,10 @@ private fun Hero(
                 .fillMaxWidth(0.46f)
                 .align(Alignment.CenterStart)
                 .background(Brush.horizontalGradient(listOf(Color(0x66000000), Color.Transparent)))
+        )
+        Box(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(120.dp)
+                .background(Brush.verticalGradient(listOf(Color.Transparent, pageBackground)))
         )
         Column(
             Modifier.align(Alignment.BottomStart).padding(start = 34.dp, bottom = 24.dp, end = 200.dp)
