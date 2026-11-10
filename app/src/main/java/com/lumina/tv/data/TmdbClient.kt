@@ -18,6 +18,8 @@ object TmdbClient {
 
     data class ExternalIds(val imdbId: String?, val tvdbId: String?)
 
+    data class ExternalLinks(val imdbId: String?, val tmdbId: String?, val tvdbId: String?)
+
     data class TmdbInfo(
         val rating: Double?,
         val posterUrl: String?,
@@ -33,6 +35,54 @@ object TmdbClient {
     private val noHit = HashSet<String>()
     private val externalIdsCache = LinkedHashMap<String, ExternalIds?>()
     private val externalIdsNoHit = HashSet<String>()
+    private val externalLinksCache = LinkedHashMap<String, ExternalLinks>()
+    private val externalLinksNoHit = HashSet<String>()
+
+    /** Resolve missing provider IDs for a detail item without blocking its first render. */
+    suspend fun externalLinks(
+        type: String,
+        title: String,
+        year: Int?,
+        embyImdbId: String?,
+        embyTmdbId: String?,
+        embyTvdbId: String?,
+    ): ExternalLinks? = withContext(Dispatchers.IO) {
+        val key = "$type|$title|${year ?: 0}|${embyImdbId.orEmpty()}|${embyTmdbId.orEmpty()}|${embyTvdbId.orEmpty()}"
+        synchronized(externalLinksCache) {
+            externalLinksCache[key]?.let { return@withContext it }
+            if (key in externalLinksNoHit) return@withContext null
+        }
+
+        val tmdbId = embyTmdbId?.takeIf(String::isNotBlank) ?: searchTmdbId(type, title, year)
+        val external = tmdbId?.let { externalIds(type, it) }
+        val result = ExternalLinks(
+            imdbId = embyImdbId?.takeIf(String::isNotBlank) ?: external?.imdbId,
+            tmdbId = tmdbId,
+            tvdbId = embyTvdbId?.takeIf(String::isNotBlank) ?: external?.tvdbId,
+        ).takeIf { it.imdbId != null || it.tmdbId != null || it.tvdbId != null }
+        synchronized(externalLinksCache) {
+            if (result == null) externalLinksNoHit.add(key) else externalLinksCache[key] = result
+            if (externalLinksCache.size > 200) externalLinksCache.clear()
+            if (externalLinksNoHit.size > 200) externalLinksNoHit.clear()
+        }
+        result
+    }
+
+    private fun searchTmdbId(type: String, title: String, year: Int?): String? {
+        if (title.isBlank()) return null
+        val isTv = type == "Series"
+        val path = if (isTv) "tv" else "movie"
+        val url = buildString {
+            append("https://api.tmdb.org/3/search/").append(path)
+            append("?query=").append(URLEncoder.encode(title, "UTF-8"))
+            if (year != null && year in 1900..2100) {
+                append("&").append(if (isTv) "first_air_date_year" else "year").append("=").append(year)
+            }
+            append("&api_key=").append(BuildConfig.TMDB_API_KEY)
+        }
+        val first = getJson(url)?.optJSONArray("results")?.optJSONObject(0) ?: return null
+        return first.optLong("id", 0L).takeIf { it > 0 }?.toString()
+    }
 
     /** Resolve IMDb and TVDB IDs from an Emby-provided TMDB ID without delaying detail rendering. */
     suspend fun externalIds(type: String, tmdbId: String): ExternalIds? = withContext(Dispatchers.IO) {

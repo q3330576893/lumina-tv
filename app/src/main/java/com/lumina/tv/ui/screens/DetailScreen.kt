@@ -46,9 +46,7 @@ import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -124,7 +122,7 @@ fun DetailScreen(
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
-    var tmdbExternalIds by remember(id) { mutableStateOf<TmdbClient.ExternalIds?>(null) }
+    var resolvedExternalLinks by remember(id) { mutableStateOf<TmdbClient.ExternalLinks?>(null) }
     var mediaInfoExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
     var sourcesLoading by remember { mutableStateOf(false) }
@@ -252,10 +250,19 @@ fun DetailScreen(
         }
     }
 
-    LaunchedEffect(id, item?.providerIds?.get("tmdb")) {
+    LaunchedEffect(id, item?.id, item?.type, item?.name, item?.seriesName, item?.year, item?.providerIds) {
         val current = item ?: return@LaunchedEffect
-        val tmdbId = current.providerIds["tmdb"] ?: return@LaunchedEffect
-        tmdbExternalIds = runCatching { TmdbClient.externalIds(current.type, tmdbId) }.getOrNull()
+        resolvedExternalLinks = null
+        resolvedExternalLinks = runCatching {
+            TmdbClient.externalLinks(
+                type = current.type,
+                title = current.seriesName ?: current.name,
+                year = current.year,
+                embyImdbId = current.providerIds["imdb"],
+                embyTmdbId = current.providerIds["tmdb"],
+                embyTvdbId = current.providerIds["tvdb"],
+            )
+        }.getOrNull()
     }
 
     LaunchedEffect(id, item?.type, sources, episodes) {
@@ -712,8 +719,6 @@ fun DetailScreen(
                 val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
                 if (activeSource != null && hasMediaInfo(activeSource)) {
                     Spacer(Modifier.height(24.dp))
-                    Text("媒体信息${activeSource.name.takeIf { sources.size > 1 && it.isNotBlank() }?.let { " · $it" }.orEmpty()}", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(10.dp))
                     MediaInfoSection(
                         source = activeSource,
                         expanded = mediaInfoExpanded,
@@ -722,14 +727,15 @@ fun DetailScreen(
                 }
 
                 val providerIds = it0!!.providerIds
+                val resolvedLinks = resolvedExternalLinks
                 val providerLinks = buildList {
-                    (providerIds["imdb"] ?: tmdbExternalIds?.imdbId)?.takeIf(String::isNotBlank)
+                    (providerIds["imdb"] ?: resolvedLinks?.imdbId)?.takeIf(String::isNotBlank)
                         ?.let { add("IMDB" to "https://www.imdb.com/title/$it/") }
-                    providerIds["tmdb"]?.takeIf(String::isNotBlank)?.let {
+                    (providerIds["tmdb"] ?: resolvedLinks?.tmdbId)?.takeIf(String::isNotBlank)?.let {
                         val type = if (it0.type == "Series") "tv" else "movie"
                         add("TMDB" to "https://www.themoviedb.org/$type/$it")
                     }
-                    (providerIds["tvdb"] ?: tmdbExternalIds?.tvdbId)?.takeIf(String::isNotBlank)?.let {
+                    (providerIds["tvdb"] ?: resolvedLinks?.tvdbId)?.takeIf(String::isNotBlank)?.let {
                         val type = if (it0.type == "Series") "series" else "movie"
                         add("THE TVDB" to "https://thetvdb.com/dereferrer/$type/$it")
                     }
@@ -946,15 +952,12 @@ private enum class MediaBadge { DolbyVision, DolbyAtmos, FourK, Hdr10Plus, Hdr10
 private fun hasMediaInfo(source: MediaSource): Boolean = source.name.isNotBlank() ||
     !source.container.isNullOrBlank() || source.size > 0 || (source.bitrate ?: 0) > 0 ||
     !source.resolution.isNullOrBlank() || source.streams.any {
-        it.type.equals("Video", true) || it.type.equals("Audio", true) ||
-            it.type.equals("Subtitle", true) || it.type.equals("Text", true)
+        it.type.equals("Video", true)
     }
 
 @Composable
 private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: () -> Unit) {
     val video = source.streams.firstOrNull { it.type.equals("Video", true) }
-    val audio = source.streams.filter { it.type.equals("Audio", true) }
-    val subtitles = source.streams.filter { it.type.equals("Subtitle", true) || it.type.equals("Text", true) }
     val fileRows = listOfNotNull(
         source.name.takeIf(String::isNotBlank)?.let { "文件名" to it },
         source.container?.takeIf(String::isNotBlank)?.uppercase()?.let { "容器" to it },
@@ -966,8 +969,8 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
         video?.frameRate?.takeIf { it > 0 }?.let { "帧率" to formatFrameRate(it) },
     )
     val videoBadges = video?.let(::videoBadges).orEmpty()
-    val summaryBadges = (videoBadges + audio.flatMap(::audioBadges)).distinct().take(4)
-    val hasCards = fileRows.isNotEmpty() || videoRows.isNotEmpty() || videoBadges.isNotEmpty() || audio.isNotEmpty() || subtitles.isNotEmpty()
+    val summaryBadges = videoBadges.take(4)
+    val hasCards = fileRows.isNotEmpty() || videoRows.isNotEmpty() || videoBadges.isNotEmpty()
     if (!hasCards) return
 
     BackHandler(enabled = expanded) { onToggle() }
@@ -981,6 +984,8 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
             Modifier.fillMaxSize().padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Text("媒体信息", color = if (focused) Color.White else TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Spacer(Modifier.width(12.dp))
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 summaryBadges.forEach { SpecBadge(it) }
                 if (summaryBadges.isEmpty()) {
@@ -1001,22 +1006,14 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
         BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 10.dp)) {
             val twoColumns = maxWidth >= 600.dp
             if (twoColumns) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (fileRows.isNotEmpty()) MediaGlassCard("文件", Icons.Rounded.InsertDriveFile, "" + fileRows.size + " 项", Modifier.weight(1f)) { DetailRows(fileRows) }
-                        if (videoRows.isNotEmpty() || videoBadges.isNotEmpty()) MediaGlassCard("视频", Icons.Rounded.Movie, video?.let { "1 条" }, Modifier.weight(1f)) { VideoCardContent(videoBadges, videoRows) }
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (audio.isNotEmpty()) MediaGlassCard("音频", Icons.Rounded.VolumeUp, "" + audio.size + " 条", Modifier.weight(1f)) { AudioRows(audio) }
-                        if (subtitles.isNotEmpty()) MediaGlassCard("字幕", Icons.Rounded.Subtitles, "" + subtitles.size + " 条", Modifier.weight(1f)) { SubtitleRows(subtitles) }
-                    }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (fileRows.isNotEmpty()) MediaGlassCard("文件", Icons.Rounded.InsertDriveFile, "" + fileRows.size + " 项", Modifier.weight(1f)) { DetailRows(fileRows) }
+                    if (videoRows.isNotEmpty() || videoBadges.isNotEmpty()) MediaGlassCard("视频", Icons.Rounded.Movie, video?.let { "1 条" }, Modifier.weight(1f)) { VideoCardContent(videoBadges, videoRows) }
                 }
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (fileRows.isNotEmpty()) MediaGlassCard("文件", Icons.Rounded.InsertDriveFile, "" + fileRows.size + " 项", Modifier.fillMaxWidth()) { DetailRows(fileRows) }
                     if (videoRows.isNotEmpty() || videoBadges.isNotEmpty()) MediaGlassCard("视频", Icons.Rounded.Movie, video?.let { "1 条" }, Modifier.fillMaxWidth()) { VideoCardContent(videoBadges, videoRows) }
-                    if (audio.isNotEmpty()) MediaGlassCard("音频", Icons.Rounded.VolumeUp, "" + audio.size + " 条", Modifier.fillMaxWidth()) { AudioRows(audio) }
-                    if (subtitles.isNotEmpty()) MediaGlassCard("字幕", Icons.Rounded.Subtitles, "" + subtitles.size + " 条", Modifier.fillMaxWidth()) { SubtitleRows(subtitles) }
                 }
             }
         }
@@ -1082,42 +1079,13 @@ private fun VideoCardContent(badges: List<MediaBadge>, rows: List<Pair<String, S
 }
 
 @Composable
-private fun AudioRows(streams: List<MediaStream>) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) { streams.forEachIndexed { index, stream ->
-        Row(Modifier.fillMaxWidth().heightIn(min = 26.dp), verticalAlignment = Alignment.CenterVertically) {
-            TrackBadge("A${index + 1}")
-            Spacer(Modifier.width(8.dp))
-            Text(audioTrackText(stream), color = Color(0xEBFFFFFF), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            audioFlagshipBadges(stream).forEach { Spacer(Modifier.width(6.dp)); SpecBadge(it) }
-        }
-    } }
-}
-
-@Composable
-private fun SubtitleRows(streams: List<MediaStream>) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) { streams.forEachIndexed { index, stream ->
-        Row(Modifier.fillMaxWidth().height(26.dp), verticalAlignment = Alignment.CenterVertically) {
-            TrackBadge("S${index + 1}")
-            Spacer(Modifier.width(8.dp))
-            Text(subtitleTrackText(stream), color = Color(0xEBFFFFFF), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        }
-    } }
-}
-
-@Composable
-private fun TrackBadge(text: String) {
-    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = Color(0xEBFFFFFF), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.18.sp)
-    }
-}
-
-@Composable
 private fun SpecBadge(badge: MediaBadge) {
-    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 5.dp), contentAlignment = Alignment.Center) {
+    val horizontalPadding = if (badge == MediaBadge.DolbyVision || badge == MediaBadge.DolbyAtmos) 5.dp else 8.dp
+    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = horizontalPadding), contentAlignment = Alignment.Center) {
         when (badge) {
             MediaBadge.DolbyVision -> Icon(painterResource(R.drawable.badge_dolby_vision), "Dolby Vision", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
             MediaBadge.DolbyAtmos -> Icon(painterResource(R.drawable.badge_dolby_atmos), "Dolby Atmos", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
-            else -> Text(badgeText(badge), color = Color(0xEBFFFFFF), fontSize = 9.sp, fontWeight = FontWeight.Black, letterSpacing = (-0.12).sp)
+            else -> Text(badgeText(badge), color = Color(0xEBFFFFFF), fontSize = 9.sp, fontWeight = FontWeight.W800, letterSpacing = 0.sp)
         }
     }
 }
@@ -1146,22 +1114,6 @@ private fun videoBadges(stream: MediaStream): List<MediaBadge> = buildList {
     }
 }
 
-private fun audioBadges(stream: MediaStream): List<MediaBadge> = buildList {
-    val haystack = listOfNotNull(stream.profile, stream.displayTitle, stream.title, stream.codec).joinToString(" ").lowercase()
-    when {
-        "dts:x" in haystack || "dts x" in haystack -> add(MediaBadge.DtsX)
-        "dts-hd" in haystack || "dts hd" in haystack -> add(MediaBadge.DtsHd)
-    }
-    if ("atmos" in haystack) add(MediaBadge.DolbyAtmos)
-    if ("truehd" in haystack || "true hd" in haystack) add(MediaBadge.TrueHd)
-    when (stream.channels) {
-        6 -> add(MediaBadge.Surround51)
-        8 -> add(MediaBadge.Surround71)
-    }
-}
-
-private fun audioFlagshipBadges(stream: MediaStream): List<MediaBadge> = audioBadges(stream).filter { it == MediaBadge.DolbyAtmos || it == MediaBadge.DtsX }
-
 private fun videoResolution(source: MediaSource, stream: MediaStream?): String? = when {
     stream?.width != null && stream.height != null -> "${stream.width} × ${stream.height}"
     else -> source.resolution?.takeIf(String::isNotBlank)
@@ -1171,23 +1123,6 @@ private fun formatFrameRate(frameRate: Double): String {
     val number = if (frameRate % 1.0 == 0.0) frameRate.toInt().toString() else "%.3f".format(frameRate).trimEnd('0').trimEnd('.')
     return "$number fps"
 }
-
-private fun audioTrackText(stream: MediaStream): String {
-    val haystack = listOfNotNull(stream.profile, stream.displayTitle, stream.title, stream.codec).joinToString(" ").lowercase()
-    val format = when {
-        "dts-hd ma" in haystack || "dts hd ma" in haystack -> "DTS-HD MA"
-        "dts-hd" in haystack || "dts hd" in haystack -> "DTS-HD"
-        "truehd" in haystack || "true hd" in haystack -> "TRUEHD"
-        else -> stream.codec?.takeIf(String::isNotBlank)?.uppercase()
-    }
-    return listOfNotNull(format, channelLabel(stream.channels), stream.language?.takeIf(String::isNotBlank)).joinToString(" · ").ifBlank { stream.label }
-}
-
-private fun subtitleTrackText(stream: MediaStream): String = listOfNotNull(
-    stream.codec?.takeIf(String::isNotBlank)?.uppercase(),
-    stream.language?.takeIf(String::isNotBlank),
-    if (stream.isExternal) "外挂" else "内封",
-).joinToString(" · ").ifBlank { stream.label }
 
 private fun channelLabel(channels: Int?): String? = when (channels) { 6 -> "5.1"; 8 -> "7.1"; else -> null }
 
