@@ -736,7 +736,7 @@ fun DetailScreen(
                     val uriHandler = LocalUriHandler.current
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         providerLinks.forEachIndexed { index, (label, uri) ->
                             val brandResource = when (index) {
@@ -745,10 +745,10 @@ fun DetailScreen(
                                 2 -> R.drawable.link_brand_rt
                                 else -> R.drawable.link_brand_douban
                             }
-                            val brandHeight = if (index == 0) 9.dp else 14.dp
-                            FocusGlassSurface(Modifier.height(38.dp), corner = 10.dp, normalFill = Color(0x14FFFFFF), onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
+                            val brandHeight = if (index == 0) 8.dp else 12.dp
+                            FocusGlassSurface(Modifier.height(34.dp), corner = 10.dp, normalFill = Color(0x14FFFFFF), onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
                                 Row(
-                                    Modifier.padding(horizontal = 14.dp),
+                                    Modifier.padding(horizontal = 12.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
@@ -1043,6 +1043,7 @@ private fun FocusGlassSurface(
             .background(if (focused) Color(0x29FFFFFF) else normalFill)
             .border(if (focused) 1.5.dp else 1.dp, if (focused) Accent else Color(0x29FFFFFF), RoundedCornerShape(corner))
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+        contentAlignment = Alignment.Center,
     ) { content(focused) }
 }
 
