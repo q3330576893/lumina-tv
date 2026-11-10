@@ -1113,11 +1113,11 @@ private fun TrackBadge(text: String) {
 
 @Composable
 private fun SpecBadge(badge: MediaBadge) {
-    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 5.dp), contentAlignment = Alignment.Center) {
         when (badge) {
             MediaBadge.DolbyVision -> Icon(painterResource(R.drawable.badge_dolby_vision), "Dolby Vision", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
             MediaBadge.DolbyAtmos -> Icon(painterResource(R.drawable.badge_dolby_atmos), "Dolby Atmos", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
-            else -> Text(badgeText(badge), color = Color(0xEBFFFFFF), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.18.sp)
+            else -> Text(badgeText(badge), color = Color(0xEBFFFFFF), fontSize = 9.sp, fontWeight = FontWeight.Black, letterSpacing = (-0.12).sp)
         }
     }
 }
