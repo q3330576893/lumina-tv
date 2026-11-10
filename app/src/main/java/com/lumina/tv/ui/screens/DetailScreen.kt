@@ -1,11 +1,22 @@
 package com.lumina.tv.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,9 +41,14 @@ import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.Layers
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -47,6 +63,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -54,18 +71,22 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.R
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
+import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.LoadingView
@@ -427,15 +448,12 @@ fun DetailScreen(
                                 it0.tags.forEach { tag ->
                                     Box(
                                         Modifier
-                                            .background(
-                                                if (tag == "DOLBY VISION") Color(0x33FFB300) else Color(0x2EFFFFFF),
-                                                RoundedCornerShape(6.dp)
-                                            )
+                                            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
                                             .padding(horizontal = 8.dp, vertical = 3.dp)
                                     ) {
                                         Text(
                                             tag,
-                                            color = if (tag == "DOLBY VISION") Color(0xFFFFD54F) else TextMain,
+                                            color = Color.White,
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
                                         )
@@ -692,103 +710,33 @@ fun DetailScreen(
                 }
 
                 val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
-                if (activeSource != null) {
+                if (activeSource != null && hasMediaInfo(activeSource)) {
                     Spacer(Modifier.height(24.dp))
                     Text("媒体信息${activeSource.name.takeIf { sources.size > 1 && it.isNotBlank() }?.let { " · $it" }.orEmpty()}", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
-                    val summary = listOfNotNull(
-                        activeSource.container?.takeIf(String::isNotBlank)?.uppercase(),
-                        activeSource.bitrate?.takeIf { it > 0 }?.let(::formatBitrate),
-                        activeSource.size.takeIf { it > 0 }?.let(::formatMediaSize),
-                        activeSource.resolution?.takeIf(String::isNotBlank),
-                    ).joinToString(" · ").ifBlank { activeSource.displayLabel }
-                    FocusSurface(
-                        Modifier.fillMaxWidth().height(46.dp),
-                        corner = 8.dp,
-                        scaleTo = 1.015f,
-                        onClick = { mediaInfoExpanded = !mediaInfoExpanded },
-                    ) { focused ->
-                        Row(
-                            Modifier.fillMaxSize().padding(horizontal = 14.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                summary,
-                                color = TextMain,
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Icon(
-                                if (mediaInfoExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                                contentDescription = if (mediaInfoExpanded) "收起媒体信息" else "展开媒体信息",
-                                tint = if (focused) Accent else TextSub,
-                                modifier = Modifier.size(20.dp),
-                            )
-                        }
-                    }
-                    if (mediaInfoExpanded) {
-                        Spacer(Modifier.height(10.dp))
-                        val video = activeSource.streams.firstOrNull { it.type == "Video" }
-                        val infoLines = buildList {
-                            activeSource.container?.takeIf(String::isNotBlank)?.let { add("容器：${it.uppercase()}") }
-                            activeSource.bitrate?.takeIf { it > 0 }?.let { add("总码率：${formatBitrate(it)}") }
-                            activeSource.size.takeIf { it > 0 }?.let { add("文件大小：${formatMediaSize(it)}") }
-                            activeSource.resolution?.takeIf(String::isNotBlank)?.let { add("分辨率：$it") }
-                            video?.let { stream ->
-                                listOfNotNull(stream.codec?.uppercase(), stream.profile?.takeIf(String::isNotBlank))
-                                    .takeIf { it.isNotEmpty() }?.let { add("视频：${it.joinToString(" ")}") }
-                                stream.bitDepth?.takeIf { it > 0 }?.let { add("位深：${it} bit") }
-                                val color = listOfNotNull(
-                                    stream.colorPrimaries?.let(::formatColor),
-                                    stream.colorTransfer?.let(::formatColor),
-                                    stream.colorSpace?.let(::formatColor),
-                                ).distinct()
-                                if (color.isNotEmpty()) add("色彩：${color.joinToString(" / ")}")
-                                val range = stream.videoRangeType.orEmpty().uppercase()
-                                when {
-                                    stream.dvProfile != null || "DOVI" in range || "DOLBY" in range || stream.profile?.contains("DV", true) == true -> add("动态范围：Dolby Vision")
-                                    "HDR" in range || "HLG" in range || stream.colorTransfer?.contains("2084", true) == true || stream.colorTransfer?.contains("PQ", true) == true ->
-                                        add("动态范围：${range.takeIf(String::isNotBlank)?.replace('_', ' ') ?: stream.colorTransfer}")
-                                }
-                            }
-                        }
-                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            infoLines.forEach { Text(it, color = TextSub, fontSize = 12.sp) }
-                            activeSource.audioStreams.forEachIndexed { index, stream ->
-                                streamSummary(stream)?.let { track ->
-                                    val bitrate = stream.bitRate?.takeIf { it > 0 }?.let { " · ${formatBitrate(it)}" }.orEmpty()
-                                    Text("音轨 ${index + 1}：$track$bitrate", color = TextSub, fontSize = 12.sp)
-                                }
-                            }
-                            activeSource.subtitleStreams.forEachIndexed { index, stream ->
-                                streamSummary(stream)?.let { track ->
-                                    val sourceType = if (stream.isExternal) "外挂" else "内封"
-                                    Text("字幕 ${index + 1}（$sourceType）：$track", color = TextSub, fontSize = 12.sp)
-                                }
-                            }
-                        }
-                    }
+                    MediaInfoSection(
+                        source = activeSource,
+                        expanded = mediaInfoExpanded,
+                        onToggle = { mediaInfoExpanded = !mediaInfoExpanded },
+                    )
                 }
 
                 val providerIds = it0!!.providerIds
                 val providerLinks = buildList {
                     (providerIds["imdb"] ?: tmdbExternalIds?.imdbId)?.takeIf(String::isNotBlank)
-                        ?.let { add("IMDb" to "https://www.imdb.com/title/$it/") }
+                        ?.let { add("IMDB" to "https://www.imdb.com/title/$it/") }
                     providerIds["tmdb"]?.takeIf(String::isNotBlank)?.let {
                         val type = if (it0.type == "Series") "tv" else "movie"
                         add("TMDB" to "https://www.themoviedb.org/$type/$it")
                     }
                     (providerIds["tvdb"] ?: tmdbExternalIds?.tvdbId)?.takeIf(String::isNotBlank)?.let {
                         val type = if (it0.type == "Series") "series" else "movie"
-                        add("TheTVDB" to "https://thetvdb.com/dereferrer/$type/$it")
+                        add("THE TVDB" to "https://thetvdb.com/dereferrer/$type/$it")
                     }
                     val title = (it0.seriesName ?: it0.name).takeIf(String::isNotBlank)
                     title?.let {
                         val encoded = URLEncoder.encode(it, "UTF-8")
-                        add("豆瓣" to "https://search.douban.com/movie/subject_search?search_text=$encoded&cat=1002")
+                        add("DOUBAN" to "https://search.douban.com/movie/subject_search?search_text=$encoded&cat=1002")
                     }
                 }
                 if (providerLinks.isNotEmpty()) {
@@ -798,12 +746,16 @@ fun DetailScreen(
                     val uriHandler = LocalUriHandler.current
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         providerLinks.forEach { (label, uri) ->
-                            FocusSurface(Modifier.height(38.dp), corner = 8.dp, onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
-                                Box(
-                                    Modifier.background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(8.dp))
+                            FocusGlassSurface(Modifier.height(38.dp), corner = 10.dp, normalFill = Color(0x14FFFFFF), onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
+                                Row(
+                                    Modifier.fillMaxSize()
                                         .padding(horizontal = 14.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) { Text(label, color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium) }
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(Icons.Rounded.OpenInNew, null, tint = if (focused) Color.White else Color(0xD9FFFFFF), modifier = Modifier.size(14.dp))
+                                    Text(label, color = if (focused) Color.White else Color(0xD9FFFFFF), fontSize = 12.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.96.sp)
+                                }
                             }
                         }
                     }
@@ -989,17 +941,260 @@ private fun SettingRow(label: String, value: String, enabled: Boolean = true, on
     }
 }
 
+private enum class MediaBadge { DolbyVision, DolbyAtmos, FourK, Hdr10Plus, Hdr10, DtsX, DtsHd, TrueHd, Surround51, Surround71 }
+
+private fun hasMediaInfo(source: MediaSource): Boolean = source.name.isNotBlank() ||
+    !source.container.isNullOrBlank() || source.size > 0 || (source.bitrate ?: 0) > 0 ||
+    !source.resolution.isNullOrBlank() || source.streams.any {
+        it.type.equals("Video", true) || it.type.equals("Audio", true) ||
+            it.type.equals("Subtitle", true) || it.type.equals("Text", true)
+    }
+
+@Composable
+private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: () -> Unit) {
+    val video = source.streams.firstOrNull { it.type.equals("Video", true) }
+    val audio = source.streams.filter { it.type.equals("Audio", true) }
+    val subtitles = source.streams.filter { it.type.equals("Subtitle", true) || it.type.equals("Text", true) }
+    val fileRows = listOfNotNull(
+        source.name.takeIf(String::isNotBlank)?.let { "文件名" to it },
+        source.container?.takeIf(String::isNotBlank)?.uppercase()?.let { "容器" to it },
+        source.size.takeIf { it > 0 }?.let { "大小" to formatMediaSize(it) },
+        source.bitrate?.takeIf { it > 0 }?.let { "总码率" to formatBitrate(it) },
+    )
+    val videoRows = listOfNotNull(
+        videoResolution(source, video)?.let { "分辨率" to it },
+        video?.frameRate?.takeIf { it > 0 }?.let { "帧率" to formatFrameRate(it) },
+    )
+    val videoBadges = video?.let(::videoBadges).orEmpty()
+    val summaryBadges = (videoBadges + audio.flatMap(::audioBadges)).distinct().take(4)
+    val hasCards = fileRows.isNotEmpty() || videoRows.isNotEmpty() || videoBadges.isNotEmpty() || audio.isNotEmpty() || subtitles.isNotEmpty()
+    if (!hasCards) return
+
+    BackHandler(enabled = expanded) { onToggle() }
+
+    FocusGlassSurface(
+        modifier = Modifier.fillMaxWidth().height(52.dp),
+        corner = 14.dp,
+        onClick = onToggle,
+    ) { focused ->
+        Row(
+            Modifier.fillMaxSize().padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                summaryBadges.forEach { SpecBadge(it) }
+                if (summaryBadges.isEmpty()) {
+                    Text(source.displayLabel, color = Color(0xEBFFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Text(if (expanded) "收起" else "展开", color = if (focused) Color.White else Color(0x73FFFFFF), fontSize = 11.sp)
+            Spacer(Modifier.width(6.dp))
+            Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = if (focused) Accent else Color(0x73FFFFFF), modifier = Modifier.size(18.dp))
+        }
+    }
+
+    AnimatedVisibility(
+        visible = expanded,
+        enter = expandVertically(tween(180)) + fadeIn(tween(180)),
+        exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
+    ) {
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 10.dp)) {
+            val twoColumns = maxWidth >= 600.dp
+            if (twoColumns) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (fileRows.isNotEmpty()) MediaGlassCard("文件", Icons.Rounded.InsertDriveFile, "" + fileRows.size + " 项", Modifier.weight(1f)) { DetailRows(fileRows) }
+                        if (videoRows.isNotEmpty() || videoBadges.isNotEmpty()) MediaGlassCard("视频", Icons.Rounded.Movie, video?.let { "1 条" }, Modifier.weight(1f)) { VideoCardContent(videoBadges, videoRows) }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (audio.isNotEmpty()) MediaGlassCard("音频", Icons.Rounded.VolumeUp, "" + audio.size + " 条", Modifier.weight(1f)) { AudioRows(audio) }
+                        if (subtitles.isNotEmpty()) MediaGlassCard("字幕", Icons.Rounded.Subtitles, "" + subtitles.size + " 条", Modifier.weight(1f)) { SubtitleRows(subtitles) }
+                    }
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (fileRows.isNotEmpty()) MediaGlassCard("文件", Icons.Rounded.InsertDriveFile, "" + fileRows.size + " 项", Modifier.fillMaxWidth()) { DetailRows(fileRows) }
+                    if (videoRows.isNotEmpty() || videoBadges.isNotEmpty()) MediaGlassCard("视频", Icons.Rounded.Movie, video?.let { "1 条" }, Modifier.fillMaxWidth()) { VideoCardContent(videoBadges, videoRows) }
+                    if (audio.isNotEmpty()) MediaGlassCard("音频", Icons.Rounded.VolumeUp, "" + audio.size + " 条", Modifier.fillMaxWidth()) { AudioRows(audio) }
+                    if (subtitles.isNotEmpty()) MediaGlassCard("字幕", Icons.Rounded.Subtitles, "" + subtitles.size + " 条", Modifier.fillMaxWidth()) { SubtitleRows(subtitles) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FocusGlassSurface(
+    modifier: Modifier,
+    corner: androidx.compose.ui.unit.Dp,
+    normalFill: Color = Color(0x12FFFFFF),
+    onClick: () -> Unit,
+    content: @Composable (Boolean) -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val scale by animateFloatAsState(if (focused) 1.015f else 1f, tween(130), label = "mediaInfoFocus")
+    Box(
+        modifier.graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(corner))
+            .background(if (focused) Color(0x29FFFFFF) else normalFill)
+            .border(if (focused) 1.5.dp else 1.dp, if (focused) Accent else Color(0x29FFFFFF), RoundedCornerShape(corner))
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+    ) { content(focused) }
+}
+
+@Composable
+private fun MediaGlassCard(title: String, icon: ImageVector, count: String?, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Box(modifier.clip(RoundedCornerShape(14.dp)).background(Color(0x12FFFFFF)).border(1.dp, Color(0x29FFFFFF), RoundedCornerShape(14.dp))) {
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x0FFFFFFF)))
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(20.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x14FFFFFF)), contentAlignment = Alignment.Center) {
+                    Icon(icon, null, tint = Color(0xD9FFFFFF), modifier = Modifier.size(13.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(title, color = Color(0xEBFFFFFF), fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                count?.let { Text(it, color = Color(0x73FFFFFF), fontSize = 11.sp) }
+            }
+            Spacer(Modifier.height(10.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+private fun DetailRows(rows: List<Pair<String, String>>) {
+    Column { rows.forEach { (label, value) ->
+        Row(Modifier.fillMaxWidth().height(26.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = Color(0x80FFFFFF), fontSize = 11.sp, modifier = Modifier.width(72.dp))
+            Text(value, color = Color(0xEBFFFFFF), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+    } }
+}
+
+@Composable
+private fun VideoCardContent(badges: List<MediaBadge>, rows: List<Pair<String, String>>) {
+    if (badges.isNotEmpty()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) { badges.forEach { SpecBadge(it) } }
+        if (rows.isNotEmpty()) Spacer(Modifier.height(8.dp))
+    }
+    DetailRows(rows)
+}
+
+@Composable
+private fun AudioRows(streams: List<MediaStream>) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) { streams.forEachIndexed { index, stream ->
+        Row(Modifier.fillMaxWidth().heightIn(min = 26.dp), verticalAlignment = Alignment.CenterVertically) {
+            TrackBadge("A${index + 1}")
+            Spacer(Modifier.width(8.dp))
+            Text(audioTrackText(stream), color = Color(0xEBFFFFFF), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            audioFlagshipBadges(stream).forEach { Spacer(Modifier.width(6.dp)); SpecBadge(it) }
+        }
+    } }
+}
+
+@Composable
+private fun SubtitleRows(streams: List<MediaStream>) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) { streams.forEachIndexed { index, stream ->
+        Row(Modifier.fillMaxWidth().height(26.dp), verticalAlignment = Alignment.CenterVertically) {
+            TrackBadge("S${index + 1}")
+            Spacer(Modifier.width(8.dp))
+            Text(subtitleTrackText(stream), color = Color(0xEBFFFFFF), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+    } }
+}
+
+@Composable
+private fun TrackBadge(text: String) {
+    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+        Text(text, color = Color(0xEBFFFFFF), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.18.sp)
+    }
+}
+
+@Composable
+private fun SpecBadge(badge: MediaBadge) {
+    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+        when (badge) {
+            MediaBadge.DolbyVision -> Icon(painterResource(R.drawable.badge_dolby_vision), "Dolby Vision", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
+            MediaBadge.DolbyAtmos -> Icon(painterResource(R.drawable.badge_dolby_atmos), "Dolby Atmos", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
+            else -> Text(badgeText(badge), color = Color(0xEBFFFFFF), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.18.sp)
+        }
+    }
+}
+
+private fun badgeText(badge: MediaBadge): String = when (badge) {
+    MediaBadge.FourK -> "4K"
+    MediaBadge.Hdr10Plus -> "HDR10+"
+    MediaBadge.Hdr10 -> "HDR10"
+    MediaBadge.DtsX -> "DTS:X"
+    MediaBadge.DtsHd -> "DTS-HD"
+    MediaBadge.TrueHd -> "TRUEHD"
+    MediaBadge.Surround51 -> "5.1"
+    MediaBadge.Surround71 -> "7.1"
+    else -> ""
+}
+
+private fun videoBadges(stream: MediaStream): List<MediaBadge> = buildList {
+    if ((stream.width ?: 0) >= 3840 || (stream.height ?: 0) >= 2160) add(MediaBadge.FourK)
+    val range = stream.videoRangeType.orEmpty().uppercase()
+    val profile = stream.profile.orEmpty().uppercase()
+    val display = stream.displayTitle.orEmpty().uppercase()
+    if (stream.dvProfile != null || "DOVI" in range || "DOLBY VISION" in range || profile.startsWith("DV") || "DOVI" in profile || "DOLBY VISION" in display) add(MediaBadge.DolbyVision)
+    when {
+        "HDR10+" in range || "HDR10PLUS" in range -> add(MediaBadge.Hdr10Plus)
+        "HDR10" in range || range == "HDR" -> add(MediaBadge.Hdr10)
+    }
+}
+
+private fun audioBadges(stream: MediaStream): List<MediaBadge> = buildList {
+    val haystack = listOfNotNull(stream.profile, stream.displayTitle, stream.title, stream.codec).joinToString(" ").lowercase()
+    when {
+        "dts:x" in haystack || "dts x" in haystack -> add(MediaBadge.DtsX)
+        "dts-hd" in haystack || "dts hd" in haystack -> add(MediaBadge.DtsHd)
+    }
+    if ("atmos" in haystack) add(MediaBadge.DolbyAtmos)
+    if ("truehd" in haystack || "true hd" in haystack) add(MediaBadge.TrueHd)
+    when (stream.channels) {
+        6 -> add(MediaBadge.Surround51)
+        8 -> add(MediaBadge.Surround71)
+    }
+}
+
+private fun audioFlagshipBadges(stream: MediaStream): List<MediaBadge> = audioBadges(stream).filter { it == MediaBadge.DolbyAtmos || it == MediaBadge.DtsX }
+
+private fun videoResolution(source: MediaSource, stream: MediaStream?): String? = when {
+    stream?.width != null && stream.height != null -> "${stream.width} × ${stream.height}"
+    else -> source.resolution?.takeIf(String::isNotBlank)
+}
+
+private fun formatFrameRate(frameRate: Double): String {
+    val number = if (frameRate % 1.0 == 0.0) frameRate.toInt().toString() else "%.3f".format(frameRate).trimEnd('0').trimEnd('.')
+    return "$number fps"
+}
+
+private fun audioTrackText(stream: MediaStream): String {
+    val haystack = listOfNotNull(stream.profile, stream.displayTitle, stream.title, stream.codec).joinToString(" ").lowercase()
+    val format = when {
+        "dts-hd ma" in haystack || "dts hd ma" in haystack -> "DTS-HD MA"
+        "dts-hd" in haystack || "dts hd" in haystack -> "DTS-HD"
+        "truehd" in haystack || "true hd" in haystack -> "TRUEHD"
+        else -> stream.codec?.takeIf(String::isNotBlank)?.uppercase()
+    }
+    return listOfNotNull(format, channelLabel(stream.channels), stream.language?.takeIf(String::isNotBlank)).joinToString(" · ").ifBlank { stream.label }
+}
+
+private fun subtitleTrackText(stream: MediaStream): String = listOfNotNull(
+    stream.codec?.takeIf(String::isNotBlank)?.uppercase(),
+    stream.language?.takeIf(String::isNotBlank),
+    if (stream.isExternal) "外挂" else "内封",
+).joinToString(" · ").ifBlank { stream.label }
+
+private fun channelLabel(channels: Int?): String? = when (channels) { 6 -> "5.1"; 8 -> "7.1"; else -> null }
+
 private fun audioLabel(stream: com.lumina.tv.data.MediaStream): String =
     listOfNotNull(stream.language ?: "未知语言", stream.codec, stream.channels?.let { "${it}ch" }).joinToString(" ")
 
 private fun subtitleKey(stream: com.lumina.tv.data.MediaStream): String = "${stream.index}:0"
-
-private fun streamSummary(stream: com.lumina.tv.data.MediaStream): String? =
-    listOfNotNull(
-        stream.codec?.takeIf(String::isNotBlank)?.uppercase(),
-        stream.channels?.takeIf { it > 0 }?.let { "${it}ch" },
-        stream.language?.takeIf(String::isNotBlank),
-    ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
 
 private fun formatBitrate(bitsPerSecond: Long): String = when {
     bitsPerSecond >= 1_000_000 -> "%.1f Mbps".format(bitsPerSecond / 1_000_000.0)
@@ -1011,14 +1206,6 @@ private fun formatMediaSize(bytes: Long): String = when {
     bytes >= 1_073_741_824 -> "%.1f GB".format(bytes / 1_073_741_824.0)
     bytes >= 1_048_576 -> "%.0f MB".format(bytes / 1_048_576.0)
     else -> "%.0f KB".format(bytes / 1_024.0)
-}
-
-private fun formatColor(value: String): String? = when (value.uppercase()) {
-    "BT2020", "BT.2020" -> "BT.2020"
-    "SMPTE2084", "SMPTE ST 2084", "PQ" -> "PQ"
-    "BT709", "BT.709" -> "BT.709"
-    "BT601", "BT.601" -> "BT.601"
-    else -> value.takeIf(String::isNotBlank)
 }
 
 @Composable
