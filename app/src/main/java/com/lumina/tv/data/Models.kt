@@ -30,7 +30,6 @@ data class MediaItem(
     val audioFormat: String? = null,
     val people: List<MediaPerson> = emptyList(),
     val providerIds: Map<String, String> = emptyMap(),
-    val dateCreated: String? = null,
 ) {
     /** 规格胶囊徽标：4K / 1080P / HDR / DV / 5.1CH 等 */
     val tags: List<String>

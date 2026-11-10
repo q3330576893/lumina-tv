@@ -7,7 +7,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URLEncoder
-import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
 /**
@@ -38,103 +37,6 @@ object TmdbClient {
     private val externalIdsNoHit = HashSet<String>()
     private val externalLinksCache = LinkedHashMap<String, ExternalLinks>()
     private val externalLinksNoHit = HashSet<String>()
-    private val chartCache = LinkedHashMap<String, List<ExternalMediaItem>>()
-
-    /** Latest movies available from a TMDB watch provider in the selected region. */
-    suspend fun providerNewMovies(
-        providerId: Int,
-        watchRegion: String = "US",
-        limit: Int = 20,
-    ): List<ExternalMediaItem> = chart("provider:$providerId:$watchRegion:$limit") {
-        val url = buildString {
-            append("https://api.tmdb.org/3/discover/movie")
-            append("?with_watch_providers=").append(providerId)
-            append("&watch_region=").append(URLEncoder.encode(watchRegion, "UTF-8"))
-            append("&with_watch_monetization_types=flatrate")
-            append("&sort_by=primary_release_date.desc")
-            append("&primary_release_date.lte=").append(LocalDate.now())
-            append("&include_adult=false&language=zh-CN")
-            append("&api_key=").append(BuildConfig.TMDB_API_KEY)
-        }
-        parseChart(url, ExternalMediaType.MOVIE, limit)
-    }
-
-    /** TMDB's public weekly trend list for movies or series. */
-    suspend fun weeklyTrending(
-        type: ExternalMediaType,
-        limit: Int = 20,
-    ): List<ExternalMediaItem> = chart("trending:${type.name}:$limit") {
-        val path = if (type == ExternalMediaType.SERIES) "tv" else "movie"
-        val url = "https://api.tmdb.org/3/trending/$path/week?language=zh-CN&api_key=${BuildConfig.TMDB_API_KEY}"
-        parseChart(url, type, limit)
-    }
-
-    /** Public TMDB animation chart, available for future home rows. */
-    suspend fun animationChart(limit: Int = 20): List<ExternalMediaItem> =
-        chart("animation:$limit") {
-            val url = buildString {
-                append("https://api.tmdb.org/3/discover/tv")
-                append("?with_genres=16&sort_by=popularity.desc")
-                append("&include_adult=false&language=zh-CN")
-                append("&api_key=").append(BuildConfig.TMDB_API_KEY)
-            }
-            parseChart(url, ExternalMediaType.SERIES, limit)
-        }
-
-    private suspend fun chart(
-        key: String,
-        loader: () -> List<ExternalMediaItem>,
-    ): List<ExternalMediaItem> = withContext(Dispatchers.IO) {
-        synchronized(chartCache) {
-            chartCache[key]?.let { return@withContext it }
-        }
-        val result = runCatching(loader).getOrDefault(emptyList())
-        if (result.isNotEmpty()) {
-            synchronized(chartCache) {
-                chartCache[key] = result
-                if (chartCache.size > 20) chartCache.clear()
-            }
-        }
-        result
-    }
-
-    private fun parseChart(
-        url: String,
-        type: ExternalMediaType,
-        limit: Int,
-    ): List<ExternalMediaItem> {
-        val results = getJson(url)?.optJSONArray("results") ?: return emptyList()
-        return buildList {
-            for (index in 0 until results.length()) {
-                val json = results.optJSONObject(index) ?: continue
-                val tmdbId = json.optLong("id", 0L)
-                val title = if (type == ExternalMediaType.SERIES) {
-                    json.optString("name").ifBlank { json.optString("original_name") }
-                } else {
-                    json.optString("title").ifBlank { json.optString("original_title") }
-                }
-                val date = if (type == ExternalMediaType.SERIES) {
-                    json.optString("first_air_date")
-                } else {
-                    json.optString("release_date")
-                }
-                val posterPath = json.optString("poster_path")
-                if (tmdbId <= 0 || title.isBlank() || posterPath.isBlank() || posterPath == "null") continue
-                val voteAverage = json.optDouble("vote_average", 0.0)
-                add(
-                    ExternalMediaItem(
-                        tmdbId = tmdbId,
-                        title = title,
-                        year = date.take(4).toIntOrNull(),
-                        rating = voteAverage.takeIf { it > 0.0 },
-                        posterUrl = "https://image.tmdb.org/t/p/w500$posterPath",
-                        type = type,
-                    )
-                )
-                if (size >= limit) break
-            }
-        }
-    }
 
     /** Resolve missing provider IDs for a detail item without blocking its first render. */
     suspend fun externalLinks(
