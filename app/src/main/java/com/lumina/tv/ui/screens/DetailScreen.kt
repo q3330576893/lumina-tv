@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -45,7 +46,6 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Movie
-import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
@@ -132,7 +132,7 @@ fun DetailScreen(
     var detailPreviewKey by remember(id) { mutableStateOf("") }
     var detailPreviewIsTrailer by remember(id) { mutableStateOf(false) }
     var detailPreviewStartMs by remember(id) { mutableStateOf<Long?>(null) }
-    var detailBackgroundStatus by remember(id) { mutableStateOf("no-url") }
+    var detailVideoPlaying by remember(id) { mutableStateOf(false) }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
@@ -278,13 +278,13 @@ fun DetailScreen(
             else -> current
         } ?: run {
             detailPreviewKey = "${current.id}:unknown"
-            detailBackgroundStatus = "skip=url"
+            detailVideoPlaying = false
             failedDetailBackgroundKeys += detailPreviewKey
             return@LaunchedEffect
         }
         if (failedDetailBackgroundKeys.any { it.startsWith("${previewItem.id}:") }) {
             detailPreviewKey = failedDetailBackgroundKeys.first { it.startsWith("${previewItem.id}:") }
-            detailBackgroundStatus = "skip=err"
+            detailVideoPlaying = false
             return@LaunchedEffect
         }
         val trailer = runCatching { c.getLocalTrailers(previewItem.id).firstOrNull() }.getOrNull()
@@ -296,7 +296,7 @@ fun DetailScreen(
                 .firstOrNull { source -> source.streams.any { it.type == "Video" } }
         } ?: run {
             detailPreviewKey = "${previewItem.id}:${sourceItem.id}:unknown"
-            detailBackgroundStatus = "skip=url"
+            detailVideoPlaying = false
             failedDetailBackgroundKeys += detailPreviewKey
             return@LaunchedEffect
         }
@@ -307,7 +307,7 @@ fun DetailScreen(
         detailPreviewKey = "${previewItem.id}:${sourceItem.id}:${previewSource.id}"
         detailPreviewUrl = c.resolveDetailPreviewUrl(sourceItem.id, previewSource.id)
         if (detailPreviewUrl.isNullOrBlank()) {
-            detailBackgroundStatus = "skip=url"
+            detailVideoPlaying = false
             failedDetailBackgroundKeys += detailPreviewKey
         }
     }
@@ -385,7 +385,7 @@ fun DetailScreen(
                 mediaKey = detailPreviewKey,
                 playing = !loading,
                 onStatus = {
-                    detailBackgroundStatus = it
+                    detailVideoPlaying = it == "play"
                     if (it.startsWith("skip=") && detailPreviewKey.isNotBlank()) {
                         failedDetailBackgroundKeys += detailPreviewKey
                     }
@@ -395,7 +395,7 @@ fun DetailScreen(
                 modifier = Modifier.fillMaxSize(),
             )
             // 模糊海报 → 主色铺满：重模糊后叠深色渐层，页面颜色随封面走
-            val videoPlaying = detailBackgroundStatus == "play"
+            val videoPlaying = detailVideoPlaying
             val v0 by animateColorAsState(if (videoPlaying) Color(0x00000000) else Color(0x4D000000), tween(500), label = "detailMaskTop")
             val v1 by animateColorAsState(if (videoPlaying) Color(0x33000000) else Color(0x99000000), tween(500), label = "detailMaskUpper")
             val v2 by animateColorAsState(Color(0x99000000), tween(500), label = "detailMaskLower")
@@ -407,14 +407,6 @@ fun DetailScreen(
                 Brush.horizontalGradient(listOf(h0, h1, Color(0x00000000)))
             ))
         }
-
-        Text(
-            text = "bg:$detailBackgroundStatus",
-            color = Color(0xCCFFFFFF),
-            fontSize = 8.sp,
-            maxLines = 1,
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 8.dp),
-        )
 
         if (loading) {
             LoadingView(text = "正在读取详情…")
@@ -451,23 +443,15 @@ fun DetailScreen(
                             ).joinToString("   "),
                             color = TextSub, fontSize = 12.sp,
                         )
-                        if (it0.tags.isNotEmpty()) {
+                        val badgeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
+                        val topBadges = badgeSource?.let { source ->
+                            val video = source.streams.firstOrNull { it.type.equals("Video", true) }
+                            video?.let { videoBadges(it, source.audioStreams.firstOrNull()) }.orEmpty()
+                        } ?: tagBadges(it0.tags)
+                        if (topBadges.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                it0.tags.forEach { tag ->
-                                    Box(
-                                        Modifier
-                                            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
-                                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                                    ) {
-                                        Text(
-                                            tag,
-                                            color = Color.White,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                        )
-                                    }
-                                }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                topBadges.take(5).forEach { SpecBadge(it, containerHeight = 22.dp, imageHeight = 13.dp) }
                             }
                         }
                         Spacer(Modifier.height(10.dp))
@@ -750,16 +734,33 @@ fun DetailScreen(
                     Text("外部链接", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
                     val uriHandler = LocalUriHandler.current
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        providerLinks.forEach { (label, uri) ->
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        providerLinks.forEachIndexed { index, (label, uri) ->
+                            val brandResource = when (index) {
+                                0 -> R.drawable.link_brand_tmdb
+                                1 -> R.drawable.link_brand_imdb
+                                2 -> R.drawable.link_brand_rt
+                                else -> R.drawable.link_brand_douban
+                            }
+                            val brandHeight = if (index == 0) 9.dp else 14.dp
                             FocusGlassSurface(Modifier.height(38.dp), corner = 10.dp, normalFill = Color(0x14FFFFFF), onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
                                 Row(
-                                    Modifier.fillMaxSize()
-                                        .padding(horizontal = 14.dp),
+                                    Modifier.padding(horizontal = 14.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Icon(Icons.Rounded.OpenInNew, null, tint = if (focused) Color.White else Color(0xD9FFFFFF), modifier = Modifier.size(14.dp))
+                                    val brandPainter = painterResource(brandResource)
+                                    Image(
+                                        painter = brandPainter,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Fit,
+                                        modifier = Modifier.height(brandHeight)
+                                            .then(if (index == 0) Modifier.aspectRatio(190.24f / 81.52f) else Modifier.aspectRatio(1f))
+                                            .graphicsLayer { alpha = if (focused) 1f else 0.85f },
+                                    )
                                     Text(label, color = if (focused) Color.White else Color(0xD9FFFFFF), fontSize = 12.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.96.sp)
                                 }
                             }
@@ -1084,7 +1085,7 @@ private fun VideoCardContent(badges: List<MediaBadge>, rows: List<Pair<String, S
 }
 
 @Composable
-private fun SpecBadge(badge: MediaBadge) {
+private fun SpecBadge(badge: MediaBadge, containerHeight: androidx.compose.ui.unit.Dp = 20.dp, imageHeight: androidx.compose.ui.unit.Dp = 12.dp) {
     val resource = when (badge) {
         MediaBadge.AtmosDolbyVision -> R.drawable.badge_wm_atmos_dv
         MediaBadge.DolbyVision -> R.drawable.badge_wm_dv
@@ -1103,11 +1104,32 @@ private fun SpecBadge(badge: MediaBadge) {
         MediaBadge.Surround51 -> R.drawable.badge_wm_51
     }
     val painter = painterResource(resource)
-    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 5.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.height(containerHeight).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 5.dp), contentAlignment = Alignment.Center) {
         Image(painter, contentDescription = badge.name, contentScale = ContentScale.Fit,
-            modifier = Modifier.height(12.dp).aspectRatio(painter.intrinsicSize.width / painter.intrinsicSize.height))
+            modifier = Modifier.height(imageHeight).aspectRatio(painter.intrinsicSize.width / painter.intrinsicSize.height))
     }
 }
+
+private fun tagBadges(tags: List<String>): List<MediaBadge> = tags.mapNotNull { tag ->
+    when (normalizeMediaTag(tag)) {
+        "DOLBYVISIONATMOS", "ATMOSDOLBYVISION", "DVATMOS" -> MediaBadge.AtmosDolbyVision
+        "DOLBYVISION", "DV", "DOVI" -> MediaBadge.DolbyVision
+        "HDR10PLUS" -> MediaBadge.Hdr10Plus
+        "HDR10" -> MediaBadge.Hdr10
+        "HDR" -> MediaBadge.Hdr
+        "DOLBYATMOS", "ATMOS" -> MediaBadge.DolbyAtmos
+        "DTSX" -> MediaBadge.DtsX
+        "DTSHD", "DTSHDMA" -> MediaBadge.DtsHd
+        "TRUEHD" -> MediaBadge.TrueHd
+        "IMAX" -> MediaBadge.Imax
+        "4K", "UHD", "2160P" -> MediaBadge.FourK
+        "1080P", "FULLHD", "FHD" -> MediaBadge.FullHd
+        "720P", "HD720" -> MediaBadge.Hd720
+        "71", "SURROUND71" -> MediaBadge.Surround71
+        "51", "SURROUND51" -> MediaBadge.Surround51
+        else -> null
+    }
+}.distinct()
 
 private fun videoBadges(stream: MediaStream, audio: MediaStream?): List<MediaBadge> = buildList {
     val range = normalizeMediaTag(stream.videoRangeType)
