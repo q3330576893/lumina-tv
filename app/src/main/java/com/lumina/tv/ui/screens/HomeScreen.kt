@@ -98,14 +98,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
-import android.os.Build
-import androidx.compose.foundation.layout.offset
-import androidx.compose.ui.draw.BlurredEdgeTreatment
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -573,8 +565,40 @@ fun HomeScreen(
         AppRuntime.client?.backdropUrl(item, 1280)?.takeIf { it.isNotBlank() }
             ?: AppRuntime.client?.imageUrl(item, 720)
     }
-    // 页面底色跟着主题走：Ink 里混入 12% 主题 accent，换主题时整体色温会变，不再是死黑
-    val pageBackgroundTarget = lerp(Ink, Accent, 0.12f)
+    var pageBackgroundTarget by remember { mutableStateOf(Ink) }
+    LaunchedEffect(heroImageUrl) {
+        val imageUrl = heroImageUrl
+        if (imageUrl == null) {
+            pageBackgroundTarget = Ink
+            return@LaunchedEffect
+        }
+        heroPageColorCache[imageUrl]?.let {
+            pageBackgroundTarget = it
+            return@LaunchedEffect
+        }
+        val sampledColor = runCatching {
+            val request = ImageRequest.Builder(context)
+                .data(imageUrl)
+                .size(32, 18)
+                .allowHardware(false)
+                .crossfade(false)
+                .build()
+            val result = context.imageLoader.execute(request) as? SuccessResult
+            result?.drawable?.let { drawable ->
+                withContext(Dispatchers.Default) { averageHeroPageColor(drawable) }
+            }
+        }.getOrNull()
+        currentCoroutineContext().ensureActive()
+        if (sampledColor != null) {
+            if (heroPageColorCache.size >= 24) {
+                heroPageColorCache.remove(heroPageColorCache.keys.firstOrNull())
+            }
+            heroPageColorCache[imageUrl] = sampledColor
+            pageBackgroundTarget = sampledColor
+        } else {
+            pageBackgroundTarget = Ink
+        }
+    }
     val pageBackground by animateColorAsState(
         targetValue = pageBackgroundTarget,
         animationSpec = tween(300),
@@ -594,15 +618,6 @@ fun HomeScreen(
             runCatching { navFocus.requestFocus() }.isSuccess
         } else false
     }) {
-        // hero 虚化延伸：内容区顶部 200dp 铺当前轮播图的模糊副本，形成「同一部片」的延续感
-        val heroVisualHeight = minOf(560.dp, LocalConfiguration.current.screenHeightDp.dp * 0.66f)
-        if (heroImageUrl != null) {
-            HeroBlurBackdrop(
-                url = heroImageUrl,
-                pageColor = pageBackground,
-                topOffset = heroVisualHeight - 8.dp,
-            )
-        }
         when {
             loading -> LoadingView(text = "正在读取影库…")
                 error != null -> Column(
@@ -1839,62 +1854,5 @@ private fun RowSection(
                 )
             }
         }
-    }
-}
-
-/**
- * 轮播图的虚化延伸层：铺在内容区顶部 200dp，营造「同一部片」的沉浸感。
- * - API 31+ 走 RenderEffect 真高斯；源图先降到 480px 宽，模糊成本降到 1/4 以下
- * - API < 31 回退到 64px 源的放大绘制，观感接近且不额外吃 GPU
- * - 叠三层：35% 压暗、6% 主题色、向下渐隐到页面底色
- */
-@Composable
-private fun HeroBlurBackdrop(url: String, pageColor: Color, topOffset: Dp) {
-    val context = LocalContext.current
-    val supportsBlur = Build.VERSION.SDK_INT >= 31
-    val sourceWidth = if (supportsBlur) 480 else 64
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .height(200.dp)
-            .offset(y = topOffset)
-            .clipToBounds(),
-    ) {
-        Crossfade(targetState = url, animationSpec = tween(400), label = "hero-blur") { target ->
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(target)
-                    .size(sourceWidth)
-                    .crossfade(false)
-                    .build(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        // 过扫 1.25 倍，避免模糊吃掉边缘后露出透明
-                        scaleX = 1.25f
-                        scaleY = 1.25f
-                    }
-                    .then(
-                        if (supportsBlur) {
-                            Modifier.blur(40.dp, BlurredEdgeTreatment.Unbounded)
-                        } else {
-                            Modifier
-                        }
-                    ),
-            )
-        }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
-        Box(Modifier.fillMaxSize().background(Accent.copy(alpha = 0.06f)))
-        Box(
-            Modifier.fillMaxSize().background(
-                Brush.verticalGradient(
-                    0.0f to Color.Transparent,
-                    0.45f to pageColor.copy(alpha = 0.55f),
-                    1.0f to pageColor,
-                )
-            )
-        )
     }
 }
