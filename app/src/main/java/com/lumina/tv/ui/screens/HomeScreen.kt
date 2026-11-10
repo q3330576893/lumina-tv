@@ -2,6 +2,7 @@
 
 package com.lumina.tv.ui.screens
 
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -23,7 +24,6 @@ import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
@@ -74,7 +75,6 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.getValue
@@ -87,17 +87,25 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -107,10 +115,7 @@ import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import coil.imageLoader
 import coil.request.ImageRequest
-import coil.request.SuccessResult
 import coil.request.CachePolicy
-import androidx.core.graphics.drawable.toBitmap
-import androidx.core.graphics.ColorUtils
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
@@ -137,39 +142,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withContext
 
-private val heroPageColorCache = LinkedHashMap<String, Color>(24, 0.75f, true)
-
-private fun averageHeroPageColor(drawable: android.graphics.drawable.Drawable): Color? {
-    val bitmap = drawable.toBitmap(width = 32, height = 18, config = android.graphics.Bitmap.Config.ARGB_8888)
-    val pixels = IntArray(bitmap.width * bitmap.height)
-    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-    var red = 0L
-    var green = 0L
-    var blue = 0L
-    var count = 0L
-    pixels.forEach { pixel ->
-        if (android.graphics.Color.alpha(pixel) >= 32) {
-            red += android.graphics.Color.red(pixel)
-            green += android.graphics.Color.green(pixel)
-            blue += android.graphics.Color.blue(pixel)
-            count++
-        }
-    }
-    if (count == 0L) return null
-    val average = android.graphics.Color.rgb(
-        (red / count).toInt(),
-        (green / count).toInt(),
-        (blue / count).toInt(),
-    )
-    val hsl = FloatArray(3)
-    ColorUtils.colorToHSL(average, hsl)
-    hsl[2] = 0.10f
-    return Color(ColorUtils.HSLToColor(hsl))
-}
+private fun calculateHeroHeight(screenHeight: Dp): Dp = minOf(560.dp, screenHeight * 0.66f)
 
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
@@ -565,46 +540,6 @@ fun HomeScreen(
         AppRuntime.client?.backdropUrl(item, 1280)?.takeIf { it.isNotBlank() }
             ?: AppRuntime.client?.imageUrl(item, 720)
     }
-    var pageBackgroundTarget by remember { mutableStateOf(Ink) }
-    LaunchedEffect(heroImageUrl) {
-        val imageUrl = heroImageUrl
-        if (imageUrl == null) {
-            pageBackgroundTarget = Ink
-            return@LaunchedEffect
-        }
-        heroPageColorCache[imageUrl]?.let {
-            pageBackgroundTarget = it
-            return@LaunchedEffect
-        }
-        val sampledColor = runCatching {
-            val request = ImageRequest.Builder(context)
-                .data(imageUrl)
-                .size(32, 18)
-                .allowHardware(false)
-                .crossfade(false)
-                .build()
-            val result = context.imageLoader.execute(request) as? SuccessResult
-            result?.drawable?.let { drawable ->
-                withContext(Dispatchers.Default) { averageHeroPageColor(drawable) }
-            }
-        }.getOrNull()
-        currentCoroutineContext().ensureActive()
-        if (sampledColor != null) {
-            if (heroPageColorCache.size >= 24) {
-                heroPageColorCache.remove(heroPageColorCache.keys.firstOrNull())
-            }
-            heroPageColorCache[imageUrl] = sampledColor
-            pageBackgroundTarget = sampledColor
-        } else {
-            pageBackgroundTarget = Ink
-        }
-    }
-    val pageBackground by animateColorAsState(
-        targetValue = pageBackgroundTarget,
-        animationSpec = tween(300),
-        label = "home-page-background",
-    )
-
     val navFocus = remember { FocusRequester() }
 
     val heroPlayFocus = remember { FocusRequester() }
@@ -613,7 +548,7 @@ fun HomeScreen(
     var heroComposed by remember { mutableStateOf(false) }
 
     // 导航在顶部，右键不再劫持（原来的右键跳竖栏逻辑会让影片行无法继续右移）
-    Box(Modifier.fillMaxSize().background(pageBackground).onPreviewKeyEvent { event ->
+    Box(Modifier.fillMaxSize().background(Ink).onPreviewKeyEvent { event ->
         if (event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
             runCatching { navFocus.requestFocus() }.isSuccess
         } else false
@@ -629,10 +564,17 @@ fun HomeScreen(
                     Spacer(Modifier.height(6.dp))
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
                 }
-                tab == HomeTab.Recommend -> LazyColumn(
-                    state = recListState,
-                    modifier = Modifier.fillMaxSize(),
-                ) {
+                tab == HomeTab.Recommend -> Box(Modifier.fillMaxSize()) {
+                    if (heroImageUrl != null) {
+                        HeroBlurBackdrop(
+                            url = heroImageUrl,
+                            topOffset = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp) - 8.dp,
+                        )
+                    }
+                    LazyColumn(
+                        state = recListState,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
                     item {
                         val displayedHeroItems = heroItems.ifEmpty { listOfNotNull(hero) }
                         Hero(
@@ -653,7 +595,6 @@ fun HomeScreen(
                             onOpenDetail = onOpenDetail,
                             playFocus = heroPlayFocus,
                             hazeState = hazeState,
-                            pageBackground = pageBackground,
                             onComposed = { heroComposed = it },
                         )
                     }
@@ -685,7 +626,6 @@ fun HomeScreen(
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
-                            counts = libraryCounts,
                             recentBackdropUrls = libraryRecentBackdropUrls,
                             requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(),
                             onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
@@ -706,6 +646,7 @@ fun HomeScreen(
                         }
                     }
                     item { Spacer(Modifier.height(140.dp)) }
+                    }
                 }
                 tab == HomeTab.Media && selectedLibrary == null -> MediaLibrary(
                     views = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) },
@@ -1330,12 +1271,19 @@ private fun TabChip(
 @Composable
 private fun HomeLibraryRow(
     views: List<LibraryView>,
-    counts: Map<String, Int?>,
     recentBackdropUrls: Map<String, String?>,
     requestInitialFocus: Boolean,
     onOpenLibrary: (LibraryView) -> Unit,
 ) {
     val context = LocalContext.current
+    val imageableViews = views.filter { view ->
+        sequenceOf(
+            AppRuntime.client?.libraryPrimaryImageUrl(view.id),
+            AppRuntime.client?.libraryBackdropImageUrl(view.id),
+            recentBackdropUrls[view.id],
+        ).any { !it.isNullOrBlank() }
+    }
+    if (imageableViews.isEmpty()) return
     Column(Modifier.padding(top = Space.section)) {
         Text(
             "媒体库",
@@ -1348,7 +1296,7 @@ private fun HomeLibraryRow(
             contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            items(views, key = { it.id }) { view ->
+            items(imageableViews, key = { it.id }) { view ->
                 val urls = remember(view.id, recentBackdropUrls[view.id]) {
                     listOfNotNull(
                         AppRuntime.client?.libraryPrimaryImageUrl(view.id),
@@ -1357,22 +1305,22 @@ private fun HomeLibraryRow(
                     ).distinct()
                 }
                 var imageIndex by remember(view.id, urls) { mutableStateOf(0) }
+                var allImagesFailed by remember(view.id, urls) { mutableStateOf(false) }
                 val cardFocusRequester = remember(view.id) { FocusRequester() }
                 val interaction = remember(view.id) { MutableInteractionSource() }
                 val focused by interaction.collectIsFocusedAsState()
                 val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(130), label = "library-card-scale")
                 LaunchedEffect(requestInitialFocus) {
-                    if (requestInitialFocus && view == views.firstOrNull()) {
+                    if (requestInitialFocus && view == imageableViews.firstOrNull()) {
                         delay(120)
                         runCatching { cardFocusRequester.requestFocus() }
                     }
                 }
                 val shape = RoundedCornerShape(12.dp)
-                Box(
+                if (!allImagesFailed) Box(
                     Modifier.width(200.dp).height(112.dp)
                         .graphicsLayer { scaleX = scale; scaleY = scale }
                         .clip(shape)
-                        .background(Accent.copy(alpha = 0.28f))
                         .border(if (focused) 1.5.dp else 0.dp, Accent, shape)
                         .focusRequester(cardFocusRequester)
                         .clickable(interactionSource = interaction, indication = null) { onOpenLibrary(view) },
@@ -1393,35 +1341,10 @@ private fun HomeLibraryRow(
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize(),
-                                onError = { if (imageIndex < urls.lastIndex) imageIndex++ },
+                                onError = {
+                                    if (imageIndex < urls.lastIndex) imageIndex++ else allImagesFailed = true
+                                },
                             )
-                        }
-                        Box(
-                            Modifier.fillMaxSize().background(
-                                Brush.verticalGradient(
-                                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f)),
-                                ),
-                            ),
-                        )
-                        Column(
-                            Modifier.align(Alignment.BottomStart).padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                        ) {
-                            Text(
-                                view.name,
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            counts[view.id]?.let { count ->
-                                Text(
-                                    "$count 个条目",
-                                    color = Color.White.copy(alpha = 0.7f),
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                )
-                            }
                         }
                 }
             }
@@ -1576,7 +1499,6 @@ private fun Hero(
     onOpenDetail: (String) -> Unit,
     playFocus: FocusRequester,
     hazeState: HazeState,
-    pageBackground: Color,
     onComposed: (Boolean) -> Unit = {},
 ) {
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
@@ -1625,14 +1547,14 @@ private fun Hero(
         val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
         context.imageLoader.enqueue(request)
     }
-    BoxWithConstraints(Modifier.hazeSource(hazeState).fillMaxWidth()) {
-        val heroHeight = minOf(560.dp, maxHeight * 0.66f)
+    val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
+    Box(Modifier.hazeSource(hazeState).fillMaxWidth()) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .height(heroHeight)
                 .clip(RoundedCornerShape(bottomEnd = 34.dp))
-                .background(pageBackground)
+                .background(Ink)
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
                     when (event.key) {
@@ -1695,7 +1617,7 @@ private fun Hero(
         )
         Box(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(120.dp)
-                .background(Brush.verticalGradient(listOf(Color.Transparent, pageBackground)))
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Ink)))
         )
         Column(
             Modifier.align(Alignment.BottomStart).padding(start = 34.dp, bottom = 24.dp, end = 200.dp)
@@ -1851,6 +1773,65 @@ private fun RowSection(
                     upFocus = upFocus,
                     onFocused = { onItemFocused?.invoke(it.id) },
                     onClick = { onClick(it) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeroBlurBackdrop(url: String?, topOffset: Dp) {
+    if (url.isNullOrBlank()) return
+    val context = LocalContext.current
+    val supportsBlur = Build.VERSION.SDK_INT >= 31
+    val sourceWidth = if (supportsBlur) 480 else 64
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(200.dp)
+            .offset(y = topOffset)
+            .clipToBounds(),
+    ) {
+        Crossfade(targetState = url, animationSpec = tween(400), label = "hero-blur") { imageUrl ->
+            var imageLoaded by remember(imageUrl) { mutableStateOf(false) }
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(imageUrl)
+                    .size(sourceWidth)
+                    .crossfade(false)
+                    .build(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = 1.25f
+                        scaleY = 1.25f
+                        compositingStrategy = CompositingStrategy.Offscreen
+                    }
+                    .then(if (supportsBlur) Modifier.blur(40.dp, BlurredEdgeTreatment.Unbounded) else Modifier)
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                0f to Color.Black.copy(alpha = 0.9f),
+                                1f to Color.Transparent,
+                            ),
+                            blendMode = BlendMode.DstIn,
+                        )
+                    },
+                onSuccess = { imageLoaded = true },
+                onError = { imageLoaded = false },
+            )
+            if (imageLoaded) {
+                Box(
+                    Modifier.fillMaxSize().background(
+                        Brush.verticalGradient(
+                            0f to Color.Black.copy(alpha = 0.3f),
+                            1f to Color.Transparent,
+                        ),
+                    ),
                 )
             }
         }
