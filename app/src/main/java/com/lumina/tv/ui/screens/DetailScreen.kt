@@ -12,6 +12,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -68,14 +69,13 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -730,23 +730,21 @@ fun DetailScreen(
 
                 val providerIds = it0!!.providerIds
                 val resolvedLinks = resolvedExternalLinks
-                val providerLinks = buildList {
-                    (providerIds["imdb"] ?: resolvedLinks?.imdbId)?.takeIf(String::isNotBlank)
-                        ?.let { add("IMDB" to "https://www.imdb.com/title/$it/") }
-                    (providerIds["tmdb"] ?: resolvedLinks?.tmdbId)?.takeIf(String::isNotBlank)?.let {
-                        val type = if (it0.type == "Series") "tv" else "movie"
-                        add("TMDB" to "https://www.themoviedb.org/$type/$it")
-                    }
-                    (providerIds["tvdb"] ?: resolvedLinks?.tvdbId)?.takeIf(String::isNotBlank)?.let {
-                        val type = if (it0.type == "Series") "series" else "movie"
-                        add("THE TVDB" to "https://thetvdb.com/dereferrer/$type/$it")
-                    }
-                    val title = (it0.seriesName?.takeIf(String::isNotBlank) ?: it0.name).takeIf(String::isNotBlank)
-                    title?.let {
-                        val encoded = URLEncoder.encode(it, "UTF-8")
-                        add("DOUBAN" to "https://search.douban.com/movie/subject_search?search_text=$encoded&cat=1002")
-                    }
-                }
+                val searchTitle = (it0.seriesName?.takeIf(String::isNotBlank) ?: it0.name)
+                    .takeIf(String::isNotBlank)
+                    ?: sources.firstOrNull()?.name.orEmpty()
+                val encodedTitle = URLEncoder.encode(searchTitle.ifBlank { "文件名" }, "UTF-8")
+                val tmdbId = (providerIds["tmdb"] ?: resolvedLinks?.tmdbId)?.takeIf(String::isNotBlank)
+                val imdbId = (providerIds["imdb"] ?: resolvedLinks?.imdbId)?.takeIf(String::isNotBlank)
+                val mediaType = if (it0.type == "Series") "tv" else "movie"
+                val providerLinks = listOf(
+                    "TMDB" to (tmdbId?.let { "https://www.themoviedb.org/$mediaType/$it" }
+                        ?: "https://www.themoviedb.org/search?query=$encodedTitle"),
+                    "IMDB" to (imdbId?.let { "https://www.imdb.com/title/$it/" }
+                        ?: "https://www.imdb.com/find/?q=$encodedTitle"),
+                    "ROTTEN TOMATOES" to "https://www.rottentomatoes.com/search?search=$encodedTitle",
+                    "DOUBAN" to "https://search.douban.com/movie/subject_search?search_text=$encodedTitle",
+                )
                 if (providerLinks.isNotEmpty()) {
                     Spacer(Modifier.height(24.dp))
                     Text("外部链接", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -949,7 +947,7 @@ private fun SettingRow(label: String, value: String, enabled: Boolean = true, on
     }
 }
 
-private enum class MediaBadge { DolbyVision, DolbyAtmos, FourK, Hdr10Plus, Hdr10, DtsX, DtsHd, TrueHd, Surround51, Surround71 }
+private enum class MediaBadge { AtmosDolbyVision, DolbyVision, Hdr10Plus, Hdr10, Hdr, DolbyAtmos, DtsX, DtsHd, TrueHd, Imax, FourK, FullHd, Hd720, Surround71, Surround51 }
 
 private fun hasMediaInfo(source: MediaSource): Boolean = source.name.isNotBlank() ||
     !source.container.isNullOrBlank() || source.size > 0 || (source.bitrate ?: 0) > 0 ||
@@ -970,8 +968,13 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
         videoResolution(source, video)?.let { "分辨率" to it },
         video?.frameRate?.takeIf { it > 0 }?.let { "帧率" to formatFrameRate(it) },
     )
-    val videoBadges = video?.let(::videoBadges).orEmpty()
+    val videoBadges = video?.let { videoBadges(it, source.audioStreams.firstOrNull()) }.orEmpty()
     val summaryBadges = videoBadges.take(4)
+    val technicalSummary = listOfNotNull(
+        source.container?.takeIf(String::isNotBlank)?.uppercase(),
+        source.size.takeIf { it > 0 }?.let(::formatMediaSize),
+        videoResolution(source, video),
+    ).joinToString(" · ")
     val hasCards = fileRows.isNotEmpty() || videoRows.isNotEmpty() || videoBadges.isNotEmpty()
     if (!hasCards) return
 
@@ -991,7 +994,7 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 summaryBadges.forEach { SpecBadge(it) }
                 if (summaryBadges.isEmpty()) {
-                    Text(source.displayLabel, color = Color(0xEBFFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (technicalSummary.isNotBlank()) Text(technicalSummary, color = Color(0xEBFFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             Text(if (expanded) "收起" else "展开", color = if (focused) Color.White else Color(0x73FFFFFF), fontSize = 11.sp)
@@ -1082,49 +1085,31 @@ private fun VideoCardContent(badges: List<MediaBadge>, rows: List<Pair<String, S
 
 @Composable
 private fun SpecBadge(badge: MediaBadge) {
-    val horizontalPadding = if (badge == MediaBadge.DolbyVision || badge == MediaBadge.DolbyAtmos) 5.dp else 8.dp
-    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = horizontalPadding), contentAlignment = Alignment.Center) {
-        when (badge) {
-            MediaBadge.DolbyVision -> Icon(painterResource(R.drawable.badge_dolby_vision), "Dolby Vision", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
-            MediaBadge.DolbyAtmos -> Icon(painterResource(R.drawable.badge_dolby_atmos), "Dolby Atmos", tint = Color.White, modifier = Modifier.height(10.dp).width(23.94.dp))
-            else -> {
-                val text = badgeText(badge)
-                val strokeWidth = with(LocalDensity.current) { 0.7.dp.toPx() }
-                val thickStyle = androidx.compose.ui.text.TextStyle(
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.sp,
-                    drawStyle = Stroke(width = strokeWidth),
-                )
-                Box(contentAlignment = Alignment.Center) {
-                    Text(text, color = Color(0xEBFFFFFF), style = thickStyle)
-                    Text(
-                        text,
-                        color = Color(0xEBFFFFFF),
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        letterSpacing = 0.sp,
-                    )
-                }
-            }
-        }
+    val resource = when (badge) {
+        MediaBadge.AtmosDolbyVision -> R.drawable.badge_wm_atmos_dv
+        MediaBadge.DolbyVision -> R.drawable.badge_wm_dv
+        MediaBadge.Hdr10Plus -> R.drawable.badge_wm_hdr10plus
+        MediaBadge.Hdr10 -> R.drawable.badge_wm_hdr10
+        MediaBadge.Hdr -> R.drawable.badge_wm_hdr
+        MediaBadge.DolbyAtmos -> R.drawable.badge_wm_atmos
+        MediaBadge.DtsX -> R.drawable.badge_wm_dtsx
+        MediaBadge.DtsHd -> R.drawable.badge_wm_dtshdma
+        MediaBadge.TrueHd -> R.drawable.badge_wm_truehd
+        MediaBadge.Imax -> R.drawable.badge_wm_imax
+        MediaBadge.FourK -> R.drawable.badge_wm_4k
+        MediaBadge.FullHd -> R.drawable.badge_wm_1080p
+        MediaBadge.Hd720 -> R.drawable.badge_wm_720p
+        MediaBadge.Surround71 -> R.drawable.badge_wm_71
+        MediaBadge.Surround51 -> R.drawable.badge_wm_51
+    }
+    val painter = painterResource(resource)
+    Box(Modifier.height(20.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 5.dp), contentAlignment = Alignment.Center) {
+        Image(painter, contentDescription = badge.name, contentScale = ContentScale.Fit,
+            modifier = Modifier.height(12.dp).aspectRatio(painter.intrinsicSize.width / painter.intrinsicSize.height))
     }
 }
 
-private fun badgeText(badge: MediaBadge): String = when (badge) {
-    MediaBadge.FourK -> "4K"
-    MediaBadge.Hdr10Plus -> "HDR10+"
-    MediaBadge.Hdr10 -> "HDR10"
-    MediaBadge.DtsX -> "DTS:X"
-    MediaBadge.DtsHd -> "DTS-HD"
-    MediaBadge.TrueHd -> "TRUEHD"
-    MediaBadge.Surround51 -> "5.1"
-    MediaBadge.Surround71 -> "7.1"
-    else -> ""
-}
-
-private fun videoBadges(stream: MediaStream): List<MediaBadge> = buildList {
-    if ((stream.width ?: 0) >= 3840 || (stream.height ?: 0) >= 2160) add(MediaBadge.FourK)
+private fun videoBadges(stream: MediaStream, audio: MediaStream?): List<MediaBadge> = buildList {
     val range = normalizeMediaTag(stream.videoRangeType)
     val profile = normalizeMediaTag(stream.profile)
     val display = normalizeMediaTag(stream.displayTitle)
@@ -1138,11 +1123,33 @@ private fun videoBadges(stream: MediaStream): List<MediaBadge> = buildList {
     val displayIsDolbyVision = display.contains("DOLBYVISION") || display.contains("DOVI") ||
         title.contains("DOLBYVISION") || title.contains("DOVI")
     val isDolbyVision = rangeIsDolbyVision || profileIsDolbyVision || displayIsDolbyVision
-    if (isDolbyVision) add(MediaBadge.DolbyVision)
+    val audioTags = normalizeMediaTag(listOfNotNull(audio?.title, audio?.displayTitle, audio?.codec, audio?.profile).joinToString(" "))
+    val videoTags = normalizeMediaTag(listOfNotNull(stream.title, stream.displayTitle, stream.codec).joinToString(" "))
+    val hdrTags = listOf(range, profile, display, title).joinToString(" ")
+    val isAtmos = audioTags.contains("ATMOS") || videoTags.contains("ATMOS")
     when {
-        isDolbyVision -> Unit
-        "HDR10PLUS" in range -> add(MediaBadge.Hdr10Plus)
-        "HDR10" in range || range == "HDR" -> add(MediaBadge.Hdr10)
+        isAtmos && isDolbyVision -> add(MediaBadge.AtmosDolbyVision)
+        isDolbyVision -> add(MediaBadge.DolbyVision)
+        "HDR10PLUS" in hdrTags -> add(MediaBadge.Hdr10Plus)
+        "HDR10" in hdrTags -> add(MediaBadge.Hdr10)
+        "HDR" in hdrTags -> add(MediaBadge.Hdr)
+    }
+    when {
+        isAtmos && isDolbyVision -> Unit
+        isAtmos -> add(MediaBadge.DolbyAtmos)
+        audioTags.contains("DTSX") -> add(MediaBadge.DtsX)
+        audioTags.contains("DTSHDMA") -> add(MediaBadge.DtsHd)
+        audioTags.contains("TRUEHD") -> add(MediaBadge.TrueHd)
+    }
+    if (videoTags.contains("IMAX")) add(MediaBadge.Imax)
+    when {
+        (stream.width ?: 0) >= 3840 || (stream.height ?: 0) >= 2160 -> add(MediaBadge.FourK)
+        (stream.width ?: 0) >= 1920 || (stream.height ?: 0) >= 1080 -> add(MediaBadge.FullHd)
+        (stream.width ?: 0) >= 1280 || (stream.height ?: 0) >= 720 -> add(MediaBadge.Hd720)
+    }
+    when (audio?.channels) {
+        8 -> add(MediaBadge.Surround71)
+        6 -> add(MediaBadge.Surround51)
     }
 }
 

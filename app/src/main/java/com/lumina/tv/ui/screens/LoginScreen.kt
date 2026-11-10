@@ -112,7 +112,6 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     var host by remember {
         mutableStateOf(prefs?.baseUrl?.let { runCatching { Uri.parse(it).host }.getOrNull() ?: it.removePrefix("https://").removePrefix("http://").substringBefore(':') }.orEmpty())
     }
-    var path by remember { mutableStateOf(prefs?.baseUrl?.let { runCatching { Uri.parse(it).path.orEmpty().trim('/') }.getOrDefault("") }.orEmpty()) }
     var port by remember {
         mutableStateOf(prefs?.baseUrl?.let { runCatching { Uri.parse(it).port }.getOrDefault(-1) }
             ?.takeIf { it > 0 }?.toString() ?: "8096")
@@ -264,8 +263,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         val cleanHost = host.trim().removePrefix("http://").removePrefix("https://").trimEnd('/')
         if (cleanHost.isBlank() || name.isBlank()) { error = "请填写服务器地址和用户名"; return }
         val selectedPort = port.trim().ifBlank { if (scheme == "https") "8920" else "8096" }
-        val cleanPath = path.trim().trim('/')
-        val primary = pendingLoginBase ?: "$scheme://$cleanHost:$selectedPort${if (cleanPath.isNotBlank()) "/$cleanPath" else ""}"
+        val primary = pendingLoginBase ?: "$scheme://$cleanHost:$selectedPort"
         val onlyPrimary = pendingLoginBase != null
         pendingLoginBase = null
         scope.launch {
@@ -335,7 +333,6 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         scheme = config.scheme
         host = config.host
         port = config.port.toString()
-        path = config.path.trimStart('/')
         user = config.user
         pass = config.pass
         paired = true
@@ -385,7 +382,6 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
             scheme = if (u?.scheme == "https") "https" else "http"
             host = u?.host ?: server.url.substringAfter("://").substringBefore(':').substringBefore('/')
             port = u?.port?.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
-            path = u?.path.orEmpty().trim('/')
             user = server.userName
             pass = ""
             pairNotice = "已填入 ${server.name}，补上密码即可登录"
@@ -414,7 +410,6 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                             .heightIn(max = maxCardHeight).verticalScroll(rememberScrollState()),
                         host = host, onHost = { host = it },
                         port = port, onPort = { port = it.filter(Char::isDigit).take(5) },
-                        path = path, onPath = { path = it },
                         user = user, onUser = { user = it },
                         pass = pass, onPass = { pass = it },
                         scheme = scheme, onScheme = { scheme = it },
@@ -434,7 +429,6 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                     modifier = Modifier.fillMaxWidth(),
                     host = host, onHost = { host = it },
                     port = port, onPort = { port = it.filter(Char::isDigit).take(5) },
-                    path = path, onPath = { path = it },
                     user = user, onUser = { user = it },
                     pass = pass, onPass = { pass = it },
                     scheme = scheme, onScheme = { scheme = it },
@@ -620,7 +614,6 @@ private fun LoginCard(
     modifier: Modifier,
     host: String, onHost: (String) -> Unit,
     port: String, onPort: (String) -> Unit,
-    path: String, onPath: (String) -> Unit,
     user: String, onUser: (String) -> Unit,
     pass: String, onPass: (String) -> Unit,
     scheme: String, onScheme: (String) -> Unit,
@@ -633,7 +626,6 @@ private fun LoginCard(
     passFocus: FocusRequester,
 ) {
     var qrOpen by remember { mutableStateOf(false) }
-    var advancedOpen by remember { mutableStateOf(false) }
     var cardFocused by remember { mutableStateOf(false) }
     val hostFocusRequester = remember { FocusRequester() }
     val clipboard = LocalClipboardManager.current
@@ -764,26 +756,6 @@ private fun LoginCard(
             GlassField(host, onHost, "IP 或域名", Modifier.weight(1f), ImeAction.Next, focusRequester = hostFocusRequester)
             GlassField(port, onPort, "端口", Modifier.width(92.dp), ImeAction.Next, keyboardType = KeyboardType.Number)
         }
-        FocusSurface(
-            Modifier.fillMaxWidth().height(34.dp),
-            corner = 17.dp,
-            scaleTo = 1.01f,
-            onClick = { advancedOpen = !advancedOpen },
-        ) { focused ->
-            Row(
-                Modifier.fillMaxSize()
-                    .background(if (focused) Color(0x2EFFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(17.dp))
-                    .padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("高级选项（路径）", color = if (focused) VioletBright else InkSub, fontSize = 11.sp)
-                Spacer(Modifier.weight(1f))
-                Text(if (advancedOpen) "▾" else "▸", color = if (focused) VioletBright else InkSub, fontSize = 12.sp)
-            }
-        }
-        if (advancedOpen) {
-            GlassField(path, onPath, "路径（可选）", Modifier.fillMaxWidth(), ImeAction.Next)
-        }
         GlassField(user, onUser, "Emby 用户名", Modifier.fillMaxWidth(), ImeAction.Next)
         GlassField(pass, onPass, "密码", Modifier.fillMaxWidth(), ImeAction.Done, password = true, onDone = onLogin, focusRequester = passFocus)
 
@@ -869,7 +841,7 @@ private fun GlassField(
             cursorColor = VioletBright,
             focusedContainerColor = Color(0x1FFFFFFF), unfocusedContainerColor = Color(0x14FFFFFF),
         ),
-        modifier = modifier.height(46.dp)
+        modifier = modifier.height(52.dp)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { focused = it.isFocused },
     )
