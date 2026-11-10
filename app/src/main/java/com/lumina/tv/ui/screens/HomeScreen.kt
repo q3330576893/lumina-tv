@@ -108,6 +108,7 @@ import coil.compose.AsyncImage
 import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
+import coil.request.CachePolicy
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.graphics.ColorUtils
 import com.lumina.tv.AppRuntime
@@ -133,6 +134,7 @@ import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
@@ -206,6 +208,8 @@ fun HomeScreen(
     var series by remember { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
     var favorites by remember { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
     var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
+    var libraryCounts by remember { mutableStateOf<Map<String, Int?>>(emptyMap()) }
+    var libraryRecentBackdropUrls by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
 
     var tab by rememberSaveable { mutableStateOf(HomeTab.Recommend) }
     var selectedLibraryId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -373,6 +377,28 @@ fun HomeScreen(
             if (cached == null) error = e.message
         } finally {
             loading = false
+        }
+    }
+
+    LaunchedEffect(views, client, reloadToken) {
+        val c = client ?: return@LaunchedEffect
+        val visibleViews = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
+        coroutineScope {
+            visibleViews.map { view ->
+                async {
+                    val count = runCatching { c.getLibraryItemCount(view.id) }.getOrNull()
+                    libraryCounts = libraryCounts + (view.id to count)
+                    val recentBackdropUrl = runCatching {
+                        c.getItems(
+                            parentId = view.id,
+                            sortBy = "DateCreated",
+                            sortOrder = "Descending",
+                            limit = 12,
+                        ).firstNotNullOfOrNull { item -> c.backdropUrl(item, 640) }
+                    }.getOrNull()
+                    libraryRecentBackdropUrls = libraryRecentBackdropUrls + (view.id to recentBackdropUrl)
+                }
+            }.awaitAll()
         }
     }
 
@@ -652,6 +678,19 @@ fun HomeScreen(
                         }
                     }
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    val homeLibraries = views.filter { view ->
+                        !(AppRuntime.prefs?.isViewHidden(view.id) ?: false) &&
+                            libraryCounts.containsKey(view.id) && libraryCounts[view.id] != 0
+                    }
+                    if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
+                        HomeLibraryRow(
+                            views = homeLibraries,
+                            counts = libraryCounts,
+                            recentBackdropUrls = libraryRecentBackdropUrls,
+                            requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(),
+                            onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
+                        )
+                    }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
                     if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
@@ -1288,6 +1327,108 @@ private fun TabChip(
 }
 
 /** 媒体库：展示服务器自带的全部分类（按 setup 顺序），可一直往下滑；隐藏项由设置页控制。 */
+@Composable
+private fun HomeLibraryRow(
+    views: List<LibraryView>,
+    counts: Map<String, Int?>,
+    recentBackdropUrls: Map<String, String?>,
+    requestInitialFocus: Boolean,
+    onOpenLibrary: (LibraryView) -> Unit,
+) {
+    val context = LocalContext.current
+    Column(Modifier.padding(top = Space.section)) {
+        Text(
+            "媒体库",
+            modifier = Modifier.padding(start = 34.dp, bottom = 10.dp),
+            color = Color.White.copy(alpha = 0.8f),
+            fontSize = 13.sp,
+        )
+        LazyRow(
+            modifier = Modifier.focusGroup(),
+            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            items(views, key = { it.id }) { view ->
+                val urls = remember(view.id, recentBackdropUrls[view.id]) {
+                    listOfNotNull(
+                        AppRuntime.client?.libraryPrimaryImageUrl(view.id),
+                        AppRuntime.client?.libraryBackdropImageUrl(view.id),
+                        recentBackdropUrls[view.id],
+                    ).distinct()
+                }
+                var imageIndex by remember(view.id, urls) { mutableStateOf(0) }
+                val cardFocusRequester = remember(view.id) { FocusRequester() }
+                val interaction = remember(view.id) { MutableInteractionSource() }
+                val focused by interaction.collectIsFocusedAsState()
+                val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(130), label = "library-card-scale")
+                LaunchedEffect(requestInitialFocus) {
+                    if (requestInitialFocus && view == views.firstOrNull()) {
+                        delay(120)
+                        runCatching { cardFocusRequester.requestFocus() }
+                    }
+                }
+                val shape = RoundedCornerShape(12.dp)
+                Box(
+                    Modifier.width(200.dp).height(112.dp)
+                        .graphicsLayer { scaleX = scale; scaleY = scale }
+                        .clip(shape)
+                        .background(Accent.copy(alpha = 0.28f))
+                        .border(if (focused) 1.5.dp else 0.dp, Accent, shape)
+                        .focusRequester(cardFocusRequester)
+                        .clickable(interactionSource = interaction, indication = null) { onOpenLibrary(view) },
+                ) {
+                        val imageUrl = urls.getOrNull(imageIndex)
+                        if (imageUrl != null) {
+                            val request = remember(imageUrl) {
+                                ImageRequest.Builder(context)
+                                    .data(imageUrl)
+                                    .memoryCacheKey(imageUrl)
+                                    .memoryCachePolicy(CachePolicy.ENABLED)
+                                    .diskCachePolicy(CachePolicy.ENABLED)
+                                    .crossfade(false)
+                                    .build()
+                            }
+                            AsyncImage(
+                                model = request,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                                onError = { if (imageIndex < urls.lastIndex) imageIndex++ },
+                            )
+                        }
+                        Box(
+                            Modifier.fillMaxSize().background(
+                                Brush.verticalGradient(
+                                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f)),
+                                ),
+                            ),
+                        )
+                        Column(
+                            Modifier.align(Alignment.BottomStart).padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                view.name,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            counts[view.id]?.let { count ->
+                                Text(
+                                    "$count 个条目",
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun MediaLibrary(
     views: List<LibraryView>,

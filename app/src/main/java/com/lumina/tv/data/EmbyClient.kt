@@ -158,6 +158,16 @@ class EmbyClient(
         }.filter { it.id.isNotBlank() }
     }
 
+    suspend fun getLibraryItemCount(parentId: String): Int? = withContext(Dispatchers.IO) {
+        val response = getSync(url("/Items", mapOf(
+            "ParentId" to parentId,
+            "Recursive" to "true",
+            "Limit" to "0",
+            "EnableTotalRecordCount" to "true",
+        )))
+        response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
+    }
+
     suspend fun getFavorites(limit: Int = 24): List<MediaItem> = withContext(Dispatchers.IO) {
         getItems(types = "Movie,Series,Episode", sortBy = "DateCreated", sortOrder = "Descending", limit = limit, filters = "IsFavorite")
     }
@@ -629,6 +639,10 @@ class EmbyClient(
         if (tag == null) return null
         return url("/Items/$id/Images/Primary", mapOf("maxHeight" to maxHeight.toString(), "tag" to tag, "quality" to "90"))
     }
+
+    fun libraryPrimaryImageUrl(id: String): String = url("/Items/$id/Images/Primary", mapOf("maxHeight" to "360", "quality" to "90"))
+
+    fun libraryBackdropImageUrl(id: String): String = url("/Items/$id/Images/Backdrop", mapOf("maxWidth" to "640", "quality" to "90"))
 
     fun personImageUrl(person: MediaPerson, maxHeight: Int = 320): String? {
         val id = person.id ?: return null
