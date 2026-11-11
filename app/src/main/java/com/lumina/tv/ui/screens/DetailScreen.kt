@@ -161,6 +161,7 @@ fun DetailScreen(
     val sourceFocus = remember { FocusRequester() }
 
     LaunchedEffect(id) {
+        failedDetailBackgroundKeys.clear()
         similar = emptyList()
         showSourceMenu = false
         AppRuntime.screenLabel = "详情"
@@ -269,9 +270,9 @@ fun DetailScreen(
         }.getOrNull()
     }
 
-    LaunchedEffect(id, selectedSourceId, selectedSeason?.id, episodes.firstOrNull()?.id) {
-        val current = item ?: return@LaunchedEffect
+    LaunchedEffect(id, item?.id, selectedSourceId, selectedSeason?.id, episodes.firstOrNull()?.id) {
         val c = client ?: return@LaunchedEffect
+        val current = item ?: return@LaunchedEffect
         val requestKey = "${current.id}|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}"
         previewResults[requestKey]?.let { cached ->
             detailPreviewUrl = cached.first
@@ -289,12 +290,6 @@ fun DetailScreen(
             else -> current
         } ?: run {
             detailPreviewKey = "${current.id}:unknown"
-            detailVideoPlaying = false
-            failedDetailBackgroundKeys += detailPreviewKey
-            return@LaunchedEffect
-        }
-        if (failedDetailBackgroundKeys.any { it.startsWith("${previewItem.id}:") }) {
-            detailPreviewKey = failedDetailBackgroundKeys.first { it.startsWith("${previewItem.id}:") }
             detailVideoPlaying = false
             return@LaunchedEffect
         }
@@ -317,7 +312,11 @@ fun DetailScreen(
             AppRuntime.prefs?.introSecondsFor(previewItem.id)?.takeIf { it > 0 }?.times(1000L)
         }
         detailPreviewKey = "${previewItem.id}:${sourceItem.id}:${previewSource.id}"
-        detailPreviewUrl = c.resolveDetailPreviewUrl(sourceItem.id, previewSource.id)
+        if (detailPreviewKey in failedDetailBackgroundKeys) {
+            detailVideoPlaying = false
+            return@LaunchedEffect
+        }
+        detailPreviewUrl = runCatching { c.resolveDetailPreviewUrl(sourceItem.id, previewSource.id) }.getOrNull()
         previewResults[requestKey] = Triple(detailPreviewUrl, detailPreviewKey, detailPreviewIsTrailer)
         previewStartTimes[requestKey] = detailPreviewStartMs
         if (detailPreviewUrl.isNullOrBlank()) {

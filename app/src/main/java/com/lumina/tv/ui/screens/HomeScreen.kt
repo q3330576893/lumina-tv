@@ -569,7 +569,7 @@ fun HomeScreen(
                     if (heroImageUrl != null) {
                         HeroBlurBackdrop(
                             url = heroImageUrl,
-                            topOffset = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp) - 8.dp,
+                            topOffset = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp) - 60.dp,
                         )
                     }
                     LazyColumn(
@@ -1286,12 +1286,7 @@ private fun HomeLibraryRow(
     }
     if (imageableViews.isEmpty()) return
     Column(Modifier.padding(top = Space.section)) {
-        Text(
-            "媒体库",
-            modifier = Modifier.padding(start = 34.dp, bottom = 10.dp),
-            color = Color.White.copy(alpha = 0.8f),
-            fontSize = 13.sp,
-        )
+        SectionTitle("媒体库", Modifier.padding(start = 34.dp, bottom = 10.dp))
         LazyRow(
             modifier = Modifier.focusGroup(),
             contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
@@ -1790,12 +1785,11 @@ private fun HeroBlurBackdrop(url: String?, topOffset: Dp) {
     Box(
         Modifier
             .fillMaxWidth()
-            .height(200.dp)
+            .height(260.dp)
             .offset(y = topOffset)
             .clipToBounds(),
     ) {
         Crossfade(targetState = url, animationSpec = tween(400), label = "hero-blur") { imageUrl ->
-            var imageLoaded by remember(imageUrl) { mutableStateOf(false) }
             AsyncImage(
                 model = ImageRequest.Builder(context)
                     .data(imageUrl)
@@ -1816,25 +1810,21 @@ private fun HeroBlurBackdrop(url: String?, topOffset: Dp) {
                         drawContent()
                         drawRect(
                             brush = Brush.verticalGradient(
-                                0f to Color.Black.copy(alpha = 0.9f),
+                                0f to Color.Transparent,
+                                0.25f to Color.Black.copy(alpha = 0.85f),
                                 1f to Color.Transparent,
                             ),
                             blendMode = BlendMode.DstIn,
                         )
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                0f to Color.Transparent,
+                                0.25f to Color.Black.copy(alpha = 0.12f),
+                                1f to Color.Transparent,
+                            ),
+                        )
                     },
-                onSuccess = { imageLoaded = true },
-                onError = { imageLoaded = false },
             )
-            if (imageLoaded) {
-                Box(
-                    Modifier.fillMaxSize().background(
-                        Brush.verticalGradient(
-                            0f to Color.Black.copy(alpha = 0.3f),
-                            1f to Color.Transparent,
-                        ),
-                    ),
-                )
-            }
         }
     }
 }
