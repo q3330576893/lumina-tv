@@ -133,6 +133,8 @@ fun DetailScreen(
     var detailPreviewIsTrailer by remember(id) { mutableStateOf(false) }
     var detailPreviewStartMs by remember(id) { mutableStateOf<Long?>(null) }
     var detailVideoPlaying by remember(id) { mutableStateOf(false) }
+    val previewResults = remember(id) { mutableMapOf<String, Triple<String?, String, Boolean>>() }
+    val previewStartTimes = remember(id) { mutableMapOf<String, Long?>() }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
@@ -267,9 +269,18 @@ fun DetailScreen(
         }.getOrNull()
     }
 
-    LaunchedEffect(id, item?.type, sources, episodes) {
+    LaunchedEffect(id, selectedSourceId, selectedSeason?.id, episodes.firstOrNull()?.id) {
         val current = item ?: return@LaunchedEffect
         val c = client ?: return@LaunchedEffect
+        val requestKey = "${current.id}|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}"
+        previewResults[requestKey]?.let { cached ->
+            detailPreviewUrl = cached.first
+            detailPreviewKey = cached.second
+            detailPreviewIsTrailer = cached.third
+            detailPreviewStartMs = previewStartTimes[requestKey]
+            detailVideoPlaying = false
+            return@LaunchedEffect
+        }
         detailPreviewUrl = null
         val previewItem = when (current.type) {
             "Series" -> episodes.firstOrNull() ?: runCatching {
@@ -290,7 +301,8 @@ fun DetailScreen(
         val trailer = runCatching { c.getLocalTrailers(previewItem.id).firstOrNull() }.getOrNull()
         val sourceItem = trailer ?: previewItem
         val previewSource = if (sourceItem.id == current.id && sources.isNotEmpty()) {
-            sources.firstOrNull { source -> source.streams.any { it.type == "Video" } }
+            sources.firstOrNull { it.id == selectedSourceId && it.streams.any { stream -> stream.type == "Video" } }
+                ?: sources.firstOrNull { source -> source.streams.any { it.type == "Video" } }
         } else {
             runCatching { c.getMediaSources(sourceItem.id) }.getOrDefault(emptyList())
                 .firstOrNull { source -> source.streams.any { it.type == "Video" } }
@@ -306,6 +318,8 @@ fun DetailScreen(
         }
         detailPreviewKey = "${previewItem.id}:${sourceItem.id}:${previewSource.id}"
         detailPreviewUrl = c.resolveDetailPreviewUrl(sourceItem.id, previewSource.id)
+        previewResults[requestKey] = Triple(detailPreviewUrl, detailPreviewKey, detailPreviewIsTrailer)
+        previewStartTimes[requestKey] = detailPreviewStartMs
         if (detailPreviewUrl.isNullOrBlank()) {
             detailVideoPlaying = false
             failedDetailBackgroundKeys += detailPreviewKey

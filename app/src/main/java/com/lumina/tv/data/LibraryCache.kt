@@ -122,18 +122,19 @@ object LibraryCache {
     }
 
     // ---- 浏览页（电影/剧集/收藏/类型）短期缓存 ----
-    private val browse = LinkedHashMap<String, Pair<List<MediaItem>, Long>>()
+    private data class BrowseEntry(val items: List<MediaItem>, val at: Long, val ttlMs: Long)
+    private val browse = LinkedHashMap<String, BrowseEntry>()
 
     fun browseOf(key: String, ttl: Long = 3 * 60_000L): List<MediaItem>? {
         val e = synchronized(this) { browse[key] } ?: return null
-        return if (System.currentTimeMillis() - e.second < ttl) e.first else null
+        return if (System.currentTimeMillis() - e.at < minOf(ttl, e.ttlMs)) e.items else null
     }
 
     fun putBrowse(key: String, list: List<MediaItem>) {
         // 空结果只缓存 30 秒，避免一次超时导致长时间显示“无内容”
         val ttlMs = if (list.isEmpty()) 30_000L else 3 * 60_000L
         synchronized(this) {
-            browse[key] = list to System.currentTimeMillis()
+            browse[key] = BrowseEntry(list, System.currentTimeMillis(), ttlMs)
             if (browse.size > 40) browse.keys.firstOrNull()?.let { browse.remove(it) }
         }
     }

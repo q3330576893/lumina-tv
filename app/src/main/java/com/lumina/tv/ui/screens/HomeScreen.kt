@@ -312,26 +312,22 @@ fun HomeScreen(
         error = null
         try {
             coroutineScope {
-                val rA = async { runCatching { c.getResume(20) }.getOrDefault(emptyList()) }
+                val rA = async { c.getResume(20) }
                 val mA = async {
-                    runCatching {
-                        c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 24)
-                    }.getOrDefault(emptyList())
+                    c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 24)
                 }
                 val sA = async {
-                    runCatching {
-                        c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 24)
-                    }.getOrDefault(emptyList())
+                    c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 24)
                 }
-                val fA = async { runCatching { c.getFavorites(24) }.getOrDefault(emptyList()) }
-                val vA = async { runCatching { c.getViews() }.getOrDefault(emptyList()) }
+                val fA = async { c.getFavorites(24) }
+                val vA = async { c.getViews() }
 
                 val r = rA.await()
                 val m = mA.await()
                 val s = sA.await()
                 val f = fA.await()
                 val v = vA.await()
-                val l = runCatching { c.getLatest(null, 24) }.getOrDefault(emptyList())
+                val l = c.getLatest(null, 24)
                     .distinctBy { it.id }
                     .filter { it.type != "Movie" && it.type != "Series" }
 
@@ -358,23 +354,30 @@ fun HomeScreen(
     LaunchedEffect(views, client, reloadToken) {
         val c = client ?: return@LaunchedEffect
         val visibleViews = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
-        coroutineScope {
+        val prefetchedViews = coroutineScope {
             visibleViews.map { view ->
                 async {
-                    val count = runCatching { c.getLibraryItemCount(view.id) }.getOrNull()
-                    libraryCounts = libraryCounts + (view.id to count)
-                    val recentBackdropUrl = runCatching {
-                        c.getItems(
+                    val cacheKey = "library:${view.id}:date:Descending"
+                    val countTask = async { runCatching { c.getLibraryItemCount(view.id) }.getOrNull() }
+                    val itemsTask = async {
+                        LibraryCache.browseOf(cacheKey) ?: c.getItems(
                             parentId = view.id,
+                            types = collectionTypeToItemTypes(view.type),
                             sortBy = "DateCreated",
                             sortOrder = "Descending",
-                            limit = 12,
-                        ).firstNotNullOfOrNull { item -> c.backdropUrl(item, 640) }
-                    }.getOrNull()
-                    libraryRecentBackdropUrls = libraryRecentBackdropUrls + (view.id to recentBackdropUrl)
+                            limit = 50,
+                        ).also { LibraryCache.putBrowse(cacheKey, it) }
+                    }
+                    val count = countTask.await()
+                    val viewItems = itemsTask.await()
+                    val recentBackdropUrl = viewItems.firstNotNullOfOrNull { item -> c.backdropUrl(item, 640) }
+                    Triple(view, count, viewItems to recentBackdropUrl)
                 }
             }.awaitAll()
         }
+        libraryCounts = libraryCounts + prefetchedViews.associate { it.first.id to it.second }
+        viewContents = viewContents + prefetchedViews.associate { it.first.id to it.third.first }
+        libraryRecentBackdropUrls = libraryRecentBackdropUrls + prefetchedViews.associate { it.first.id to it.third.second }
     }
 
     LaunchedEffect(loading, initialFocusPending, resume, favorites, latest, movies, series) {
@@ -429,8 +432,13 @@ fun HomeScreen(
             HomeTab.Media -> "library:${requestLibrary?.id.orEmpty()}:$requestSort:$requestOrder"
             else -> return@LaunchedEffect
         }
-        if (requestTab != HomeTab.Media) LibraryCache.browseOf(key)?.let {
+        LibraryCache.browseOf(key)?.let {
             gridItems = it
+            if (requestTab == HomeTab.Media) {
+                libraryTotalCount = requestLibrary?.let { libraryCounts[it.id] }
+                gridNextIndex = it.size
+                gridHasMore = it.size == 50
+            }
             return@LaunchedEffect
         }
         gridLoading = requestTab == HomeTab.Media || gridItems.isEmpty()
@@ -514,22 +522,13 @@ fun HomeScreen(
 
     // 媒体库视图内容：启动后即在后台预热拉取各视图最近内容，无需等切换Tab
     LaunchedEffect(views, reloadToken) {
-        val c = client ?: return@LaunchedEffect
-        if (views.isEmpty()) return@LaunchedEffect
-        val enabled = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
-        val missing = enabled.filter { v -> viewContents[v.id] == null }
-        if (missing.isEmpty()) return@LaunchedEffect
-        val result = coroutineScope {
-            missing.map { v ->
-                async {
-                    v.id to runCatching {
-                        c.getItems(parentId = v.id, types = collectionTypeToItemTypes(v.type),
-                            sortBy = "DateCreated", sortOrder = "Descending", limit = 30)
-                    }.getOrDefault(emptyList())
-                }
-            }.map { it.await() }.toMap()
+        val missing = views.filter { v ->
+            !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) && viewContents[v.id] == null
         }
-        viewContents = viewContents + result
+        val cached = missing.mapNotNull { view ->
+            LibraryCache.browseOf("library:${view.id}:date:Descending")?.let { view.id to it }
+        }.toMap()
+        if (cached.isNotEmpty()) viewContents = viewContents + cached
     }
 
     val heroPool = (latest + movies + series + favorites).distinctBy { it.id }
@@ -556,10 +555,12 @@ fun HomeScreen(
         when {
             loading -> LoadingView(text = "正在读取影库…")
                 error != null -> Column(
-                    Modifier.fillMaxSize(),
+                    Modifier.fillMaxSize().clickable { reloadToken++ },
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
+                    Text("点击任意位置重试", color = Accent, fontSize = 13.sp)
+                    Spacer(Modifier.height(6.dp))
                     Text("加载失败：$error", color = TextSub, fontSize = 13.sp)
                     Spacer(Modifier.height(6.dp))
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)

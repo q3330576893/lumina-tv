@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.io.InterruptedIOException
+import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import android.net.Uri
 import java.util.concurrent.TimeUnit
@@ -43,7 +44,8 @@ class EmbyClient(
 
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val trickplayMutex = Mutex()
-    private val trickplayFiles = mutableMapOf<String, ByteArray>()
+    private val trickplayFiles = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
+    private var trickplayBytes = 0L
     private val unavailableTrickplay = ConcurrentHashMap.newKeySet<String>()
     private val playbackTargetCache = ConcurrentHashMap<String, Pair<Long, PlaybackTarget>>()
     private val chapterCache = ConcurrentHashMap<String, List<MediaChapter>>()
@@ -445,9 +447,9 @@ class EmbyClient(
     /** Returns a JPEG frame from Emby's optional BIF file; failures are intentionally silent. */
     suspend fun getTrickplayFrame(itemId: String, positionMs: Long): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            if (itemId in unavailableTrickplay) return@withContext null
+            if (synchronized(trickplayFiles) { itemId in unavailableTrickplay }) return@withContext null
             val file = trickplayMutex.withLock {
-                trickplayFiles[itemId] ?: if (itemId in unavailableTrickplay) null else run {
+                synchronized(trickplayFiles) { trickplayFiles[itemId] } ?: if (synchronized(trickplayFiles) { itemId in unavailableTrickplay }) null else run {
                     val request = Request.Builder()
                         .url(url("/Videos/$itemId/index.bif"))
                         .header("X-Emby-Authorization", authHeader())
@@ -455,8 +457,20 @@ class EmbyClient(
                     val bytes = http.newCall(request).execute().use { response ->
                         if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
                         val body = response.body ?: throw IOException("Empty BIF")
-                        if (body.contentLength() > MAX_TRICKPLAY_BYTES) throw IOException("BIF too large")
-                        body.bytes().takeIf { it.size <= MAX_TRICKPLAY_BYTES } ?: throw IOException("BIF too large")
+                        if (body.contentLength() > MAX_TRICKPLAY_FILE_BYTES) throw IOException("BIF too large")
+                        val output = ByteArrayOutputStream(minOf(body.contentLength().coerceAtLeast(0L), MAX_TRICKPLAY_FILE_BYTES).toInt().coerceAtLeast(8192))
+                        body.byteStream().buffered().use { input ->
+                            val buffer = ByteArray(8192)
+                            var total = 0L
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                total += read
+                                if (total > MAX_TRICKPLAY_FILE_BYTES) throw IOException("BIF too large")
+                                output.write(buffer, 0, read)
+                            }
+                        }
+                        output.toByteArray()
                     }
                     if (bytes.size < 72 || !bytes.copyOfRange(0, 8).contentEquals(BIF_MAGIC)) {
                         throw IOException("Invalid BIF header")
@@ -466,7 +480,16 @@ class EmbyClient(
                     if (count <= 0 || count > MAX_TRICKPLAY_FRAMES || interval <= 0 || 64L + (count + 1L) * 8L > bytes.size) {
                         throw IOException("Invalid BIF index")
                     }
-                    trickplayFiles[itemId] = bytes
+                    synchronized(trickplayFiles) {
+                        while (trickplayBytes + bytes.size > MAX_TRICKPLAY_BYTES) {
+                            val eldest = trickplayFiles.entries.iterator().let { if (it.hasNext()) it.next() else null } ?: break
+                            trickplayBytes -= eldest.value.size
+                            trickplayFiles.remove(eldest.key)
+                            unavailableTrickplay.remove(eldest.key)
+                        }
+                        trickplayFiles[itemId] = bytes
+                        trickplayBytes += bytes.size
+                    }
                     bytes
                 }
             } ?: return@withContext null
@@ -485,7 +508,7 @@ class EmbyClient(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            unavailableTrickplay.add(itemId)
+            synchronized(trickplayFiles) { unavailableTrickplay.add(itemId) }
             null
         }
     }
@@ -1135,6 +1158,7 @@ data class PlaybackTarget(
     companion object {
         private const val SEARCH_REQUEST_ATTEMPTS = 2
         private val BIF_MAGIC = byteArrayOf(0x89.toByte(), 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A)
+        private const val MAX_TRICKPLAY_FILE_BYTES = 16L * 1024 * 1024
         private const val MAX_TRICKPLAY_BYTES = 64L * 1024 * 1024
         private const val MAX_TRICKPLAY_FRAMES = 1_000_000
 
