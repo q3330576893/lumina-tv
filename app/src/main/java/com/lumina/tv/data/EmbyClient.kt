@@ -949,6 +949,9 @@ data class PlaybackTarget(
         startPositionMs: Long = item.positionTicks / 10_000,
         audioStreamIndex: Int? = null,
         forceDirect: Boolean = false,
+        removeSubtitleParams: Boolean = false,
+        preferDirectStreamUrl: Boolean = false,
+        manualAudioStreamSelection: Boolean = false,
         recordDiagnostics: Boolean = true,
         cacheResult: Boolean = false,
     ): PlaybackTarget =
@@ -1013,12 +1016,28 @@ data class PlaybackTarget(
                     "MinSegments" to "1",
                     "BreakOnNonKeyFrames" to "true",
                     "AudioStreamIndex" to audioStreamIndex?.toString(),
+                    "StartTimeTicks" to (startPositionMs.coerceAtLeast(0L) * 10_000L).takeIf { it > 0L }?.toString(),
+                    "PlaySessionId" to info.optString("PlaySessionId").ifBlank { null },
                 )
             )
             // forceDirect：服务端转码流坏了（HLS 解析失败）时的兜底，直接拉原文件
             val useDirect = forceDirect || !needTranscode
-            val transcodingUrl = first?.optString("TranscodingUrl")?.takeIf { it.startsWith("http", true) }
-                ?.let { addPlaybackQuery(it, audioStreamIndex) }
+            fun absUrl(value: String?): String? {
+                val candidate = value?.trim().orEmpty()
+                if (candidate.isBlank()) return null
+                return if (candidate.startsWith("http", true)) candidate
+                else baseUrl.trimEnd('/') + "/" + candidate.trimStart('/')
+            }
+            val transcodingUrl = absUrl(first?.optString("TranscodingUrl"))
+                ?.let { serverUrl ->
+                    val withAudio = if (manualAudioStreamSelection) addPlaybackQuery(serverUrl, audioStreamIndex) else serverUrl
+                    val withPosition = addStartTimeIfMissing(withAudio, startPositionMs)
+                    if (removeSubtitleParams) removeSubtitleQuery(withPosition) else withPosition
+                }
+            val serverDirectUrl = absUrl(first?.optString("DirectStreamUrl"))?.let {
+                val withAudio = if (manualAudioStreamSelection) addPlaybackQuery(it, audioStreamIndex) else it
+                addStartTimeIfMissing(withAudio, startPositionMs)
+            }
             // --- STRM 处理 ---
             // 只在确实是 STRM 条目时读一次文本，URL 与请求头都从这里出，避免重复请求。
             val strmText: String? =
@@ -1027,7 +1046,7 @@ data class PlaybackTarget(
                 } else null
             val strmUrl: String? = when {
                 // Emby 已经在 MediaSources 里给了绝对直链
-                source.directStreamUrl?.startsWith("http") == true -> source.directStreamUrl
+                absUrl(source.directStreamUrl) != null -> absUrl(source.directStreamUrl)
                 // 否则从 .strm 文本取第一条有效地址
                 strmText != null -> extractStrmUrl(strmText)
                 else -> null
@@ -1039,11 +1058,15 @@ data class PlaybackTarget(
             }
             // 是 STRM 条目却拿不到地址：直接报错，不要退化成转码流导致无限缓冲
             if (!isStrm && first != null && isStrmSource(first) &&
-                source.directStreamUrl?.startsWith("http") != true
+                absUrl(source.directStreamUrl) == null
             ) {
                 throw EmbyException("该 STRM 条目没有可用地址（文件为空或内容不是 http 链接）")
             }
-            val finalUrl = if (isStrm && !forceTranscode) strmUrl!! else if (useDirect) directUrl else transcodingUrl ?: hlsUrl
+            val finalUrl = if (isStrm && !forceTranscode) strmUrl!!
+                else if (forceDirect) directUrl
+                else if (preferDirectStreamUrl && serverDirectUrl != null) serverDirectUrl
+                else if (!needTranscode && serverDirectUrl != null) serverDirectUrl
+                else transcodingUrl ?: serverDirectUrl ?: if (useDirect) directUrl else hlsUrl
             // 请求头：#EXTVLCOPT / #EXTHTTP 既可能来自 MediaSources.AdditionalOptions，也可能在 .strm 文本里
             val headers = buildMap {
                 putAll(parseStrmOptions(source.additionalOptions))
@@ -1090,12 +1113,34 @@ data class PlaybackTarget(
         ))
 
     private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
-        val builder = Uri.parse(url).buildUpon()
+        val builder = Uri.parse(url).buildUpon().clearQuery()
         val names = Uri.parse(url).queryParameterNames
+        names.filterNot { it.equals("AudioStreamIndex", true) }.forEach { name ->
+            Uri.parse(url).getQueryParameters(name).forEach { value -> builder.appendQueryParameter(name, value) }
+        }
         if ("DeviceId" !in names) builder.appendQueryParameter("DeviceId", deviceId)
         if ("api_key" !in names && token.isNotEmpty()) builder.appendQueryParameter("api_key", token)
         if (audioStreamIndex != null) builder.appendQueryParameter("AudioStreamIndex", audioStreamIndex.toString())
         return builder.build().toString()
+    }
+
+    private fun removeSubtitleQuery(url: String): String {
+        val builder = Uri.parse(url).buildUpon().clearQuery()
+        Uri.parse(url).queryParameterNames
+            .filterNot { it.equals("SubtitleStreamIndex", true) || it.equals("SubtitleMethod", true) }
+            .forEach { name ->
+                Uri.parse(url).getQueryParameters(name).forEach { value ->
+                    builder.appendQueryParameter(name, value)
+                }
+            }
+        return builder.build().toString()
+    }
+
+    private fun addStartTimeIfMissing(url: String, startPositionMs: Long): String {
+        if (startPositionMs <= 0L || Uri.parse(url).queryParameterNames.any { it.equals("StartTimeTicks", true) }) return url
+        return Uri.parse(url).buildUpon()
+            .appendQueryParameter("StartTimeTicks", (startPositionMs * 10_000L).toString())
+            .build().toString()
     }
 
     fun subtitleUrl(itemId: String, mediaSourceId: String, index: Int, format: String = "srt"): String =

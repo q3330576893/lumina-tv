@@ -193,6 +193,8 @@ fun PlayerScreen(
     // 转码流（HLS）解析失败时改拉原文件直连
     var forceDirectNext by remember(item.id) { mutableStateOf(false) }
     var directFallbackTried by remember(item.id) { mutableStateOf(false) }
+    var badHttpFallbackStage by remember(item.id) { mutableIntStateOf(0) }
+    var manualAudioStreamSelection by remember(item.id) { mutableStateOf(false) }
     var transcodeFallbackTried by remember(item.id) { mutableStateOf(false) }
     var invalidSourceDetected by remember(item.id) { mutableStateOf(false) }
     // 同一部片可能有多个版本（不同压制/大小），一个播不了就换下一个
@@ -385,12 +387,17 @@ fun PlayerScreen(
             try {
                 invalidSourceDetected = false
                 if (forceTranscode) transcodeFallbackTried = true
-                val target = c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext)
+                val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext)
                     ?.copy(startPositionMs = resumePosition)
-                    ?: c.resolvePlayback(
+                    else null
+                val resolvedTarget = cachedTarget ?: c.resolvePlayback(
                         item, forceTranscode, sourceId, resumePosition, audioStreamIndex,
                         forceDirect = forceDirectNext,
+                        removeSubtitleParams = badHttpFallbackStage == 1,
+                        preferDirectStreamUrl = badHttpFallbackStage == 2,
+                        manualAudioStreamSelection = manualAudioStreamSelection,
                     )
+                val target = resolvedTarget
                 failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
@@ -698,7 +705,17 @@ fun PlayerScreen(
                 val currentIsHls = currentPlaybackUrl?.let {
                     it.contains("master.m3u8", true) || it.contains(".m3u8", true)
                 } == true
-                if (audioDecodeMode == "passthrough" && err.errorCodeName.contains("DECOD", true)) {
+                val isBadHttpStatus = err.errorCodeName.contains("IO_BAD_HTTP_STATUS", true) &&
+                    generateSequence(err as Throwable?) { it.cause }
+                        .any { it.message.orEmpty().contains(Regex("\\b400\\b")) }
+                if (isBadHttpStatus && badHttpFallbackStage < 2) {
+                    badHttpFallbackStage++
+                    buffering = true
+                    error = null
+                    audioDecodeNotice = if (badHttpFallbackStage == 1) "HTTP 400，正在尝试移除字幕转码参数" else "字幕参数回退失败，正在尝试服务器直连地址"
+                    engineSwitchTrace.add("http-400-fallback:$badHttpFallbackStage")
+                    reloadKey++
+                } else if (audioDecodeMode == "passthrough" && err.errorCodeName.contains("DECOD", true)) {
                     buffering = false
                     audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
                     error = "设备不支持该音轨直通，建议改回自动"
@@ -1603,6 +1620,7 @@ fun PlayerScreen(
                 audioStreams = if (activeEngine == "media3") media3AudioTracks(exo.currentTracks) else emptyList(),
                 selectedAudioStreamIndex = AppRuntime.prefs?.audioTrackFor(item.id),
                 onAudioStreamSelected = { streamIndex, override ->
+                    manualAudioStreamSelection = true
                     AppRuntime.prefs?.rememberAudioTrack(item.id, streamIndex)
                     if (override != null) {
                         exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
