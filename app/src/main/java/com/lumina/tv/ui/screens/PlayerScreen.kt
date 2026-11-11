@@ -110,6 +110,7 @@ import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.player.SubtitleRenderersFactory
+import com.lumina.tv.player.AssSubtitleLayer
 import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
@@ -250,6 +251,7 @@ fun PlayerScreen(
     var previewDisabled by remember(item.id) { mutableStateOf(false) }
     var lastHoldPreviewAt by remember(item.id) { mutableLongStateOf(0L) }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
+    var nativeAssActive by remember(item.id) { mutableStateOf(false) }
 
     val introSeconds = playbackMarkers?.introEndMs?.takeIf { it > 0L && (duration <= 0L || it < duration) }
         ?.div(1000L)?.toInt()
@@ -280,6 +282,7 @@ fun PlayerScreen(
 
     val subtitleRenderersFactory = remember(item.id) { SubtitleRenderersFactory(context) }
     val fastStart = AppRuntime.prefs?.fastStart != false
+    val assSubtitlesEnabled = AppRuntime.prefs?.assSubtitles != false
 
     val exo = remember(item.id, ffmpegFallback, fastStart) {
         val preference = AppRuntime.prefs?.decoderPreference ?: "auto"
@@ -1188,6 +1191,7 @@ fun PlayerScreen(
             update = { pv ->
                 pv.resizeMode = resizeMode
                 pv.subtitleView?.apply {
+                    visibility = if (nativeAssActive) android.view.View.INVISIBLE else android.view.View.VISIBLE
                     val subtitleColor = when {
                         subScale >= 1.6f -> android.graphics.Color.WHITE
                         subScale >= 1.25f -> android.graphics.Color.rgb(217, 217, 217)
@@ -1210,7 +1214,17 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize(),
         )
-        else AndroidView(
+        if (activeEngine == "media3" && assSubtitlesEnabled) AndroidView(
+            factory = { ctx ->
+                AssSubtitleLayer(ctx, exo, subtitleOffsetMs) { active ->
+                    nativeAssActive = active
+                }
+            },
+            update = { layer -> layer.subtitleOffsetMs = subtitleOffsetMs },
+            onRelease = { layer -> layer.release() },
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (activeEngine != "media3") AndroidView(
             factory = { ctx ->
                 SurfaceView(ctx).apply {
                     keepScreenOn = true
