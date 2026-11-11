@@ -15,6 +15,7 @@ import java.util.Base64
 
 /** 全局运行时：给 UI 与内置配对服务共享的薄状态层。 */
 object AppRuntime {
+    private var applicationContext: Context? = null
     var prefs: Prefs? = null
     var client: EmbyClient? = null
     var session: Session? = null
@@ -70,6 +71,7 @@ object AppRuntime {
     }
 
     fun init(context: Context) {
+        applicationContext = context.applicationContext
         if (prefs == null) prefs = Prefs(context.applicationContext)
     }
 
@@ -88,6 +90,11 @@ object AppRuntime {
     }
 
     fun applySession(s: Session) {
+        val previous = session
+        if (previous != null && (!previous.baseUrl.trimEnd('/').equals(s.baseUrl.trimEnd('/'), ignoreCase = true) || previous.userId != s.userId)) {
+            applicationContext?.let { com.lumina.tv.data.LibraryCache.removeHomeDisk(it, previous.baseUrl, previous.userId) }
+            com.lumina.tv.data.LibraryCache.clear()
+        }
         session = s
         client = EmbyClient(
             baseUrl = s.baseUrl,
@@ -124,6 +131,10 @@ object AppRuntime {
     }
 
     fun logout() {
+        session?.let { current ->
+            applicationContext?.let { com.lumina.tv.data.LibraryCache.removeHomeDisk(it, current.baseUrl, current.userId) }
+        }
+        com.lumina.tv.data.LibraryCache.clear()
         session = null
         client = null
         prefs?.clearSession()

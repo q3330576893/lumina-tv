@@ -36,9 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 import com.lumina.tv.data.MediaItem
-import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.ui.components.AuroraBackground
 import com.lumina.tv.ui.screens.DetailScreen
 import com.lumina.tv.ui.screens.HomeScreen
@@ -101,11 +99,8 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(Unit) {
                         if (!bootDone) {
                             val startedAt = System.currentTimeMillis()
-                            AppRuntime.client?.let { client ->
-                                withTimeoutOrNull(2000) { LibraryCache.prefetch(client) { } }
-                            }
                             val elapsed = System.currentTimeMillis() - startedAt
-                            if (elapsed < 1400) delay(1400 - elapsed)
+                            if (elapsed < 600) delay(600 - elapsed)
                             bootDone = true
                         }
                     }

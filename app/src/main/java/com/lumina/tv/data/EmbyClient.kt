@@ -2,6 +2,7 @@ package com.lumina.tv.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import com.lumina.tv.data.MediaChapter
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -190,7 +191,7 @@ class EmbyClient(
                 id = o.optString("Id"),
                 name = o.optString("Name"),
                 type = o.optString("CollectionType", "movies"),
-                imageTag = o.optString("ImageTags.Primary").ifBlank { null },
+                imageTag = o.optJSONObject("ImageTags")?.optString("Primary")?.ifBlank { null },
             )
         }.filter { it.id.isNotBlank() }
     }
@@ -348,7 +349,7 @@ class EmbyClient(
         parseItems(arr)
     }
 
-    suspend fun getLatest(parentId: String?, limit: Int = 20): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun getLatest(parentId: String?, limit: Int = 20): List<MediaItem> = withTimeoutOrNull(6_000L) { withContext(Dispatchers.IO) {
         val fields = "Overview,PrimaryImageAspectRatio,UserData,ProductionYear"
         suspend fun query(path: String, params: Map<String, String?>): List<MediaItem>? = runCatching {
             val response = getSync(url(path, params))
@@ -366,7 +367,7 @@ class EmbyClient(
         val fallback = mutableMapOf<String, String?>("Recursive" to "true", "SortBy" to "DateCreated", "SortOrder" to "Descending", "IncludeItemTypes" to "Movie,Series", "Limit" to limit.toString(), "Fields" to fields)
         if (parentId != null) fallback["ParentId"] = parentId
         query("/Items", fallback) ?: emptyList()
-    }
+    } } ?: emptyList()
 
     suspend fun getItem(id: String): MediaItem? = withContext(Dispatchers.IO) {
         try {

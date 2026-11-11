@@ -89,11 +89,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
@@ -116,10 +114,6 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
-import com.lumina.tv.data.ExternalCard
-import com.lumina.tv.data.DiscoverySectionConfig
-import com.lumina.tv.data.DiscoveryLayout
-import com.lumina.tv.data.DiscoverySections
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.LoadingView
@@ -144,7 +138,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineExceptionHandler
-import kotlin.math.abs
 
 private fun calculateHeroHeight(screenHeight: Dp): Dp = minOf(560.dp, screenHeight * 0.66f)
 
@@ -176,11 +169,10 @@ fun HomeScreen(
     val client = AppRuntime.client
     val context = LocalContext.current
     val hazeState = remember { HazeState() }
-    val discoveryLookupCache = remember(client) { mutableMapOf<String, MediaItem>() }
-    val discoveryLookupInFlight = remember(client) { mutableSetOf<String>() }
 
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var offline by remember { mutableStateOf(false) }
     var resume by remember { mutableStateOf(LibraryCache.home?.resume ?: emptyList()) }
     var latest by remember { mutableStateOf(LibraryCache.home?.latest ?: emptyList()) }
     var movies by remember { mutableStateOf(LibraryCache.home?.movies ?: emptyList()) }
@@ -307,7 +299,7 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(reloadToken) {
+    LaunchedEffect(reloadToken, client) {
         AppRuntime.screenLabel = "首页"
         val c = client
         if (c == null) {
@@ -315,46 +307,55 @@ fun HomeScreen(
             loading = false
             return@LaunchedEffect
         }
-        if (LibraryCache.homeFresh()) return@LaunchedEffect
-        val cached = LibraryCache.home
-        loading = cached == null
+        val session = AppRuntime.session
+        val diskCached = session?.let { LibraryCache.readHome(context, it.baseUrl, it.userId) }
+        val cached = diskCached ?: LibraryCache.home
+        if (cached != null) {
+            resume = cached.resume
+            latest = cached.latest
+            movies = cached.movies
+            series = cached.series
+            favorites = cached.favorites
+            views = cached.views
+            loading = false
+        }
         error = null
+        offline = false
         try {
             coroutineScope {
-                val rA = async { c.getResume(20) }
-                val mA = async {
-                    c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 24)
-                }
-                val sA = async {
-                    c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 24)
-                }
-                val fA = async { c.getFavorites(24) }
-                val vA = async { c.getViews() }
+                val rA = async { runCatching { c.getResume(20) } }
+                val mA = async { runCatching { c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 24) } }
+                val sA = async { runCatching { c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 24) } }
+                val fA = async { runCatching { c.getFavorites(24) } }
+                val vA = async { runCatching { c.getViews() } }
+                val lA = async { runCatching {
+                    c.getLatest(null, 24).distinctBy { it.id }.filter { it.type != "Movie" && it.type != "Series" }
+                        .ifEmpty { cached?.latest.orEmpty() }
+                } }
 
-                val r = rA.await()
-                val m = mA.await()
-                val s = sA.await()
-                val f = fA.await()
-                val v = vA.await()
-                val l = c.getLatest(null, 24)
-                    .distinctBy { it.id }
-                    .filter { it.type != "Movie" && it.type != "Series" }
-
-                resume = r
-                latest = l
-                movies = m
-                series = s
-                favorites = f
-                views = v
-                LibraryCache.putHome(
-                    LibraryCache.HomeData(
+                val results = listOf(rA.await(), mA.await(), sA.await(), fA.await(), vA.await(), lA.await())
+                val failed = results.count { it.isFailure }
+                offline = failed > 0
+                if (failed == results.size && cached == null) {
+                    error = c.lastApiFailure ?: results.firstNotNullOfOrNull { it.exceptionOrNull()?.message }
+                } else if (failed < results.size) {
+                    val r = rA.await().getOrElse { cached?.resume.orEmpty() }
+                    val m = mA.await().getOrElse { cached?.movies.orEmpty() }
+                    val s = sA.await().getOrElse { cached?.series.orEmpty() }
+                    val f = fA.await().getOrElse { cached?.favorites.orEmpty() }
+                    val v = vA.await().getOrElse { cached?.views.orEmpty() }
+                    val l = lA.await().getOrElse { cached?.latest.orEmpty() }
+                    resume = r; latest = l; movies = m; series = s; favorites = f; views = v
+                    val updated = LibraryCache.HomeData(
                         resume = r, latest = l, movies = m, series = s,
                         favorites = f, genres = emptyList(), views = v, at = System.currentTimeMillis(),
                     )
-                )
+                    LibraryCache.putHome(updated)
+                    session?.let { LibraryCache.writeHome(context, it.baseUrl, it.userId, updated) }
+                }
             }
         } catch (e: Exception) {
-            if (cached == null) error = e.message
+            if (cached == null) error = e.message else offline = true
         } finally {
             loading = false
         }
@@ -367,7 +368,6 @@ fun HomeScreen(
             visibleViews.map { view ->
                 async {
                     val cacheKey = "library:${view.id}:date:Descending"
-                    val countTask = async { runCatching { c.getLibraryItemCount(view.id) }.getOrNull() }
                     val itemsTask = async {
                         LibraryCache.browseOf(cacheKey) ?: c.getItems(
                             parentId = view.id,
@@ -377,16 +377,22 @@ fun HomeScreen(
                             limit = 50,
                         ).also { LibraryCache.putBrowse(cacheKey, it) }
                     }
-                    val count = countTask.await()
                     val viewItems = itemsTask.await()
                     val recentBackdropUrl = viewItems.firstNotNullOfOrNull { item -> c.backdropUrl(item, 640) }
-                    Triple(view, count, viewItems to recentBackdropUrl)
+                    Triple(view, viewItems, recentBackdropUrl)
                 }
             }.awaitAll()
         }
-        libraryCounts = libraryCounts + prefetchedViews.associate { it.first.id to it.second }
-        viewContents = viewContents + prefetchedViews.associate { it.first.id to it.third.first }
-        libraryRecentBackdropUrls = libraryRecentBackdropUrls + prefetchedViews.associate { it.first.id to it.third.second }
+        viewContents = viewContents + prefetchedViews.associate { it.first.id to it.second }
+        libraryRecentBackdropUrls = libraryRecentBackdropUrls + prefetchedViews.associate { it.first.id to it.third }
+    }
+
+    LaunchedEffect(views, client, reloadToken) {
+        val c = client ?: return@LaunchedEffect
+        val counts = coroutineScope {
+            views.map { view -> async { view.id to runCatching { c.getLibraryItemCount(view.id) }.getOrNull() } }.awaitAll()
+        }
+        libraryCounts = libraryCounts + counts
     }
 
     LaunchedEffect(loading, initialFocusPending, resume, favorites, latest, movies, series) {
@@ -622,55 +628,15 @@ fun HomeScreen(
                         }
                     }
                     if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
-                    val homeLibraries = views.filter { view ->
-                        !(AppRuntime.prefs?.isViewHidden(view.id) ?: false) &&
-                            libraryCounts.containsKey(view.id) && libraryCounts[view.id] != 0
-                    }
+                    val homeLibraries = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
                             recentBackdropUrls = libraryRecentBackdropUrls,
+                            counts = libraryCounts,
                             requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(),
                             onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
                         )
-                    }
-                    DiscoverySections.home.forEach { config ->
-                        item(key = "discovery-${config.id}") {
-                            DiscoverySectionRow(config) { card ->
-                                val emby = client ?: return@DiscoverySectionRow
-                                discoveryLookupCache[card.tmdbId]?.let {
-                                    onOpenDetail(it.id)
-                                    return@DiscoverySectionRow
-                                }
-                                if (!discoveryLookupInFlight.add(card.tmdbId)) return@DiscoverySectionRow
-                                scope.launch {
-                                    try {
-                                        val fullTitleResults = emby.getItems(
-                                            types = "Movie", searchTerm = card.title, limit = 50,
-                                            fields = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProviderIds",
-                                        )
-                                        var match = pickDiscoveryMatch(fullTitleResults, card.title, card.year)
-                                        val mainTitle = card.title.split(Regex("\\s+-\\s+|[:：]"), limit = 2)
-                                            .first().trim()
-                                        if (match == null && mainTitle.isNotBlank() && mainTitle != card.title) {
-                                            val mainTitleResults = emby.getItems(
-                                                types = "Movie", searchTerm = mainTitle, limit = 50,
-                                                fields = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProviderIds",
-                                            )
-                                            match = pickDiscoveryMatch(mainTitleResults, card.title, card.year)
-                                                ?: pickDiscoveryMatch(mainTitleResults, mainTitle, card.year)
-                                        }
-                                        if (match != null) discoveryLookupCache[card.tmdbId] = match
-                                        if (match != null) onOpenDetail(match.id)
-                                        else android.widget.Toast.makeText(context, "库里暂无《${card.title}》", android.widget.Toast.LENGTH_SHORT).show()
-                                    } catch (_: Exception) {
-                                        android.widget.Toast.makeText(context, "库内搜索失败", android.widget.Toast.LENGTH_SHORT).show()
-                                    } finally {
-                                        discoveryLookupInFlight.remove(card.tmdbId)
-                                    }
-                                }
-                            }
-                        }
                     }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
@@ -864,6 +830,14 @@ fun HomeScreen(
                 }
             }
 
+        if (offline && !loading && error == null) {
+            Text(
+                "离线，显示上次内容",
+                color = Color(0xFF9AA4B2),
+                fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.TopEnd).zIndex(3f).padding(top = 18.dp, end = 34.dp),
+            )
+        }
         NavBar(
             modifier = Modifier.fillMaxSize().zIndex(2f),
                 tab = tab,
@@ -876,6 +850,7 @@ fun HomeScreen(
                     LibraryCache.clear()
                     loading = true
                     error = null
+                    offline = false
                     resume = emptyList()
                     latest = emptyList()
                     movies = emptyList()
@@ -883,6 +858,8 @@ fun HomeScreen(
                     favorites = emptyList()
                     views = emptyList()
                     viewContents = emptyMap()
+                    libraryCounts = emptyMap()
+                    libraryRecentBackdropUrls = emptyMap()
                     selectedLibraryId = null
                     gridItems = emptyList()
                     focusedMediaId = null
@@ -1119,7 +1096,6 @@ private fun MenuRowGlass(title: String, sub: String, danger: Boolean = false, on
         }
     }
 }
-
 @Composable
 private fun TopNavBar(
     modifier: Modifier,
@@ -1313,18 +1289,11 @@ private fun TabChip(
 private fun HomeLibraryRow(
     views: List<LibraryView>,
     recentBackdropUrls: Map<String, String?>,
+    counts: Map<String, Int?>,
     requestInitialFocus: Boolean,
     onOpenLibrary: (LibraryView) -> Unit,
 ) {
     val context = LocalContext.current
-    val imageableViews = views.filter { view ->
-        sequenceOf(
-            AppRuntime.client?.libraryPrimaryImageUrl(view.id),
-            AppRuntime.client?.libraryBackdropImageUrl(view.id),
-            recentBackdropUrls[view.id],
-        ).any { !it.isNullOrBlank() }
-    }
-    if (imageableViews.isEmpty()) return
     Column(Modifier.padding(top = Space.section)) {
         SectionTitle("媒体库", Modifier.padding(start = 34.dp, bottom = 10.dp))
         LazyRow(
@@ -1332,36 +1301,33 @@ private fun HomeLibraryRow(
             contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            items(imageableViews, key = { it.id }) { view ->
-                val urls = remember(view.id, recentBackdropUrls[view.id]) {
-                    listOfNotNull(
-                        AppRuntime.client?.libraryPrimaryImageUrl(view.id),
-                        AppRuntime.client?.libraryBackdropImageUrl(view.id),
-                        recentBackdropUrls[view.id],
-                    ).distinct()
+            items(views, key = { it.id }) { view ->
+                val imageUrl = remember(view.id, view.imageTag, recentBackdropUrls[view.id]) {
+                    if (!view.imageTag.isNullOrBlank()) AppRuntime.client?.libraryPrimaryImageUrl(view.id)
+                    else recentBackdropUrls[view.id]
                 }
-                var imageIndex by remember(view.id, urls) { mutableStateOf(0) }
-                var allImagesFailed by remember(view.id, urls) { mutableStateOf(false) }
+                var imageLoaded by remember(view.id, imageUrl) { mutableStateOf(false) }
                 val cardFocusRequester = remember(view.id) { FocusRequester() }
                 val interaction = remember(view.id) { MutableInteractionSource() }
                 val focused by interaction.collectIsFocusedAsState()
                 val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(130), label = "library-card-scale")
+                val imageAlpha by animateFloatAsState(if (imageLoaded) 1f else 0f, tween(150), label = "library-image-fade")
                 LaunchedEffect(requestInitialFocus) {
-                    if (requestInitialFocus && view == imageableViews.firstOrNull()) {
+                    if (requestInitialFocus && view == views.firstOrNull()) {
                         delay(120)
                         runCatching { cardFocusRequester.requestFocus() }
                     }
                 }
                 val shape = RoundedCornerShape(12.dp)
-                if (!allImagesFailed) Box(
+                Box(
                     Modifier.width(200.dp).height(112.dp)
                         .graphicsLayer { scaleX = scale; scaleY = scale }
                         .clip(shape)
+                        .background(Color(0xFF1A2233))
                         .border(if (focused) 1.5.dp else 0.dp, Accent, shape)
                         .focusRequester(cardFocusRequester)
                         .clickable(interactionSource = interaction, indication = null) { onOpenLibrary(view) },
                 ) {
-                        val imageUrl = urls.getOrNull(imageIndex)
                         if (imageUrl != null) {
                             val request = remember(imageUrl) {
                                 ImageRequest.Builder(context)
@@ -1376,11 +1342,14 @@ private fun HomeLibraryRow(
                                 model = request,
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize(),
-                                onError = {
-                                    if (imageIndex < urls.lastIndex) imageIndex++ else allImagesFailed = true
-                                },
+                                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = imageAlpha },
+                                onSuccess = { imageLoaded = true },
                             )
+                        }
+                        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth()
+                            .background(Color(0x99070A12)).padding(horizontal = 10.dp, vertical = 6.dp)) {
+                            Text(view.name, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(counts[view.id]?.toString() ?: "—", color = Color(0xFFB7C0CF), fontSize = 10.sp)
                         }
                 }
             }
@@ -1667,7 +1636,7 @@ private fun Hero(
             Modifier.align(Alignment.BottomStart).padding(start = 34.dp, bottom = 24.dp, end = 200.dp)
         ) {
             Text("为你推荐", color = Accent, fontSize = 11.sp, letterSpacing = 2.sp)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(8.dp))
             if (!titleLogo.isNullOrBlank()) {
                 AsyncImage(
                     model = ImageRequest.Builder(context).data(titleLogo).crossfade(true).build(),
@@ -1821,182 +1790,4 @@ private fun RowSection(
             }
         }
     }
-}
-
-private sealed interface DiscoveryRowState {
-    data object Loading : DiscoveryRowState
-    data class Error(val reason: String) : DiscoveryRowState
-    data object Empty : DiscoveryRowState
-    data class Data(val cards: List<ExternalCard>) : DiscoveryRowState
-}
-
-@Composable
-private fun DiscoverySectionRow(
-    config: DiscoverySectionConfig,
-    onClick: (ExternalCard) -> Unit,
-) {
-    var state by remember(config.id) { mutableStateOf<DiscoveryRowState>(DiscoveryRowState.Loading) }
-    var retryToken by remember(config.id) { mutableStateOf(0) }
-    LaunchedEffect(config, retryToken) {
-        state = DiscoveryRowState.Loading
-        val cards = TmdbClient.discovery(config)
-        state = when {
-            TmdbClient.lastRequestFailure != null -> DiscoveryRowState.Error(TmdbClient.lastRequestFailure ?: "request_error")
-            cards.isNotEmpty() -> DiscoveryRowState.Data(cards)
-            else -> DiscoveryRowState.Empty
-        }
-    }
-    if (state == DiscoveryRowState.Empty || state == DiscoveryRowState.Loading) return
-    Column(Modifier.padding(top = Space.section)) {
-        SectionTitle(config.title, Modifier.padding(start = 34.dp, bottom = 10.dp))
-        when (val current = state) {
-            is DiscoveryRowState.Error -> Text(
-                text = "TMDB 暂时不可用（${current.reason}） · 按 OK 重试",
-                color = TextSub.copy(alpha = 0.75f), fontSize = 12.sp,
-                modifier = Modifier.padding(start = 34.dp, bottom = 8.dp).focusable()
-                    .onKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.DirectionCenter)) {
-                            retryToken++
-                            true
-                        } else false
-                    },
-            )
-            is DiscoveryRowState.Data -> LazyRow(
-                modifier = Modifier.focusGroup(),
-                contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
-                horizontalArrangement = Arrangement.spacedBy(Space.m),
-            ) {
-                itemsIndexed(current.cards, key = { _, card -> "${config.id}-${card.tmdbId}" }) { index, card ->
-                    DiscoveryCard(card, index, config.layout, onClick)
-                }
-            }
-            else -> Unit
-        }
-    }
-}
-
-@Composable
-private fun DiscoveryCard(
-    card: ExternalCard,
-    index: Int,
-    layout: DiscoveryLayout,
-    onClick: (ExternalCard) -> Unit,
-) {
-    val interaction = remember { MutableInteractionSource() }
-    val focused by interaction.collectIsFocusedAsState()
-    val isPoster = layout == DiscoveryLayout.POSTER_RANKED
-    val width = when {
-        isPoster && index == 0 -> 176.dp
-        isPoster -> 150.dp
-        else -> 240.dp
-    }
-    val height = when {
-        isPoster && index == 0 -> 264.dp
-        isPoster -> 225.dp
-        else -> 135.dp
-    }
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(180), label = "discovery-card-scale")
-    val shape = RoundedCornerShape(12.dp)
-
-    Column(
-        Modifier
-            .width(width)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clickable(interactionSource = interaction, indication = null) { onClick(card) }
-    ) {
-        Box(
-            Modifier
-                .width(width)
-                .height(height)
-                .clip(shape)
-                .background(Color(0xFF141B2B))
-                .border(if (focused) 1.5.dp else 1.dp, if (focused) Accent else Color.White.copy(alpha = 0.14f), shape)
-        ) {
-            AsyncImage(
-                model = if (isPoster) card.posterUrl else card.backdropUrl ?: card.posterUrl,
-                contentDescription = card.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-            if (isPoster) {
-                if (index < 10) {
-                    val outlineWidth = with(LocalDensity.current) { 2.dp.toPx() }
-                    Box(Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 4.dp)) {
-                        Text(
-                            text = "${index + 1}", color = Color.Black,
-                            fontSize = 44.sp, fontWeight = FontWeight.Black,
-                            style = TextStyle(drawStyle = Stroke(width = outlineWidth)),
-                        )
-                        Text(
-                            text = "${index + 1}", color = Color.White.copy(alpha = 0.85f),
-                            fontSize = 44.sp, fontWeight = FontWeight.Black,
-                        )
-                    }
-                }
-            } else {
-                Box(
-                    Modifier.align(Alignment.BottomStart).fillMaxWidth().height(56.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.70f))))
-                )
-                Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = 7.dp, end = 72.dp)) {
-                    Text(card.title, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(card.year?.toString().orEmpty(), color = Color.White.copy(alpha = 0.70f), fontSize = 11.sp)
-                }
-                Box(
-                    Modifier.align(Alignment.TopEnd).padding(7.dp)
-                        .background(Accent.copy(alpha = 0.20f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Text("热映", color = Color.White, fontSize = 10.sp)
-                }
-            }
-            card.rating?.takeIf { it > 0 }?.let { rating ->
-                Box(
-                    Modifier.align(Alignment.BottomEnd).padding(6.dp)
-                        .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                ) {
-                    Text("★ %.1f".format(rating), color = Color.White, fontSize = 12.sp)
-                }
-            }
-        }
-        if (isPoster) {
-            Spacer(Modifier.height(7.dp))
-            Text(
-                text = card.title,
-                color = TextMain,
-                fontSize = 13.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.width(width),
-            )
-        }
-    }
-}
-
-private fun normDiscoveryTitle(value: String): String = value.lowercase()
-    .replace(Regex("[\\s\\p{Punct}·：:，。！？、（）()【】\\[\\]—\\-_]"), "")
-
-private fun pickDiscoveryMatch(cards: List<MediaItem>, title: String, year: Int?): MediaItem? {
-    val normalizedTitle = normDiscoveryTitle(title)
-    if (normalizedTitle.isBlank()) return null
-    return cards.map { card ->
-        val normalizedName = normDiscoveryTitle(card.name)
-        var score = when {
-            normalizedName == normalizedTitle -> 100
-            normalizedName.startsWith(normalizedTitle) || normalizedTitle.startsWith(normalizedName) -> 60
-            normalizedName.contains(normalizedTitle) || normalizedTitle.contains(normalizedName) -> 40
-            else -> 0
-        }
-        if (year != null && card.year != null) {
-            val difference = abs(card.year - year)
-            score += when {
-                difference == 0 -> 30
-                difference <= 1 -> 15
-                difference <= 2 -> 5
-                else -> -20
-            }
-        }
-        card to score
-    }.filter { it.second > 30 }.maxByOrNull { it.second }?.first
 }

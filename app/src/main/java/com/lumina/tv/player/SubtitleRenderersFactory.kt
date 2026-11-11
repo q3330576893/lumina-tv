@@ -37,9 +37,17 @@ private class OffsetTextRenderer(
     private val delegate: Renderer,
     private val offsetMs: () -> Long,
 ) : Renderer by delegate {
+    private var frameTick = 0
 
     override fun render(positionUs: Long, elapsedRealtimeUs: Long) {
-        delegate.render(positionUs - offsetMs() * 1000L, elapsedRealtimeUs)
+        val offset = offsetMs()
+        if (offset == 0L) {
+            delegate.render(positionUs, elapsedRealtimeUs)
+            frameTick = 0
+            return
+        }
+        if (frameTick == 0) delegate.render(positionUs - offset * 1000L, elapsedRealtimeUs)
+        frameTick = (frameTick + 1) % 3
     }
 
     override fun release() = delegate.release()
