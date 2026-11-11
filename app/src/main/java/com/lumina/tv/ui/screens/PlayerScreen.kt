@@ -419,6 +419,13 @@ fun PlayerScreen(
                 failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
+                val sourceVideoRange = target.source?.streams?.firstOrNull { it.type == "Video" }?.videoRangeType.orEmpty().uppercase()
+                AppRuntime.currentVideoRange = when {
+                    sourceVideoRange.contains("DOVI") || sourceVideoRange.contains("DOLBY") || sourceVideoRange == "DV" -> "DV"
+                    sourceVideoRange.contains("HLG") -> "HLG"
+                    sourceVideoRange.contains("HDR10") || sourceVideoRange.contains("HDR") -> "HDR10"
+                    else -> "SDR"
+                }
                 currentPlaybackUrl = target.url
                 val targetIsHls = target.url.contains("master.m3u8", true) || target.url.contains(".m3u8", true)
                 if (targetIsHls) transcodeFallbackTried = true
@@ -620,6 +627,7 @@ fun PlayerScreen(
         currentSourceId = initialSourceId
         AppRuntime.screenLabel = "播放"
         AppRuntime.nowPlaying = item.seriesName?.let { "${it} · ${item.name}" } ?: item.name
+        AppRuntime.currentVideoRange = "SDR"
         AppRuntime.playingItemId = item.id
         if (client == null) {
             error = "未登录"

@@ -45,7 +45,7 @@ object DiagExporter {
             mpvLog = runCatching { File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.readText(Charsets.UTF_8) }
                 .getOrNull()?.ifBlank { "No mpv log messages captured" } ?: "mpv log unavailable: no session log file",
             appLog = appLogTail(),
-            uiText = "screen=${AppRuntime.screenLabel}\nplaying=${AppRuntime.nowPlaying}\nactiveEngine=unknown\nbuffering=unknown\ndegraded=unknown",
+            uiText = "screen=${AppRuntime.screenLabel}\nplaying=${AppRuntime.nowPlaying}\nactiveEngine=unknown\nbuffering=unknown\ndegraded=unknown\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}",
         )
     }
 
@@ -89,7 +89,7 @@ object DiagExporter {
             "errors.json" to payload.errorsJson,
             "mpv.log" to payload.mpvLog,
             "app.log" to payload.appLog,
-            "ui.txt" to payload.uiText,
+            "ui.txt" to (payload.uiText + "\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}"),
             "net.json" to NetLog.tail(),
             "pages.txt" to PageLog.tail(),
             "crash-stats.json" to File(root, "crash-stats.json").takeIf(File::exists)?.readText().orEmpty(),
@@ -117,6 +117,10 @@ object DiagExporter {
         val keyValue = Regex("(?i)(\\\"?(?:api_key|x-emby-token|authorization|password|passwd|pw|token)\\\"?\\s*[:=]\\s*)(?:\\\"[^\\\"]*\\\"|[^,}\\s&]+)")
         val query = Regex("(?i)(api_key|x-emby-token|authorization|password|passwd|pw|token)=([^&\\s]+)")
         val header = Regex("(?im)(\\b(?:api_key|x-emby-token|authorization|password|passwd|pw|token)\\b\\s*:\\s*)[^\\r\\n]+")
-        return text.replace(keyValue, "$1***").replace(query, "$1=***").replace(header, "$1***")
+        val sanitized = text.replace(keyValue, "$1***").replace(query, "$1=***").replace(header, "$1***")
+        return if (sanitized.startsWith("[基础]") || sanitized.startsWith("[鍩虹]")) {
+            sanitized.replace(Regex("(?m)^视频动态范围:.*(?:\\r?\\n)?"), "") +
+                "\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}\n"
+        } else sanitized
     }
 }

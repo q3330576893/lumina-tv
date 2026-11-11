@@ -35,6 +35,7 @@ object AppRuntime {
             field = value
         }
     var nowPlaying: String = ""
+    @Volatile var currentVideoRange: String = "SDR"
     @Volatile var playingItemId: String = ""
     @Volatile var activePlayerEngine: String = "unknown"
 
