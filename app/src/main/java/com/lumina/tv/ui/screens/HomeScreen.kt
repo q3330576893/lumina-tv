@@ -358,6 +358,7 @@ fun HomeScreen(
             if (cached == null) error = e.message else offline = true
         } finally {
             loading = false
+            c.requestProgressFlush()
         }
     }
 

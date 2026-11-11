@@ -60,6 +60,11 @@ class Prefs(context: Context) {
         get() = sp.getString("decoder_preference", "auto") ?: "auto"
         set(v) = sp.edit().putString("decoder_preference", v).apply()
 
+    /** Media3 fast-start buffering; kept hidden so it can be disabled as a compatibility escape hatch. */
+    var fastStart: Boolean
+        get() = sp.getBoolean("fast_start", true)
+        set(v) = sp.edit().putBoolean("fast_start", v).apply()
+
 
     var savedServersJson: String
         get() = sp.getString("saved_servers", "[]") ?: "[]"

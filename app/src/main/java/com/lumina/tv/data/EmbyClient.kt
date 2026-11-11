@@ -1,6 +1,11 @@
 package com.lumina.tv.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import com.lumina.tv.data.MediaChapter
@@ -32,6 +37,7 @@ class EmbyClient(
     private val deviceId: String = "lumina-tv",
     val userName: String = "",
     val serverName: String = "Emby",
+    private val progressQueue: ProgressQueue? = null,
 ) {
     @Volatile var lastPlaybackInfoJson: String? = null
         private set
@@ -49,6 +55,8 @@ class EmbyClient(
                 if (!response.isSuccessful) {
                     val body = response.peekBody(200).string()
                     lastApiFailure = "HTTP ${response.code}: ${safeErrorBody(body)}"
+                } else {
+                    requestProgressFlush()
                 }
                 response
             } catch (e: IOException) {
@@ -64,6 +72,11 @@ class EmbyClient(
         .build()
 
     private val jsonType = "application/json; charset=utf-8".toMediaType()
+    private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val progressFlushMutex = Mutex()
+    private val progressScheduleLock = Any()
+    @Volatile private var progressFlushScheduled = false
+    @Volatile private var lastProgressFlushAt = 0L
     private val trickplayMutex = Mutex()
     private val trickplayFiles = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
     private var trickplayBytes = 0L
@@ -1214,7 +1227,12 @@ data class PlaybackTarget(
                 .put("PlayMethod", "DirectPlay")
                 .put("MediaSourceId", mediaSourceId ?: itemId)
                 .toString())
-        }.onFailure { lastApiFailure = "reportProgress: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }
+        }.onSuccess {
+            progressQueue?.removeThrough(itemId, positionMs)
+        }.onFailure {
+            lastApiFailure = "reportProgress: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}"
+            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis()))
+        }
     }
 
     suspend fun reportStop(itemId: String, positionMs: Long) = withContext(Dispatchers.IO) {
@@ -1223,7 +1241,52 @@ data class PlaybackTarget(
                 .put("ItemId", itemId)
                 .put("PositionTicks", positionMs * 10_000)
                 .toString())
-        }.onFailure { lastApiFailure = "reportStop: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }
+        }.onSuccess {
+            progressQueue?.removeThrough(itemId, positionMs)
+        }.onFailure {
+            lastApiFailure = "reportStop: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}"
+            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis()))
+        }
+    }
+
+    fun requestProgressFlush() {
+        val queue = progressQueue ?: return
+        if (queue.isEmpty()) return
+        synchronized(progressScheduleLock) {
+            if (progressFlushScheduled) return
+            progressFlushScheduled = true
+        }
+        progressScope.launch {
+            val waitMs = (lastProgressFlushAt + PROGRESS_FLUSH_DEBOUNCE_MS - System.currentTimeMillis()).coerceAtLeast(0L)
+            if (waitMs > 0L) delay(waitMs)
+            try {
+                flushPendingProgress()
+            } finally {
+                synchronized(progressScheduleLock) { progressFlushScheduled = false }
+            }
+        }
+    }
+
+    private suspend fun flushPendingProgress() = progressFlushMutex.withLock {
+        val queue = progressQueue ?: return@withLock
+        lastProgressFlushAt = System.currentTimeMillis()
+        queue.peek().forEach { progress ->
+            val sent = runCatching {
+                postSync(url("/Sessions/Playing/Stopped", emptyMap()), JSONObject()
+                    .put("ItemId", progress.itemId)
+                    .put("PositionTicks", progress.positionMs * 10_000)
+                    .toString())
+            }.isSuccess
+            if (sent) queue.remove(progress)
+        }
+    }
+
+    fun clearPendingProgress() {
+        progressQueue?.clear()
+    }
+
+    fun close() {
+        progressScope.cancel()
     }
 
     suspend fun clearWatchHistory(): Int = withContext(Dispatchers.IO) {
@@ -1261,6 +1324,7 @@ data class PlaybackTarget(
 
     companion object {
         private const val SEARCH_REQUEST_ATTEMPTS = 2
+        private const val PROGRESS_FLUSH_DEBOUNCE_MS = 10_000L
         private val BIF_MAGIC = byteArrayOf(0x89.toByte(), 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A)
         private const val MAX_TRICKPLAY_FILE_BYTES = 16L * 1024 * 1024
         private const val MAX_TRICKPLAY_BYTES = 64L * 1024 * 1024

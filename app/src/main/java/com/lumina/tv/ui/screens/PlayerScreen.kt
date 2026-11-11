@@ -1,7 +1,6 @@
 ﻿package com.lumina.tv.ui.screens
 
 import android.os.Build
-import android.util.TypedValue
 import android.view.SurfaceHolder
 import android.view.Surface
 import android.view.SurfaceView
@@ -86,6 +85,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
@@ -279,8 +279,9 @@ fun PlayerScreen(
     }
 
     val subtitleRenderersFactory = remember(item.id) { SubtitleRenderersFactory(context) }
+    val fastStart = AppRuntime.prefs?.fastStart != false
 
-    val exo = remember(item.id, ffmpegFallback) {
+    val exo = remember(item.id, ffmpegFallback, fastStart) {
         val preference = AppRuntime.prefs?.decoderPreference ?: "auto"
         val codecSelector = MediaCodecSelector { mimeType, secure, tunneling ->
             val dvMime = mimeType.equals("video/dolby-vision", ignoreCase = true)
@@ -305,8 +306,19 @@ fun PlayerScreen(
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setMediaCodecSelector(codecSelector)
             .setEnableDecoderFallback(true)
-        ExoPlayer.Builder(context, renderers)
+        val playerBuilder = ExoPlayer.Builder(context, renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
+        if (fastStart) {
+            playerBuilder.setLoadControl(DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    15_000,
+                    50_000,
+                    1_000,
+                    2_000,
+                )
+                .build())
+        }
+        playerBuilder
             .build()
             .apply {
                 playWhenReady = true
@@ -1167,26 +1179,25 @@ fun PlayerScreen(
             },
             update = { pv ->
                 pv.resizeMode = resizeMode
-                val prefs = AppRuntime.prefs
                 pv.subtitleView?.apply {
-                    val subtitleSp = when {
-                        subScale >= 2.3f -> 38.4f
-                        subScale >= 1.9f -> 32f
-                        subScale >= 1.5f -> 25.6f
-                        subScale >= 1.2f -> 20.8f
-                        else -> 16f
+                    val subtitleColor = when {
+                        subScale >= 1.6f -> android.graphics.Color.WHITE
+                        subScale >= 1.25f -> android.graphics.Color.rgb(217, 217, 217)
+                        else -> android.graphics.Color.rgb(179, 179, 179)
                     }
-                    setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, subtitleSp)
-                    setBackgroundColor(if (prefs?.subtitleBg == true) 0x99000000.toInt() else android.graphics.Color.TRANSPARENT)
+                    setApplyEmbeddedStyles(false)
+                    setApplyEmbeddedFontSizes(false)
+                    setFractionalTextSize(0.0533f)
+                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
                     setStyle(androidx.media3.ui.CaptionStyleCompat(
-                        prefs?.subtitleColor ?: android.graphics.Color.WHITE,
-                        if (prefs?.subtitleBg == true) 0x99000000.toInt() else android.graphics.Color.TRANSPARENT,
+                        subtitleColor,
                         android.graphics.Color.TRANSPARENT,
-                        if (prefs?.subtitleOutline != false) androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE else androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE,
+                        android.graphics.Color.TRANSPARENT,
+                        androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
                         android.graphics.Color.BLACK,
                         null,
                     ))
-                    setBottomPaddingFraction((prefs?.subtitlePosition ?: 0.08f) + if (subtitleSp >= 38f) 0.05f else if (subtitleSp >= 32f) 0.035f else 0f)
+                    setBottomPaddingFraction(0.08f)
                 }
             },
             modifier = Modifier.fillMaxSize(),

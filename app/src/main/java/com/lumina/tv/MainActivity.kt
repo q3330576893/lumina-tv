@@ -131,6 +131,11 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    override fun onResume() {
+        super.onResume()
+        AppRuntime.client?.requestProgressFlush()
+    }
+
     /** 手机遥控 -> 系统按键事件，直接喂给当前 Compose 焦点系统。 */
     private fun dispatchRemote(action: String) {
         val code = when (action) {

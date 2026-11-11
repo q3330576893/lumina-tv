@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.Prefs
+import com.lumina.tv.data.ProgressQueue
 import com.lumina.tv.data.Session
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.pair.PairingServer
@@ -98,10 +99,14 @@ object AppRuntime {
 
     fun applySession(s: Session) {
         val previous = session
-        if (previous != null && (!previous.baseUrl.trimEnd('/').equals(s.baseUrl.trimEnd('/'), ignoreCase = true) || previous.userId != s.userId)) {
+        val identityChanged = previous != null &&
+            (!previous.baseUrl.trimEnd('/').equals(s.baseUrl.trimEnd('/'), ignoreCase = true) || previous.userId != s.userId)
+        if (identityChanged) {
+            client?.clearPendingProgress()
             applicationContext?.let { com.lumina.tv.data.LibraryCache.removeHomeDisk(it, previous.baseUrl, previous.userId) }
             com.lumina.tv.data.LibraryCache.clear()
         }
+        client?.close()
         session = s
         client = EmbyClient(
             baseUrl = s.baseUrl,
@@ -110,6 +115,7 @@ object AppRuntime {
             deviceId = prefs?.deviceId ?: "lumina-tv",
             userName = s.userName,
             serverName = s.serverName,
+            progressQueue = applicationContext?.let { ProgressQueue(it, s.baseUrl, s.userId) },
         )
         prefs?.saveSession(s)
     }
@@ -138,6 +144,8 @@ object AppRuntime {
     }
 
     fun logout() {
+        client?.clearPendingProgress()
+        client?.close()
         session?.let { current ->
             applicationContext?.let { com.lumina.tv.data.LibraryCache.removeHomeDisk(it, current.baseUrl, current.userId) }
         }
