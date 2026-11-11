@@ -762,7 +762,7 @@ class EmbyClient(
         return url("/Items/$id/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
-    /** Resolves the server-created low-bitrate preview session, falling back to the original file. */
+    /** Resolves the server-created low-bitrate preview session. */
     suspend fun resolveDetailPreviewUrl(itemId: String, mediaSourceId: String): String? =
         withContext(Dispatchers.IO) {
             val body = JSONObject()
@@ -784,21 +784,19 @@ class EmbyClient(
             }.getOrNull()
             val first = info?.optJSONArray("MediaSources")?.optJSONObject(0)
             if (first != null && isStrmSource(first)) {
-                val strmUrl = first.optString("DirectStreamUrl")
-                    .takeIf { it.startsWith("http", true) }
+                val strmUrl = absUrl(first.optString("DirectStreamUrl"))
                     ?: extractStrmUrl(getTextSync(url("/Items/$itemId/Download", mapOf("UserId" to userId))))
                 return@withContext strmUrl?.takeIf { it.startsWith("http", true) }
             }
-            first?.optString("TranscodingUrl")
-                ?.takeIf { it.startsWith("http", true) }
-                // The PlaybackInfo URL already contains the complete transcoding session query.
-                ?: (first?.optString("Id")?.ifBlank { null } ?: mediaSourceId.ifBlank { null })?.let { sourceId ->
-                    url(
-                        "/Videos/$itemId/stream",
-                        mapOf("static" to "true", "MediaSourceId" to sourceId),
-                    )
-                }
+            absUrl(first?.optString("TranscodingUrl"))
         }
+
+    private fun absUrl(value: String?): String? {
+        val candidate = value?.trim().orEmpty()
+        if (candidate.isBlank()) return null
+        return if (candidate.startsWith("http", true)) candidate
+        else baseUrl.trimEnd('/') + "/" + candidate.trimStart('/')
+    }
 
     // ---------------- 播放 ----------------
 
@@ -1033,12 +1031,6 @@ data class PlaybackTarget(
             )
             // forceDirect：服务端转码流坏了（HLS 解析失败）时的兜底，直接拉原文件
             val useDirect = forceDirect || !needTranscode
-            fun absUrl(value: String?): String? {
-                val candidate = value?.trim().orEmpty()
-                if (candidate.isBlank()) return null
-                return if (candidate.startsWith("http", true)) candidate
-                else baseUrl.trimEnd('/') + "/" + candidate.trimStart('/')
-            }
             val transcodingUrl = absUrl(first?.optString("TranscodingUrl"))
                 ?.let { serverUrl ->
                     val withAudio = if (manualAudioStreamSelection) addPlaybackQuery(serverUrl, audioStreamIndex) else serverUrl
@@ -1117,7 +1109,9 @@ data class PlaybackTarget(
                 .put("AudioCodec", "aac")
                 .put("Protocol", "hls")
                 .put("MaxAudioChannels", "2")
-                .put("MaxWidth", "960")
+                .put("MaxWidth", "1280")
+                .put("MaxHeight", "720")
+                .put("VideoRangeType", "SDR")
         ))
 
     private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
@@ -1339,4 +1333,4 @@ private fun JSONObject.optNormalizedValue(normalizedKey: String): String? {
     return opt(key)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
 }
 
-private const val DETAIL_PREVIEW_BITRATE = 1_200_000
+private const val DETAIL_PREVIEW_BITRATE = 2_000_000

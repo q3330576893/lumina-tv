@@ -49,18 +49,18 @@ fun DetailVideoBackground(
         probeResult = null
         if (url.isNullOrBlank()) {
             probeResult = "skip=url"
-        } else {
-            val scheme = Uri.parse(url).scheme?.lowercase()
-            probeResult = when {
-                scheme == "file" || scheme == "content" -> "valid"
-                scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url).let {
-                    if (it.valid == true) "valid" else when (it.reason) {
-                        "html" -> "skip=html"
-                        else -> "skip=err"
-                    }
-                }
-                else -> "skip=url"
+            onStatus("skip=url")
+            return@LaunchedEffect
+        }
+
+        delay(1_500)
+        val scheme = Uri.parse(url).scheme?.lowercase()
+        probeResult = when {
+            scheme == "file" || scheme == "content" -> "valid"
+            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url).let {
+                if (it.valid == true) "valid" else if (it.reason == "html") "skip=html" else "skip=err"
             }
+            else -> "skip=url"
         }
         if (probeResult != "valid") onStatus(probeResult ?: "skip=err")
     }
@@ -93,7 +93,14 @@ private fun DetailVideoPlayback(
     var failed by remember(url) { mutableStateOf(false) }
     var loopStartMs by remember(url) { mutableStateOf(0L) }
     var loopEndMs by remember(url) { mutableStateOf(0L) }
-    val player = remember(url, mediaKey) {
+    val playerState = remember { mutableStateOf<ExoPlayer?>(null) }
+    LaunchedEffect(url, mediaKey) {
+        playerState.value?.let { oldPlayer ->
+            oldPlayer.pause()
+            oldPlayer.stop()
+            oldPlayer.clearMediaItems()
+            oldPlayer.release()
+        }
         val httpClient = OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
@@ -113,15 +120,17 @@ private fun DetailVideoPlayback(
             .setUri(url)
             .setCustomCacheKey(cacheKey)
             .build()
-        ExoPlayer.Builder(context)
+        val nextPlayer = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(cacheFactory))
             .build()
             .apply {
                 volume = 0f
                 setMediaItem(mediaItem)
-                prepare()
             }
+        playerState.value = nextPlayer
     }
+
+    val player = playerState.value ?: return
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -156,14 +165,25 @@ private fun DetailVideoPlayback(
         player.addListener(listener)
         onDispose {
             player.removeListener(listener)
-            player.stop()
-            player.clearMediaItems()
-            player.release()
+        }
+    }
+
+    DisposableEffect(playerState) {
+        onDispose {
+            playerState.value?.let {
+                it.pause()
+                it.stop()
+                it.clearMediaItems()
+                it.release()
+            }
         }
     }
 
     LaunchedEffect(player, playing, failed) {
-        if (playing && !failed) player.play() else player.pause()
+        if (playing && !failed) {
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
+            player.play()
+        } else player.pause()
     }
 
     LaunchedEffect(player, playing, failed) {
