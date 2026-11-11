@@ -33,8 +33,8 @@ object TmdbClient {
     private data class DiscoveryCacheEntry(val expiresAt: Long, val cards: List<ExternalCard>)
 
     private val http: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(6, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
     private val cache = LinkedHashMap<String, TmdbInfo?>()
@@ -49,8 +49,9 @@ object TmdbClient {
 
     fun externalLinkDiagnosticSnapshot(): String = externalLinkDiagnostic
 
-    suspend fun discovery(config: DiscoverySectionConfig): List<ExternalCard> = withContext(Dispatchers.IO) {
-        discoveryLocks.getOrPut(config.id) { Mutex() }.withLock {
+    suspend fun discovery(config: DiscoverySectionConfig): List<ExternalCard> = runCatching {
+        withContext(Dispatchers.IO) {
+            discoveryLocks.getOrPut(config.id) { Mutex() }.withLock {
             require(config.sourceId == "tmdb") { "Unsupported discovery source: ${config.sourceId}" }
             val now = System.currentTimeMillis()
             synchronized(discoveryCache) {
@@ -59,11 +60,12 @@ object TmdbClient {
             }
 
             val path = config.endpoint.trimStart('/')
-            val url = "https://api.tmdb.org/3/$path" +
+            val url = "https://api.themoviedb.org/3/$path" +
                 "?language=zh-CN&region=CN&page=1&include_adult=false" +
                 "&sort_by=${URLEncoder.encode(config.sortBy, "UTF-8")}" +
                 "&api_key=${BuildConfig.TMDB_API_KEY}"
-            val response = getJson(url) ?: throw java.io.IOException("TMDB discovery request failed")
+            val response = getJson(url)
+                ?: throw java.io.IOException("TMDB discovery request failed: ${lastRequestFailure ?: "unknown"}")
             val results = response.optJSONArray("results") ?: JSONArray()
             val cards = buildList {
                 for (index in 0 until minOf(results.length(), config.pageSize.coerceAtLeast(0))) {
@@ -94,8 +96,14 @@ object TmdbClient {
                 )
             }
             cards
+            }
         }
-    }
+    }.onFailure {
+        lastRequestFailure = when (it) {
+            is java.net.SocketTimeoutException -> "timeout"
+            else -> "discovery_error:${it.message ?: it.javaClass.simpleName}"
+        }
+    }.getOrDefault(emptyList())
 
     /** Resolve missing provider IDs for a detail item without blocking its first render. */
     suspend fun externalLinks(

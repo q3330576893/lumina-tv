@@ -2,7 +2,7 @@
 
 package com.lumina.tv.ui.screens
 
-import android.os.Build
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -87,17 +87,13 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.BlurredEdgeTreatment
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
@@ -122,6 +118,7 @@ import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.ExternalCard
 import com.lumina.tv.data.DiscoverySectionConfig
+import com.lumina.tv.data.DiscoveryLayout
 import com.lumina.tv.data.DiscoverySections
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
@@ -146,6 +143,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlin.math.abs
 
 private fun calculateHeroHeight(screenHeight: Dp): Dp = minOf(560.dp, screenHeight * 0.66f)
 
@@ -177,7 +176,7 @@ fun HomeScreen(
     val client = AppRuntime.client
     val context = LocalContext.current
     val hazeState = remember { HazeState() }
-    val discoveryLookupCache = remember(client) { mutableMapOf<String, MediaItem?>() }
+    val discoveryLookupCache = remember(client) { mutableMapOf<String, MediaItem>() }
     val discoveryLookupInFlight = remember(client) { mutableSetOf<String>() }
 
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
@@ -219,7 +218,12 @@ fun HomeScreen(
     }
     // 待恢复的滚动位置：null 表示没有待恢复目标（此时才允许把位置写回缓存）
     var pendingGridRestore by remember(gridStateKey) { mutableStateOf(LibraryCache.gridPosition(gridStateKey)) }
-    val scope = rememberCoroutineScope()
+    val homeExceptionHandler = remember {
+        CoroutineExceptionHandler { _, throwable ->
+            Log.e("HomeScreen", "Unhandled home coroutine failure", throwable)
+        }
+    }
+    val scope = rememberCoroutineScope { homeExceptionHandler }
     fun closeSortMenu() {
         sortMenuOpen = false
         restoreSortFocus = true
@@ -540,10 +544,6 @@ fun HomeScreen(
     val heroItems = remember(heroPool) { pickHeroItems(heroPool, latest.map { it.id }.toHashSet(), 6) }
     LaunchedEffect(heroItems) { heroIndex = 0 }
     val hero = heroItems.getOrNull(heroIndex) ?: resume.firstOrNull()
-    val heroImageUrl = hero?.let { item ->
-        AppRuntime.client?.backdropUrl(item, 1280)?.takeIf { it.isNotBlank() }
-            ?: AppRuntime.client?.imageUrl(item, 720)
-    }
     val navFocus = remember { FocusRequester() }
 
     val heroPlayFocus = remember { FocusRequester() }
@@ -571,12 +571,6 @@ fun HomeScreen(
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
                 }
                 tab == HomeTab.Recommend -> Box(Modifier.fillMaxSize()) {
-                    if (heroImageUrl != null) {
-                        HeroBlurBackdrop(
-                            url = heroImageUrl,
-                            topOffset = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp) - 60.dp,
-                        )
-                    }
                     LazyColumn(
                         state = recListState,
                         modifier = Modifier.fillMaxSize(),
@@ -641,24 +635,31 @@ fun HomeScreen(
                         item(key = "discovery-${config.id}") {
                             DiscoverySectionRow(config) { card ->
                                 val emby = client ?: return@DiscoverySectionRow
-                                if (discoveryLookupCache.containsKey(card.tmdbId)) {
-                                    discoveryLookupCache[card.tmdbId]?.let { onOpenDetail(it.id) }
-                                        ?: android.widget.Toast.makeText(context, "库里暂无此片", android.widget.Toast.LENGTH_SHORT).show()
+                                discoveryLookupCache[card.tmdbId]?.let {
+                                    onOpenDetail(it.id)
                                     return@DiscoverySectionRow
                                 }
                                 if (!discoveryLookupInFlight.add(card.tmdbId)) return@DiscoverySectionRow
                                 scope.launch {
                                     try {
-                                        val searchTerm = listOfNotNull(card.title, card.year?.toString()).joinToString(" ")
-                                        val match = emby.getItems(
-                                            types = "Movie",
-                                            searchTerm = searchTerm,
-                                            limit = 20,
+                                        val fullTitleResults = emby.getItems(
+                                            types = "Movie", searchTerm = card.title, limit = 50,
                                             fields = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProviderIds",
-                                        ).firstOrNull()
-                                        discoveryLookupCache[card.tmdbId] = match
+                                        )
+                                        var match = pickDiscoveryMatch(fullTitleResults, card.title, card.year)
+                                        val mainTitle = card.title.split(Regex("\\s+-\\s+|[:：]"), limit = 2)
+                                            .first().trim()
+                                        if (match == null && mainTitle.isNotBlank() && mainTitle != card.title) {
+                                            val mainTitleResults = emby.getItems(
+                                                types = "Movie", searchTerm = mainTitle, limit = 50,
+                                                fields = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProviderIds",
+                                            )
+                                            match = pickDiscoveryMatch(mainTitleResults, card.title, card.year)
+                                                ?: pickDiscoveryMatch(mainTitleResults, mainTitle, card.year)
+                                        }
+                                        if (match != null) discoveryLookupCache[card.tmdbId] = match
                                         if (match != null) onOpenDetail(match.id)
-                                        else android.widget.Toast.makeText(context, "库里暂无此片", android.widget.Toast.LENGTH_SHORT).show()
+                                        else android.widget.Toast.makeText(context, "库里暂无《${card.title}》", android.widget.Toast.LENGTH_SHORT).show()
                                     } catch (_: Exception) {
                                         android.widget.Toast.makeText(context, "库内搜索失败", android.widget.Toast.LENGTH_SHORT).show()
                                     } finally {
@@ -1648,8 +1649,16 @@ private fun Hero(
                 .background(Brush.horizontalGradient(listOf(Color(0x66000000), Color.Transparent)))
         )
         Box(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(120.dp)
-                .background(Brush.verticalGradient(listOf(Color.Transparent, Ink)))
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(240.dp)
+                .background(
+                    Brush.verticalGradient(
+                        0.00f to Color.Transparent,
+                        0.22f to Ink.copy(alpha = 0.12f),
+                        0.45f to Ink.copy(alpha = 0.38f),
+                        0.70f to Ink.copy(alpha = 0.72f),
+                        1.00f to Ink,
+                    )
+                )
         )
         Column(
             Modifier.align(Alignment.BottomStart).padding(start = 34.dp, bottom = 24.dp, end = 200.dp)
@@ -1825,12 +1834,10 @@ private fun DiscoverySectionRow(
 ) {
     var state by remember(config.id) { mutableStateOf<DiscoveryRowState>(DiscoveryRowState.Loading) }
     LaunchedEffect(config) {
-        state = try {
+        state = runCatching {
             TmdbClient.discovery(config).takeIf { it.isNotEmpty() }?.let(DiscoveryRowState::Data)
                 ?: DiscoveryRowState.Empty
-        } catch (_: Exception) {
-            DiscoveryRowState.Error
-        }
+        }.getOrElse { DiscoveryRowState.Error }
     }
     val cards = (state as? DiscoveryRowState.Data)?.cards ?: return
     Column(Modifier.padding(top = Space.section)) {
@@ -1840,77 +1847,135 @@ private fun DiscoverySectionRow(
             contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
             horizontalArrangement = Arrangement.spacedBy(Space.m),
         ) {
-            items(cards, key = { "${config.id}-${it.tmdbId}" }) { card ->
-                val media = remember(card) {
-                    MediaItem(
-                        id = card.tmdbId,
-                        name = card.title,
-                        type = "Movie",
-                        year = card.year,
-                        communityRating = card.rating,
-                    )
-                }
-                PosterCard(
-                    item = media,
-                    imageUrl = card.posterUrl,
-                    width = 200.dp,
-                    onClick = { onClick(card) },
-                )
+            itemsIndexed(cards, key = { _, card -> "${config.id}-${card.tmdbId}" }) { index, card ->
+                DiscoveryCard(card, index, config.layout, onClick)
             }
         }
     }
 }
 
 @Composable
-private fun HeroBlurBackdrop(url: String?, topOffset: Dp) {
-    if (url.isNullOrBlank()) return
-    val context = LocalContext.current
-    val supportsBlur = Build.VERSION.SDK_INT >= 31
-    val sourceWidth = if (supportsBlur) 480 else 64
+private fun DiscoveryCard(
+    card: ExternalCard,
+    index: Int,
+    layout: DiscoveryLayout,
+    onClick: (ExternalCard) -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val isPoster = layout == DiscoveryLayout.POSTER_RANKED
+    val width = when {
+        isPoster && index == 0 -> 176.dp
+        isPoster -> 150.dp
+        else -> 240.dp
+    }
+    val height = when {
+        isPoster && index == 0 -> 264.dp
+        isPoster -> 225.dp
+        else -> 135.dp
+    }
+    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(180), label = "discovery-card-scale")
+    val shape = RoundedCornerShape(12.dp)
 
-    Box(
+    Column(
         Modifier
-            .fillMaxWidth()
-            .height(260.dp)
-            .offset(y = topOffset)
-            .clipToBounds(),
+            .width(width)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clickable(interactionSource = interaction, indication = null) { onClick(card) }
     ) {
-        Crossfade(targetState = url, animationSpec = tween(400), label = "hero-blur") { imageUrl ->
+        Box(
+            Modifier
+                .width(width)
+                .height(height)
+                .clip(shape)
+                .background(Color(0xFF141B2B))
+                .border(if (focused) 1.5.dp else 1.dp, if (focused) Accent else Color.White.copy(alpha = 0.14f), shape)
+        ) {
             AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(imageUrl)
-                    .size(sourceWidth)
-                    .crossfade(false)
-                    .build(),
-                contentDescription = null,
+                model = if (isPoster) card.posterUrl else card.backdropUrl ?: card.posterUrl,
+                contentDescription = card.title,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = 1.25f
-                        scaleY = 1.25f
-                        compositingStrategy = CompositingStrategy.Offscreen
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (isPoster) {
+                if (index < 10) {
+                    val outlineWidth = with(LocalDensity.current) { 2.dp.toPx() }
+                    Box(Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 4.dp)) {
+                        Text(
+                            text = "${index + 1}", color = Color.Black,
+                            fontSize = 44.sp, fontWeight = FontWeight.Black,
+                            style = TextStyle(drawStyle = Stroke(width = outlineWidth)),
+                        )
+                        Text(
+                            text = "${index + 1}", color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 44.sp, fontWeight = FontWeight.Black,
+                        )
                     }
-                    .then(if (supportsBlur) Modifier.blur(40.dp, BlurredEdgeTreatment.Unbounded) else Modifier)
-                    .drawWithContent {
-                        drawContent()
-                        drawRect(
-                            brush = Brush.verticalGradient(
-                                0f to Color.Transparent,
-                                0.25f to Color.Black.copy(alpha = 0.85f),
-                                1f to Color.Transparent,
-                            ),
-                            blendMode = BlendMode.DstIn,
-                        )
-                        drawRect(
-                            brush = Brush.verticalGradient(
-                                0f to Color.Transparent,
-                                0.25f to Color.Black.copy(alpha = 0.12f),
-                                1f to Color.Transparent,
-                            ),
-                        )
-                    },
+                }
+            } else {
+                Box(
+                    Modifier.align(Alignment.BottomStart).fillMaxWidth().height(56.dp)
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.70f))))
+                )
+                Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = 7.dp, end = 72.dp)) {
+                    Text(card.title, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(card.year?.toString().orEmpty(), color = Color.White.copy(alpha = 0.70f), fontSize = 11.sp)
+                }
+                Box(
+                    Modifier.align(Alignment.TopEnd).padding(7.dp)
+                        .background(Accent.copy(alpha = 0.20f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text("热映", color = Color.White, fontSize = 10.sp)
+                }
+            }
+            card.rating?.takeIf { it > 0 }?.let { rating ->
+                Box(
+                    Modifier.align(Alignment.BottomEnd).padding(6.dp)
+                        .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                ) {
+                    Text("★ %.1f".format(rating), color = Color.White, fontSize = 12.sp)
+                }
+            }
+        }
+        if (isPoster) {
+            Spacer(Modifier.height(7.dp))
+            Text(
+                text = card.title,
+                color = TextMain,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.width(width),
             )
         }
     }
+}
+
+private fun normDiscoveryTitle(value: String): String = value.lowercase()
+    .replace(Regex("[\\s\\p{Punct}·：:，。！？、（）()【】\\[\\]—\\-_]"), "")
+
+private fun pickDiscoveryMatch(cards: List<MediaItem>, title: String, year: Int?): MediaItem? {
+    val normalizedTitle = normDiscoveryTitle(title)
+    if (normalizedTitle.isBlank()) return null
+    return cards.map { card ->
+        val normalizedName = normDiscoveryTitle(card.name)
+        var score = when {
+            normalizedName == normalizedTitle -> 100
+            normalizedName.startsWith(normalizedTitle) || normalizedTitle.startsWith(normalizedName) -> 60
+            normalizedName.contains(normalizedTitle) || normalizedTitle.contains(normalizedName) -> 40
+            else -> 0
+        }
+        if (year != null && card.year != null) {
+            val difference = abs(card.year - year)
+            score += when {
+                difference == 0 -> 30
+                difference <= 1 -> 15
+                difference <= 2 -> 5
+                else -> -20
+            }
+        }
+        card to score
+    }.filter { it.second > 30 }.maxByOrNull { it.second }?.first
 }

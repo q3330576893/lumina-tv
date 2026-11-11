@@ -151,7 +151,20 @@ fun GlassPanel(
                 color = ThemeRuntime.glassLine(focused),
                 shape = corner?.let { RoundedCornerShape(it) } ?: ShapeScale.panel,
             )
-    ) { content() }
+    ) {
+        content()
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(60.dp)
+                .align(Alignment.TopCenter)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.White.copy(alpha = 0.06f), Color.Transparent)
+                    )
+                )
+        )
+    }
 }
 
 /** 可聚焦容器：缩放 + 高光描边的统一交互语言。 */
