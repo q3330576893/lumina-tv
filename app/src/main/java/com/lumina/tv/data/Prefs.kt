@@ -276,10 +276,6 @@ class Prefs(context: Context) {
         get() = sp.getLong("subtitle_offset_ms", 0L)
         set(v) = sp.edit().putLong("subtitle_offset_ms", v.coerceIn(-10_000L, 10_000L)).apply()
 
-    var assSubtitles: Boolean
-        get() = sp.getBoolean("ass_subtitles", true)
-        set(v) = sp.edit().putBoolean("ass_subtitles", v).apply()
-
     /** 全局片头时长（秒），0 = 关闭 */
     var globalIntroSeconds: Int
         get() = sp.getInt("global_intro_seconds", 0)

@@ -953,13 +953,6 @@ data class PlaybackTarget(
             path.endsWith(".strm", ignoreCase = true)
     }
 
-    /** STRM 直链探活：只发 HEAD，2 秒超时，2xx/3xx 视为可达。 */
-    private fun strmUrlReachable(u: String): Boolean = runCatching {
-        val request = Request.Builder().url(u).head().build()
-        http.newCall(request).apply { timeout().timeout(2, TimeUnit.SECONDS) }
-            .execute().use { it.isSuccessful || it.code in 300..399 }
-    }.getOrDefault(false)
-
     suspend fun resolvePlayback(
         item: MediaItem,
         forceTranscode: Boolean = false,
@@ -1062,29 +1055,26 @@ data class PlaybackTarget(
                 if (first != null && isStrmSource(first)) {
                     getTextSync(url("/Items/${item.id}/Download", mapOf("UserId" to userId)))
                 } else null
-            val strmUrl: String? = when {
+            val isStrmItem = first != null && isStrmSource(first)
+            val directLinkUrl: String? = when {
                 // Emby 已经在 MediaSources 里给了绝对直链
                 absUrl(source.directStreamUrl) != null -> absUrl(source.directStreamUrl)
                 // 否则从 .strm 文本取第一条有效地址
                 strmText != null -> extractStrmUrl(strmText)
                 else -> null
             }
-            val isStrm = strmUrl?.isNotBlank() == true
-            val strmReachable = if (isStrm) strmUrlReachable(strmUrl!!) else true
-            if (isStrm && !strmReachable && !forceDirect) {
-                throw EmbyException("STRM 直链无法访问（网盘链接可能已失效或需要登录），路径：${strmUrl.take(80)}")
-            }
+            // HEAD being rejected does not prove GET playback will fail. This server returns DirectStreamUrl for ordinary items too, so probing blocks every source before engine selection.
             // 是 STRM 条目却拿不到地址：直接报错，不要退化成转码流导致无限缓冲
-            if (!isStrm && first != null && isStrmSource(first) &&
-                absUrl(source.directStreamUrl) == null
-            ) {
+            if (isStrmItem && directLinkUrl == null) {
                 throw EmbyException("该 STRM 条目没有可用地址（文件为空或内容不是 http 链接）")
             }
-            val finalUrl = if (isStrm && !forceTranscode) strmUrl!!
+            val finalUrl = if (isStrmItem && directLinkUrl != null && !forceTranscode) directLinkUrl
                 else if (forceDirect) directUrl
                 else if (preferDirectStreamUrl && serverDirectUrl != null) serverDirectUrl
                 else if (!needTranscode && serverDirectUrl != null) serverDirectUrl
                 else transcodingUrl ?: serverDirectUrl ?: if (useDirect) directUrl else hlsUrl
+            val finalPath = android.net.Uri.parse(finalUrl).path.orEmpty()
+            android.util.Log.d("EmbyClient", "playback: isStrmItem=$isStrmItem hasDirectLink=${directLinkUrl != null} final=$finalPath")
             // 请求头：#EXTVLCOPT / #EXTHTTP 既可能来自 MediaSources.AdditionalOptions，也可能在 .strm 文本里
             val headers = buildMap {
                 putAll(parseStrmOptions(source.additionalOptions))
@@ -1093,7 +1083,7 @@ data class PlaybackTarget(
             PlaybackTarget(
                 url = finalUrl,
                 // STRM 直链本身就是直连播放，不参与转码判定
-                direct = if (isStrm && !forceTranscode) true else useDirect,
+                direct = if (isStrmItem && directLinkUrl != null && !forceTranscode) true else useDirect,
                 source = source,
                 startPositionMs = resolvedStartPositionMs,
                 headers = headers,

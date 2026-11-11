@@ -57,7 +57,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            // libmpv 与 ass 各自带了一份 libc++_shared.so，二选一即可
+            // libmpv 自带的 libc++_shared 去重
             pickFirsts += "**/libc++_shared.so"
         }
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
@@ -84,11 +84,6 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.7.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.7.1")
     implementation("org.jellycine.mpv:libmpv:1.0.4")
-    // libass 原生库（.so）
-    implementation("io.github.peerless2012:ass:0.5.1")
-    // Kotlin API：Ass / AssRender / AssTrack 等
-    implementation("io.github.peerless2012:ass-kt:0.5.1")
-
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
 

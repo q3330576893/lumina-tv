@@ -80,7 +80,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var subtitleBg by remember { mutableStateOf(prefs?.subtitleBg ?: false) }
     var subtitleColor by remember { mutableStateOf(prefs?.subtitleColor ?: android.graphics.Color.WHITE) }
     var subtitleOutline by remember { mutableStateOf(prefs?.subtitleOutline ?: true) }
-    var assSubtitles by remember { mutableStateOf(prefs?.assSubtitles ?: true) }
     var subtitlePosition by remember { mutableStateOf(prefs?.subtitlePosition ?: 0.08f) }
     var defaultSpeed by remember { mutableStateOf(prefs?.defaultSpeed ?: 1.0f) }
     var subtitleScale by remember { mutableStateOf(prefs?.subtitleScale ?: 1.0f) }
@@ -464,12 +463,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             subtitleOutline = it
                             prefs?.subtitleOutline = it
                         })
-                        Spacer(Modifier.height(8.dp))
-                        SwitchRow(title = "ASS 特效字幕", desc = "动漫番剧的卡拉OK/定位等特效；异常时可关闭回退普通字幕", checked = assSubtitles, onChange = {
-                            assSubtitles = it
-                            prefs?.assSubtitles = it
-                        })
-                        Spacer(Modifier.height(8.dp))
                         Text("垂直位置", color = TextSub, fontSize = 11.sp)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf(0.04f to "低", 0.08f to "标准", 0.15f to "高").forEach { (value, label) ->
