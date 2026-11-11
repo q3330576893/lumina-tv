@@ -3,121 +3,102 @@ package com.lumina.tv
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Debug
+import android.app.ActivityManager
+import com.lumina.tv.diag.DiagExporter
+import com.lumina.tv.diag.NetLog
+import com.lumina.tv.diag.PageLog
+import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * 崩溃捕获与诊断导出。
- * - 崩溃时把完整堆栈写入 App 外部目录，用户可通过系统分享发回给开发者
- * - 设置页可随时导出"诊断包"（设备信息 + 崩溃记录 + 运行状态，不含密码/token）
- */
 object CrashHandler {
-
-    private const val CRASH_FILE = "crash-latest.txt"
-
-    fun crashFile(context: Context): File =
-        File(context.getExternalFilesDir(null) ?: context.filesDir, CRASH_FILE)
+    private fun root(context: Context) = context.getExternalFilesDir(null) ?: context.filesDir
+    fun crashFile(context: Context) = File(root(context), "crash-latest.txt")
+    fun crashFiles(context: Context) = (1..5).map { File(root(context), "crash-$it.txt") }
+    private fun statsFile(context: Context) = File(root(context), "crash-stats.json")
 
     fun install(context: Context) {
-        val appContext = context.applicationContext
+        val app = context.applicationContext
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            runCatching { writeCrash(appContext, thread, throwable) }
-            previous?.uncaughtException(thread, throwable)
+            try { writeCrash(app, thread, throwable) } catch (_: Throwable) { }
+            try { previous?.uncaughtException(thread, throwable) } catch (_: Throwable) { }
         }
     }
 
     private fun writeCrash(context: Context, thread: Thread, t: Throwable) {
-        val text = buildString {
-            appendLine("===== 琉璃TV 崩溃报告 =====")
-            appendLine("时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())}")
-            appendLine("线程: ${thread.name}")
-            appendLine(deviceBlock())
-            appendLine("----- 堆栈 -----")
-            appendLine(android.util.Log.getStackTraceString(t))
-            appendLine("----- 运行状态 -----")
+        val frames = generateSequence(t as Throwable?) { it.cause }.toList()
+        val fingerprint = MessageDigest.getInstance("SHA-1").digest(
+            frames.firstOrNull()?.stackTrace.orEmpty().take(3).joinToString("\n") { "${it.className}.${it.methodName}:${it.lineNumber}" }.toByteArray()
+        ).joinToString("") { "%02x".format(it) }
+        val now = System.currentTimeMillis()
+        val stats = runCatching { JSONObject(statsFile(context).takeIf(File::exists)?.readText().orEmpty()) }.getOrDefault(JSONObject())
+        val entry = stats.optJSONObject(fingerprint) ?: JSONObject()
+        entry.put("count", entry.optInt("count", 0) + 1).put("lastAt", now)
+        stats.put(fingerprint, entry)
+        statsFile(context).writeText(stats.toString(2), Charsets.UTF_8)
+        if (entry.optInt("count") > 1) {
+            context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE).edit().putBoolean("notice_pending", true).putString("fingerprint", fingerprint).commit()
+            return
+        }
+        val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+        val appLog = runCatching {
+            Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-t", "800", "--pid=${android.os.Process.myPid()}"))
+                .inputStream.bufferedReader().useLines { it.toList().takeLast(100).joinToString("\n") }
+        }.getOrDefault("app.log unavailable")
+        val report = buildString {
+            appendLine("[基础]")
+            appendLine("时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(now))}")
+            appendLine("版本: ${BuildConfig.VERSION_NAME} / versionCode=${if (Build.VERSION.SDK_INT >= 28) info?.longVersionCode else info?.versionCode}")
+            appendLine("设备: ${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})")
+            appendLine("系统: Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) ABI: ${Build.SUPPORTED_ABIS.joinToString(",")}")
+            appendLine("线程: ${thread.name} (${thread.id})")
+            appendLine("\n[上下文]")
             appendLine("页面: ${AppRuntime.screenLabel}")
-            appendLine("播放: ${AppRuntime.nowPlaying}")
-        }
-        runCatching {
-            val target = crashFile(context)
-            val pending = File(target.parentFile, "$CRASH_FILE.pending")
-            pending.outputStream().bufferedWriter(Charsets.UTF_8).use { writer -> writer.write(text) }
-            if (!pending.renameTo(target)) {
-                target.writeText(text, Charsets.UTF_8)
-                pending.delete()
+            appendLine("播放条目: ${AppRuntime.nowPlaying} / id=${AppRuntime.playingItemId}")
+            appendLine("播放引擎: ${AppRuntime.activePlayerEngine}")
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val foreground = am?.runningAppProcesses?.firstOrNull { it.pid == android.os.Process.myPid() }?.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+            appendLine("前台: $foreground")
+            appendLine("\n[内存]")
+            appendLine("java heap used=${Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()} max=${Runtime.getRuntime().maxMemory()}")
+            appendLine("native heap=${Debug.getNativeHeapAllocatedSize()}")
+            appendLine("\n[最近页面]\n${PageLog.tail().ifBlank { "(无)" }}")
+            appendLine("\n[最近网络]\n${NetLog.tail()}")
+            appendLine("\n[最近日志]\n$appLog")
+            appendLine("\n[堆栈]")
+            frames.forEachIndexed { i, cause ->
+                appendLine("Cause #${i + 1}: ${cause.javaClass.name}: ${cause.message}")
+                cause.stackTrace.take(30).forEach { appendLine("  at $it") }
             }
-            context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE)
-                .edit().putBoolean("notice_pending", true).commit()
+            appendLine("\n[指纹]\n$fingerprint")
         }
+        val safe = DiagExporter.sanitize(report)
+        crashFiles(context).asReversed().forEachIndexed { index, file ->
+            val source = crashFiles(context).asReversed().getOrNull(index + 1)
+            if (source?.exists() == true) runCatching { source.copyTo(file, overwrite = true) }
+        }
+        File(root(context), "crash-1.txt").writeText(safe, Charsets.UTF_8)
+        crashFile(context).writeText(safe, Charsets.UTF_8)
+        context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE).edit().putBoolean("notice_pending", true).putString("fingerprint", fingerprint).commit()
     }
 
     fun takeStartupNotice(context: Context): String? {
-        val preferences = context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE)
-        if (!preferences.getBoolean("notice_pending", false)) return null
-        preferences.edit().putBoolean("notice_pending", false).commit()
-        return lastCrashSummary(context)
+        val prefs = context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("notice_pending", false)) return null
+        prefs.edit().putBoolean("notice_pending", false).commit()
+        return "上次崩溃已记录（${prefs.getString("fingerprint", "未知")?.take(8)}）· 设置 → 诊断 → 复制崩溃报告"
     }
 
-    fun deviceBlock(): String = buildString {
-        appendLine("设备: ${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})")
-        appendLine("系统: Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
-        appendLine("版本: 琉璃TV ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
-        appendLine("内核: ${System.getProperty("os.version") ?: "-"}")
-        appendLine("架构: ${Build.SUPPORTED_ABIS.joinToString("/")}")
-    }
-
-    /** 生成完整诊断包文本。 */
-    fun diagnosticReport(context: Context): String = buildString {
-        appendLine("===== 琉璃TV 诊断包 =====")
-        appendLine("导出时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())}")
-        appendLine()
-        appendLine(deviceBlock())
-        appendLine()
-        appendLine("----- 运行状态 -----")
-        appendLine("页面: ${AppRuntime.screenLabel}")
-        appendLine("正在播放: ${AppRuntime.nowPlaying.ifEmpty { "无" }}")
-        appendLine("服务器: ${AppRuntime.session?.serverName ?: "未登录"}")
-        appendLine("配对服务: ${if (AppRuntime.pairing != null) "运行中 ${AppRuntime.pairingUrl}" else (AppRuntime.pairingError ?: "未启动")}")
-        appendLine()
-        val cf = crashFile(context)
-        if (cf.exists()) {
-            appendLine("----- 最近崩溃 -----")
-            appendLine(runCatching { cf.readText() }.getOrDefault("(读取失败)"))
-        } else {
-            appendLine("----- 最近崩溃 -----")
-            appendLine("(无崩溃记录)")
-        }
-    }
-
-    fun lastCrashSummary(context: Context): String? {
-        val f = crashFile(context)
-        if (!f.exists()) return null
-        return runCatching {
-            val lines = f.readLines()
-            val time = lines.firstOrNull { it.startsWith("时间:") } ?: ""
-            val first = lines.indexOfFirst { it == "----- 堆栈 -----" }
-            val cause = if (first >= 0 && lines.size > first + 2) {
-                lines.drop(first + 1).firstOrNull { it.contains("Exception") || it.contains("Error") } ?: ""
-            } else ""
-            listOf(time, cause).filter { it.isNotBlank() }.joinToString("  ")
-        }.getOrNull()
-    }
-
-    fun clearCrash(context: Context) {
-        runCatching { crashFile(context).delete() }
-    }
-
-    /** 调起系统分享面板发送诊断包。 */
+    fun diagnosticReport(context: Context): String = crashFile(context).takeIf(File::exists)?.readText().orEmpty()
+    fun lastCrashSummary(context: Context): String? = crashFile(context).takeIf(File::exists)?.readLines()?.firstOrNull { it.startsWith("时间:") }
+    fun clearCrash(context: Context) { runCatching { crashFiles(context).forEach { it.delete() }; crashFile(context).delete() } }
     fun shareReport(context: Context) {
-        val report = diagnosticReport(context)
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "琉璃TV 诊断包")
-            putExtra(Intent.EXTRA_TEXT, report.take(9000))
-        }
+        val intent = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_SUBJECT, "LuminaTV crash report"); putExtra(Intent.EXTRA_TEXT, diagnosticReport(context).take(9000)) }
         context.startActivity(Intent.createChooser(intent, "分享诊断包"))
     }
 }

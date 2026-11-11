@@ -120,6 +120,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -131,6 +133,9 @@ private fun formatTime(ms: Long): String {
     val s = total % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }
+
+private inline fun CoroutineScope.safeLaunch(crossinline block: suspend () -> Unit) =
+    launch { runCatching { block() }.onFailure { android.util.Log.e("LuminaTV", "Async player operation failed", it) } }
 
 
 private fun media3AudioTracks(tracks: Tracks): List<MediaStream> = tracks.groups
@@ -162,7 +167,8 @@ fun PlayerScreen(
 ) {
     val context = LocalContext.current
     val client = AppRuntime.client
-    val scope = rememberCoroutineScope()
+    val playerExceptionHandler = remember { CoroutineExceptionHandler { _, error -> android.util.Log.e("LuminaTV", "Player coroutine failed", error) } }
+    val scope = rememberCoroutineScope { playerExceptionHandler }
 
     var showControls by remember { mutableStateOf(true) }
     var isPlaying by remember { mutableStateOf(true) }
@@ -602,12 +608,14 @@ fun PlayerScreen(
         currentSourceId = initialSourceId
         AppRuntime.screenLabel = "播放"
         AppRuntime.nowPlaying = item.seriesName?.let { "${it} · ${item.name}" } ?: item.name
+        AppRuntime.playingItemId = item.id
         if (client == null) {
             error = "未登录"
             return@LaunchedEffect
         }
         if (activeEngine == "media3") loadSource(AppRuntime.prefs?.forceTranscode ?: false, initialSourceId)
     }
+    LaunchedEffect(activeEngine) { AppRuntime.activePlayerEngine = activeEngine }
 
     LaunchedEffect(exo, mpvBackend, subtitleOffsetMs) {
         subtitleRenderersFactory.subtitleOffsetMs = subtitleOffsetMs
@@ -1113,7 +1121,7 @@ fun PlayerScreen(
             if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
                 sinceReport = 0
                 val paused = if (activeEngine == "mpv") !mpvState.playing else !exo.isPlaying
-                AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId)
+                runCatching { AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId) }
             }
         }
     }
@@ -1140,7 +1148,7 @@ fun PlayerScreen(
             optionMenu -> optionMenu = false
             showControls -> showControls = false
             else -> {
-                scope.launch { AppRuntime.client?.reportStop(item.id, position.coerceAtLeast(0L)) }
+                scope.safeLaunch { AppRuntime.client?.reportStop(item.id, position.coerceAtLeast(0L)) }
                 if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
                 onBack()
             }

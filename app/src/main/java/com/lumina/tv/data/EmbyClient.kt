@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import com.lumina.tv.diag.NetLog
 
 class EmbyException(message: String) : Exception(message)
 
@@ -40,14 +41,18 @@ class EmbyClient(
         private set
     private val http: OkHttpClient = OkHttpClient.Builder()
         .addInterceptor { chain ->
+            val started = System.currentTimeMillis()
+            val request = chain.request()
             try {
-                val response = chain.proceed(chain.request())
+                val response = chain.proceed(request)
+                NetLog.add(started, request.method, request.url.toString(), System.currentTimeMillis() - started, response.code, if (response.isSuccessful) null else "HTTP")
                 if (!response.isSuccessful) {
                     val body = response.peekBody(200).string()
                     lastApiFailure = "HTTP ${response.code}: ${safeErrorBody(body)}"
                 }
                 response
             } catch (e: IOException) {
+                NetLog.add(started, request.method, request.url.toString(), System.currentTimeMillis() - started, null, e.javaClass.simpleName)
                 lastApiFailure = "Request failed: ${e.message?.replace(Regex("[\\r\\n]+"), " ")?.take(120) ?: e.javaClass.simpleName}"
                 throw e
             }
@@ -1196,7 +1201,7 @@ data class PlaybackTarget(
                 .put("PlayMethod", playMethod)
                 .put("MediaSourceId", mediaSourceId ?: itemId)
                 .toString())
-        }
+        }.onFailure { lastApiFailure = "reportStart: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }
     }
 
     suspend fun reportProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?) = withContext(Dispatchers.IO) {
@@ -1209,7 +1214,7 @@ data class PlaybackTarget(
                 .put("PlayMethod", "DirectPlay")
                 .put("MediaSourceId", mediaSourceId ?: itemId)
                 .toString())
-        }
+        }.onFailure { lastApiFailure = "reportProgress: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }
     }
 
     suspend fun reportStop(itemId: String, positionMs: Long) = withContext(Dispatchers.IO) {
@@ -1218,7 +1223,7 @@ data class PlaybackTarget(
                 .put("ItemId", itemId)
                 .put("PositionTicks", positionMs * 10_000)
                 .toString())
-        }
+        }.onFailure { lastApiFailure = "reportStop: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }
     }
 
     suspend fun clearWatchHistory(): Int = withContext(Dispatchers.IO) {

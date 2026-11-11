@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.lumina.tv.diag.NetLog
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -191,17 +192,23 @@ object TmdbClient {
         return fallback?.let { "https://image.tmdb.org/t/p/w500$it" }
     }
 
-    private fun getJson(url: String): JSONObject? = runCatching {
-        val req = Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()
-        http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                lastRequestFailure = "http_${resp.code}"
-                return null
+    private fun getJson(url: String): JSONObject? {
+        val started = System.currentTimeMillis()
+        return runCatching {
+            val req = Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()
+            http.newCall(req).execute().use { resp ->
+                NetLog.add(started, req.method, url, System.currentTimeMillis() - started, resp.code, if (resp.isSuccessful) null else "HTTP")
+                if (!resp.isSuccessful) {
+                    lastRequestFailure = "http_${resp.code}"
+                    return null
+                }
+                val body = resp.body?.string() ?: return null
+                lastRequestFailure = null
+                JSONObject(body)
             }
-            val body = resp.body?.string() ?: return null
-            lastRequestFailure = null
-            JSONObject(body)
-        }
-    }.onFailure { lastRequestFailure = if (it is java.net.SocketTimeoutException) "timeout" else "request_error:${it.javaClass.simpleName}" }
-        .getOrNull()
+        }.onFailure {
+            lastRequestFailure = if (it is java.net.SocketTimeoutException) "timeout" else "request_error:${it.javaClass.simpleName}"
+            NetLog.add(started, "GET", url, System.currentTimeMillis() - started, null, it.javaClass.simpleName)
+        }.getOrNull()
+    }
 }

@@ -90,7 +90,12 @@ object DiagExporter {
             "mpv.log" to payload.mpvLog,
             "app.log" to payload.appLog,
             "ui.txt" to payload.uiText,
+            "net.json" to NetLog.tail(),
+            "pages.txt" to PageLog.tail(),
+            "crash-stats.json" to File(root, "crash-stats.json").takeIf(File::exists)?.readText().orEmpty(),
         )
+        (1..5).forEach { n -> File(root, "crash-$n.txt").takeIf(File::exists)?.let { files["crash-$n.txt"] = it.readText() } }
+        File(root, "crash-latest.txt").takeIf(File::exists)?.let { files["crash-latest.txt"] = it.readText() }
         ZipOutputStream(out.outputStream().buffered()).use { zip ->
             files.forEach { (name, original) ->
                 val limit = when (name) {
@@ -109,9 +114,9 @@ object DiagExporter {
     }
 
     fun sanitize(text: String): String {
-        val keyValue = Regex("(?i)(\\\"?(?:api_key|x-emby-token|authorization|password|passwd|pw|token)\\\"?\\s*[:=]\\s*\\\")[^\\\"]*(\\\")")
+        val keyValue = Regex("(?i)(\\\"?(?:api_key|x-emby-token|authorization|password|passwd|pw|token)\\\"?\\s*[:=]\\s*)(?:\\\"[^\\\"]*\\\"|[^,}\\s&]+)")
         val query = Regex("(?i)(api_key|x-emby-token|authorization|password|passwd|pw|token)=([^&\\s]+)")
         val header = Regex("(?im)(\\b(?:api_key|x-emby-token|authorization|password|passwd|pw|token)\\b\\s*:\\s*)[^\\r\\n]+")
-        return text.replace(keyValue, "$1***$2").replace(query, "$1=***").replace(header, "$1***")
+        return text.replace(keyValue, "$1***").replace(query, "$1=***").replace(header, "$1***")
     }
 }

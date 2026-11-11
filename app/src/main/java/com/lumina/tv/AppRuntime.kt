@@ -9,6 +9,7 @@ import com.lumina.tv.data.Prefs
 import com.lumina.tv.data.Session
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.pair.PairingServer
+import com.lumina.tv.diag.PageLog
 import org.json.JSONObject
 import java.security.SecureRandom
 import java.util.Base64
@@ -28,7 +29,13 @@ object AppRuntime {
     var pairingStatus by mutableStateOf("")
 
     var screenLabel: String = "登录"
+        set(value) {
+            if (field != value) PageLog.add(value)
+            field = value
+        }
     var nowPlaying: String = ""
+    @Volatile var playingItemId: String = ""
+    @Volatile var activePlayerEngine: String = "unknown"
 
     var onRemoteKey: ((String) -> Unit)? = null
     var onSearch: ((String) -> Unit)? = null

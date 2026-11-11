@@ -40,6 +40,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,6 +68,7 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalLayoutApi::class)
 fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val prefs = AppRuntime.prefs
     val scope = rememberCoroutineScope()
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
@@ -748,7 +751,19 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         Spacer(Modifier.height(8.dp))
                         FocusSurface(Modifier.height(40.dp).width(180.dp), corner = 20.dp, onClick = { showDiagExport = true }) { focused ->
                             Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x1AFFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
-                                Text("导出诊断日志", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                                Text("导出诊断包", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        FocusSurface(Modifier.height(40.dp).width(180.dp), corner = 20.dp, onClick = {
+                            val report = com.lumina.tv.CrashHandler.crashFile(context).takeIf(java.io.File::exists)?.readText().orEmpty()
+                            if (report.isNotBlank()) {
+                                clipboard.setText(AnnotatedString(DiagExporter.sanitize(report)))
+                                android.widget.Toast.makeText(context, "已复制", android.widget.Toast.LENGTH_SHORT).show()
+                            } else android.widget.Toast.makeText(context, "暂无崩溃报告", android.widget.Toast.LENGTH_SHORT).show()
+                        }) { focused ->
+                            Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x1AFFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                                Text("复制崩溃报告", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
                             }
                         }
                     }
