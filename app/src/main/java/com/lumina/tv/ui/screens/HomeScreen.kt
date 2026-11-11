@@ -120,6 +120,9 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.ExternalCard
+import com.lumina.tv.data.DiscoverySectionConfig
+import com.lumina.tv.data.DiscoverySections
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.LoadingView
@@ -174,6 +177,8 @@ fun HomeScreen(
     val client = AppRuntime.client
     val context = LocalContext.current
     val hazeState = remember { HazeState() }
+    val discoveryLookupCache = remember(client) { mutableMapOf<String, MediaItem?>() }
+    val discoveryLookupInFlight = remember(client) { mutableSetOf<String>() }
 
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -631,6 +636,37 @@ fun HomeScreen(
                             requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(),
                             onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
                         )
+                    }
+                    DiscoverySections.home.forEach { config ->
+                        item(key = "discovery-${config.id}") {
+                            DiscoverySectionRow(config) { card ->
+                                val emby = client ?: return@DiscoverySectionRow
+                                if (discoveryLookupCache.containsKey(card.tmdbId)) {
+                                    discoveryLookupCache[card.tmdbId]?.let { onOpenDetail(it.id) }
+                                        ?: android.widget.Toast.makeText(context, "库里暂无此片", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@DiscoverySectionRow
+                                }
+                                if (!discoveryLookupInFlight.add(card.tmdbId)) return@DiscoverySectionRow
+                                scope.launch {
+                                    try {
+                                        val searchTerm = listOfNotNull(card.title, card.year?.toString()).joinToString(" ")
+                                        val match = emby.getItems(
+                                            types = "Movie",
+                                            searchTerm = searchTerm,
+                                            limit = 20,
+                                            fields = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProviderIds",
+                                        ).firstOrNull()
+                                        discoveryLookupCache[card.tmdbId] = match
+                                        if (match != null) onOpenDetail(match.id)
+                                        else android.widget.Toast.makeText(context, "库里暂无此片", android.widget.Toast.LENGTH_SHORT).show()
+                                    } catch (_: Exception) {
+                                        android.widget.Toast.makeText(context, "库内搜索失败", android.widget.Toast.LENGTH_SHORT).show()
+                                    } finally {
+                                        discoveryLookupInFlight.remove(card.tmdbId)
+                                    }
+                                }
+                            }
+                        }
                     }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
@@ -1769,6 +1805,56 @@ private fun RowSection(
                     upFocus = upFocus,
                     onFocused = { onItemFocused?.invoke(it.id) },
                     onClick = { onClick(it) },
+                )
+            }
+        }
+    }
+}
+
+private sealed interface DiscoveryRowState {
+    data object Loading : DiscoveryRowState
+    data object Error : DiscoveryRowState
+    data object Empty : DiscoveryRowState
+    data class Data(val cards: List<ExternalCard>) : DiscoveryRowState
+}
+
+@Composable
+private fun DiscoverySectionRow(
+    config: DiscoverySectionConfig,
+    onClick: (ExternalCard) -> Unit,
+) {
+    var state by remember(config.id) { mutableStateOf<DiscoveryRowState>(DiscoveryRowState.Loading) }
+    LaunchedEffect(config) {
+        state = try {
+            TmdbClient.discovery(config).takeIf { it.isNotEmpty() }?.let(DiscoveryRowState::Data)
+                ?: DiscoveryRowState.Empty
+        } catch (_: Exception) {
+            DiscoveryRowState.Error
+        }
+    }
+    val cards = (state as? DiscoveryRowState.Data)?.cards ?: return
+    Column(Modifier.padding(top = Space.section)) {
+        SectionTitle(config.title, Modifier.padding(start = 34.dp, bottom = 10.dp))
+        LazyRow(
+            modifier = Modifier.focusGroup(),
+            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
+            horizontalArrangement = Arrangement.spacedBy(Space.m),
+        ) {
+            items(cards, key = { "${config.id}-${it.tmdbId}" }) { card ->
+                val media = remember(card) {
+                    MediaItem(
+                        id = card.tmdbId,
+                        name = card.title,
+                        type = "Movie",
+                        year = card.year,
+                        communityRating = card.rating,
+                    )
+                }
+                PosterCard(
+                    item = media,
+                    imageUrl = card.posterUrl,
+                    width = 200.dp,
+                    onClick = { onClick(card) },
                 )
             }
         }

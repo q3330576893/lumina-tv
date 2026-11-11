@@ -8,6 +8,10 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
 
 /**
  * TMDB 元数据补充：评分 + 透明标题图（logo）。
@@ -26,6 +30,8 @@ object TmdbClient {
         val logoUrl: String? = null,
     )
 
+    private data class DiscoveryCacheEntry(val expiresAt: Long, val cards: List<ExternalCard>)
+
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(6, TimeUnit.SECONDS)
@@ -37,9 +43,59 @@ object TmdbClient {
     private val externalIdsNoHit = HashSet<String>()
     private val externalLinksCache = LinkedHashMap<String, ExternalLinks>()
     private val externalLinksNoHit = HashSet<String>()
+    private val discoveryCache = LinkedHashMap<String, DiscoveryCacheEntry>()
+    private val discoveryLocks = ConcurrentHashMap<String, Mutex>()
     @Volatile private var externalLinkDiagnostic = JSONObject().put("status", "not_attempted").toString()
 
     fun externalLinkDiagnosticSnapshot(): String = externalLinkDiagnostic
+
+    suspend fun discovery(config: DiscoverySectionConfig): List<ExternalCard> = withContext(Dispatchers.IO) {
+        discoveryLocks.getOrPut(config.id) { Mutex() }.withLock {
+            require(config.sourceId == "tmdb") { "Unsupported discovery source: ${config.sourceId}" }
+            val now = System.currentTimeMillis()
+            synchronized(discoveryCache) {
+                discoveryCache[config.id]?.takeIf { it.expiresAt > now }?.let { return@withLock it.cards }
+                discoveryCache.remove(config.id)
+            }
+
+            val path = config.endpoint.trimStart('/')
+            val url = "https://api.tmdb.org/3/$path" +
+                "?language=zh-CN&region=CN&page=1&include_adult=false" +
+                "&sort_by=${URLEncoder.encode(config.sortBy, "UTF-8")}" +
+                "&api_key=${BuildConfig.TMDB_API_KEY}"
+            val response = getJson(url) ?: throw java.io.IOException("TMDB discovery request failed")
+            val results = response.optJSONArray("results") ?: JSONArray()
+            val cards = buildList {
+                for (index in 0 until minOf(results.length(), config.pageSize.coerceAtLeast(0))) {
+                    val result = results.optJSONObject(index) ?: continue
+                    val id = result.optLong("id", 0L).takeIf { it > 0 }?.toString() ?: continue
+                    val title = result.optString("title").takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    val releaseDate = result.optString("release_date")
+                    val year = releaseDate.take(4).toIntOrNull()
+                    val posterPath = result.optString("poster_path").takeIf { it.isNotBlank() && it != "null" }
+                    val backdropPath = result.optString("backdrop_path").takeIf { it.isNotBlank() && it != "null" }
+                    val rating = result.optDouble("vote_average", 0.0).takeIf { it > 0.0 }
+                    add(
+                        ExternalCard(
+                            tmdbId = id,
+                            title = title,
+                            year = year,
+                            posterUrl = posterPath?.let { "https://image.tmdb.org/t/p/w500$it" },
+                            backdropUrl = backdropPath?.let { "https://image.tmdb.org/t/p/w780$it" },
+                            rating = rating,
+                        )
+                    )
+                }
+            }
+            synchronized(discoveryCache) {
+                discoveryCache[config.id] = DiscoveryCacheEntry(
+                    expiresAt = System.currentTimeMillis() + 10 * 60 * 1000L,
+                    cards = cards,
+                )
+            }
+            cards
+        }
+    }
 
     /** Resolve missing provider IDs for a detail item without blocking its first render. */
     suspend fun externalLinks(
