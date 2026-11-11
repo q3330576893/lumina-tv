@@ -569,6 +569,9 @@ fun HomeScreen(
                     Text("加载失败：$error", color = TextSub, fontSize = 13.sp)
                     Spacer(Modifier.height(6.dp))
                     Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
+                    AppRuntime.client?.lastApiFailure?.let { failure ->
+                        Text("诊断：$failure", color = TextSub.copy(alpha = 0.6f), fontSize = 10.sp, maxLines = 2)
+                    }
                 }
                 tab == HomeTab.Recommend -> Box(Modifier.fillMaxSize()) {
                     LazyColumn(
@@ -1822,7 +1825,7 @@ private fun RowSection(
 
 private sealed interface DiscoveryRowState {
     data object Loading : DiscoveryRowState
-    data object Error : DiscoveryRowState
+    data class Error(val reason: String) : DiscoveryRowState
     data object Empty : DiscoveryRowState
     data class Data(val cards: List<ExternalCard>) : DiscoveryRowState
 }
@@ -1833,23 +1836,41 @@ private fun DiscoverySectionRow(
     onClick: (ExternalCard) -> Unit,
 ) {
     var state by remember(config.id) { mutableStateOf<DiscoveryRowState>(DiscoveryRowState.Loading) }
-    LaunchedEffect(config) {
-        state = runCatching {
-            TmdbClient.discovery(config).takeIf { it.isNotEmpty() }?.let(DiscoveryRowState::Data)
-                ?: DiscoveryRowState.Empty
-        }.getOrElse { DiscoveryRowState.Error }
+    var retryToken by remember(config.id) { mutableStateOf(0) }
+    LaunchedEffect(config, retryToken) {
+        state = DiscoveryRowState.Loading
+        val cards = TmdbClient.discovery(config)
+        state = when {
+            TmdbClient.lastRequestFailure != null -> DiscoveryRowState.Error(TmdbClient.lastRequestFailure ?: "request_error")
+            cards.isNotEmpty() -> DiscoveryRowState.Data(cards)
+            else -> DiscoveryRowState.Empty
+        }
     }
-    val cards = (state as? DiscoveryRowState.Data)?.cards ?: return
+    if (state == DiscoveryRowState.Empty || state == DiscoveryRowState.Loading) return
     Column(Modifier.padding(top = Space.section)) {
         SectionTitle(config.title, Modifier.padding(start = 34.dp, bottom = 10.dp))
-        LazyRow(
-            modifier = Modifier.focusGroup(),
-            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
-            horizontalArrangement = Arrangement.spacedBy(Space.m),
-        ) {
-            itemsIndexed(cards, key = { _, card -> "${config.id}-${card.tmdbId}" }) { index, card ->
-                DiscoveryCard(card, index, config.layout, onClick)
+        when (val current = state) {
+            is DiscoveryRowState.Error -> Text(
+                text = "TMDB 暂时不可用（${current.reason}） · 按 OK 重试",
+                color = TextSub.copy(alpha = 0.75f), fontSize = 12.sp,
+                modifier = Modifier.padding(start = 34.dp, bottom = 8.dp).focusable()
+                    .onKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.DirectionCenter)) {
+                            retryToken++
+                            true
+                        } else false
+                    },
+            )
+            is DiscoveryRowState.Data -> LazyRow(
+                modifier = Modifier.focusGroup(),
+                contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
+                horizontalArrangement = Arrangement.spacedBy(Space.m),
+            ) {
+                itemsIndexed(current.cards, key = { _, card -> "${config.id}-${card.tmdbId}" }) { index, card ->
+                    DiscoveryCard(card, index, config.layout, onClick)
+                }
             }
+            else -> Unit
         }
     }
 }

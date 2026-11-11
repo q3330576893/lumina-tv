@@ -45,11 +45,15 @@ object TmdbClient {
     private val externalLinksNoHit = HashSet<String>()
     private val discoveryCache = LinkedHashMap<String, DiscoveryCacheEntry>()
     private val discoveryLocks = ConcurrentHashMap<String, Mutex>()
+    @Volatile var lastRequestFailure: String? = null
+        private set
     @Volatile private var externalLinkDiagnostic = JSONObject().put("status", "not_attempted").toString()
 
     fun externalLinkDiagnosticSnapshot(): String = externalLinkDiagnostic
 
-    suspend fun discovery(config: DiscoverySectionConfig): List<ExternalCard> = runCatching {
+    suspend fun discovery(config: DiscoverySectionConfig): List<ExternalCard> {
+        lastRequestFailure = null
+        return runCatching {
         withContext(Dispatchers.IO) {
             discoveryLocks.getOrPut(config.id) { Mutex() }.withLock {
             require(config.sourceId == "tmdb") { "Unsupported discovery source: ${config.sourceId}" }
@@ -101,9 +105,10 @@ object TmdbClient {
     }.onFailure {
         lastRequestFailure = when (it) {
             is java.net.SocketTimeoutException -> "timeout"
-            else -> "discovery_error:${it.message ?: it.javaClass.simpleName}"
+                else -> lastRequestFailure ?: "discovery_error:${it.javaClass.simpleName}"
         }
     }.getOrDefault(emptyList())
+    }
 
     /** Resolve missing provider IDs for a detail item without blocking its first render. */
     suspend fun externalLinks(
@@ -251,8 +256,6 @@ object TmdbClient {
         }
         return fallback?.let { "https://image.tmdb.org/t/p/w500$it" }
     }
-
-    @Volatile private var lastRequestFailure: String? = null
 
     private fun getJson(url: String): JSONObject? = runCatching {
         val req = Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()

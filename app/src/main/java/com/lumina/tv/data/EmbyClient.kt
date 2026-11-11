@@ -35,7 +35,22 @@ class EmbyClient(
         private set
     @Volatile var lastTotalRecordCount: Int? = null
         private set
+    @Volatile var lastApiFailure: String? = null
+        private set
     private val http: OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor { chain ->
+            try {
+                val response = chain.proceed(chain.request())
+                if (!response.isSuccessful) {
+                    val body = response.peekBody(200).string()
+                    lastApiFailure = "HTTP ${response.code}: ${safeErrorBody(body)}"
+                }
+                response
+            } catch (e: IOException) {
+                lastApiFailure = "Request failed: ${e.message?.replace(Regex("[\\r\\n]+"), " ")?.take(120) ?: e.javaClass.simpleName}"
+                throw e
+            }
+        }
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
@@ -87,8 +102,18 @@ class EmbyClient(
             try {
                 http.newCall(req).apply { timeoutSeconds?.let { timeout().timeout(it.toLong(), TimeUnit.SECONDS) } }.execute().use { resp ->
                     val body = resp.body?.string().orEmpty()
-                    if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${safeErrorBody(body)}")
-                    return parseJsonObject(body)
+                    if (!resp.isSuccessful) {
+                        val failure = "HTTP ${resp.code}: ${safeErrorBody(body)}"
+                        lastApiFailure = failure
+                        throw EmbyException(failure)
+                    }
+                    return try {
+                        parseJsonObject(body)
+                    } catch (_: EmbyException) {
+                        val failure = "HTTP ${resp.code} non-json: ${body.replace(Regex("[\\r\\n]+"), " ").take(120)}"
+                        lastApiFailure = failure
+                        throw EmbyException(failure)
+                    }
                 }
             } catch (e: IOException) {
                 attempts++
@@ -105,8 +130,18 @@ class EmbyClient(
             .build()
         http.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}: ${safeErrorBody(text)}")
-            return parseJsonObject(text)
+            if (!resp.isSuccessful) {
+                val failure = "HTTP ${resp.code}: ${safeErrorBody(text)}"
+                lastApiFailure = failure
+                throw EmbyException(failure)
+            }
+            return try {
+                parseJsonObject(text)
+            } catch (_: EmbyException) {
+                val failure = "HTTP ${resp.code} non-json: ${text.replace(Regex("[\\r\\n]+"), " ").take(120)}"
+                lastApiFailure = failure
+                throw EmbyException(failure)
+            }
         }
     }
 
@@ -161,13 +196,21 @@ class EmbyClient(
     }
 
     suspend fun getLibraryItemCount(parentId: String): Int? = withContext(Dispatchers.IO) {
-        val response = getSync(url("/Items", mapOf(
+        val response = runCatching { getSync(url("/Items", mapOf(
             "ParentId" to parentId,
             "Recursive" to "true",
-            "Limit" to "0",
+            "Limit" to "1",
             "EnableTotalRecordCount" to "true",
-        )))
-        response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
+        ))) }.getOrNull()
+        response?.optInt("TotalRecordCount", -1)?.takeIf { it >= 0 }?.let { return@withContext it }
+        runCatching {
+            val counts = getSync(url("/Items/Counts", mapOf("ParentId" to parentId, "Recursive" to "true")))
+            val total = counts.optInt("TotalRecordCount", -1)
+            if (total >= 0) total else {
+                val keys = listOf("MovieCount", "SeriesCount", "EpisodeCount", "AlbumCount", "ArtistCount", "SongCount", "ItemCount")
+                if (keys.none { counts.has(it) }) null else keys.map { counts.optInt(it, 0) }.sum()
+            }
+        }.getOrNull()
     }
 
     suspend fun getFavorites(limit: Int = 24): List<MediaItem> = withContext(Dispatchers.IO) {
@@ -306,13 +349,23 @@ class EmbyClient(
     }
 
     suspend fun getLatest(parentId: String?, limit: Int = 20): List<MediaItem> = withContext(Dispatchers.IO) {
-        val params = mutableMapOf(
-            "Limit" to limit.toString(),
-            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,ProductionYear",
-        )
-        if (parentId != null) params["ParentId"] = parentId
-        val arr = getSync(url("/Users/$userId/Items/Latest", params)).optJSONArray("Items") ?: JSONArray()
-        parseItems(arr)
+        val fields = "Overview,PrimaryImageAspectRatio,UserData,ProductionYear"
+        suspend fun query(path: String, params: Map<String, String?>): List<MediaItem>? = runCatching {
+            val response = getSync(url(path, params))
+            val arr = response.optJSONArray("Items") ?: run {
+                lastApiFailure = "HTTP 200 invalid response: missing Items"
+                return@runCatching null
+            }
+            parseItems(arr)
+        }.getOrNull()
+        val minimal = mapOf<String, String?>("Limit" to limit.toString())
+        query("/Users/$userId/Items/Latest", minimal)?.let { return@withContext it }
+        val withFields = mutableMapOf<String, String?>("Limit" to limit.toString(), "Fields" to fields)
+        if (parentId != null) withFields["ParentId"] = parentId
+        query("/Users/$userId/Items/Latest", withFields)?.let { return@withContext it }
+        val fallback = mutableMapOf<String, String?>("Recursive" to "true", "SortBy" to "DateCreated", "SortOrder" to "Descending", "IncludeItemTypes" to "Movie,Series", "Limit" to limit.toString(), "Fields" to fields)
+        if (parentId != null) fallback["ParentId"] = parentId
+        query("/Items", fallback) ?: emptyList()
     }
 
     suspend fun getItem(id: String): MediaItem? = withContext(Dispatchers.IO) {
