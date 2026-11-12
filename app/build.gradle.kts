@@ -19,8 +19,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 79
-        versionName = "1.22.38"
+        versionCode = 81
+        versionName = "1.22.40"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
     }

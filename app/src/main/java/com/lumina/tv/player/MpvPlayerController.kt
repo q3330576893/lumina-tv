@@ -25,6 +25,8 @@ class MpvPlayerController(
     )
 
     private val handler = Handler(Looper.getMainLooper())
+    private val fallbackSurfaceWidth = context.resources.displayMetrics.widthPixels.coerceAtLeast(1)
+    private val fallbackSurfaceHeight = context.resources.displayMetrics.heightPixels.coerceAtLeast(1)
     private val logLock = Any()
     private val sessionLogFile = File(context.applicationContext.filesDir, "mpv-session.log")
     private val diagnosticLines = ArrayDeque<String>()
@@ -103,15 +105,15 @@ class MpvPlayerController(
 
     fun attachSurface(surface: Surface, width: Int = 0, height: Int = 0) {
         if (!released && surface.isValid) {
+            val resolvedWidth = width.takeIf { it > 0 } ?: fallbackSurfaceWidth
+            val resolvedHeight = height.takeIf { it > 0 } ?: fallbackSurfaceHeight
             Log.i(TAG, "${timestamp()} MPVLib.attachSurface (init already completed)")
             mpv?.attachSurface(surface)
-            if (attachedSurface !== surface || (width > 0 && height > 0 &&
-                    (width != lastSurfaceWidth || height != lastSurfaceHeight))) {
-                Log.i(TAG, "${timestamp()} attached surface ${width}x$height, vo=gpu")
-                if (width > 0 && height > 0) {
-                    lastSurfaceWidth = width
-                    lastSurfaceHeight = height
-                }
+            if (attachedSurface !== surface || resolvedWidth != lastSurfaceWidth || resolvedHeight != lastSurfaceHeight) {
+                Log.i(TAG, "${timestamp()} attached surface ${resolvedWidth}x$resolvedHeight, vo=gpu")
+                runCatching { mpv?.setPropertyString("android-surface-size", "${resolvedWidth}x${resolvedHeight}") }
+                lastSurfaceWidth = resolvedWidth
+                lastSurfaceHeight = resolvedHeight
                 if (fileLoaded && pendingUrl != null) {
                     // Re-seek after late attachment to make the Android VO render the already-loaded frame.
                     mpv?.setPropertyBoolean("pause", false)
@@ -241,12 +243,12 @@ class MpvPlayerController(
         }
     }
 
-    fun release() {
+    fun release(reason: String = "unspecified") {
         if (released) return
         released = true
         handler.removeCallbacks(loadTimeout)
         mpv?.let { engine ->
-            Log.i(TAG, "${timestamp()} MPVLib.destroy (release)")
+            Log.i(TAG, "${timestamp()} MPVLib.destroy (release reason=$reason fileLoaded=$fileLoaded)")
             runCatching { engine.removeObserver(this) }
             runCatching { engine.removeLogObserver(logObserver) }
             if (attachedSurface != null) runCatching { engine.detachSurface() }

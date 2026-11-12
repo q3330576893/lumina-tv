@@ -138,7 +138,24 @@ private fun formatTime(ms: Long): String {
 }
 
 private inline fun CoroutineScope.safeLaunch(crossinline block: suspend () -> Unit) =
-    launch { runCatching { block() }.onFailure { android.util.Log.e("LuminaTV", "Async player operation failed", it) } }
+    launch {
+        try { block() }
+        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) { android.util.Log.e("LuminaTV", "Async player operation failed", e) }
+    }
+
+private fun playbackNetworkMessage(error: Throwable): String {
+    val causeChain = generateSequence(error) { it.cause }.toList()
+    val message = causeChain.joinToString(" ") { it.message.orEmpty() }
+    val status = causeChain.filterIsInstance<com.lumina.tv.data.EmbyException>().firstNotNullOfOrNull { it.httpStatus }
+    return when {
+        status == 401 || status == 403 || message.contains("HTTP 401") || message.contains("HTTP 403") -> "登录已失效，请重新登录"
+        status != null && status >= 500 -> "服务器错误（$status）"
+        causeChain.any { it is java.net.SocketException || it is java.net.SocketTimeoutException || it is java.io.InterruptedIOException } ||
+            message.contains("connection reset", true) || message.contains("timeout", true) || message.contains("timed out", true) -> "网络中断，请检查连接后重试"
+        else -> error.message?.takeIf { it.isNotBlank() } ?: "播放请求失败，请重试"
+    }
+}
 
 
 private fun media3AudioTracks(tracks: Tracks): List<MediaStream> = tracks.groups
@@ -583,7 +600,7 @@ fun PlayerScreen(
                             } else {
                                 "mpv 内核不可用（${state.error}），已临时回退 Media3，可在设置里重选"
                             }
-                            mpvBackend?.release()
+                            mpvBackend?.release("mpv-state-error")
                             mpvBackend = null
                             degraded = true
                             ffmpegFallback = true
@@ -599,7 +616,7 @@ fun PlayerScreen(
                         AppRuntime.prefs?.mpvBroken = true
                         AppRuntime.prefs?.mpvUnavailableReason = unavailable
                         mpvBackend = null
-                        runCatching { backend.release() }
+                        runCatching { backend.release("mpv-unavailable") }
                         degraded = true
                         ffmpegFallback = true
                         error = if (AppRuntime.prefs?.playerEngine == "auto") {
@@ -618,7 +635,7 @@ fun PlayerScreen(
                     }
                     val surface = currentSurface?.takeIf { it.isValid }
                     if (surface == null) {
-                        backend.release()
+                        backend.release("surface-not-ready")
                         mpvBackend = null
                         error = "播放画面未就绪（Surface 未创建），已回退 Media3"
                         degraded = true
@@ -642,14 +659,20 @@ fun PlayerScreen(
                     exo.playWhenReady = true
                     exo.setPlaybackSpeed(if (boosting) 3f else speed)
                 }
-                if (generation == sessionGeneration) c.reportStart(item.id, target.startPositionMs, target.source?.id, target.playMethod)
+                if (generation == sessionGeneration) {
+                    try { c.reportStart(item.id, target.startPositionMs, target.source?.id, target.playMethod) }
+                    catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                    catch (e: Exception) { android.util.Log.w("LuminaTV", "Playback start report failed", e) }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 if (generation != sessionGeneration) return@launch
                 buffering = false
                 if (failurePhase == "未知") failurePhase = "解析"
-                val reason = e.message ?: "播放失败"
+                val reason = playbackNetworkMessage(e)
                 if (activeEngine == "mpv") {
-                    mpvBackend?.release()
+                    mpvBackend?.release("playback-start-failed: ${e.javaClass.simpleName}")
                     mpvBackend = null
                     error = "mpv 初始化失败，正在回退 Media3：$reason"
                     activeEngine = "media3"
@@ -1101,8 +1124,12 @@ fun PlayerScreen(
         onDispose { exo.removeAnalyticsListener(analytics) }
     }
 
-    DisposableEffect(mpvBackend, item.id) {
-        onDispose { mpvBackend?.release(); mpvBackend = null }
+    DisposableEffect(item.id) {
+        onDispose {
+            val backend = mpvBackend
+            backend?.release("player-disposed")
+            if (mpvBackend === backend) mpvBackend = null
+        }
     }
 
     DisposableEffect(item.id) {
@@ -1195,7 +1222,7 @@ fun PlayerScreen(
                     val c = client ?: return@launch
                     val next = runCatching { c.getNextEpisode(item) }.getOrNull() ?: return@launch
                     nextEpisode = next
-                    c.prewarmPlayback(next, audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id))
+                    runCatching { c.prewarmPlayback(next, audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id)) }
                     nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
                     while (nextCountdown > 0) {
                         delay(1000)
@@ -1217,7 +1244,7 @@ fun PlayerScreen(
                     val next = runCatching { c.getNextEpisode(item) }.getOrNull()
                     if (next != null) {
                         prewarmedEpisodeId = next.id
-                        c.prewarmPlayback(next, audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id))
+                        runCatching { c.prewarmPlayback(next, audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id)) }
                     } else prewarmedEpisodeId = "none"
                 }
             }
