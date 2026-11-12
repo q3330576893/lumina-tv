@@ -70,6 +70,11 @@ class Prefs(context: Context) {
             ?: 120_000_000L
         set(v) = sp.edit().putLong("max_streaming_bitrate", v.takeIf { it in STREAMING_BITRATE_OPTIONS } ?: 120_000_000L).apply()
 
+    var playbackCacheBytes: Long
+        get() = sp.getLong("playback_cache_bytes", 512L * 1024L * 1024L).takeIf { it in PLAYBACK_CACHE_OPTIONS }
+            ?: 512L * 1024L * 1024L
+        set(v) = sp.edit().putLong("playback_cache_bytes", v.takeIf { it in PLAYBACK_CACHE_OPTIONS } ?: 512L * 1024L * 1024L).apply()
+
 
     var savedServersJson: String
         get() = sp.getString("saved_servers", "[]") ?: "[]"
@@ -344,3 +349,4 @@ class Prefs(context: Context) {
 }
 
 val STREAMING_BITRATE_OPTIONS = setOf(20_000_000L, 40_000_000L, 80_000_000L, 120_000_000L)
+val PLAYBACK_CACHE_OPTIONS = setOf(0L, 256L, 512L, 1024L, 2048L).map { it * 1024L * 1024L }.toSet()

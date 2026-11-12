@@ -49,6 +49,8 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.BuildConfig
 import com.lumina.tv.data.LibraryCache
+import com.lumina.tv.data.PlaybackCache
+import com.lumina.tv.data.PLAYBACK_CACHE_OPTIONS
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.DiagExportDialog
 import com.lumina.tv.ui.components.GlassPanel
@@ -90,6 +92,8 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var licensesOpen by remember { mutableStateOf(false) }
     var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
     var maxStreamingBitrate by remember { mutableStateOf(prefs?.maxStreamingBitrate ?: 120_000_000L) }
+    var playbackCacheBytes by remember { mutableStateOf(prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L) }
+    var playbackCacheUsed by remember { mutableStateOf(PlaybackCache.spaceBytes(context)) }
     var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
     var mpvBroken by remember { mutableStateOf(prefs?.mpvBroken ?: false) }
     var savedServers by remember { mutableStateOf(prefs?.savedServers().orEmpty()) }
@@ -593,6 +597,42 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                     Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = 0.9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
                                         Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
                                     }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Text("播放缓存", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(8.dp))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PLAYBACK_CACHE_OPTIONS.forEach { value ->
+                                val label = when (value) {
+                                    0L -> "关闭"
+                                    256L * 1024L * 1024L -> "256M"
+                                    512L * 1024L * 1024L -> "512M"
+                                    1024L * 1024L * 1024L -> "1G"
+                                    else -> "2G"
+                                }
+                                val active = playbackCacheBytes == value
+                                FocusSurface(Modifier.width(72.dp).height(36.dp), corner = 12.dp, onClick = {
+                                    playbackCacheBytes = value
+                                    prefs?.playbackCacheBytes = value
+                                    PlaybackCache.setLimit(value)
+                                    playbackCacheUsed = PlaybackCache.spaceBytes(context)
+                                }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = 0.9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
+                                    }
+                                }
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("已用 ${playbackCacheUsed / (1024L * 1024L)} MB", color = TextSub, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                            FocusSurface(Modifier.width(104.dp).height(34.dp), corner = 17.dp, onClick = {
+                                PlaybackCache.clear(context)
+                                playbackCacheUsed = PlaybackCache.spaceBytes(context)
+                            }) { focused ->
+                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)), contentAlignment = Alignment.Center) {
+                                    Text("清空播放缓存", color = TextMain, fontSize = 10.sp)
                                 }
                             }
                         }

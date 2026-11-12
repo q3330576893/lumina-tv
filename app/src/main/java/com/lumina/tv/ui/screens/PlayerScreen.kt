@@ -97,6 +97,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
+import com.lumina.tv.data.PlaybackCache
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.DeviceCodecCapabilities
 import com.lumina.tv.data.MediaChapter
@@ -510,9 +511,26 @@ fun PlayerScreen(
                     ?: if (target.direct) null else "转码"
                 // 透传 STRM 的 Referer/User-Agent 等请求头
                 if (target.headers.isNotEmpty()) httpFactory.setDefaultRequestProperties(target.headers)
+                val cacheLimit = AppRuntime.prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L
+                PlaybackCache.setLimit(cacheLimit)
+                val upstreamFactory = DefaultHttpDataSource.Factory()
+                    .setAllowCrossProtocolRedirects(true)
+                    .setConnectTimeoutMs(12_000)
+                    .setReadTimeoutMs(30_000)
+                    .setUserAgent("LuminaTV/1.5 (Android)")
+                    .setDefaultRequestProperties(target.headers)
+                val cacheFactory = if (cacheLimit > 0L) PlaybackCache.dataSourceFactory(context, upstreamFactory) else null
+                val sourceFactory = cacheFactory?.let { DefaultMediaSourceFactory(it) } ?: DefaultMediaSourceFactory(httpFactory)
+                val customKey = if (targetIsHls) null else PlaybackCache.mediaKey(
+                    AppRuntime.session?.baseUrl ?: AppRuntime.prefs?.baseUrl.orEmpty(),
+                    AppRuntime.session?.userId ?: AppRuntime.prefs?.userId.orEmpty(),
+                    item.id,
+                    target.source?.id,
+                )
                 val videoSource: ExoSource =
-                    DefaultMediaSourceFactory(httpFactory).createMediaSource(
+                    sourceFactory.createMediaSource(
                         androidx.media3.common.MediaItem.Builder().setUri(target.url)
+                            .apply { if (customKey != null) setCustomCacheKey(customKey) }
                             .setMediaMetadata(
                                 androidx.media3.common.MediaMetadata.Builder()
                                     .setTitle(item.name)
