@@ -72,7 +72,7 @@ object ThemeRuntime {
         glassEnabled = glassStyle != "off"
     }
 
-    fun setDeviceBlurSupported(supported: Boolean) { deviceBlurSupported = supported }
+    fun updateDeviceBlurSupported(supported: Boolean) { deviceBlurSupported = supported }
 
     val trueBlurEnabled: Boolean
         get() = glassEnabled && deviceBlurSupported && android.os.Build.VERSION.SDK_INT >= 31

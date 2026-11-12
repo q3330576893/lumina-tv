@@ -184,7 +184,7 @@ fun FrostPanel(
     val context = LocalContext.current
     val manager = remember(context) { context.getSystemService(ActivityManager::class.java) }
     val supported = manager?.isLowRamDevice != true
-    LaunchedEffect(supported) { ThemeRuntime.setDeviceBlurSupported(supported) }
+    LaunchedEffect(supported) { ThemeRuntime.updateDeviceBlurSupported(supported) }
     val shape = RoundedCornerShape(corner)
     Box(modifier.clip(shape)) {
         Box(

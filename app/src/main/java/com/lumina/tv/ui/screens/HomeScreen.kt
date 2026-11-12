@@ -171,7 +171,7 @@ fun HomeScreen(
     val context = LocalContext.current
     val hazeState = remember { HazeState() }
     LaunchedEffect(context) {
-        ThemeRuntime.setDeviceBlurSupported(
+        ThemeRuntime.updateDeviceBlurSupported(
             context.getSystemService(ActivityManager::class.java)?.isLowRamDevice != true,
         )
     }

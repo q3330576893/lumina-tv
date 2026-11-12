@@ -96,6 +96,7 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
+import com.lumina.tv.ui.theme.ThemeRuntime
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope

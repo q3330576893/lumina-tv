@@ -650,6 +650,7 @@ fun PlayerScreen(
             mpvState, client?.lastPlaybackInfoJson, showControls, buffering, error, position,
             activeVideoDecoder, dvDecoderPath, playbackStatusNotice,
             negotiationDiagnostics, rangeProbeDiagnostics, phaseTimes, droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
+            currentSourceId, currentPlayMethod, duration,
         )
     }
 

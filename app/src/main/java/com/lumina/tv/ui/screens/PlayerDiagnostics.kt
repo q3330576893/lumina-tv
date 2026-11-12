@@ -43,6 +43,9 @@ internal fun buildPlayerDiagPayload(
     renderedFrames: Long,
     bufferingCount: Int,
     bufferingDurationMs: Long,
+    currentSourceId: String?,
+    currentPlayMethod: String,
+    duration: Long,
 ): DiagPayload {
     val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
     val isDolbyVision = videoStream?.let {
