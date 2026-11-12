@@ -857,7 +857,7 @@ data class PlaybackTarget(
     )
 
     /** 解析单个 MediaSource JSON 为模型（含大小与分辨率）。 */
-    private fun parseMediaSource(o: JSONObject): MediaSource {
+    internal fun parseMediaSource(o: JSONObject): MediaSource {
         val streams = mutableListOf<MediaStream>()
         var resolution: String? = null
         o.optJSONArray("MediaStreams")?.let { arr ->
@@ -880,7 +880,7 @@ data class PlaybackTarget(
                     channels = s.optInt("Channels").takeIf { s.has("Channels") },
                     sampleRate = s.optInt("SampleRate").takeIf { s.has("SampleRate") },
                     videoRangeType = s.optString("VideoRangeType").ifBlank { s.optString("VideoRange").ifBlank { null } },
-                    dvProfile = s.optNormalizedValue("dvprofile")?.toIntOrNull()?.takeIf { it > 0 },
+                    dvProfile = parseDvProfile(s),
                     bitDepth = s.optInt("BitDepth", 0).takeIf { it > 0 },
                     colorSpace = s.optString("ColorSpace").ifBlank { null },
                     colorTransfer = s.optString("ColorTransfer").ifBlank { null },
@@ -1396,9 +1396,24 @@ data class PlaybackTarget(
     }
 }
 
+private fun parseDvProfile(stream: JSONObject): Int? {
+    val profile = listOf("VideoDoViProfile", "doviProfile", "dvProfile")
+        .firstNotNullOfOrNull { stream.optNormalizedValue(it) }
+        ?.filter(Char::isLetterOrDigit)
+        ?.toIntOrNull()
+        ?.takeIf { it > 0 }
+    if (profile != null) return profile
+
+    val codecTag = listOf("CodecTag", "CodecTagString", "Codec")
+        .firstNotNullOfOrNull { stream.optNormalizedValue(it) }
+    return Regex("(?i)dv(?:he|h1|i)\\.(\\d+)")
+        .find(codecTag.orEmpty())?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it > 0 }
+}
+
 private fun JSONObject.optNormalizedValue(normalizedKey: String): String? {
+    val normalized = normalizedKey.filter(Char::isLetterOrDigit)
     val key = keys().asSequence().firstOrNull { candidate ->
-        candidate.filter(Char::isLetterOrDigit).equals(normalizedKey, ignoreCase = true)
+        candidate.filter(Char::isLetterOrDigit).equals(normalized, ignoreCase = true)
     } ?: return null
     return opt(key)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
 }

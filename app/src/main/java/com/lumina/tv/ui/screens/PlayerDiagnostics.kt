@@ -161,6 +161,19 @@ internal fun buildPlayerDiagPayload(
                 .getOrNull()?.ifBlank { "No mpv log messages captured" }
             ?: "mpv log unavailable: no session log file",
         appLog = DiagExporter.appLogTail(),
-        uiText = "showControls=$showControls\nbuffering=$buffering\nerror=${error ?: "none"}\nstatus=${playbackStatusNotice ?: "none"}\npositionMs=$position\nactiveEngine=$activeEngine\ndegraded=$degraded",
+        uiText = buildString {
+            appendLine("screen=${AppRuntime.screenLabel}")
+            appendLine("media=${item.name} / ${item.seriesName ?: "no series"}")
+            appendLine("source=${playbackSource?.name ?: currentSourceId ?: "unknown"}")
+            appendLine("playMethod=$currentPlayMethod urlType=${currentPlaybackUrl?.let { if (it.contains(".m3u8", true)) "hls" else "static" } ?: "none"}")
+            appendLine("showControls=$showControls buffering=$buffering degraded=$degraded")
+            appendLine("positionMs=$position durationMs=$duration activeEngine=$activeEngine videoRange=${AppRuntime.currentVideoRange}")
+            appendLine("decoder=${activeVideoDecoder ?: "unknown"} decoderPath=${dvDecoderPath ?: "unknown"}")
+            appendLine("phase=$failurePhase phaseTimes=${phaseTimes}")
+            appendLine("framesDropped=$droppedFrames framesRendered=$renderedFrames bufferingCount=$bufferingCount bufferingDurationMs=$bufferingDurationMs")
+            appendLine("error=${error ?: "none"}")
+            appendLine("status=${playbackStatusNotice ?: "none"}")
+            appendLine("mpvError=${mpvState.error ?: "none"}")
+        },
     )
 }
