@@ -58,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -67,6 +68,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -89,6 +93,7 @@ import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.TmdbClient
+import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
@@ -111,7 +116,8 @@ import dev.chrisbanes.haze.hazeSource
 import androidx.compose.ui.platform.LocalUriHandler
 import java.net.URLEncoder
 
-private val failedDetailBackgroundKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
+private const val DETAIL_PREVIEW_FAILURE_TTL_MS = 10 * 60 * 1000L
 
 @Composable
 fun DetailScreen(
@@ -169,9 +175,13 @@ fun DetailScreen(
     val similarRowState = rememberLazyListState()
     val playFocus = remember { FocusRequester() }
     val sourceFocus = remember { FocusRequester() }
+    var playButtonFocused by remember(id) { mutableStateOf(false) }
 
     LaunchedEffect(id, detailRetry) {
-        failedDetailBackgroundKeys.clear()
+        synchronized(failedDetailBackgroundKeys) {
+            val now = System.currentTimeMillis()
+            failedDetailBackgroundKeys.entries.removeAll { now - it.value >= DETAIL_PREVIEW_FAILURE_TTL_MS }
+        }
         similar = emptyList()
         showSourceMenu = false
         AppRuntime.screenLabel = "详情"
@@ -310,16 +320,18 @@ fun DetailScreen(
         }.getOrNull()
     }
 
-    LaunchedEffect(id, item?.id, selectedSourceId, selectedSeason?.id, episodes.firstOrNull()?.id) {
-        val c = client ?: return@LaunchedEffect
-        val current = item ?: return@LaunchedEffect
+    val sourceIdsKey = sources.joinToString(",") { it.id }
+    LaunchedEffect(id, item?.id, selectedSourceId, selectedSeason?.id, episodes.firstOrNull()?.id, sourceIdsKey) {
+        val c = client ?: run { PageLog.add("detailPreview stage=skip reason=client-null"); return@LaunchedEffect }
+        val current = item ?: run { PageLog.add("detailPreview stage=skip reason=item-null"); return@LaunchedEffect }
         val requestKey = "${current.id}|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}"
-        previewResults[requestKey]?.let { cached ->
+        previewResults[requestKey]?.takeIf { !it.first.isNullOrBlank() }?.let { cached ->
             detailPreviewUrl = cached.first
             detailPreviewKey = cached.second
             detailPreviewIsTrailer = cached.third
             detailPreviewStartMs = previewStartTimes[requestKey]
             detailVideoPlaying = false
+            PageLog.add("detailPreview stage=skip reason=cache-hit")
             return@LaunchedEffect
         }
         detailPreviewUrl = null
@@ -332,47 +344,74 @@ fun DetailScreen(
         } ?: run {
             detailPreviewKey = "${current.id}:unknown"
             detailVideoPlaying = false
+            PageLog.add("detailPreview stage=skip reason=preview-item-null")
             return@LaunchedEffect
         }
         val trailer = runCatching { c.getLocalTrailers(previewItem.id).firstOrNull() }.getOrNull()
         val sourceItem = trailer ?: previewItem
-        val previewSource = if (sourceItem.id == current.id && sources.isNotEmpty()) {
+        val previewSource = if (sourceItem.id == current.id) {
+            if (sources.isEmpty() && sourcesLoading) {
+                PageLog.add("detailPreview stage=skip reason=no-cache-source")
+                return@LaunchedEffect
+            }
             sources.firstOrNull { it.id == selectedSourceId && it.streams.any { stream -> stream.type == "Video" } }
                 ?: sources.firstOrNull { source -> source.streams.any { it.type == "Video" } }
         } else {
             runCatching { c.getMediaSources(sourceItem.id) }.getOrDefault(emptyList())
                 .firstOrNull { source -> source.streams.any { it.type == "Video" } }
-        } ?: run {
+        }
+        if (previewSource == null && sourceItem.id == current.id && sourcesLoading) {
+            PageLog.add("detailPreview stage=skip reason=no-cache-source")
+            return@LaunchedEffect
+        }
+        val resolvedPreviewSource = previewSource ?: run {
             detailPreviewKey = "${previewItem.id}:${sourceItem.id}:unknown"
             detailVideoPlaying = false
-            failedDetailBackgroundKeys += detailPreviewKey
+            PageLog.add("detailPreview stage=skip reason=preview-source-null")
             return@LaunchedEffect
         }
         detailPreviewIsTrailer = trailer != null
         detailPreviewStartMs = if (trailer != null) 0L else {
             AppRuntime.prefs?.introSecondsFor(previewItem.id)?.takeIf { it > 0 }?.times(1000L)
         }
-        detailPreviewKey = "${previewItem.id}:${sourceItem.id}:${previewSource.id}"
-        if (detailPreviewKey in failedDetailBackgroundKeys) {
+        detailPreviewKey = "${previewItem.id}:${sourceItem.id}:${resolvedPreviewSource.id}"
+        val failedAt = failedDetailBackgroundKeys[detailPreviewKey]
+        if (failedAt != null && System.currentTimeMillis() - failedAt < DETAIL_PREVIEW_FAILURE_TTL_MS) {
             detailVideoPlaying = false
+            PageLog.add("detailPreview stage=skip reason=blacklist")
+            return@LaunchedEffect
+        }
+        if (failedAt != null) failedDetailBackgroundKeys.remove(detailPreviewKey)
+        if (AppRuntime.prefs?.detailBackgroundVideo == "off") {
+            PageLog.add("detailPreview stage=skip reason=mode-off")
             return@LaunchedEffect
         }
         detailPreviewUrl = runCatching {
-            c.resolveDetailPreviewUrl(sourceItem.id, previewSource.id, AppRuntime.prefs?.detailBackgroundVideo ?: "auto")
+            c.resolveDetailPreviewUrl(sourceItem.id, resolvedPreviewSource.id, AppRuntime.prefs?.detailBackgroundVideo ?: "auto")
         }.getOrNull()
-        previewResults[requestKey] = Triple(detailPreviewUrl, detailPreviewKey, detailPreviewIsTrailer)
-        previewStartTimes[requestKey] = detailPreviewStartMs
         if (detailPreviewUrl.isNullOrBlank()) {
             detailVideoPlaying = false
             detailPreviewFailure = "server-no-preview-url"
-            failedDetailBackgroundKeys += detailPreviewKey
+            failedDetailBackgroundKeys[detailPreviewKey] = System.currentTimeMillis()
+        } else {
+            previewResults[requestKey] = Triple(detailPreviewUrl, detailPreviewKey, detailPreviewIsTrailer)
+            previewStartTimes[requestKey] = detailPreviewStartMs
         }
     }
 
     LaunchedEffect(item?.id) {
         if (item == null) return@LaunchedEffect
-        delay(240)
-        runCatching { playFocus.requestFocus() }
+        playButtonFocused = false
+        var focused = false
+        for (attempt in 0 until 3) {
+            withFrameNanos { }
+            runCatching { playFocus.requestFocus() }
+            withFrameNanos { }
+            focused = playButtonFocused
+            if (focused) break
+            if (attempt < 2) delay(120)
+        }
+        if (!focused) PageLog.add("focus=play-failed")
     }
 
     LaunchedEffect(showSourceMenu) {
@@ -447,7 +486,7 @@ fun DetailScreen(
                         detailPreviewFailure = "server-no-preview-url"
                     } else if (it.startsWith("skip=") && detailPreviewKey.isNotBlank()) {
                         detailPreviewFailure = "playback-failed"
-                        failedDetailBackgroundKeys += detailPreviewKey
+                        PageLog.add("detailPreview stage=skip reason=preview-playback-failed")
                     }
                 },
                 startAtMs = detailPreviewStartMs,
@@ -553,6 +592,7 @@ fun DetailScreen(
                                 modifier = Modifier.height(46.dp).width(150.dp),
                                 corner = 23.dp,
                                 focusRequester = playFocus,
+                                onFocused = { playButtonFocused = true },
                                 onClick = {
                                     val target = if (it0.type == "Series") {
                                         episodes.firstOrNull { !it.played && it.positionTicks > 0 }
@@ -1123,15 +1163,21 @@ private fun FocusGlassSurface(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.02f else 1f, tween(240), label = "mediaInfoFocus")
+    var userMovedFocus by remember { mutableStateOf(false) }
+    val showHighlight = focused && userMovedFocus
+    val scale by animateFloatAsState(if (showHighlight) 1.01f else 1f, tween(240), label = "mediaInfoFocus")
     Box(
         modifier.graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(corner))
-            .background(if (focused) ThemeRuntime.glassFillStrong else normalFill)
-            .border(if (focused) 1.5.dp else 1.dp, if (focused) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge, RoundedCornerShape(corner))
+            .background(if (showHighlight) Color(0x0AFFFFFF) else normalFill)
+            .border(if (showHighlight) 1.5.dp else 1.dp, if (showHighlight) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge, RoundedCornerShape(corner))
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown) userMovedFocus = true
+                false
+            }
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
-    ) { content(focused) }
+    ) { content(showHighlight) }
 }
 
 @Composable

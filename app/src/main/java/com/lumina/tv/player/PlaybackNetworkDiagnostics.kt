@@ -43,8 +43,8 @@ object PlaybackRangeProbe {
     private val client by lazy {
         OkHttpClient.Builder()
             .connectTimeout(3, TimeUnit.SECONDS)
-            .readTimeout(3, TimeUnit.SECONDS)
-            .callTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(7, TimeUnit.SECONDS)
+            .callTimeout(7, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
@@ -53,7 +53,7 @@ object PlaybackRangeProbe {
     suspend fun probe(url: String, headers: Map<String, String>): JSONObject = suspendCancellableCoroutine { continuation ->
         val started = android.os.SystemClock.elapsedRealtime()
         val request = runCatching {
-            Request.Builder().url(url).header("Range", "bytes=0-0").header("User-Agent", "LuminaTV/1.5 (Android)").apply {
+            Request.Builder().url(url).header("Range", "bytes=0-1023").header("User-Agent", "LuminaTV/1.5 (Android)").apply {
                 headers.forEach { (name, value) -> header(name, value) }
             }.build()
         }.getOrElse {
@@ -80,6 +80,8 @@ object PlaybackRangeProbe {
                     continuation.resume(JSONObject()
                         .put("status", it.code)
                         .put("rangeSupported", it.code == 206 || it.header("Accept-Ranges")?.contains("bytes", true) == true)
+                        .put("contentType", it.header("Content-Type") ?: JSONObject.NULL)
+                        .put("finalUrlHost", it.request.url.host)
                         .put("size", it.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
                             ?: it.header("Content-Length")?.toLongOrNull() ?: JSONObject.NULL)
                         .put("redirects", redirects)

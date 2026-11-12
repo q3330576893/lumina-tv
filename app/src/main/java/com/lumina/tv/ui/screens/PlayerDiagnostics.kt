@@ -74,6 +74,7 @@ internal fun buildPlayerDiagPayload(
                 AppRuntime.prefs?.mpvBroken == true -> "mpvBroken-persisted-flag"
                 else -> JSONObject.NULL
             })
+            .put("mpvProperties", JSONObject(mpvBackend?.diagnosticProperties().orEmpty()))
             .put("kernels", JSONArray().put("media3").put("mpv")))
         .put("media", JSONObject()
             .put("id", item.id)
@@ -170,8 +171,11 @@ internal fun buildPlayerDiagPayload(
         tracksJson = JSONObject().put("groups", tracks).toString(2),
         errorsJson = errors.toString(2),
         mpvLog = mpvBackend?.diagnosticLog()?.ifBlank { null }
-            ?: runCatching { File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.readText(Charsets.UTF_8) }
-                .getOrNull()?.ifBlank { "No mpv log messages captured" }
+            ?: runCatching {
+                val previous = File(context.filesDir, "mpv-previous-abnormal.txt").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty()
+                val current = File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty()
+                listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
+            }.getOrNull()?.ifBlank { "No mpv log messages captured" }
             ?: "mpv log unavailable: no session log file",
         appLog = DiagExporter.appLogTail(),
         uiText = buildString {

@@ -820,7 +820,69 @@ fun PlayerScreen(
                 val isBadHttpStatus = err.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS &&
                     generateSequence(err as Throwable?) { it.cause }
                         .any { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode == 400 }
-                if (errorClass.category == PlaybackErrorCategory.NETWORK_TRANSIENT && networkRetryCount < 2) {
+                val probeContentType = (rangeProbeDiagnostics.opt("contentType") as? String)
+                    .orEmpty().substringBefore(';').trim().lowercase()
+                val directProbePending = containerUnsupported &&
+                    currentPlaybackUrl?.contains(".m3u8", true) != true &&
+                    rangeProbeDiagnostics.optString("state") == "pending"
+                val nonVideoResponse = containerUnsupported &&
+                    currentPlaybackUrl?.contains(".m3u8", true) != true &&
+                    probeContentType.isNotBlank() && probeContentType != "application/octet-stream" &&
+                    !probeContentType.startsWith("video/")
+                if (directProbePending) {
+                    val generation = sessionGeneration
+                    buffering = true
+                    error = null
+                    scope.launch {
+                        rangeProbeJob?.join()
+                        if (generation != sessionGeneration || activeEngine != "media3") return@launch
+                        val contentType = (rangeProbeDiagnostics.opt("contentType") as? String)
+                            .orEmpty().substringBefore(';').trim().lowercase()
+                        if (contentType.isNotBlank() && contentType != "application/octet-stream" && !contentType.startsWith("video/")) {
+                            val typeLabel = when {
+                                contentType.startsWith("image/") -> "图片"
+                                contentType.startsWith("text/") -> "网页或文本"
+                                else -> "非视频内容（$contentType）"
+                            }
+                            failurePhase = "直链校验"
+                            error = "片源直链失效：服务器返回了$typeLabel（网盘链接可能已过期）"
+                            rangeProbeDiagnostics.put("nonVideoResponse", true)
+                            lastPlaybackErrorJson = JSONObject(lastPlaybackErrorJson.orEmpty())
+                                .put("contentType", contentType)
+                                .put("statusCode", rangeProbeDiagnostics.opt("status") ?: JSONObject.NULL)
+                                .put("finalUrlHost", (rangeProbeDiagnostics.opt("finalUrlHost") as? String) ?: JSONObject.NULL)
+                                .toString(2)
+                            engineSwitchTrace.add("non-video-response:$contentType")
+                            buffering = false
+                        } else {
+                            transcodeFallbackTried = true
+                            forceDirectNext = false
+                            degraded = true
+                            enginePinned = "media3"
+                            reloadForceTranscode = true
+                            failurePhase = "解封装"
+                            audioDecodeNotice = "直连容器无法解析，正在尝试转码"
+                            engineSwitchTrace.add("transcode-fallback:${err.errorCodeName}")
+                            reloadKey++
+                        }
+                    }
+                } else if (nonVideoResponse) {
+                    val typeLabel = when {
+                        probeContentType.startsWith("image/") -> "图片"
+                        probeContentType.startsWith("text/") -> "网页或文本"
+                        else -> "非视频内容（$probeContentType）"
+                    }
+                    failurePhase = "直链校验"
+                    error = "片源直链失效：服务器返回了$typeLabel（网盘链接可能已过期）"
+                    rangeProbeDiagnostics.put("nonVideoResponse", true)
+                    lastPlaybackErrorJson = JSONObject(lastPlaybackErrorJson.orEmpty())
+                        .put("contentType", probeContentType)
+                        .put("statusCode", rangeProbeDiagnostics.opt("status") ?: JSONObject.NULL)
+                        .put("finalUrlHost", (rangeProbeDiagnostics.opt("finalUrlHost") as? String) ?: JSONObject.NULL)
+                        .toString(2)
+                    engineSwitchTrace.add("non-video-response:$probeContentType")
+                    buffering = false
+                } else if (errorClass.category == PlaybackErrorCategory.NETWORK_TRANSIENT && networkRetryCount < 2) {
                     val retryIndex = networkRetryCount++
                     val generation = sessionGeneration
                     networkRetryJob?.cancel()
@@ -1397,6 +1459,35 @@ fun PlayerScreen(
                 Text(it, color = Color(0xFFFF8A9A), fontSize = 14.sp, modifier = Modifier.padding(horizontal = 40.dp))
                 if (bufferingTimedOut || error != null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FocusSurface(Modifier.width(132.dp).height(40.dp), corner = 20.dp, onClick = {
+                        error = null
+                        playbackStatusNotice = null
+                        loadSource(reloadForceTranscode, currentSourceId)
+                    }) { focused ->
+                        Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                            Text("重试", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                        }
+                    }
+                    if (mediaSources.size > 1) {
+                        FocusSurface(Modifier.width(132.dp).height(40.dp), corner = 20.dp, onClick = {
+                            val next = mediaSources.firstOrNull { it.id != currentSourceId }
+                            if (next != null) {
+                                currentSourceId = next.id
+                                playbackSource = next
+                                forceDirectNext = false
+                                directFallbackTried = false
+                                transcodeFallbackTried = false
+                                triedSources = emptySet()
+                                reloadForceTranscode = false
+                                error = null
+                                reloadKey++
+                            }
+                        }) { focused ->
+                            Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                                Text("换源", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                            }
+                        }
+                    }
                     if (bufferingTimedOut) {
                     Spacer(Modifier.height(12.dp))
                     FocusSurface(Modifier.width(190.dp).height(40.dp), corner = 20.dp, onClick = {
