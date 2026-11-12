@@ -334,7 +334,9 @@ object VideoSourceProbe {
                     val mkv = bytes.indices.any { i -> i + 4 <= bytes.size &&
                         bytes[i] == 0x1A.toByte() && bytes[i + 1] == 0x45.toByte() &&
                         bytes[i + 2] == 0xDF.toByte() && bytes[i + 3] == 0xA3.toByte() }
-                    val valid = response.isSuccessful && !htmlOrJsonType && !textInvalid && (hls || mp4 || mkv)
+                    val videoContentType = contentType.startsWith("video/", true) ||
+                        contentType.startsWith("application/octet-stream", true)
+                    val valid = response.isSuccessful && !htmlOrJsonType && !textInvalid && (hls || mp4 || mkv || videoContentType)
                     VideoSourceProbeResult(
                         valid = valid,
                         statusCode = response.code,

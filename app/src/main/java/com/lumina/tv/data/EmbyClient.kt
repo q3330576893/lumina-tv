@@ -31,6 +31,12 @@ import com.lumina.tv.diag.NetLog
 
 class EmbyException(message: String, val httpStatus: Int? = null) : Exception(message)
 
+data class DetailPreviewResolution(
+    val url: String?,
+    val stage: String?,
+    val failures: List<String>,
+)
+
 private enum class PlaybackRequestFlag(
     val key: String,
     val send: Boolean,
@@ -817,13 +823,19 @@ class EmbyClient(
         return url("/Items/$id/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
-    /** Resolves a detail backdrop using explicit HLS, then direct stream, then the original file. */
-    suspend fun resolveDetailPreviewUrl(itemId: String, mediaSourceId: String, mode: String = "auto"): String? =
+    /** Resolves a detail backdrop using validated HLS, direct stream, then the controlled static fallback. */
+    suspend fun resolveDetailPreviewUrl(
+        itemId: String,
+        mediaSourceId: String,
+        mode: String = "auto",
+        fromStage: String = "hls",
+    ): DetailPreviewResolution =
         withContext(Dispatchers.IO) {
             if (mode == "off") {
-                com.lumina.tv.diag.PageLog.add("detailPreview stage=explicit-hls result=err keys=disabled")
-                return@withContext null
+                return@withContext DetailPreviewResolution(null, null, listOf("disabled"))
             }
+            val startAt = listOf("hls", "direct", "static", "done").indexOf(fromStage).takeIf { it >= 0 } ?: 0
+            val failures = mutableListOf<String>()
             val source = runCatching { getMediaSources(itemId).firstOrNull { it.id == mediaSourceId } }.getOrNull()
             val hls = url("/Videos/$itemId/master.m3u8", mapOf(
                 "MediaSourceId" to mediaSourceId,
@@ -839,39 +851,71 @@ class EmbyClient(
                 "BreakOnNonKeyFrames" to "true",
                 "StartTimeTicks" to "0",
             ))
-            val hlsResult = probeDetailPreview(hls)
-            logDetailPreview("explicit-hls", hlsResult, "mediaSourceId,DeviceId,VideoCodec,AudioCodec,MaxWidth,MaxHeight,VideoBitrate")
-            if (hlsResult.first) return@withContext hls
-            if (mode == "720p") return@withContext null
-
-            val direct = absUrl(source?.directStreamUrl)
-            if (direct == null) {
-                com.lumina.tv.diag.PageLog.add("detailPreview stage=direct result=err keys=DirectStreamUrl-missing")
-            } else {
-                val directResult = probeDetailPreview(direct)
-                logDetailPreview("direct", directResult, "DirectStreamUrl")
-                if (directResult.first) return@withContext direct
+            if (startAt <= 0) {
+                val hlsResult = probeDetailPreview("hls", hls)
+                if (hlsResult.valid) return@withContext DetailPreviewResolution(hls, "hls", failures)
+                failures += "hls:${hlsResult.verdict}"
+            }
+            if (mode == "720p" || startAt >= 3) {
+                return@withContext DetailPreviewResolution(null, null, failures)
             }
 
-            val staticUrl = url("/Videos/$itemId/stream", mapOf("static" to "true", "MediaSourceId" to mediaSourceId))
-            val staticResult = probeDetailPreview(staticUrl)
-            logDetailPreview("static", staticResult, "static,MediaSourceId")
-            if (staticResult.first) staticUrl else null
+            val direct = absUrl(source?.directStreamUrl)
+            if (startAt <= 1) {
+                if (direct == null) {
+                    logDetailPreview("direct", "0", "none", "missing-url", null)
+                    failures += "direct:missing-url"
+                } else {
+                    val directResult = probeDetailPreview("direct", direct)
+                    if (directResult.valid) return@withContext DetailPreviewResolution(direct, "direct", failures)
+                    failures += "direct:${directResult.verdict}"
+                }
+            }
+
+            if (startAt <= 2 && mode == "auto") {
+                val staticUrl = url("/Videos/$itemId/stream", mapOf("static" to "true", "MediaSourceId" to mediaSourceId))
+                val staticResult = probeDetailPreview("static", staticUrl)
+                if (staticResult.valid) return@withContext DetailPreviewResolution(staticUrl, "static", failures)
+                failures += "static:${staticResult.verdict}"
+            }
+            DetailPreviewResolution(null, null, failures)
         }
 
-    private fun probeDetailPreview(target: String): Pair<Boolean, String> = try {
+    private data class DetailPreviewProbe(val valid: Boolean, val verdict: String)
+
+    private fun probeDetailPreview(stage: String, target: String): DetailPreviewProbe = try {
         val request = Request.Builder().url(target).header("Range", "bytes=0-511")
             .header("X-Emby-Authorization", authHeader()).get().build()
         http.newCall(request).apply { timeout().timeout(7, TimeUnit.SECONDS) }.execute().use { response ->
-            if (response.isSuccessful) true to "ok" else false to "http-${response.code}"
+            val contentType = response.header("Content-Type").orEmpty().substringBefore(';').trim().lowercase().ifBlank { "none" }
+            val prefix = response.body?.source()?.let { source ->
+                val buffer = okio.Buffer()
+                while (buffer.size < 512L) {
+                    val count = source.read(buffer, 512L - buffer.size)
+                    if (count == -1L) break
+                }
+                buffer.readByteArray().toString(Charsets.ISO_8859_1).removePrefix("\uFEFF").trimStart()
+            }.orEmpty()
+            val isHls = runCatching { Uri.parse(target).path.orEmpty().endsWith(".m3u8", true) }.getOrDefault(false)
+            val verdict = when {
+                !response.isSuccessful -> "http-${response.code}"
+                isHls && !prefix.contains("#EXTM3U", true) -> "not-m3u8"
+                !isHls && !(contentType.startsWith("video/") || contentType == "application/octet-stream") -> "not-video"
+                else -> "ok"
+            }
+            logDetailPreview(stage, response.code.toString(), contentType, verdict, target)
+            DetailPreviewProbe(verdict == "ok", verdict)
         }
     } catch (e: Exception) {
         if (e is kotlinx.coroutines.CancellationException) throw e
-        false to "err"
+        logDetailPreview(stage, "0", "none", "error-${e.javaClass.simpleName}", target)
+        DetailPreviewProbe(false, "error")
     }
 
-    private fun logDetailPreview(stage: String, result: Pair<Boolean, String>, keys: String) {
-        com.lumina.tv.diag.PageLog.add("detailPreview stage=$stage result=${result.second} keys=$keys")
+    private fun logDetailPreview(stage: String, status: String, contentType: String, verdict: String, target: String?) {
+        val host = runCatching { Uri.parse(target).host.orEmpty() }.getOrDefault("")
+        val safeHost = if (host.isBlank()) "none" else "hash-${host.hashCode().toUInt().toString(16)}"
+        com.lumina.tv.diag.PageLog.add("detailPreview stage=$stage status=$status contentType=$contentType verdict=$verdict host=$safeHost")
     }
 
     private fun isSafeLowRiskSource(source: JSONObject): Boolean {

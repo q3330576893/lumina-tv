@@ -54,6 +54,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -149,6 +150,11 @@ fun DetailScreen(
     var detailPreviewStartMs by remember(id) { mutableStateOf<Long?>(null) }
     var detailVideoPlaying by remember(id) { mutableStateOf(false) }
     var detailPreviewFailure by remember(id) { mutableStateOf<String?>(null) }
+    var detailPreviewFromStage by remember(id) { mutableStateOf("hls") }
+    var detailPreviewStage by remember(id) { mutableStateOf<String?>(null) }
+    var detailPreviewRequestKey by remember(id) { mutableStateOf("") }
+    var detailPreviewFailures by remember(id) { mutableStateOf<List<String>>(emptyList()) }
+    var detailPreviewRetry by remember(id) { mutableIntStateOf(0) }
     val previewResults = remember(id) { mutableMapOf<String, Triple<String?, String, Boolean>>() }
     val previewStartTimes = remember(id) { mutableMapOf<String, Long?>() }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
@@ -321,11 +327,17 @@ fun DetailScreen(
     }
 
     val sourceIdsKey = sources.joinToString(",") { it.id }
-    LaunchedEffect(id, item?.id, selectedSourceId, selectedSeason?.id, episodes.firstOrNull()?.id, sourceIdsKey) {
+    LaunchedEffect(id, item?.id, selectedSourceId, selectedSeason?.id, episodes.firstOrNull()?.id, sourceIdsKey, detailPreviewRetry) {
         val c = client ?: run { PageLog.add("detailPreview stage=skip reason=client-null"); return@LaunchedEffect }
         val current = item ?: run { PageLog.add("detailPreview stage=skip reason=item-null"); return@LaunchedEffect }
         val requestKey = "${current.id}|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}"
-        previewResults[requestKey]?.takeIf { !it.first.isNullOrBlank() }?.let { cached ->
+        if (detailPreviewRequestKey != requestKey) {
+            detailPreviewRequestKey = requestKey
+            detailPreviewFromStage = "hls"
+            detailPreviewFailures = emptyList()
+            detailPreviewStage = null
+        }
+        if (detailPreviewRetry == 0) previewResults[requestKey]?.takeIf { !it.first.isNullOrBlank() }?.let { cached ->
             detailPreviewUrl = cached.first
             detailPreviewKey = cached.second
             detailPreviewIsTrailer = cached.third
@@ -335,7 +347,7 @@ fun DetailScreen(
             return@LaunchedEffect
         }
         detailPreviewUrl = null
-        detailPreviewFailure = null
+        if (detailPreviewRetry == 0) detailPreviewFailure = null
         val previewItem = when (current.type) {
             "Series" -> episodes.firstOrNull() ?: runCatching {
                 c.getEpisodes(current.id, selectedSeason?.id).firstOrNull()
@@ -386,14 +398,24 @@ fun DetailScreen(
             PageLog.add("detailPreview stage=skip reason=mode-off")
             return@LaunchedEffect
         }
-        detailPreviewUrl = runCatching {
-            c.resolveDetailPreviewUrl(sourceItem.id, resolvedPreviewSource.id, AppRuntime.prefs?.detailBackgroundVideo ?: "auto")
+        val resolution = runCatching {
+            c.resolveDetailPreviewUrl(
+                sourceItem.id,
+                resolvedPreviewSource.id,
+                AppRuntime.prefs?.detailBackgroundVideo ?: "auto",
+                fromStage = detailPreviewFromStage,
+            )
         }.getOrNull()
+        detailPreviewFailures = (detailPreviewFailures + resolution?.failures.orEmpty()).distinct()
+        detailPreviewUrl = resolution?.url
         if (detailPreviewUrl.isNullOrBlank()) {
             detailVideoPlaying = false
-            detailPreviewFailure = "server-no-preview-url"
-            failedDetailBackgroundKeys[detailPreviewKey] = System.currentTimeMillis()
+            detailPreviewFailure = detailPreviewFailures.joinToString(" / ").ifBlank { "preview-unavailable" }
+            detailPreviewFromStage = "done"
+            PageLog.add("detailPreview stage=done failures=${detailPreviewFailure}")
         } else {
+            detailPreviewStage = resolution?.stage
+            detailPreviewFailure = null
             previewResults[requestKey] = Triple(detailPreviewUrl, detailPreviewKey, detailPreviewIsTrailer)
             previewStartTimes[requestKey] = detailPreviewStartMs
         }
@@ -480,19 +502,49 @@ fun DetailScreen(
                 url = detailPreviewUrl,
                 mediaKey = detailPreviewKey,
                 playing = !loading,
-                onStatus = {
-                    detailVideoPlaying = it == "play"
-                    if (it == "skip=no-preview-url") {
-                        detailPreviewFailure = "server-no-preview-url"
-                    } else if (it.startsWith("skip=") && detailPreviewKey.isNotBlank()) {
-                        detailPreviewFailure = "playback-failed"
-                        PageLog.add("detailPreview stage=skip reason=preview-playback-failed")
+                onStatus = { status ->
+                    detailVideoPlaying = status == "play"
+                    if (status.startsWith("skip=") && status != "skip=no-preview-url" && detailPreviewStage != null && detailPreviewKey.isNotBlank()) {
+                        val failedStage = detailPreviewStage ?: "unknown"
+                        val reason = "$failedStage:playback-failed"
+                        detailPreviewFailures = (detailPreviewFailures + reason).distinct()
+                        PageLog.add("detailPreview stage=$failedStage verdict=playback-failed")
+                        detailPreviewUrl = null
+                        if (failedStage == "static") {
+                            detailPreviewFromStage = "done"
+                            detailPreviewFailure = detailPreviewFailures.joinToString(" / ")
+                        } else {
+                            detailPreviewFromStage = when (failedStage) {
+                                "hls" -> "direct"
+                                "direct" -> "static"
+                                else -> "done"
+                            }
+                            detailPreviewRetry++
+                        }
                     }
                 },
                 startAtMs = detailPreviewStartMs,
                 loopWholeItem = detailPreviewIsTrailer,
                 modifier = Modifier.fillMaxSize(),
             )
+            detailPreviewFailure?.takeIf { detailPreviewFromStage == "done" }?.let { failure ->
+                Row(
+                    Modifier.align(Alignment.TopStart).padding(start = 48.dp, top = 10.dp)
+                        .clickable {
+                            detailPreviewFailure = null
+                            detailPreviewFailures = emptyList()
+                            detailPreviewFromStage = "hls"
+                            detailPreviewStage = null
+                            detailPreviewUrl = null
+                            detailPreviewRetry++
+                        }
+                        .background(Color(0x66000000), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("背景视频不可用：$failure · 点击重试", color = TextMain.copy(alpha = 0.62f), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
             // 模糊海报 → 主色铺满：重模糊后叠深色渐层，页面颜色随封面走
             val videoPlaying = detailVideoPlaying
             val v0 by animateColorAsState(if (videoPlaying) Color(0x00000000) else Color(0x4D000000), tween(500), label = "detailMaskTop")

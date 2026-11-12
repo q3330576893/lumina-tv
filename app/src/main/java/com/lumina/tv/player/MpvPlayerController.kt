@@ -5,10 +5,13 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Surface
+import com.lumina.tv.data.MediaStream
+import com.lumina.tv.diag.PageLog
 import org.jellycine.mpv.MPVLib
 import java.io.File
 import java.util.ArrayDeque
 import org.json.JSONObject
+import org.json.JSONArray
 
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
 class MpvPlayerController(
@@ -23,6 +26,7 @@ class MpvPlayerController(
         val playing: Boolean = false,
         val ended: Boolean = false,
         val error: String? = null,
+        val audioSilentCodec: String? = null,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -64,6 +68,10 @@ class MpvPlayerController(
     private var fileLoaded = false
     private var buffering = false
     private val loadTimeout = Runnable { onLoadTimeout() }
+    private var audioStreams: List<MediaStream> = emptyList()
+    private var preferredAudioIndex: Int? = null
+    private var audioSilentCodec: String? = null
+    private val audioOutputCheck = Runnable { checkAudioOutput() }
 
     init {
         Log.i(TAG, "${timestamp()} MPVLib.create starting")
@@ -103,6 +111,9 @@ class MpvPlayerController(
                 engine.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 engine.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
                 engine.observeProperty("video-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
+                engine.observeProperty("audio-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
+                engine.observeProperty("audio-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
+                engine.observeProperty("track-list", MPVLib.MpvFormat.MPV_FORMAT_NODE)
                 engine.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
                 engine.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
                 listOf("hwdec-current", "current-vo", "video-params/pixelformat")
@@ -159,13 +170,21 @@ class MpvPlayerController(
         if (!released) runCatching { mpv?.setPropertyDouble("sub-delay", offsetMs / 1000.0) }
     }
 
+    fun setAudioStreams(streams: List<MediaStream>) {
+        audioStreams = streams.filter { it.type.equals("Audio", true) }
+    }
+
     fun setAudioTrack(index: Int) {
-        if (!released) runCatching { mpv?.setPropertyInt("aid", index) }
+        if (released) return
+        preferredAudioIndex = index.takeIf { it >= 0 }
+        if (fileLoaded && preferredAudioIndex != null) applyPreferredAudioTrack()
     }
 
     fun load(url: String, startPositionMs: Long, subtitleUrls: List<String> = emptyList(), headers: Map<String, String> = emptyMap()) {
         if (released || mpv == null) return
         clearSessionLog()
+        audioSilentCodec = null
+        handler.removeCallbacks(audioOutputCheck)
         pendingUrl = url
         pendingPositionMs = startPositionMs.coerceAtLeast(0L)
         ready = false
@@ -248,7 +267,53 @@ class MpvPlayerController(
         listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
     }
     fun softwareRetryCount(): Int = softwareRetryCount
-    fun diagnosticProperties(): Map<String, String> = synchronized(observedProperties) { observedProperties.toMap() }
+    fun diagnosticProperties(): Map<String, String> {
+        val properties = synchronized(observedProperties) { observedProperties.toMutableMap() }
+        listOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device", "track-list")
+            .forEach { key ->
+                runCatching { mpv?.getPropertyString(key) }.getOrNull()?.let { properties[key] = it }
+            }
+        return properties
+    }
+
+    private fun applyPreferredAudioTrack() {
+        val embyIndex = preferredAudioIndex ?: return
+        val ordinal = audioStreams.indexOfFirst { it.index == embyIndex }.takeIf { it >= 0 }?.plus(1)
+            ?: return
+        val audioIds = readMpvAudioTrackIds()
+        val aid = audioIds.getOrNull(ordinal - 1) ?: ordinal
+        appendMpvLog("${timestamp()} mpv audio map: embyIndex=$embyIndex -> audioOrdinal=$ordinal -> aid=$aid")
+        mpv?.setPropertyInt("aid", aid)
+    }
+
+    private fun readMpvAudioTrackIds(): List<Int> = runCatching<List<Int>> {
+        val raw = mpv?.getPropertyString("track-list") ?: return@runCatching emptyList()
+        val tracks = JSONArray(raw)
+        (0 until tracks.length()).mapNotNull { index ->
+            val track = tracks.optJSONObject(index) ?: return@mapNotNull null
+            if (!track.optString("type").equals("audio", true)) return@mapNotNull null
+            track.optInt("id", -1).takeIf { it > 0 }
+        }
+    }.getOrDefault(emptyList())
+
+    private fun checkAudioOutput() {
+        if (released || !ready) return
+        val properties = diagnosticProperties()
+        val params = properties["audio-params"].orEmpty()
+        val ao = properties["current-ao"].orEmpty()
+        val abnormalAo = ao.isBlank() || ao.equals("null", true) || ao.equals("unknown", true) || ao.equals("no", true)
+        if (params.isBlank() || params.equals("null", true) || params.equals("{}") || abnormalAo) {
+            val codec = audioStreams.firstOrNull { it.index == preferredAudioIndex }?.codec
+                ?: audioStreams.firstOrNull { it.isDefault }?.codec
+                ?: audioStreams.firstOrNull()?.codec ?: "unknown"
+            val aid = properties["aid"] ?: preferredAudioIndex?.toString() ?: "auto"
+            val message = "mpv audio silent: aid=$aid ao=${ao.ifBlank { "empty" }} codec=$codec"
+            appendMpvLog("${timestamp()} $message")
+            PageLog.add(message)
+            audioSilentCodec = codec
+            emit()
+        }
+    }
 
     private fun clearSessionLog() {
         synchronized(logLock) {
@@ -297,6 +362,9 @@ class MpvPlayerController(
                 .put("pixelformat", synchronized(observedProperties) { observedProperties["video-params/pixelformat"] } ?: JSONObject.NULL)
                 .put("w", synchronized(observedProperties) { observedProperties["video-params/w"] } ?: JSONObject.NULL)
                 .put("h", synchronized(observedProperties) { observedProperties["video-params/h"] } ?: JSONObject.NULL))
+            .put("audio", JSONObject(diagnosticProperties().filterKeys {
+                it in setOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device")
+            }))
             .put("memory", JSONObject()
                 .put("usedBytes", runtime.totalMemory() - runtime.freeMemory())
                 .put("maxBytes", runtime.maxMemory()))
@@ -397,6 +465,7 @@ class MpvPlayerController(
                 buffering = false
                 Log.i(TAG, "${timestamp()} received FILE_LOADED")
                 appendMpvLog("${timestamp()} file-loaded properties=${JSONObject(diagnosticProperties())}")
+                applyPreferredAudioTrack()
                 persistSessionState()
                 handler.removeCallbacks(heartbeat)
                 handler.postDelayed(heartbeat, SESSION_HEARTBEAT_MS)
@@ -409,6 +478,8 @@ class MpvPlayerController(
                 ready = true
                 handler.removeCallbacks(loadTimeout)
                 if (firstReady) Log.i(TAG, "${timestamp()} received PLAYBACK_RESTART (first frame ready)")
+                handler.removeCallbacks(audioOutputCheck)
+                handler.postDelayed(audioOutputCheck, AUDIO_OUTPUT_CHECK_DELAY_MS)
                 emit(buffering = false, ready = true)
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
@@ -424,7 +495,7 @@ class MpvPlayerController(
         ended: Boolean = false,
         error: String? = null,
     ) {
-        onState(State(positionMs, durationMs, buffering, ready, playing, ended, error))
+        onState(State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec))
     }
 
     private companion object {
@@ -434,7 +505,11 @@ class MpvPlayerController(
         const val MAX_DIAGNOSTIC_LINES = 2_000
         const val MAX_SESSION_LOG_BYTES = 512 * 1024
         const val SESSION_HEARTBEAT_MS = 10_000L
-        val MPV_DIAGNOSTIC_PROPERTIES = setOf("hwdec-current", "current-vo", "video-params/pixelformat")
+        const val AUDIO_OUTPUT_CHECK_DELAY_MS = 5_000L
+        val MPV_DIAGNOSTIC_PROPERTIES = setOf(
+            "hwdec-current", "current-vo", "video-params/pixelformat", "audio-params",
+            "audio-out-params", "current-ao", "audio-device", "track-list",
+        )
     }
 
     private fun timestamp(): Long = System.currentTimeMillis()

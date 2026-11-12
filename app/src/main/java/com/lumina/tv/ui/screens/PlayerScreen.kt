@@ -608,9 +608,13 @@ fun PlayerScreen(
                             reloadKey++
                         }
                     }.also { mpvBackend = it }
+                    val mpvAudioStreams = playbackSource?.audioStreams
+                        ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
+                        ?: mediaSources.firstOrNull()?.audioStreams.orEmpty()
+                    backend.setAudioStreams(mpvAudioStreams)
                     val subtitleSp = when { subScale >= 2.3f -> 38.4f; subScale >= 1.9f -> 32f; subScale >= 1.5f -> 25.6f; subScale >= 1.2f -> 20.8f; else -> 16f }
                     backend.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
-                    backend.setAudioTrack(audioStreamIndex ?: defaultAudio?.index ?: -1)
+                    backend.setAudioTrack(audioStreamIndex ?: -1)
                     val unavailable = backend.unavailableReason
                     if (unavailable != null) {
                         AppRuntime.prefs?.mpvBroken = true
@@ -1454,6 +1458,19 @@ fun PlayerScreen(
             )
         }
 
+        mpvState.audioSilentCodec?.let { codec ->
+            Text(
+                "当前音轨无音频输出（$codec），按菜单可切换其他音轨",
+                color = Color(0xFFFFD28A),
+                fontSize = 12.sp,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 132.dp)
+                    .background(Color(0xAA10141D), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
         error?.let {
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text(it, color = Color(0xFFFF8A9A), fontSize = 14.sp, modifier = Modifier.padding(horizontal = 40.dp))
@@ -1866,12 +1883,18 @@ fun PlayerScreen(
                 audioDecodeMode = audioDecodeMode,
                 subtitleOffsetMs = subtitleOffsetMs,
                 activeEngine = activeEngine,
-                audioStreams = if (activeEngine == "media3") media3AudioTracks(exo.currentTracks) else emptyList(),
+                audioStreams = if (activeEngine == "media3") media3AudioTracks(exo.currentTracks) else {
+                    playbackSource?.audioStreams
+                        ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
+                        ?: mediaSources.firstOrNull()?.audioStreams.orEmpty()
+                },
                 selectedAudioStreamIndex = AppRuntime.prefs?.audioTrackFor(item.id),
                 onAudioStreamSelected = { streamIndex, override ->
                     manualAudioStreamSelection = true
                     AppRuntime.prefs?.rememberAudioTrack(item.id, streamIndex)
-                    if (override != null) {
+                    if (activeEngine == "mpv") {
+                        mpvBackend?.setAudioTrack(streamIndex)
+                    } else if (override != null) {
                         exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                             .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                             .addOverride(override)
@@ -1880,7 +1903,6 @@ fun PlayerScreen(
                         reloadForceTranscode = false
                         reloadKey++
                     }
-                    if (activeEngine == "mpv") mpvBackend?.setAudioTrack(streamIndex)
                 },
                 onSubtitleSelected = { AppRuntime.prefs?.rememberSubtitleTrack(item.id, it) },
                 onSubtitleOffset = {
