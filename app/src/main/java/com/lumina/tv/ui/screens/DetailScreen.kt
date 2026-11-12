@@ -133,6 +133,7 @@ fun DetailScreen(
     var detailPreviewIsTrailer by remember(id) { mutableStateOf(false) }
     var detailPreviewStartMs by remember(id) { mutableStateOf<Long?>(null) }
     var detailVideoPlaying by remember(id) { mutableStateOf(false) }
+    var detailPreviewFailure by remember(id) { mutableStateOf<String?>(null) }
     val previewResults = remember(id) { mutableMapOf<String, Triple<String?, String, Boolean>>() }
     val previewStartTimes = remember(id) { mutableMapOf<String, Long?>() }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
@@ -283,6 +284,7 @@ fun DetailScreen(
             return@LaunchedEffect
         }
         detailPreviewUrl = null
+        detailPreviewFailure = null
         val previewItem = when (current.type) {
             "Series" -> episodes.firstOrNull() ?: runCatching {
                 c.getEpisodes(current.id, selectedSeason?.id).firstOrNull()
@@ -321,6 +323,7 @@ fun DetailScreen(
         previewStartTimes[requestKey] = detailPreviewStartMs
         if (detailPreviewUrl.isNullOrBlank()) {
             detailVideoPlaying = false
+            detailPreviewFailure = "server-no-preview-url"
             failedDetailBackgroundKeys += detailPreviewKey
         }
     }
@@ -399,7 +402,10 @@ fun DetailScreen(
                 playing = !loading,
                 onStatus = {
                     detailVideoPlaying = it == "play"
-                    if (it.startsWith("skip=") && detailPreviewKey.isNotBlank()) {
+                    if (it == "skip=no-preview-url") {
+                        detailPreviewFailure = "server-no-preview-url"
+                    } else if (it.startsWith("skip=") && detailPreviewKey.isNotBlank()) {
+                        detailPreviewFailure = "playback-failed"
                         failedDetailBackgroundKeys += detailPreviewKey
                     }
                 },

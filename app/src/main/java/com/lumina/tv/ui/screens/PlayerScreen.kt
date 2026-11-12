@@ -218,6 +218,16 @@ fun PlayerScreen(
     var playStartAt by remember(item.id) { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
     var engineSwitchTrace by remember(item.id) { mutableStateOf(mutableListOf<String>()) }
     var currentPlaybackUrl by remember(item.id) { mutableStateOf<String?>(null) }
+    var currentPlayMethod by remember(item.id) { mutableStateOf("DirectPlay") }
+    var negotiationDiagnostics by remember(item.id) { mutableStateOf(JSONObject()) }
+    var sessionGeneration by remember(item.id) { mutableIntStateOf(0) }
+    var loadJob by remember(item.id) { mutableStateOf<Job?>(null) }
+    var phaseTimes by remember(item.id) { mutableStateOf(JSONObject()) }
+    var droppedFrames by remember(item.id) { mutableLongStateOf(0L) }
+    var renderedFrames by remember(item.id) { mutableLongStateOf(0L) }
+    var bufferingCount by remember(item.id) { mutableIntStateOf(0) }
+    var bufferingDurationMs by remember(item.id) { mutableLongStateOf(0L) }
+    var bufferingStartedAt by remember(item.id) { mutableLongStateOf(0L) }
     var lastPlaybackErrorJson by remember(item.id) { mutableStateOf<String?>(null) }
     var dvDecoderPath by remember(item.id) { mutableStateOf<String?>(null) }
     var activeVideoDecoder by remember(item.id) { mutableStateOf<String?>(null) }
@@ -359,7 +369,12 @@ fun PlayerScreen(
     fun startAutoNext() {
         if (nextTriggered || AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null) return
         nextTriggered = true
-        scope.launch {
+        loadJob?.cancel()
+        val generation = ++sessionGeneration
+        playStartAt = android.os.SystemClock.elapsedRealtime()
+        phaseTimes = JSONObject().put("session", generation).put("decoderInitMs", JSONObject.NULL)
+            .put("compatMappingMs", JSONObject.NULL).put("firstFrameMs", JSONObject.NULL).put("stableOutputMs", JSONObject.NULL)
+        loadJob = scope.launch {
             val c = client ?: return@launch
             val next = runCatching { c.getNextEpisode(item) }.getOrNull() ?: return@launch
             runCatching { c.reportStop(item.id, position) }
@@ -392,7 +407,11 @@ fun PlayerScreen(
             }
             } else position.takeIf { it > 0 } ?: item.positionTicks / 10_000
         }
-        scope.launch {
+        loadJob?.cancel()
+        val generation = ++sessionGeneration
+        playStartAt = android.os.SystemClock.elapsedRealtime()
+        phaseTimes = JSONObject().put("session", generation)
+        loadJob = scope.launch {
             error = null
             buffering = true
             firstFrameRendered = false
@@ -416,6 +435,10 @@ fun PlayerScreen(
                         manualAudioStreamSelection = manualAudioStreamSelection,
                     )
                 val target = resolvedTarget
+                if (generation != sessionGeneration) return@launch
+                phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
+                negotiationDiagnostics = target.negotiationDiagnostics
+                currentPlayMethod = target.playMethod
                 failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
@@ -444,6 +467,7 @@ fun PlayerScreen(
                         return@launch
                     }
                 }
+                if (generation != sessionGeneration) return@launch
                 val defaultAudio = target.source?.audioStreams?.firstOrNull { it.isDefault }
                     ?: target.source?.audioStreams?.firstOrNull()
                 val audioCodec = listOfNotNull(defaultAudio?.codec, defaultAudio?.profile).joinToString(" ").lowercase()
@@ -592,8 +616,9 @@ fun PlayerScreen(
                     exo.playWhenReady = true
                     exo.setPlaybackSpeed(if (boosting) 3f else speed)
                 }
-                c.reportStart(item.id, target.startPositionMs, target.source?.id, if (target.direct) "DirectPlay" else "Transcode")
+                if (generation == sessionGeneration) c.reportStart(item.id, target.startPositionMs, target.source?.id, target.playMethod)
             } catch (e: Exception) {
+                if (generation != sessionGeneration) return@launch
                 buffering = false
                 if (failurePhase == "未知") failurePhase = "解析"
                 val reason = e.message ?: "播放失败"
@@ -618,6 +643,7 @@ fun PlayerScreen(
             audioDecodeMode, degraded, engineSwitchTrace, exo, failurePhase, lastPlaybackErrorJson,
             mpvState, client?.lastPlaybackInfoJson, showControls, buffering, error, position,
             activeVideoDecoder, dvDecoderPath, playbackStatusNotice,
+            negotiationDiagnostics, phaseTimes, droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
         )
     }
 
@@ -863,6 +889,13 @@ fun PlayerScreen(
             override fun onPlaybackStateChanged(state: Int) {
                 if (activeEngine != "media3") return
                 buffering = state == Player.STATE_BUFFERING
+                if (state == Player.STATE_BUFFERING && bufferingStartedAt == 0L) {
+                    bufferingStartedAt = android.os.SystemClock.elapsedRealtime()
+                    bufferingCount++
+                } else if (state != Player.STATE_BUFFERING && bufferingStartedAt > 0L) {
+                    bufferingDurationMs += android.os.SystemClock.elapsedRealtime() - bufferingStartedAt
+                    bufferingStartedAt = 0L
+                }
                 if (state == Player.STATE_READY) {
                     playStartAt = android.os.SystemClock.elapsedRealtime()
                     if (!firstFrameRendered) readyWithoutFrameSince = System.currentTimeMillis()
@@ -980,6 +1013,7 @@ fun PlayerScreen(
                 initializationDurationMs: Long,
             ) {
                 activeVideoDecoder = decoderName
+                phaseTimes.put("decoderInitMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
             }
 
             override fun onRenderedFirstFrame(
@@ -988,8 +1022,18 @@ fun PlayerScreen(
                 renderTimeMs: Long,
             ) {
                 firstFrameRendered = true
+                phaseTimes.put("firstFrameMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
                 readyWithoutFrameSince = 0L
                 playbackStatusNotice = null
+                scope.launch { delay(2_000); if (firstFrameRendered) phaseTimes.put("stableOutputMs", android.os.SystemClock.elapsedRealtime() - playStartAt) }
+            }
+
+            override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFramesCount: Int, elapsedMs: Long) {
+                droppedFrames += droppedFramesCount
+            }
+
+            override fun onVideoFrameProcessingOffset(eventTime: AnalyticsListener.EventTime, totalProcessingOffsetUs: Long, frameCount: Int) {
+                renderedFrames += frameCount
             }
 
             override fun onBandwidthEstimate(
@@ -1007,6 +1051,13 @@ fun PlayerScreen(
 
     DisposableEffect(mpvBackend, item.id) {
         onDispose { mpvBackend?.release(); mpvBackend = null }
+    }
+
+    DisposableEffect(item.id) {
+        onDispose {
+            sessionGeneration++
+            loadJob?.cancel()
+        }
     }
 
     LaunchedEffect(seekHint) {
@@ -1141,7 +1192,7 @@ fun PlayerScreen(
             if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
                 sinceReport = 0
                 val paused = if (activeEngine == "mpv") !mpvState.playing else !exo.isPlaying
-                runCatching { AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId) }
+                runCatching { AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId, currentPlayMethod) }
             }
         }
     }

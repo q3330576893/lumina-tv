@@ -36,6 +36,12 @@ internal fun buildPlayerDiagPayload(
     activeVideoDecoder: String?,
     dvDecoderPath: String?,
     playbackStatusNotice: String?,
+    negotiationDiagnostics: JSONObject,
+    phaseTimes: JSONObject,
+    droppedFrames: Long,
+    renderedFrames: Long,
+    bufferingCount: Int,
+    bufferingDurationMs: Long,
 ): DiagPayload {
     val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
     val isDolbyVision = videoStream?.let {
@@ -47,6 +53,10 @@ internal fun buildPlayerDiagPayload(
             profile.contains("DVPROFILE") || profile.contains("DOLBYVISION") ||
             display.contains("DOVI") || display.contains("DOLBYVISION")
     } ?: false
+    val phases = JSONObject(phaseTimes.toString())
+    if (activeEngine == "mpv") listOf("decoderInitMs", "compatMappingMs", "firstFrameMs", "stableOutputMs").forEach { key ->
+        if (phases.isNull(key)) phases.put(key, "N/A")
+    }
     val meta = DiagExporter.baseMeta(context, outcome)
         .put("engine", JSONObject()
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
@@ -54,7 +64,9 @@ internal fun buildPlayerDiagPayload(
             .put("mpvAvailable", mpvBackend?.unavailableReason == null && mpvBackend != null)
             .put("kernels", JSONArray().put("media3").put("mpv")))
         .put("media", JSONObject()
-            .put("id", item.id).put("name", item.name).put("seriesName", item.seriesName ?: JSONObject.NULL)
+            .put("id", item.id)
+            .put("name", item.name)
+            .put("seriesName", item.seriesName ?: JSONObject.NULL)
             .put("container", playbackSource?.container ?: JSONObject.NULL)
             .put("size", playbackSource?.size ?: 0L)
             .put("isStrm", playbackSource?.container?.contains("strm", true) == true)
@@ -66,7 +78,16 @@ internal fun buildPlayerDiagPayload(
                 .put("displayTitle", videoStream?.displayTitle ?: JSONObject.NULL)
                 .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
                 .put("decoderPath", dvDecoderPath ?: JSONObject.NULL)))
-        .put("playback", JSONObject().put("url", currentPlaybackUrl ?: JSONObject.NULL))
+        .put("playback", JSONObject().put("url", currentPlaybackUrl ?: JSONObject.NULL)
+            .put("urlType", currentPlaybackUrl?.let {
+                when { it.contains(".m3u8", true) -> "hls"; else -> "static" }
+            } ?: "none").put("negotiation", negotiationDiagnostics)
+            .put("phasesMs", phases)
+            .put("frameStability", JSONObject().put("droppedFrames", droppedFrames)
+                .put("framesWithProcessingOffset", renderedFrames).put("bufferingCount", bufferingCount)
+                .put("bufferingDurationMs", bufferingDurationMs)
+                .put("sourceFps", videoStream?.frameRate ?: JSONObject.NULL)
+                .put("firstFrameLatencyMs", phases.opt("firstFrameMs"))))
         .put("audioDecode", JSONObject()
             .put("audioDecodeMode", audioDecodeMode)
             .put("audioDecodePath", when {
@@ -96,8 +117,9 @@ internal fun buildPlayerDiagPayload(
             for (i in 0 until group.length) {
                 val f = group.getTrackFormat(i)
                 formats.put(JSONObject()
+                    .put("sampleMimeType", f.sampleMimeType ?: JSONObject.NULL)
                     .put("id", f.id ?: JSONObject.NULL).put("label", f.label ?: JSONObject.NULL)
-                    .put("language", f.language ?: JSONObject.NULL).put("sampleMimeType", f.sampleMimeType ?: JSONObject.NULL)
+                    .put("language", f.language ?: JSONObject.NULL)
                     .put("codecs", f.codecs ?: JSONObject.NULL).put("bitrate", f.bitrate)
                     .put("width", f.width).put("height", f.height).put("sampleRate", f.sampleRate)
                     .put("channelCount", f.channelCount).put("selected", group.isTrackSelected(i))
@@ -121,8 +143,11 @@ internal fun buildPlayerDiagPayload(
         .put("lastPlaybackErrorCodeName", lastPlaybackErrorJson?.let {
             runCatching { JSONObject(it).optString("errorCodeName") }.getOrNull()
         } ?: JSONObject.NULL)
+        .put("hasPlaybackError", error != null)
+        .put("hasPlaybackNotice", playbackStatusNotice != null)
         .put("finalReason", error ?: playbackStatusNotice ?: JSONObject.NULL)
         .put("mpv", mpvState.error ?: "No mpv error recorded")
+        .put("mpvErrorPresent", mpvState.error != null)
         .put("mpvSoftwareRetryCount", mpvBackend?.softwareRetryCount() ?: 0)
         .put("audioDecodeFailure", AppRuntime.prefs?.lastPlaybackAudioFailure ?: "")
     return DiagPayload(

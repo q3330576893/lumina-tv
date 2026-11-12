@@ -776,20 +776,65 @@ class EmbyClient(
                 .put("MaxStreamingBitrate", DETAIL_PREVIEW_BITRATE)
                 .put("MediaSourceId", mediaSourceId)
                 .put("DeviceProfile", detailPreviewDeviceProfile())
-            val info = runCatching {
+            val endpoint = url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId))
+            var info: JSONObject? = try {
                 postSync(
-                    url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId)),
-                    body.toString(),
+                    endpoint, body.toString(),
                 )
-            }.getOrNull()
-            val first = info?.optJSONArray("MediaSources")?.optJSONObject(0)
-            if (first != null && isStrmSource(first)) {
-                val strmUrl = absUrl(first.optString("DirectStreamUrl"))
+            } catch (e: Exception) {
+                android.util.Log.w("EmbyClient", "detail preview playback info failed (${e.javaClass.simpleName})")
+                null
+            }
+            var sources = info?.optJSONArray("MediaSources")
+            var source = (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }
+                .firstOrNull { it.optString("Id") == mediaSourceId }
+            if (source == null) {
+                val confirmed = runCatching { getMediaSources(itemId) }.getOrDefault(emptyList())
+                    .firstOrNull { it.id == mediaSourceId }
+                if (confirmed != null && confirmed.streams.any { it.type == "Video" && isExplicitSdr(it.videoRangeType) && it.dvProfile == null }) {
+                    val retryBody = JSONObject(body.toString()).apply { remove("DeviceProfile") }
+                    info = try { postSync(endpoint, retryBody.toString()) }
+                    catch (e: Exception) {
+                        android.util.Log.w("EmbyClient", "detail preview fallback failed (${e.javaClass.simpleName})")
+                        null
+                    }
+                    sources = info?.optJSONArray("MediaSources")
+                    source = (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }
+                        .firstOrNull { it.optString("Id") == mediaSourceId }
+                }
+            }
+            val matched = source ?: return@withContext null
+            if (isStrmSource(matched)) {
+                val strmUrl = absUrl(matched.optString("DirectStreamUrl"))
                     ?: extractStrmUrl(getTextSync(url("/Items/$itemId/Download", mapOf("UserId" to userId))))
                 return@withContext strmUrl?.takeIf { it.startsWith("http", true) }
             }
-            absUrl(first?.optString("TranscodingUrl"))
+            absUrl(matched.optString("TranscodingUrl"))?.let { return@withContext it }
+            if (!isSafeLowRiskSource(matched)) return@withContext null
+            absUrl(matched.optString("DirectStreamUrl"))?.let { return@withContext it }
+            url("/Videos/$itemId/stream", mapOf("static" to "true", "MediaSourceId" to mediaSourceId))
         }
+
+    private fun isSafeLowRiskSource(source: JSONObject): Boolean {
+        val streams = source.optJSONArray("MediaStreams") ?: return false
+        val video = (0 until streams.length()).mapNotNull { streams.optJSONObject(it) }
+            .firstOrNull { it.optString("Type").equals("Video", true) } ?: return false
+        val bitrate = video.optLong("BitRate", -1L)
+        val width = video.optInt("Width", -1)
+        val height = video.optInt("Height", -1)
+        if (bitrate !in 1 until 8_000_000L || width !in 1..1920 || height !in 1..1080) return false
+        val range = listOf("VideoRangeType", "VideoRange").joinToString(" ") { video.optString(it) }
+        if (!isExplicitSdr(range) || video.has("DvProfile") && !video.isNull("DvProfile")) return false
+        val dvPattern = Regex("(?i)dv(?:he|h1|i)\\.?[0-9.]*")
+        val markers = listOf("Codec", "CodecTag", "Profile", "CodecTagString").joinToString(" ") { video.optString(it) }
+        return !dvPattern.containsMatchIn(markers) && !markers.contains("dolby vision", true)
+    }
+
+    private fun isExplicitSdr(value: String?): Boolean {
+        val normalized = value?.trim()?.uppercase().orEmpty()
+        return normalized.isNotEmpty() && (normalized == "SDR" || normalized == "STANDARD") &&
+            listOf("HDR", "PQ", "HLG", "DOVI", "DV").none(normalized::contains)
+    }
 
     private fun absUrl(value: String?): String? {
         val candidate = value?.trim().orEmpty()
@@ -807,6 +852,8 @@ data class PlaybackTarget(
         val startPositionMs: Long,
         val headers: Map<String, String> = emptyMap(),
         val durationMs: Long? = null,
+    val playMethod: String = "DirectPlay",
+    val negotiationDiagnostics: JSONObject = JSONObject(),
     )
 
     /** 解析单个 MediaSource JSON 为模型（含大小与分辨率）。 */
@@ -1079,6 +1126,29 @@ data class PlaybackTarget(
                 source = source,
                 startPositionMs = resolvedStartPositionMs,
                 headers = headers,
+                playMethod = when {
+                    first?.optString("PlayMethod").equals("Transcode", true) || first?.optString("PlayMethod").equals("Transcoding", true) -> "Transcode"
+                    transcodingUrl != null && finalUrl == transcodingUrl -> "Transcode"
+                    else -> "DirectPlay"
+                },
+                negotiationDiagnostics = JSONObject()
+                    .put("request", JSONObject().apply {
+                        // 如实记录：这 5 个布尔当前没发给服务器，就记 null，不假装 true
+                        listOf("EnableDirectPlay", "EnableDirectStream", "EnableTranscoding",
+                            "AllowVideoStreamCopy", "AllowAudioStreamCopy").forEach { key ->
+                            put(key, if (infoBody.has(key)) infoBody.opt(key) else JSONObject.NULL)
+                        }
+                        put("MaxStreamingBitrate", infoBody.opt("MaxStreamingBitrate") ?: JSONObject.NULL)
+                        put("DeviceProfilePresent", infoBody.has("DeviceProfile"))
+                    })
+                    .put("server", JSONObject().put("playMethod", first?.optString("PlayMethod")?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+                        .put("transcodingUrlType", when {
+                            first?.optString("TranscodingUrl").orEmpty().isBlank() -> "none"
+                            first?.optString("TranscodingUrl").orEmpty().contains(".m3u8", true) -> "hls"
+                            else -> "static"
+                        }).put("transcodeReasons", first?.optJSONArray("TranscodeReasons") ?: JSONArray()))
+                    .put("selectedAudioIndex", audioStreamIndex ?: JSONObject.NULL)
+                    .put("selectedSubtitleIndex", JSONObject.NULL),
             ).also { target ->
                 if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect)] =
                     System.currentTimeMillis() to target
@@ -1201,14 +1271,14 @@ data class PlaybackTarget(
         }.onFailure { lastApiFailure = "reportStart: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }
     }
 
-    suspend fun reportProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?) = withContext(Dispatchers.IO) {
+    suspend fun reportProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String) = withContext(Dispatchers.IO) {
         runCatching {
             postSync(url("/Sessions/Playing/Progress", emptyMap()), JSONObject()
                 .put("ItemId", itemId)
                 .put("PositionTicks", positionMs * 10_000)
                 .put("IsPaused", paused)
                 .put("CanSeek", true)
-                .put("PlayMethod", "DirectPlay")
+                .put("PlayMethod", playMethod)
                 .put("MediaSourceId", mediaSourceId ?: itemId)
                 .toString())
         }.onSuccess {

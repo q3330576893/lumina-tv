@@ -48,8 +48,8 @@ fun DetailVideoBackground(
     LaunchedEffect(url, mediaKey) {
         probeResult = null
         if (url.isNullOrBlank()) {
-            probeResult = "skip=url"
-            onStatus("skip=url")
+            probeResult = "skip=no-preview-url"
+            onStatus("skip=no-preview-url")
             return@LaunchedEffect
         }
 
@@ -62,7 +62,7 @@ fun DetailVideoBackground(
             }
             else -> "skip=url"
         }
-        if (probeResult != "valid") onStatus(probeResult ?: "skip=err")
+        if (probeResult != "valid") onStatus("skip=playback-failed")
     }
 
     if (probeResult == "valid" && !url.isNullOrBlank()) {
@@ -115,11 +115,10 @@ private fun DetailVideoPlayback(
         val cacheFactory = CacheDataSource.Factory()
             .setCache(PreviewVideoCache.get(context))
             .setUpstreamDataSourceFactory(httpFactory)
-            .setCacheKeyFactory { dataSpec -> dataSpec.key ?: dataSpec.uri.toString() }
-        val mediaItem = MediaItem.Builder()
-            .setUri(url)
-            .setCustomCacheKey(cacheKey)
-            .build()
+            .setCacheKeyFactory { dataSpec -> cacheUriKey(Uri.parse(dataSpec.key ?: dataSpec.uri.toString())) }
+        val builder = MediaItem.Builder().setUri(url)
+        if (!url.contains(".m3u8", true)) builder.setCustomCacheKey(cacheKey)
+        val mediaItem = builder.build()
         val nextPlayer = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(cacheFactory))
             .build()
@@ -159,7 +158,7 @@ private fun DetailVideoPlayback(
 
             override fun onPlayerError(error: PlaybackException) {
                 failed = true
-                onStatus("skip=err")
+                onStatus("skip=playback-failed")
             }
         }
         player.addListener(listener)
@@ -244,6 +243,11 @@ private fun DetailVideoPlayback(
         }
     }
 }
+
+private fun cacheUriKey(uri: Uri): String = uri.buildUpon().clearQuery().apply {
+    uri.queryParameterNames.filterNot { it.contains("api_key", true) || it.contains("token", true) || it.contains("authorization", true) }
+        .forEach { name -> uri.getQueryParameters(name).forEach { appendQueryParameter(name, it) } }
+}.build().toString()
 
 data class VideoSourceProbeResult(
     val valid: Boolean?,
