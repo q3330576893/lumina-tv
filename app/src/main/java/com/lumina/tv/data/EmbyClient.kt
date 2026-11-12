@@ -19,6 +19,8 @@ import java.io.IOException
 import java.io.InterruptedIOException
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import android.net.Uri
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
@@ -126,12 +128,34 @@ class EmbyClient(
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
+    private fun retryAfterMillis(value: String?, serverDate: String?): Long? {
+        val raw = value?.trim()?.takeIf(String::isNotEmpty) ?: return null
+        val delay = raw.toLongOrNull()?.let { it.coerceAtMost(60L).coerceAtLeast(0L) * 1_000L } ?: runCatching {
+            val retryAt = ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli()
+            val now = serverDate?.let { ZonedDateTime.parse(it, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli() }
+                ?: System.currentTimeMillis()
+            (retryAt - now).coerceAtLeast(0L)
+        }.getOrNull() ?: return null
+        return delay.coerceAtMost(60_000L)
+    }
+
     private fun getSync(url: String, withToken: Boolean = true, timeoutSeconds: Int? = null): JSONObject {
         val req = Request.Builder().url(url).header("X-Emby-Authorization", authHeader(withToken)).build()
         var attempts = 0
+        var rateLimitRetries = 0
         while (true) {
             try {
-                http.newCall(req).apply { timeoutSeconds?.let { timeout().timeout(it.toLong(), TimeUnit.SECONDS) } }.execute().use { resp ->
+                val response = http.newCall(req).apply { timeoutSeconds?.let { timeout().timeout(it.toLong(), TimeUnit.SECONDS) } }.execute()
+                if (response.code == 429 && rateLimitRetries == 0) {
+                    val delayMs = retryAfterMillis(response.header("Retry-After"), response.header("Date"))
+                    if (delayMs != null) {
+                        rateLimitRetries++
+                        response.close()
+                        Thread.sleep(delayMs)
+                        continue
+                    }
+                }
+                response.use { resp ->
                     val body = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
                         val failure = "HTTP ${resp.code}: ${safeErrorBody(body)}"
@@ -159,7 +183,19 @@ class EmbyClient(
             .header("X-Emby-Authorization", authHeader())
             .post((body ?: "{}").toRequestBody(jsonType))
             .build()
-        http.newCall(req).execute().use { resp ->
+        var rateLimitRetries = 0
+        while (true) {
+            val response = http.newCall(req).execute()
+            if (response.code == 429 && url.contains("/PlaybackInfo", true) && rateLimitRetries == 0) {
+                val delayMs = retryAfterMillis(response.header("Retry-After"), response.header("Date"))
+                if (delayMs != null) {
+                    rateLimitRetries++
+                    response.close()
+                    Thread.sleep(delayMs)
+                    continue
+                }
+            }
+            response.use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 val failure = "HTTP ${resp.code}: ${safeErrorBody(text)}"
@@ -172,6 +208,7 @@ class EmbyClient(
                 val failure = "HTTP ${resp.code} non-json: ${text.replace(Regex("[\\r\\n]+"), " ").take(120)}"
                 lastApiFailure = failure
                 throw EmbyException(failure)
+            }
             }
         }
     }
@@ -513,11 +550,11 @@ class EmbyClient(
         return null
     }
 
-    private fun playbackTargetKey(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean) =
-        "$itemId|$forceTranscode|${sourceId.orEmpty()}|${audioStreamIndex ?: ""}|$forceDirect"
+    private fun playbackTargetKey(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long) =
+        "$itemId|$forceTranscode|${sourceId.orEmpty()}|${audioStreamIndex ?: ""}|$forceDirect|$maxStreamingBitrate"
 
-    fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean): PlaybackTarget? {
-        val cached = playbackTargetCache.remove(playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect)) ?: return null
+    fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long = 120_000_000L): PlaybackTarget? {
+        val cached = playbackTargetCache.remove(playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate)) ?: return null
         return cached.second.takeIf { System.currentTimeMillis() - cached.first < 120_000L }
     }
 
@@ -1020,6 +1057,7 @@ data class PlaybackTarget(
         removeSubtitleParams: Boolean = false,
         preferDirectStreamUrl: Boolean = false,
         manualAudioStreamSelection: Boolean = false,
+        maxStreamingBitrate: Long = 120_000_000L,
         recordDiagnostics: Boolean = true,
         cacheResult: Boolean = false,
     ): PlaybackTarget =
@@ -1029,7 +1067,7 @@ data class PlaybackTarget(
                 .put("StartTimeTicks", startPositionMs.coerceAtLeast(0L) * 10_000)
                 .put("IsPlayback", true)
                 .put("AutoOpenLiveStream", false)
-                .put("MaxStreamingBitrate", 120_000_000)
+                .put("MaxStreamingBitrate", maxStreamingBitrate.coerceIn(20_000_000L, 120_000_000L))
                 .put("DeviceProfile", deviceProfile())
                 .apply {
                     PlaybackRequestFlag.values().filter { it.send }.forEach { flag ->
@@ -1167,7 +1205,7 @@ data class PlaybackTarget(
                     .put("selectedAudioIndex", audioStreamIndex ?: JSONObject.NULL)
                     .put("selectedSubtitleIndex", JSONObject.NULL),
             ).also { target ->
-                if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect)] =
+                if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect, maxStreamingBitrate)] =
                     System.currentTimeMillis() to target
             }
         }

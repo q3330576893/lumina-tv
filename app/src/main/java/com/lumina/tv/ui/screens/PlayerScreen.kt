@@ -114,7 +114,9 @@ import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.ui.components.DiagExportDialog
-import com.lumina.tv.ui.components.VideoSourceProbe
+import com.lumina.tv.player.PlaybackErrorCategory
+import com.lumina.tv.player.PlaybackRangeProbe
+import com.lumina.tv.player.classifyPlaybackError
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -202,7 +204,6 @@ fun PlayerScreen(
     var badHttpFallbackStage by remember(item.id) { mutableIntStateOf(0) }
     var manualAudioStreamSelection by remember(item.id) { mutableStateOf(false) }
     var transcodeFallbackTried by remember(item.id) { mutableStateOf(false) }
-    var invalidSourceDetected by remember(item.id) { mutableStateOf(false) }
     // 同一部片可能有多个版本（不同压制/大小），一个播不了就换下一个
     var mediaSources by remember(item.id) { mutableStateOf<List<MediaSource>>(emptyList()) }
     var triedSources by remember(item.id) { mutableStateOf<Set<String>>(emptySet()) }
@@ -220,6 +221,10 @@ fun PlayerScreen(
     var currentPlaybackUrl by remember(item.id) { mutableStateOf<String?>(null) }
     var currentPlayMethod by remember(item.id) { mutableStateOf("DirectPlay") }
     var negotiationDiagnostics by remember(item.id) { mutableStateOf(JSONObject()) }
+    var rangeProbeDiagnostics by remember(item.id) { mutableStateOf(JSONObject()) }
+    var rangeProbeJob by remember(item.id) { mutableStateOf<Job?>(null) }
+    var networkRetryJob by remember(item.id) { mutableStateOf<Job?>(null) }
+    var networkRetryCount by remember(item.id) { mutableIntStateOf(0) }
     var sessionGeneration by remember(item.id) { mutableIntStateOf(0) }
     var loadJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var phaseTimes by remember(item.id) { mutableStateOf(JSONObject()) }
@@ -370,6 +375,8 @@ fun PlayerScreen(
         if (nextTriggered || AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null) return
         nextTriggered = true
         loadJob?.cancel()
+        networkRetryJob?.cancel()
+        rangeProbeJob?.cancel()
         val generation = ++sessionGeneration
         playStartAt = android.os.SystemClock.elapsedRealtime()
         phaseTimes = JSONObject().put("session", generation).put("decoderInitMs", JSONObject.NULL)
@@ -408,6 +415,8 @@ fun PlayerScreen(
             } else position.takeIf { it > 0 } ?: item.positionTicks / 10_000
         }
         loadJob?.cancel()
+        networkRetryJob?.cancel()
+        rangeProbeJob?.cancel()
         val generation = ++sessionGeneration
         playStartAt = android.os.SystemClock.elapsedRealtime()
         phaseTimes = JSONObject().put("session", generation)
@@ -422,9 +431,9 @@ fun PlayerScreen(
             dvDecoderPath = null
             failurePhase = "解析"
             try {
-                invalidSourceDetected = false
                 if (forceTranscode) transcodeFallbackTried = true
-                val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext)
+                val maxStreamingBitrate = AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
+                val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate)
                     ?.copy(startPositionMs = resumePosition)
                     else null
                 val resolvedTarget = cachedTarget ?: c.resolvePlayback(
@@ -433,6 +442,7 @@ fun PlayerScreen(
                         removeSubtitleParams = badHttpFallbackStage == 1,
                         preferDirectStreamUrl = badHttpFallbackStage == 2,
                         manualAudioStreamSelection = manualAudioStreamSelection,
+                        maxStreamingBitrate = maxStreamingBitrate,
                     )
                 val target = resolvedTarget
                 if (generation != sessionGeneration) return@launch
@@ -450,21 +460,15 @@ fun PlayerScreen(
                     else -> "SDR"
                 }
                 currentPlaybackUrl = target.url
+                rangeProbeDiagnostics = JSONObject().put("state", "pending")
                 val targetIsHls = target.url.contains("master.m3u8", true) || target.url.contains(".m3u8", true)
                 if (targetIsHls) transcodeFallbackTried = true
-                if (VideoSourceProbe.shouldProbe(target.url)) {
-                    val probe = VideoSourceProbe.probe(target.url, target.headers)
-                    if (probe.valid == false) {
-                        invalidSourceDetected = true
-                        buffering = false
-                        error = buildString {
-                            append("片源不可用：这个地址返回的不是视频文件（网盘链接可能已失效或需要登录）")
-                            append("\nHTTP ").append(probe.statusCode ?: "未知")
-                            if (probe.prefix.isNotBlank()) append("\n响应开头：").append(probe.prefix.take(60))
-                        }
-                        failurePhase = "连接"
-                        engineSwitchTrace.add("source-probe-invalid:${probe.statusCode ?: "unknown"}")
-                        return@launch
+                rangeProbeJob = scope.launch {
+                    val probeResult = runCatching { PlaybackRangeProbe.probe(target.url, target.headers) }
+                        .getOrElse { JSONObject().put("error", it.javaClass.simpleName) }
+                    if (generation == sessionGeneration) {
+                        rangeProbeDiagnostics = probeResult
+                        phaseTimes.put("rangeProbe", probeResult)
                     }
                 }
                 if (generation != sessionGeneration) return@launch
@@ -645,7 +649,7 @@ fun PlayerScreen(
             audioDecodeMode, degraded, engineSwitchTrace, exo, failurePhase, lastPlaybackErrorJson,
             mpvState, client?.lastPlaybackInfoJson, showControls, buffering, error, position,
             activeVideoDecoder, dvDecoderPath, playbackStatusNotice,
-            negotiationDiagnostics, phaseTimes, droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
+            negotiationDiagnostics, rangeProbeDiagnostics, phaseTimes, droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
         )
     }
 
@@ -663,7 +667,14 @@ fun PlayerScreen(
         }
         if (activeEngine == "media3") loadSource(AppRuntime.prefs?.forceTranscode ?: false, initialSourceId)
     }
-    LaunchedEffect(activeEngine) { AppRuntime.activePlayerEngine = activeEngine }
+    LaunchedEffect(activeEngine) {
+        AppRuntime.activePlayerEngine = activeEngine
+        if (activeEngine != "media3") {
+            networkRetryJob?.cancel()
+            networkRetryJob = null
+            playbackStatusNotice = null
+        }
+    }
 
     LaunchedEffect(exo, mpvBackend, subtitleOffsetMs) {
         subtitleRenderersFactory.subtitleOffsetMs = subtitleOffsetMs
@@ -730,18 +741,19 @@ fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
                 if (activeEngine != "media3") return
-                if (invalidSourceDetected) return
+                val errorClass = classifyPlaybackError(err)
+                android.util.Log.e("LuminaTV", "Media3 playback failed code=${err.errorCode}", err)
                 failurePhase = when {
-                    err.errorCodeName.contains("IO", true) -> "连接"
-                    err.errorCodeName.contains("DEMUX", true) || err.errorCodeName.contains("PARSING", true) -> "解封装"
-                    err.errorCodeName.contains("DECOD", true) -> "解码"
-                    err.errorCodeName.contains("RENDER", true) -> "渲染"
-                    else -> "解码"
+                    errorClass.category == PlaybackErrorCategory.NETWORK_TRANSIENT || errorClass.category == PlaybackErrorCategory.HTTP_PERMISSION -> "连接"
+                    errorClass.category == PlaybackErrorCategory.PARSING -> "解封装"
+                    errorClass.category == PlaybackErrorCategory.DECODING -> "解码"
+                    else -> "未知"
                 }
                 lastPlaybackErrorJson = JSONObject()
                     .put("engine", activeEngine)
                     .put("errorCodeName", err.errorCodeName)
                     .put("errorCode", err.errorCode)
+                    .put("category", errorClass.category.name)
                     .put("message", err.message)
                     .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
                     .put("dolbyVision", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.let {
@@ -751,31 +763,49 @@ fun PlayerScreen(
                     .put("videoRangeType", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.videoRangeType ?: JSONObject.NULL)
                     .put("decoderPath", dvDecoderPath ?: JSONObject.NULL)
                     .put("causes", JSONArray().apply {
-                        generateSequence(err as Throwable?) { it.cause }.take(5)
+                        generateSequence(err as Throwable?) { it.cause }
                             .forEach { put(it.message ?: it::class.java.name) }
-                    }).toString(2)
-                val containerUnsupported = err.errorCodeName.contains("PARSING", true) ||
-                    err.errorCodeName.contains("DEMUX", true) ||
-                    err.errorCodeName.contains("CONTAINER", true)
-                val decodingUnsupported = err.errorCodeName.contains("DECOD", true)
+                    })
+                    .put("exceptionChain", android.util.Log.getStackTraceString(err))
+                    .toString(2)
+                val containerUnsupported = errorClass.category == PlaybackErrorCategory.PARSING
+                val decodingUnsupported = errorClass.category == PlaybackErrorCategory.DECODING
                 val currentIsHls = currentPlaybackUrl?.let {
                     it.contains("master.m3u8", true) || it.contains(".m3u8", true)
                 } == true
-                val isBadHttpStatus = err.errorCodeName.contains("IO_BAD_HTTP_STATUS", true) &&
+                val isBadHttpStatus = err.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS &&
                     generateSequence(err as Throwable?) { it.cause }
-                        .any { it.message.orEmpty().contains(Regex("\\b400\\b")) }
-                if (isBadHttpStatus && badHttpFallbackStage < 2) {
+                        .any { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode == 400 }
+                if (errorClass.category == PlaybackErrorCategory.NETWORK_TRANSIENT && networkRetryCount < 2) {
+                    val retryIndex = networkRetryCount++
+                    val generation = sessionGeneration
+                    networkRetryJob?.cancel()
+                    buffering = true
+                    error = null
+                    playbackStatusNotice = "网络波动，${retryIndex + 1}/2 秒后重试"
+                    networkRetryJob = scope.launch {
+                        delay(if (retryIndex == 0) 1_000L else 3_000L)
+                        if (generation == sessionGeneration && activeEngine == "media3") {
+                            playbackStatusNotice = null
+                            buffering = true
+                            exo.prepare()
+                        }
+                    }
+                } else if (errorClass.category == PlaybackErrorCategory.HTTP_PERMISSION) {
+                    buffering = false
+                    error = "媒体服务器拒绝了播放请求（权限或认证失败）"
+                } else if (isBadHttpStatus && badHttpFallbackStage < 2) {
                     badHttpFallbackStage++
                     buffering = true
                     error = null
                     audioDecodeNotice = if (badHttpFallbackStage == 1) "HTTP 400，正在尝试移除字幕转码参数" else "字幕参数回退失败，正在尝试服务器直连地址"
                     engineSwitchTrace.add("http-400-fallback:$badHttpFallbackStage")
                     reloadKey++
-                } else if (audioDecodeMode == "passthrough" && err.errorCodeName.contains("DECOD", true)) {
+                } else if (audioDecodeMode == "passthrough" && decodingUnsupported) {
                     buffering = false
                     audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
                     error = "设备不支持该音轨直通，建议改回自动"
-                } else if (audioDecodeMode != "passthrough" && err.errorCodeName.contains("DECOD", true) && !mpvFallbackTried) {
+                } else if (audioDecodeMode != "passthrough" && decodingUnsupported && !mpvFallbackTried) {
                     buffering = false
                     mpvFallbackTried = true
                     audioDecodeNotice = "本机解码不支持该音轨，已自动切到 mpv 本地软解"
@@ -832,7 +862,6 @@ fun PlayerScreen(
                     currentSourceId = next.id
                     directFallbackTried = false
                     transcodeFallbackTried = false
-                    invalidSourceDetected = false
                     degraded = false
                     forceDirectNext = false
                     enginePinned = null
@@ -1762,7 +1791,6 @@ fun PlayerScreen(
                     optionMenu = false
                     directFallbackTried = false
                     transcodeFallbackTried = false
-                    invalidSourceDetected = false
                     forceDirectNext = false
                     degraded = false
                     loadSource(AppRuntime.prefs?.forceTranscode ?: false, sid)

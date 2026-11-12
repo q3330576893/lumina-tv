@@ -65,6 +65,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("fast_start", true)
         set(v) = sp.edit().putBoolean("fast_start", v).apply()
 
+    var maxStreamingBitrate: Long
+        get() = sp.getLong("max_streaming_bitrate", 120_000_000L).takeIf { it in STREAMING_BITRATE_OPTIONS }
+            ?: 120_000_000L
+        set(v) = sp.edit().putLong("max_streaming_bitrate", v.takeIf { it in STREAMING_BITRATE_OPTIONS } ?: 120_000_000L).apply()
+
 
     var savedServersJson: String
         get() = sp.getString("saved_servers", "[]") ?: "[]"
@@ -337,3 +342,5 @@ class Prefs(context: Context) {
 
     fun hasSession(): Boolean = baseUrl.isNotBlank() && token.isNotBlank() && userId.isNotBlank()
 }
+
+val STREAMING_BITRATE_OPTIONS = setOf(20_000_000L, 40_000_000L, 80_000_000L, 120_000_000L)

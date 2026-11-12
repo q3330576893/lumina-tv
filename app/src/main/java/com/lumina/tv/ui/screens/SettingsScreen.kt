@@ -89,6 +89,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
     var licensesOpen by remember { mutableStateOf(false) }
     var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
+    var maxStreamingBitrate by remember { mutableStateOf(prefs?.maxStreamingBitrate ?: 120_000_000L) }
     var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
     var mpvBroken by remember { mutableStateOf(prefs?.mpvBroken ?: false) }
     var savedServers by remember { mutableStateOf(prefs?.savedServers().orEmpty()) }
@@ -433,7 +434,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 }
                             }
                         }
-
                         Spacer(Modifier.height(14.dp))
                         SwitchRow(
                             title = "自动连播",
@@ -575,6 +575,22 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                     prefs?.decoderPreference = key
                                 }) { focused ->
                                     Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = 0.9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Text("播放码率上限", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(8.dp))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(20_000_000L to "20 Mbps", 40_000_000L to "40 Mbps", 80_000_000L to "80 Mbps", 120_000_000L to "120 Mbps").forEach { (value, label) ->
+                                val active = maxStreamingBitrate == value
+                                FocusSurface(Modifier.width(98.dp).height(36.dp), corner = 12.dp, onClick = {
+                                    maxStreamingBitrate = value
+                                    prefs?.maxStreamingBitrate = value
+                                }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = 0.9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
                                         Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
                                     }
                                 }

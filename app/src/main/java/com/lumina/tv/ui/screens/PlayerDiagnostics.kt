@@ -37,6 +37,7 @@ internal fun buildPlayerDiagPayload(
     dvDecoderPath: String?,
     playbackStatusNotice: String?,
     negotiationDiagnostics: JSONObject,
+    rangeProbeDiagnostics: JSONObject,
     phaseTimes: JSONObject,
     droppedFrames: Long,
     renderedFrames: Long,
@@ -82,6 +83,7 @@ internal fun buildPlayerDiagPayload(
             .put("urlType", currentPlaybackUrl?.let {
                 when { it.contains(".m3u8", true) -> "hls"; else -> "static" }
             } ?: "none").put("negotiation", negotiationDiagnostics)
+            .put("rangeProbe", rangeProbeDiagnostics)
             .put("phasesMs", phases)
             .put("frameStability", JSONObject().put("droppedFrames", droppedFrames)
                 .put("framesWithProcessingOffset", renderedFrames).put("bufferingCount", bufferingCount)
