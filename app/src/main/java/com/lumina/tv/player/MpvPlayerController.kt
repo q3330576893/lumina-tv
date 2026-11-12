@@ -53,6 +53,7 @@ class MpvPlayerController(
     private val loadTimeout = Runnable { onLoadTimeout() }
 
     init {
+        Log.i(TAG, "${timestamp()} MPVLib.create starting")
         val created = runCatching { MPVLib.create(context.applicationContext) }
         if (created.isFailure || created.getOrNull() == null) {
             unavailableReason = created.exceptionOrNull()?.message ?: "libmpv 初始化失败或当前设备 ABI 不受支持"
@@ -73,14 +74,14 @@ class MpvPlayerController(
                     "tone-mapping" to "bt.2446a",
                     "hdr-compute-peak" to "yes",
                     "target-peak" to "auto",
-                    "force-window" to "yes",
-                    "hwdec" to "auto-safe",
+                    "hwdec" to "mediacodec",
                     "hwdec-codecs" to "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1",
                     "cache" to "yes",
                     "keep-open" to "no",
                     "tls-verify" to "no",
                     "sub-scale" to "1.0",
                 ).forEach { (key, value) -> engine.setOptionString(key, value) }
+                Log.i(TAG, "${timestamp()} MPVLib.init starting (create -> init; Surface attached later)")
                 engine.init()
                 engine.addObserver(this)
                 engine.addLogObserver(logObserver)
@@ -96,12 +97,13 @@ class MpvPlayerController(
                 runCatching { engine.destroy() }
                 mpv = null
                 emit(error = "该设备不支持 mpv 内核：$unavailableReason")
-            }.onSuccess { Log.i(TAG, "mpv initialization succeeded") }
+            }.onSuccess { Log.i(TAG, "${timestamp()} MPVLib.init succeeded") }
         }
     }
 
     fun attachSurface(surface: Surface, width: Int = 0, height: Int = 0) {
         if (!released && surface.isValid) {
+            Log.i(TAG, "${timestamp()} MPVLib.attachSurface (init already completed)")
             mpv?.attachSurface(surface)
             if (attachedSurface !== surface || (width > 0 && height > 0 &&
                     (width != lastSurfaceWidth || height != lastSurfaceHeight))) {
@@ -123,6 +125,7 @@ class MpvPlayerController(
 
     fun detachSurface() {
         if (!released) {
+            Log.i(TAG, "${timestamp()} MPVLib.detachSurface")
             mpv?.detachSurface()
             if (attachedSurface != null) Log.d(TAG, "surface detached")
             attachedSurface = null
@@ -151,7 +154,7 @@ class MpvPlayerController(
         positionMs = pendingPositionMs
         softwareRetryUsed = false
         softwareRetryCount = 0
-        mpv?.setOptionString("hwdec", "auto-safe")
+        mpv?.setOptionString("hwdec", "mediacodec")
         val headerFields = headers.entries.mapNotNull { (key, value) ->
             if (',' in key || ',' in value) {
                 Log.w(TAG, "Skipping HTTP header containing comma: $key")
@@ -163,6 +166,7 @@ class MpvPlayerController(
         if (headerFields.isNotEmpty()) {
             runCatching { mpv?.setOptionString("http-header-fields", headerFields.joinToString(",")) }
         }
+        Log.i(TAG, "${timestamp()} MPVLib.load (create -> init -> attachSurface -> load)")
         runCatching { mpv?.command(loadCommand(url, pendingPositionMs)) }.onFailure {
             emit(error = "mpv 加载失败：${it.message ?: "未知错误"}")
             return
@@ -242,6 +246,7 @@ class MpvPlayerController(
         released = true
         handler.removeCallbacks(loadTimeout)
         mpv?.let { engine ->
+            Log.i(TAG, "${timestamp()} MPVLib.destroy (release)")
             runCatching { engine.removeObserver(this) }
             runCatching { engine.removeLogObserver(logObserver) }
             if (attachedSurface != null) runCatching { engine.detachSurface() }

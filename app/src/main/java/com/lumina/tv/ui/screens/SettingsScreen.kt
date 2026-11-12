@@ -90,7 +90,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var licensesOpen by remember { mutableStateOf(false) }
     var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
     var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
-    val mpvBroken = prefs?.mpvBroken ?: false
+    var mpvBroken by remember { mutableStateOf(prefs?.mpvBroken ?: false) }
     var savedServers by remember { mutableStateOf(prefs?.savedServers().orEmpty()) }
     var hiddenIds by remember { mutableStateOf(prefs?.hiddenViewIds ?: emptySet()) }
     var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
@@ -714,6 +714,17 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                     Box(Modifier.fillMaxSize().background(if (active && !mpvBroken) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
                                         Text(label, color = if (active && !mpvBroken) Color(0xFF06101F) else if (mpvBroken && key == "mpv") TextSub.copy(alpha = .6f) else TextMain, fontSize = 11.sp)
                                     }
+                                }
+                            }
+                        }
+                        if (mpvBroken) {
+                            Spacer(Modifier.height(8.dp))
+                            FocusSurface(Modifier.height(36.dp).width(150.dp), corner = 18.dp, onClick = {
+                                prefs?.mpvBroken = false
+                                mpvBroken = false
+                            }) { focused ->
+                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
+                                    Text("重置 mpv 状态", color = TextMain, fontSize = 11.sp)
                                 }
                             }
                         }

@@ -552,7 +552,7 @@ fun PlayerScreen(
                         isPlaying = state.playing
                         if (state.ended) startAutoNext()
                         if (state.error != null) {
-                            if (state.error.contains("12s 无首帧") || state.error.contains("不支持 mpv")) {
+                            if (state.error.contains("不支持 mpv")) {
                                 AppRuntime.prefs?.mpvBroken = true
                             }
                             error = if (AppRuntime.prefs?.playerEngine == "auto") {
@@ -603,11 +603,13 @@ fun PlayerScreen(
                         reloadKey++
                         return@launch
                     }
+                    if (generation != sessionGeneration) return@launch
                     backend.attachSurface(surface)
                     val externalSubtitles = subs.mapNotNull { stream ->
                         srcId?.let { c.subtitleUrl(item.id, it, stream.index, "vtt") }
                     }
                     backend.setSpeed(if (boosting) 3f else speed)
+                    if (generation != sessionGeneration) return@launch
                     backend.load(target.url, target.startPositionMs, externalSubtitles, target.headers)
                 } else {
                     exo.setMediaSource(merged)
