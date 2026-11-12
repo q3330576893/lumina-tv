@@ -103,6 +103,9 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lumina.tv.ui.components.GlassPanel
+import com.lumina.tv.ui.components.FrostPanel
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
 import androidx.compose.ui.platform.LocalUriHandler
 import java.net.URLEncoder
 
@@ -117,6 +120,7 @@ fun DetailScreen(
     onBack: () -> Unit,
 ) {
     val client = AppRuntime.client
+    val detailHazeState = remember { HazeState() }
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
     var item by remember { mutableStateOf<MediaItem?>(null) }
@@ -394,7 +398,7 @@ fun DetailScreen(
                 model = client?.backdropUrl(it0, 1920),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().blur(42.dp),
+                modifier = Modifier.fillMaxSize().blur(42.dp).hazeSource(detailHazeState),
             )
             DetailVideoBackground(
                 url = detailPreviewUrl,
@@ -728,6 +732,7 @@ fun DetailScreen(
                         source = activeSource,
                         expanded = mediaInfoExpanded,
                         onToggle = { mediaInfoExpanded = !mediaInfoExpanded },
+                        hazeState = detailHazeState,
                     )
                 }
 
@@ -976,7 +981,7 @@ private fun hasMediaInfo(source: MediaSource): Boolean = source.name.isNotBlank(
     }
 
 @Composable
-private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: () -> Unit) {
+private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: () -> Unit, hazeState: HazeState) {
     val video = source.streams.firstOrNull { it.type.equals("Video", true) }
     val fileRows = listOfNotNull(
         source.name.takeIf(String::isNotBlank)?.let { "文件名" to it },
@@ -1000,8 +1005,9 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
 
     BackHandler(enabled = expanded) { onToggle() }
 
-    FocusGlassSurface(
-        modifier = Modifier.fillMaxWidth().height(52.dp),
+    FrostPanel(Modifier.fillMaxWidth().height(52.dp), hazeState = hazeState, corner = 14.dp, strong = true) {
+      FocusGlassSurface(
+        modifier = Modifier.fillMaxSize(),
         corner = 14.dp,
         onClick = onToggle,
     ) { focused ->
@@ -1021,6 +1027,7 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
             Spacer(Modifier.width(6.dp))
             Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = if (focused) Accent else Color(0x73FFFFFF), modifier = Modifier.size(18.dp))
         }
+      }
     }
 
     AnimatedVisibility(
@@ -1055,12 +1062,12 @@ private fun FocusGlassSurface(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.015f else 1f, tween(130), label = "mediaInfoFocus")
+    val scale by animateFloatAsState(if (focused) 1.02f else 1f, tween(240), label = "mediaInfoFocus")
     Box(
         modifier.graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(corner))
-            .background(if (focused) Color(0x29FFFFFF) else normalFill)
-            .border(if (focused) 1.5.dp else 1.dp, if (focused) Accent else Color(0x29FFFFFF), RoundedCornerShape(corner))
+            .background(if (focused) ThemeRuntime.glassFillStrong else normalFill)
+            .border(if (focused) 1.5.dp else 1.dp, if (focused) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge, RoundedCornerShape(corner))
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { content(focused) }

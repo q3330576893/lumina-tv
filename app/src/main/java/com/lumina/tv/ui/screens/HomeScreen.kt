@@ -3,6 +3,7 @@
 package com.lumina.tv.ui.screens
 
 import android.util.Log
+import android.app.ActivityManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -169,6 +170,11 @@ fun HomeScreen(
     val client = AppRuntime.client
     val context = LocalContext.current
     val hazeState = remember { HazeState() }
+    LaunchedEffect(context) {
+        ThemeRuntime.setDeviceBlurSupported(
+            context.getSystemService(ActivityManager::class.java)?.isLowRamDevice != true,
+        )
+    }
 
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -1124,14 +1130,14 @@ private fun TopNavBar(
                 if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
                     state = hazeState,
                     style = HazeStyle(
-                        backgroundColor = Color(0xD9151B2A),
-                        tint = HazeTint(Color(0x38FFFFFF)),
-                        blurRadius = ThemeRuntime.blurRadiusDp,
+                        backgroundColor = ThemeRuntime.frostFallback,
+                        tint = HazeTint(ThemeRuntime.frostTint),
+                        blurRadius = ThemeRuntime.glassBlurRadius,
                         noiseFactor = 0f,
                     ),
-                ) else Modifier.background(Color(0xD9151B2A))
+                ) else Modifier.background(ThemeRuntime.frostFallback)
             )
-            .border(1.dp, Color(0x44FFFFFF), glassShape)
+            .border(1.dp, ThemeRuntime.glassEdge, glassShape)
             .height(48.dp)
             .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,

@@ -1,6 +1,7 @@
 package com.lumina.tv.ui.components
 
 import android.graphics.Bitmap
+import android.app.ActivityManager
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -55,6 +56,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.google.zxing.BarcodeFormat
@@ -73,6 +75,10 @@ import com.lumina.tv.ui.theme.ThemeRuntime
 import com.lumina.tv.ui.theme.Radius
 import com.lumina.tv.ui.theme.ShapeScale
 import com.lumina.tv.ui.theme.TypeScale
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
 
 /** 极光背景：深空底 + 两团缓慢漂移的光晕，营造 iOS 玻璃质感的空间感。 */
 @Composable
@@ -145,10 +151,10 @@ fun GlassPanel(
     Box(
         modifier
             .clip(corner?.let { RoundedCornerShape(it) } ?: ShapeScale.panel)
-            .background(fillColor ?: if (focused) ThemeRuntime.glassFill(true).copy(alpha = 1.4f) else ThemeRuntime.glassFill(false))
+            .background(fillColor ?: ThemeRuntime.glassFill(focused))
             .border(
                 width = if (focused) 1.5.dp else 1.dp,
-                color = ThemeRuntime.glassLine(focused),
+                color = if (focused) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge,
                 shape = corner?.let { RoundedCornerShape(it) } ?: ShapeScale.panel,
             )
     ) {
@@ -160,11 +166,56 @@ fun GlassPanel(
                 .align(Alignment.TopCenter)
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color.White.copy(alpha = 0.06f), Color.Transparent)
+                    listOf(ThemeRuntime.glassHighlight, Color.Transparent)
                     )
                 )
         )
     }
+}
+
+@Composable
+fun FrostPanel(
+    modifier: Modifier = Modifier,
+    hazeState: HazeState,
+    corner: Dp = Radius.l,
+    strong: Boolean = false,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val context = LocalContext.current
+    val manager = remember(context) { context.getSystemService(ActivityManager::class.java) }
+    val supported = manager?.isLowRamDevice != true
+    LaunchedEffect(supported) { ThemeRuntime.setDeviceBlurSupported(supported) }
+    val shape = RoundedCornerShape(corner)
+    Box(modifier.clip(shape)) {
+        Box(
+            Modifier.fillMaxSize()
+                .then(if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
+                    state = hazeState,
+                    style = HazeStyle(
+                        backgroundColor = if (strong) ThemeRuntime.frostStrongFallback else ThemeRuntime.frostFallback,
+                        tint = HazeTint(if (strong) ThemeRuntime.frostStrongTint else ThemeRuntime.frostTint),
+                        blurRadius = ThemeRuntime.glassBlurRadius,
+                        noiseFactor = 0f,
+                    ),
+                ) else Modifier.background(if (strong) ThemeRuntime.frostStrongFallback else ThemeRuntime.frostFallback))
+        )
+        Box(Modifier.fillMaxSize().border(
+            1.dp,
+            if (strong) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge,
+            shape,
+        ))
+        content()
+    }
+}
+
+enum class FocusFamily { Poster, DenseGrid, Button, DetailPanel }
+
+private data class FocusSpec(val scale: Float, val elevation: Float, val duration: Int)
+private fun FocusFamily.spec(): FocusSpec = when (this) {
+    FocusFamily.Poster -> FocusSpec(1.08f, 16f, 220)
+    FocusFamily.DenseGrid -> FocusSpec(1.025f, 8f, 180)
+    FocusFamily.Button -> FocusSpec(1.04f, 10f, 200)
+    FocusFamily.DetailPanel -> FocusSpec(1.02f, 12f, 240)
 }
 
 /** 可聚焦容器：缩放 + 高光描边的统一交互语言。 */
@@ -172,7 +223,8 @@ fun GlassPanel(
 fun FocusSurface(
     modifier: Modifier = Modifier,
     corner: Dp = Radius.l,
-    scaleTo: Float = 1.06f,
+    scaleTo: Float? = null,
+    focusFamily: FocusFamily = FocusFamily.Button,
     requestFocus: Boolean = false,
     focusRequester: FocusRequester? = null,
     onFocused: (() -> Unit)? = null,
@@ -181,7 +233,8 @@ fun FocusSurface(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) scaleTo else 1f, tween(130), label = "scale")
+    val focusSpec = focusFamily.spec()
+    val scale by animateFloatAsState(if (focused) (scaleTo ?: focusSpec.scale) else 1f, tween(focusSpec.duration), label = "scale")
     val requestFocusRequester = remember { FocusRequester() }
     LaunchedEffect(requestFocus) {
         if (requestFocus) {
@@ -197,7 +250,7 @@ fun FocusSurface(
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
-                shadowElevation = if (focused) 24f else 0f
+                shadowElevation = if (focused) focusSpec.elevation else 0f
                 shape = RoundedCornerShape(corner)
                 clip = false
             }
@@ -205,7 +258,7 @@ fun FocusSurface(
             .background(ThemeRuntime.glassFill(focused))
             .border(
                 if (focused) 1.25.dp else 1.dp,
-                if (focused) Accent else ThemeRuntime.glassLine(false),
+                if (focused) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge,
                 RoundedCornerShape(corner),
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
@@ -228,7 +281,8 @@ fun PosterCard(
     val interaction = remember { MutableInteractionSource() }
     val initialFocusRequester = remember { FocusRequester() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(180), label = "posterScale")
+    val posterSpec = FocusFamily.Poster.spec()
+    val scale by animateFloatAsState(if (focused) posterSpec.scale else 1f, tween(posterSpec.duration), label = "posterScale")
     LaunchedEffect(requestInitialFocus) {
         if (requestInitialFocus) {
             kotlinx.coroutines.delay(120)
@@ -245,6 +299,9 @@ fun PosterCard(
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
+                shadowElevation = if (focused) posterSpec.elevation else 0f
+                shape = ShapeScale.card
+                clip = false
             }
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
     ) {

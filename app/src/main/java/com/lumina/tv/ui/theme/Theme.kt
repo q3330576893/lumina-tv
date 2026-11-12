@@ -56,6 +56,10 @@ object ThemeRuntime {
         private set
     var glassStyle by mutableStateOf("frosted")
         private set
+    var glassEnabled by mutableStateOf(true)
+        private set
+    var deviceBlurSupported by mutableStateOf(true)
+        private set
 
     fun applyTheme(colorKey: String) {
         val p = THEME_PRESETS.firstOrNull { it.key == colorKey } ?: THEME_PRESETS[0]
@@ -65,19 +69,36 @@ object ThemeRuntime {
 
     fun applyGlass(styleKey: String) {
         glassStyle = if (styleKey in listOf("frosted", "clear", "off")) styleKey else "frosted"
+        glassEnabled = glassStyle != "off"
     }
 
-    val trueBlurEnabled: Boolean
-        get() = android.os.Build.VERSION.SDK_INT >= 31 && glassStyle != "off"
+    fun setDeviceBlurSupported(supported: Boolean) { deviceBlurSupported = supported }
 
-    val blurRadiusDp: Dp
+    val trueBlurEnabled: Boolean
+        get() = glassEnabled && deviceBlurSupported && android.os.Build.VERSION.SDK_INT >= 31
+
+    val glassBlurRadius: Dp
         get() = if (glassStyle == "clear") 12.dp else 24.dp
 
+    val blurRadiusDp: Dp get() = glassBlurRadius
+
+    val frostTint: Color get() = if (glassStyle == "clear") Color(0x14FFFFFF) else Color(0x20FFFFFF)
+    val frostStrongTint: Color get() = if (glassStyle == "clear") Color(0x24FFFFFF) else Color(0x38FFFFFF)
+    val frostFallback: Color get() = if (glassStyle == "off") Color(0xFF141B2B) else Color(0xE6151B2A)
+    val frostStrongFallback: Color get() = if (glassStyle == "off") Color(0xFF1B2438) else Color(0xF21A2232)
+    val glassHighlight: Color get() = Color(0x0FFFFFFF)
+
     /** 玻璃面板填充色 */
-    fun glassFill(focused: Boolean): Color = when (glassStyle) {
-        "clear" -> if (focused) Color(0x1FFFFFFF) else Color(0x0AFFFFFF)
-        "off" -> if (focused) Color(0xFF1B2438) else Color(0xFF141B2B)
-        else -> if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF)
+    fun glassFill(focused: Boolean): Color = if (focused) glassFillStrong else glassFillSubtle
+    val glassFillSubtle: Color get() = when (glassStyle) {
+        "clear" -> Color(0x0AFFFFFF)
+        "off" -> frostFallback
+        else -> Color(0x14FFFFFF)
+    }
+    val glassFillStrong: Color get() = when (glassStyle) {
+        "clear" -> Color(0x1FFFFFFF)
+        "off" -> frostStrongFallback
+        else -> Color(0x2EFFFFFF)
     }
 
     /** 玻璃面板描边色 */
@@ -86,6 +107,8 @@ object ThemeRuntime {
         "off" -> if (focused) accent.copy(alpha = 0.9f) else Color(0x0FFFFFFF)
         else -> if (focused) accent.copy(alpha = 0.9f) else Color(0x22FFFFFF)
     }
+    val glassEdge: Color get() = glassLine(false)
+    val glassEdgeStrong: Color get() = accent.copy(alpha = 0.72f)
 }
 
 val Accent: Color get() = ThemeRuntime.accent
