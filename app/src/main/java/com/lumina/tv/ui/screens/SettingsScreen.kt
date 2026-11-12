@@ -89,6 +89,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var endCreditsSkipSeconds by remember { mutableStateOf(AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) }
     var themeKey by remember { mutableStateOf(prefs?.themeColor ?: "blue") }
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
+    var detailBackgroundVideo by remember { mutableStateOf(prefs?.detailBackgroundVideo ?: "auto") }
     var licensesOpen by remember { mutableStateOf(false) }
     var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
     var maxStreamingBitrate by remember { mutableStateOf(prefs?.maxStreamingBitrate ?: 120_000_000L) }
@@ -309,6 +310,32 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp),
                         )
+                        Spacer(Modifier.height(10.dp))
+                        Text("详情页背景视频", color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("off" to "关", "720p" to "仅 720p 转码", "auto" to "自动").forEach { (key, label) ->
+                                val active = detailBackgroundVideo == key
+                                FocusSurface(
+                                    modifier = Modifier.height(38.dp).widthIn(min = 72.dp),
+                                    corner = 10.dp,
+                                    onClick = {
+                                        detailBackgroundVideo = key
+                                        prefs?.detailBackgroundVideo = key
+                                    },
+                                ) { focused ->
+                                    Box(
+                                        Modifier.fillMaxSize().background(
+                                            if (active) Accent.copy(alpha = 0.9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
+                                            RoundedCornerShape(10.dp),
+                                        ).padding(horizontal = 12.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp)
+                                    }
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(10.dp))
                         SwitchRow(
                             title = "海报评分",

@@ -817,77 +817,62 @@ class EmbyClient(
         return url("/Items/$id/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
-    /** Resolves the server-created low-bitrate preview session. */
-    suspend fun resolveDetailPreviewUrl(itemId: String, mediaSourceId: String): String? =
+    /** Resolves a detail backdrop using explicit HLS, then direct stream, then the original file. */
+    suspend fun resolveDetailPreviewUrl(itemId: String, mediaSourceId: String, mode: String = "auto"): String? =
         withContext(Dispatchers.IO) {
-            val body = JSONObject()
-                .put("UserId", userId)
-                .put("StartTimeTicks", 0)
-                .put("IsPlayback", true)
-                .put("AutoOpenLiveStream", false)
-                .put("EnableDirectPlay", false)
-                .put("EnableDirectStream", false)
-                .put("EnableTranscoding", true)
-                .put("MaxStreamingBitrate", DETAIL_PREVIEW_BITRATE)
-                .put("MediaSourceId", mediaSourceId)
-            val endpoint = url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId))
-            val profiles = listOf(
-                "full" to detailPreviewDeviceProfile(),
-                "without-video-range" to detailPreviewDeviceProfile().also { profile ->
-                    profile.optJSONArray("TranscodingProfiles")?.optJSONObject(0)?.remove("VideoRangeType")
-                },
-                "minimal" to minimalDetailPreviewDeviceProfile(),
-            )
-            var info: JSONObject? = null
-            var source: JSONObject? = null
-            for ((stage, profile) in profiles) {
-                val result = try {
-                    Result.success(postSync(endpoint, JSONObject(body.toString()).put("DeviceProfile", profile).toString()))
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Result.failure(e)
-                }
-                info = result.getOrNull()
-                val mediaSources = info?.optJSONArray("MediaSources")
-                source = (0 until (mediaSources?.length() ?: 0)).mapNotNull { mediaSources?.optJSONObject(it) }
-                    .firstOrNull { it.optString("Id") == mediaSourceId }
-                val matched = source
-                com.lumina.tv.diag.PageLog.add(
-                    "detailPreview stage=$stage result=${if (result.isSuccess) "ok" else result.exceptionOrNull()?.javaClass?.simpleName ?: "error"} " +
-                        "keys=${info?.keys()?.asSequence()?.joinToString(",") ?: "none"} " +
-                        "source=${matched != null} transcoding=${matched?.has("TranscodingUrl") == true && !matched.isNull("TranscodingUrl")} " +
-                        "direct=${matched?.has("DirectStreamUrl") == true && !matched.isNull("DirectStreamUrl")} " +
-                        "supportsDirectStream=${matched?.opt("SupportsDirectStream") ?: "missing"}"
-                )
-                if (!source?.optString("TranscodingUrl").isNullOrBlank()) break
+            if (mode == "off") {
+                com.lumina.tv.diag.PageLog.add("detailPreview stage=explicit-hls result=err keys=disabled")
+                return@withContext null
             }
-            val matched = source ?: run {
-                val confirmed = runCatching { getMediaSources(itemId) }.getOrDefault(emptyList())
-                    .firstOrNull { it.id == mediaSourceId }
-                com.lumina.tv.diag.PageLog.add("detailPreview fallback source=${confirmed != null} directUrl=${confirmed?.directStreamUrl != null} supportsDirectStream=${confirmed?.supportsDirectStream}")
-                val sourceJson = info?.optJSONArray("MediaSources")
-                (0 until (sourceJson?.length() ?: 0)).mapNotNull { sourceJson?.optJSONObject(it) }
-                    .firstOrNull { it.optString("Id") == mediaSourceId }
-                    ?: run {
-                        if (confirmed == null || !isSafeLowRiskSource(confirmed)) return@withContext null
-                        if (confirmed.supportsDirectStream) {
-                            absUrl(confirmed.directStreamUrl)?.let { return@withContext it }
-                        }
-                        return@withContext url("/Videos/$itemId/stream", mapOf("static" to "true", "MediaSourceId" to mediaSourceId))
-                    }
+            val source = runCatching { getMediaSources(itemId).firstOrNull { it.id == mediaSourceId } }.getOrNull()
+            val hls = url("/Videos/$itemId/master.m3u8", mapOf(
+                "MediaSourceId" to mediaSourceId,
+                "DeviceId" to deviceId,
+                "VideoCodec" to "h264",
+                "AudioCodec" to "aac",
+                "MaxAudioChannels" to "2",
+                "MaxWidth" to "1280",
+                "MaxHeight" to "720",
+                "VideoBitrate" to "2000000",
+                "SegmentContainer" to "ts",
+                "MinSegments" to "1",
+                "BreakOnNonKeyFrames" to "true",
+                "StartTimeTicks" to "0",
+            ))
+            val hlsResult = probeDetailPreview(hls)
+            logDetailPreview("explicit-hls", hlsResult, "mediaSourceId,DeviceId,VideoCodec,AudioCodec,MaxWidth,MaxHeight,VideoBitrate")
+            if (hlsResult.first) return@withContext hls
+            if (mode == "720p") return@withContext null
+
+            val direct = absUrl(source?.directStreamUrl)
+            if (direct == null) {
+                com.lumina.tv.diag.PageLog.add("detailPreview stage=direct result=err keys=DirectStreamUrl-missing")
+            } else {
+                val directResult = probeDetailPreview(direct)
+                logDetailPreview("direct", directResult, "DirectStreamUrl")
+                if (directResult.first) return@withContext direct
             }
-            if (isStrmSource(matched)) {
-                if (!isSafeLowRiskSource(matched)) return@withContext null
-                val strmUrl = absUrl(matched.optString("DirectStreamUrl"))
-                    ?: extractStrmUrl(getTextSync(url("/Items/$itemId/Download", mapOf("UserId" to userId))))
-                return@withContext strmUrl?.takeIf { it.startsWith("http", true) }
-            }
-            absUrl(matched.optString("TranscodingUrl"))?.let { return@withContext it }
-            if (!isSafeLowRiskSource(matched)) return@withContext null
-            absUrl(matched.optString("DirectStreamUrl"))?.let { return@withContext it }
-            url("/Videos/$itemId/stream", mapOf("static" to "true", "MediaSourceId" to mediaSourceId))
+
+            val staticUrl = url("/Videos/$itemId/stream", mapOf("static" to "true", "MediaSourceId" to mediaSourceId))
+            val staticResult = probeDetailPreview(staticUrl)
+            logDetailPreview("static", staticResult, "static,MediaSourceId")
+            if (staticResult.first) staticUrl else null
         }
+
+    private fun probeDetailPreview(target: String): Pair<Boolean, String> = try {
+        val request = Request.Builder().url(target).header("Range", "bytes=0-511")
+            .header("X-Emby-Authorization", authHeader()).get().build()
+        http.newCall(request).apply { timeout().timeout(7, TimeUnit.SECONDS) }.execute().use { response ->
+            if (response.isSuccessful) true to "ok" else false to "http-${response.code}"
+        }
+    } catch (e: Exception) {
+        if (e is kotlinx.coroutines.CancellationException) throw e
+        false to "err"
+    }
+
+    private fun logDetailPreview(stage: String, result: Pair<Boolean, String>, keys: String) {
+        com.lumina.tv.diag.PageLog.add("detailPreview stage=$stage result=${result.second} keys=$keys")
+    }
 
     private fun isSafeLowRiskSource(source: JSONObject): Boolean {
         val streams = source.optJSONArray("MediaStreams") ?: return false
@@ -1263,31 +1248,6 @@ data class PlaybackTarget(
             .put(JSONObject().put("Container", "ts").put("Type", "Audio").put("AudioCodec", "aac")
                 .put("Protocol", "hls").put("MaxAudioChannels", "2")))
 
-    private fun detailPreviewDeviceProfile(): JSONObject = JSONObject()
-        .put("MaxStreamingBitrate", DETAIL_PREVIEW_BITRATE)
-        .put("MaxAudioChannels", "2")
-        .put("DirectPlayProfiles", JSONArray())
-        .put("TranscodingProfiles", JSONArray().put(
-            JSONObject()
-                .put("Container", "ts")
-                .put("Type", "Video")
-                .put("VideoCodec", "h264")
-                .put("AudioCodec", "aac")
-                .put("Protocol", "hls")
-                .put("MaxAudioChannels", "2")
-                .put("MaxWidth", "1280")
-                .put("MaxHeight", "720")
-                .put("VideoRangeType", "SDR")
-        ))
-
-    private fun minimalDetailPreviewDeviceProfile(): JSONObject = JSONObject()
-        .put("MaxStreamingBitrate", DETAIL_PREVIEW_BITRATE)
-        .put("MaxAudioChannels", "2")
-        .put("TranscodingProfiles", JSONArray().put(JSONObject()
-            .put("Container", "ts").put("Type", "Video").put("VideoCodec", "h264")
-            .put("AudioCodec", "aac").put("Protocol", "hls").put("MaxAudioChannels", "2")
-            .put("MaxWidth", "1280").put("MaxHeight", "720")))
-
     private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
         val builder = Uri.parse(url).buildUpon().clearQuery()
         val names = Uri.parse(url).queryParameterNames
@@ -1521,5 +1481,3 @@ private fun JSONObject.optNormalizedValue(normalizedKey: String): String? {
     } ?: return null
     return opt(key)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
 }
-
-private const val DETAIL_PREVIEW_BITRATE = 2_000_000

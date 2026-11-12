@@ -357,7 +357,9 @@ fun DetailScreen(
             detailVideoPlaying = false
             return@LaunchedEffect
         }
-        detailPreviewUrl = runCatching { c.resolveDetailPreviewUrl(sourceItem.id, previewSource.id) }.getOrNull()
+        detailPreviewUrl = runCatching {
+            c.resolveDetailPreviewUrl(sourceItem.id, previewSource.id, AppRuntime.prefs?.detailBackgroundVideo ?: "auto")
+        }.getOrNull()
         previewResults[requestKey] = Triple(detailPreviewUrl, detailPreviewKey, detailPreviewIsTrailer)
         previewStartTimes[requestKey] = detailPreviewStartMs
         if (detailPreviewUrl.isNullOrBlank()) {
@@ -527,6 +529,14 @@ fun DetailScreen(
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 topBadges.take(5).forEach { SpecBadge(it, containerHeight = 22.dp, imageHeight = 13.dp) }
                             }
+                        }
+                        if (it0.isDolbyVision) {
+                            Text(
+                                "DV 原片可能触发电视切换显示模式",
+                                color = TextSub,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(top = 5.dp),
+                            )
                         }
                         Spacer(Modifier.height(10.dp))
                         it0.overview?.let {

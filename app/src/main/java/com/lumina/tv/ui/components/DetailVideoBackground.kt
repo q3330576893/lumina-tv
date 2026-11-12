@@ -16,13 +16,16 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.lumina.tv.data.PreviewVideoCache
+import com.lumina.tv.diag.PageLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -93,6 +96,9 @@ private fun DetailVideoPlayback(
     var failed by remember(url) { mutableStateOf(false) }
     var loopStartMs by remember(url) { mutableStateOf(0L) }
     var loopEndMs by remember(url) { mutableStateOf(0L) }
+    var staticBytesLoaded by remember(url) { mutableStateOf(0L) }
+    var staticBitrateEstimate by remember(url) { mutableStateOf(0L) }
+    val isStaticFallback = remember(url) { Uri.parse(url).getQueryParameter("static") == "true" }
     val playerState = remember { mutableStateOf<ExoPlayer?>(null) }
     LaunchedEffect(url, mediaKey) {
         playerState.value?.let { oldPlayer ->
@@ -117,6 +123,7 @@ private fun DetailVideoPlayback(
             .setUpstreamDataSourceFactory(httpFactory)
             .setCacheKeyFactory { dataSpec -> cacheUriKey(Uri.parse(dataSpec.key ?: dataSpec.uri.toString())) }
         val builder = MediaItem.Builder().setUri(url)
+        if (url.contains(".m3u8", true)) builder.setMimeType(MimeTypes.APPLICATION_M3U8)
         if (!url.contains(".m3u8", true)) builder.setCustomCacheKey(cacheKey)
         val mediaItem = builder.build()
         val nextPlayer = ExoPlayer.Builder(context)
@@ -136,6 +143,9 @@ private fun DetailVideoPlayback(
             override fun onRenderedFirstFrame() {
                 firstFrame = true
                 onStatus("play")
+                if (isStaticFallback) {
+                    PageLog.add("detailPreview stage=static-startup bitrate=${staticBitrateEstimate}bps bytes=${staticBytesLoaded}")
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -165,6 +175,24 @@ private fun DetailVideoPlayback(
         onDispose {
             player.removeListener(listener)
         }
+    }
+
+    DisposableEffect(player, isStaticFallback) {
+        val listener = object : AnalyticsListener {
+            override fun onBandwidthEstimate(
+                eventTime: AnalyticsListener.EventTime,
+                totalLoadTimeMs: Int,
+                totalBytesLoaded: Long,
+                bitrateEstimate: Long,
+            ) {
+                if (isStaticFallback) {
+                    staticBytesLoaded = totalBytesLoaded
+                    staticBitrateEstimate = bitrateEstimate
+                }
+            }
+        }
+        player.addAnalyticsListener(listener)
+        onDispose { player.removeAnalyticsListener(listener) }
     }
 
     DisposableEffect(playerState) {

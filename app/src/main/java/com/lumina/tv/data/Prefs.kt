@@ -206,6 +206,10 @@ class Prefs(context: Context) {
         get() = sp.getString("glass_style", "frosted") ?: "frosted"
         set(v) = sp.edit().putString("glass_style", v).apply()
 
+    var detailBackgroundVideo: String
+        get() = sp.getString("detail_background_video", "auto") ?: "auto"
+        set(v) = sp.edit().putString("detail_background_video", v.takeIf { it in setOf("off", "720p", "auto") } ?: "auto").apply()
+
     /** 默认倍速 */
     var defaultSpeed: Float
         get() = sp.getFloat("default_speed", 1.0f)

@@ -136,6 +136,7 @@ import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -371,11 +372,11 @@ fun HomeScreen(
     LaunchedEffect(views, client, reloadToken) {
         val c = client ?: return@LaunchedEffect
         val visibleViews = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
-        val prefetchedViews = coroutineScope {
+        val prefetchedViews = supervisorScope {
             visibleViews.map { view ->
                 async {
                     val cacheKey = "library:${view.id}:date:Descending"
-                    val itemsTask = async {
+                    val viewItems = try {
                         LibraryCache.browseOf(cacheKey) ?: c.getItems(
                             parentId = view.id,
                             types = collectionTypeToItemTypes(view.type),
@@ -383,8 +384,12 @@ fun HomeScreen(
                             sortOrder = "Descending",
                             limit = 50,
                         ).also { LibraryCache.putBrowse(cacheKey, it) }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("LuminaTV", "Library row load failed: ${view.id}", e)
+                        LibraryCache.browseOf(cacheKey).orEmpty()
                     }
-                    val viewItems = itemsTask.await()
                     val recentBackdropUrl = viewItems.firstNotNullOfOrNull { item -> c.backdropUrl(item, 640) }
                     Triple(view, viewItems, recentBackdropUrl)
                 }
