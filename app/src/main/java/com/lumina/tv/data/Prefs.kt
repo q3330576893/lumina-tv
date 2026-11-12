@@ -56,6 +56,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("mpv_broken", false)
         set(v) = sp.edit().putBoolean("mpv_broken", v).apply()
 
+    var mpvUnavailableReason: String
+        get() = sp.getString("mpv_unavailable_reason", "").orEmpty()
+        set(v) = sp.edit().putString("mpv_unavailable_reason", v.take(300)).apply()
+
     var decoderPreference: String
         get() = sp.getString("decoder_preference", "auto") ?: "auto"
         set(v) = sp.edit().putString("decoder_preference", v).apply()

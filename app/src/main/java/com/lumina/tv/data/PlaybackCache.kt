@@ -66,6 +66,7 @@ object PlaybackCache {
     private fun safeKey(spec: DataSpec): String {
         val raw = spec.key ?: spec.uri.toString()
         val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return sha256(raw)
+        if (uri.isOpaque) return raw
         val builder = uri.buildUpon().clearQuery()
         uri.queryParameterNames.forEach { name ->
             if (name.lowercase() !in sensitiveParams) {

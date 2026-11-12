@@ -576,6 +576,7 @@ fun PlayerScreen(
                         if (state.error != null) {
                             if (state.error.contains("不支持 mpv")) {
                                 AppRuntime.prefs?.mpvBroken = true
+                                AppRuntime.prefs?.mpvUnavailableReason = state.error
                             }
                             error = if (AppRuntime.prefs?.playerEngine == "auto") {
                                 "该设备不支持 mpv 内核，已回退 Media3"
@@ -596,6 +597,7 @@ fun PlayerScreen(
                     val unavailable = backend.unavailableReason
                     if (unavailable != null) {
                         AppRuntime.prefs?.mpvBroken = true
+                        AppRuntime.prefs?.mpvUnavailableReason = unavailable
                         mpvBackend = null
                         runCatching { backend.release() }
                         degraded = true

@@ -777,6 +777,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             Spacer(Modifier.height(8.dp))
                             FocusSurface(Modifier.height(36.dp).width(150.dp), corner = 18.dp, onClick = {
                                 prefs?.mpvBroken = false
+                                prefs?.mpvUnavailableReason = ""
                                 mpvBroken = false
                             }) { focused ->
                                 Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {

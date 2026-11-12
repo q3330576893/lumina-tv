@@ -23,7 +23,7 @@ object NetLog {
 object PageLog {
     private val records = ArrayDeque<PageRecord>()
     @Synchronized fun add(name: String) {
-        records.addLast(PageRecord(System.currentTimeMillis(), name.take(80)))
+        records.addLast(PageRecord(System.currentTimeMillis(), name.take(300)))
         while (records.size > 20) records.removeFirst()
     }
     @Synchronized fun tail(): String = records.joinToString("\n") { "${it.at}\t${it.name}" }

@@ -84,6 +84,7 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.R
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.EmbyException
 import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.MediaStream
@@ -124,6 +125,9 @@ fun DetailScreen(
     val detailHazeState = remember { HazeState() }
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
+    var loadFailed by remember(id) { mutableStateOf(false) }
+    var itemNotFound by remember(id) { mutableStateOf(false) }
+    var detailRetry by remember(id) { mutableStateOf(0) }
     var item by remember { mutableStateOf<MediaItem?>(null) }
     var seasons by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
@@ -166,15 +170,19 @@ fun DetailScreen(
     val playFocus = remember { FocusRequester() }
     val sourceFocus = remember { FocusRequester() }
 
-    LaunchedEffect(id) {
+    LaunchedEffect(id, detailRetry) {
         failedDetailBackgroundKeys.clear()
         similar = emptyList()
         showSourceMenu = false
         AppRuntime.screenLabel = "详情"
-        val c = client ?: return@LaunchedEffect
+        val c = client ?: run {
+            loading = false
+            loadFailed = true
+            return@LaunchedEffect
+        }
 
         // 命中缓存：立即渲染，不再转圈
-        val cached = LibraryCache.detail(id)
+        val cached = LibraryCache.detail(id)?.takeIf { it.item != null }
         if (cached != null) {
             item = cached.item
             seasons = cached.seasons
@@ -208,16 +216,42 @@ fun DetailScreen(
         }
 
         loading = true
+        loadFailed = false
+        itemNotFound = false
         sourcesLoading = true
         // 详情 / 分季 / 多源并行拉取，避免串行等待
+        var main: MediaItem? = null
+        var loadError: Throwable? = null
+        for (attempt in 0..2) {
+            try {
+                main = c.getItemForDetail(id)
+                loadError = null
+                break
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                loadError = e
+                if (attempt < 2 && (e as? EmbyException)?.httpStatus != 404) {
+                    delay(if (attempt == 0) 1_000L else 3_000L)
+                } else if ((e as? EmbyException)?.httpStatus == 404) {
+                    break
+                }
+            }
+        }
+        if (loadError != null) {
+            loading = false
+            sourcesLoading = false
+            itemNotFound = (loadError as? EmbyException)?.httpStatus == 404
+            loadFailed = !itemNotFound
+            return@LaunchedEffect
+        }
         val it0 = coroutineScope {
             val sA = async { runCatching { c.getSeasons(id) }.getOrDefault(emptyList()) }
             val srcA = async { runCatching { c.getMediaSources(id) }.getOrDefault(emptyList()) }
             val relatedA = async { runCatching { c.getSimilarItems(id, 12) }.getOrDefault(emptyList()) }
-            val main = c.getItem(id)
             similar = relatedA.await()
             sources = srcA.await()
-            if (main != null && main.type == "Series") {
+            if (main?.type == "Series") {
                 val ss = sA.await()
                 seasons = ss
                 val first = ss.firstOrNull()
@@ -238,7 +272,7 @@ fun DetailScreen(
         )
         // TMDB 补充：仅当 Emby 自身无评分时异步拉取，失败静默
         if (it0 != null && it0.rating == null && it0.communityRating == null) {
-            tmdb = TmdbClient.lookup(it0.type, it0.seriesName ?: it0.name, it0.year)
+            tmdb = runCatching { TmdbClient.lookup(it0.type, it0.seriesName ?: it0.name, it0.year) }.getOrNull()
         }
         if (it0 != null) {
             isFav = it0.isFavorite
@@ -434,6 +468,22 @@ fun DetailScreen(
 
         if (loading) {
             LoadingView(text = "正在读取详情…")
+        } else if (itemNotFound) {
+            LoadingView(text = "\u672a\u627e\u5230\u8be5\u5185\u5bb9")
+        } else if (loadFailed) {
+            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("\u52a0\u8f7d\u5931\u8d25", color = TextMain, fontSize = 16.sp)
+                Spacer(Modifier.height(14.dp))
+                FocusSurface(Modifier.width(156.dp).height(42.dp), corner = 12.dp, requestFocus = true, onClick = {
+                    loading = true
+                    loadFailed = false
+                    detailRetry++
+                }) { focused ->
+                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                        Text("\u70b9\u51fb\u91cd\u8bd5", color = TextMain, fontSize = 13.sp)
+                    }
+                }
+            }
         } else if (item == null) {
             LoadingView(text = "未找到该内容")
         } else {

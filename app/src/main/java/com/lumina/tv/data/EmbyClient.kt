@@ -29,7 +29,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.lumina.tv.diag.NetLog
 
-class EmbyException(message: String) : Exception(message)
+class EmbyException(message: String, val httpStatus: Int? = null) : Exception(message)
 
 private enum class PlaybackRequestFlag(
     val key: String,
@@ -160,7 +160,7 @@ class EmbyClient(
                     if (!resp.isSuccessful) {
                         val failure = "HTTP ${resp.code}: ${safeErrorBody(body)}"
                         lastApiFailure = failure
-                        throw EmbyException(failure)
+                        throw EmbyException(failure, resp.code)
                     }
                     return try {
                         parseJsonObject(body)
@@ -200,7 +200,7 @@ class EmbyClient(
             if (!resp.isSuccessful) {
                 val failure = "HTTP ${resp.code}: ${safeErrorBody(text)}"
                 lastApiFailure = failure
-                throw EmbyException(failure)
+                throw EmbyException(failure, resp.code)
             }
             return try {
                 parseJsonObject(text)
@@ -442,6 +442,12 @@ class EmbyClient(
                 "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds")
             parseItem(getSync(url("/Users/$userId/Items/$id", params)))
         } catch (_: Exception) { null }
+    }
+
+    suspend fun getItemForDetail(id: String): MediaItem = withContext(Dispatchers.IO) {
+        val params = mapOf("UserId" to userId,
+            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds")
+        parseItem(getSync(url("/Users/$userId/Items/$id", params)))
     }
 
     suspend fun getLocalTrailers(itemId: String): List<MediaItem> = withContext(Dispatchers.IO) {
@@ -824,36 +830,55 @@ class EmbyClient(
                 .put("EnableTranscoding", true)
                 .put("MaxStreamingBitrate", DETAIL_PREVIEW_BITRATE)
                 .put("MediaSourceId", mediaSourceId)
-                .put("DeviceProfile", detailPreviewDeviceProfile())
             val endpoint = url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId))
-            var info: JSONObject? = try {
-                postSync(
-                    endpoint, body.toString(),
+            val profiles = listOf(
+                "full" to detailPreviewDeviceProfile(),
+                "without-video-range" to detailPreviewDeviceProfile().also { profile ->
+                    profile.optJSONArray("TranscodingProfiles")?.optJSONObject(0)?.remove("VideoRangeType")
+                },
+                "minimal" to minimalDetailPreviewDeviceProfile(),
+            )
+            var info: JSONObject? = null
+            var source: JSONObject? = null
+            for ((stage, profile) in profiles) {
+                val result = try {
+                    Result.success(postSync(endpoint, JSONObject(body.toString()).put("DeviceProfile", profile).toString()))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Result.failure(e)
+                }
+                info = result.getOrNull()
+                val mediaSources = info?.optJSONArray("MediaSources")
+                source = (0 until (mediaSources?.length() ?: 0)).mapNotNull { mediaSources?.optJSONObject(it) }
+                    .firstOrNull { it.optString("Id") == mediaSourceId }
+                val matched = source
+                com.lumina.tv.diag.PageLog.add(
+                    "detailPreview stage=$stage result=${if (result.isSuccess) "ok" else result.exceptionOrNull()?.javaClass?.simpleName ?: "error"} " +
+                        "keys=${info?.keys()?.asSequence()?.joinToString(",") ?: "none"} " +
+                        "source=${matched != null} transcoding=${matched?.has("TranscodingUrl") == true && !matched.isNull("TranscodingUrl")} " +
+                        "direct=${matched?.has("DirectStreamUrl") == true && !matched.isNull("DirectStreamUrl")} " +
+                        "supportsDirectStream=${matched?.opt("SupportsDirectStream") ?: "missing"}"
                 )
-            } catch (e: Exception) {
-                android.util.Log.w("EmbyClient", "detail preview playback info failed (${e.javaClass.simpleName})")
-                null
+                if (!source?.optString("TranscodingUrl").isNullOrBlank()) break
             }
-            var sources = info?.optJSONArray("MediaSources")
-            var source = (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }
-                .firstOrNull { it.optString("Id") == mediaSourceId }
-            if (source == null) {
+            val matched = source ?: run {
                 val confirmed = runCatching { getMediaSources(itemId) }.getOrDefault(emptyList())
                     .firstOrNull { it.id == mediaSourceId }
-                if (confirmed != null && confirmed.streams.any { it.type == "Video" && isExplicitSdr(it.videoRangeType) && it.dvProfile == null }) {
-                    val retryBody = JSONObject(body.toString()).apply { remove("DeviceProfile") }
-                    info = try { postSync(endpoint, retryBody.toString()) }
-                    catch (e: Exception) {
-                        android.util.Log.w("EmbyClient", "detail preview fallback failed (${e.javaClass.simpleName})")
-                        null
+                com.lumina.tv.diag.PageLog.add("detailPreview fallback source=${confirmed != null} directUrl=${confirmed?.directStreamUrl != null} supportsDirectStream=${confirmed?.supportsDirectStream}")
+                val sourceJson = info?.optJSONArray("MediaSources")
+                (0 until (sourceJson?.length() ?: 0)).mapNotNull { sourceJson?.optJSONObject(it) }
+                    .firstOrNull { it.optString("Id") == mediaSourceId }
+                    ?: run {
+                        if (confirmed == null || !isSafeLowRiskSource(confirmed)) return@withContext null
+                        if (confirmed.supportsDirectStream) {
+                            absUrl(confirmed.directStreamUrl)?.let { return@withContext it }
+                        }
+                        return@withContext url("/Videos/$itemId/stream", mapOf("static" to "true", "MediaSourceId" to mediaSourceId))
                     }
-                    sources = info?.optJSONArray("MediaSources")
-                    source = (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }
-                        .firstOrNull { it.optString("Id") == mediaSourceId }
-                }
             }
-            val matched = source ?: return@withContext null
             if (isStrmSource(matched)) {
+                if (!isSafeLowRiskSource(matched)) return@withContext null
                 val strmUrl = absUrl(matched.optString("DirectStreamUrl"))
                     ?: extractStrmUrl(getTextSync(url("/Items/$itemId/Download", mapOf("UserId" to userId))))
                 return@withContext strmUrl?.takeIf { it.startsWith("http", true) }
@@ -871,12 +896,24 @@ class EmbyClient(
         val bitrate = video.optLong("BitRate", -1L)
         val width = video.optInt("Width", -1)
         val height = video.optInt("Height", -1)
-        if (bitrate !in 1 until 8_000_000L || width !in 1..1920 || height !in 1..1080) return false
+        if (bitrate !in 1..8_000_000L || width !in 1..1920 || height !in 1..1080) return false
         val range = listOf("VideoRangeType", "VideoRange").joinToString(" ") { video.optString(it) }
         if (!isExplicitSdr(range) || video.has("DvProfile") && !video.isNull("DvProfile")) return false
         val dvPattern = Regex("(?i)dv(?:he|h1|i)\\.?[0-9.]*")
         val markers = listOf("Codec", "CodecTag", "Profile", "CodecTagString").joinToString(" ") { video.optString(it) }
         return !dvPattern.containsMatchIn(markers) && !markers.contains("dolby vision", true)
+    }
+
+    private fun isSafeLowRiskSource(source: MediaSource): Boolean {
+        val streamArray = JSONArray().apply {
+            source.streams.forEach { stream ->
+                put(JSONObject().put("Type", stream.type).put("BitRate", stream.bitRate ?: -1L)
+                    .put("Width", stream.width ?: -1).put("Height", stream.height ?: -1)
+                    .put("VideoRangeType", stream.videoRangeType ?: "").put("DvProfile", stream.dvProfile ?: JSONObject.NULL)
+                    .put("Codec", stream.codec ?: "").put("Profile", stream.profile ?: ""))
+            }
+        }
+        return isSafeLowRiskSource(JSONObject().put("MediaStreams", streamArray))
     }
 
     private fun isExplicitSdr(value: String?): Boolean {
@@ -1242,6 +1279,14 @@ data class PlaybackTarget(
                 .put("MaxHeight", "720")
                 .put("VideoRangeType", "SDR")
         ))
+
+    private fun minimalDetailPreviewDeviceProfile(): JSONObject = JSONObject()
+        .put("MaxStreamingBitrate", DETAIL_PREVIEW_BITRATE)
+        .put("MaxAudioChannels", "2")
+        .put("TranscodingProfiles", JSONArray().put(JSONObject()
+            .put("Container", "ts").put("Type", "Video").put("VideoCodec", "h264")
+            .put("AudioCodec", "aac").put("Protocol", "hls").put("MaxAudioChannels", "2")
+            .put("MaxWidth", "1280").put("MaxHeight", "720")))
 
     private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
         val builder = Uri.parse(url).buildUpon().clearQuery()
