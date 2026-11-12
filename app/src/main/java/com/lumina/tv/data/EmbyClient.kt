@@ -29,6 +29,18 @@ import com.lumina.tv.diag.NetLog
 
 class EmbyException(message: String) : Exception(message)
 
+private enum class PlaybackRequestFlag(
+    val key: String,
+    val send: Boolean,
+    val value: Boolean,
+) {
+    ENABLE_DIRECT_PLAY("EnableDirectPlay", true, true),
+    ENABLE_DIRECT_STREAM("EnableDirectStream", true, true),
+    ENABLE_TRANSCODING("EnableTranscoding", true, true),
+    ALLOW_VIDEO_STREAM_COPY("AllowVideoStreamCopy", true, true),
+    ALLOW_AUDIO_STREAM_COPY("AllowAudioStreamCopy", true, true),
+}
+
 /** Emby REST 客户端。所有方法都是挂起函数，网络在 IO 线程执行。 */
 class EmbyClient(
     var baseUrl: String,
@@ -1019,6 +1031,11 @@ data class PlaybackTarget(
                 .put("AutoOpenLiveStream", false)
                 .put("MaxStreamingBitrate", 120_000_000)
                 .put("DeviceProfile", deviceProfile())
+                .apply {
+                    PlaybackRequestFlag.values().filter { it.send }.forEach { flag ->
+                        put(flag.key, flag.value)
+                    }
+                }
             if (audioStreamIndex != null) infoBody.put("AudioStreamIndex", audioStreamIndex)
             if (mediaSourceId != null) infoBody.put("MediaSourceId", mediaSourceId)
             val playbackInfoParams = mapOf("UserId" to userId)
@@ -1156,11 +1173,15 @@ data class PlaybackTarget(
         }
 
     private fun deviceProfile(): JSONObject = JSONObject()
-        .put("MaxAudioChannels", "2")
         .put("DirectPlayProfiles", JSONArray()
             .put(JSONObject().put("Type", "Video").put("Container", "mkv,mp4,m4v,ts,mov")
                 .put("VideoCodec", "h264,hevc").put("AudioCodec", "aac,ac3,eac3,mp3,opus,flac,vorbis"))
             .put(JSONObject().put("Type", "Audio").put("Container", "mp3").put("AudioCodec", "mp3")))
+        .put("SubtitleProfiles", JSONArray()
+            .put(JSONObject().put("Format", "srt").put("Method", "External"))
+            .put(JSONObject().put("Format", "subrip").put("Method", "External"))
+            .put(JSONObject().put("Format", "vtt").put("Method", "External"))
+            .put(JSONObject().put("Format", "webvtt").put("Method", "External")))
         .put("TranscodingProfiles", JSONArray()
             .put(JSONObject().put("Container", "ts").put("Type", "Video").put("VideoCodec", "h264")
                 .put("AudioCodec", "aac").put("Protocol", "hls").put("MaxAudioChannels", "2"))
