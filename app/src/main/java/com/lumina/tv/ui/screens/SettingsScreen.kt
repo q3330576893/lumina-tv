@@ -75,6 +75,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     val scope = rememberCoroutineScope()
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
     var audioDecodeMode by remember { mutableStateOf(prefs?.audioDecodeMode ?: "auto") }
+    var declareDtsDirectPlay by remember { mutableStateOf(prefs?.declareDtsDirectPlay ?: false) }
     var autoNext by remember { mutableStateOf(prefs?.autoNextEpisode ?: false) }
     var showPosterRating by remember { mutableStateOf(AppRuntime.prefs?.showPosterRating ?: true) }
     var showPosterWatchState by remember { mutableStateOf(AppRuntime.prefs?.showPosterWatchState ?: true) }
@@ -473,6 +474,15 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             onChange = {
                                 autoNext = it
                                 prefs?.autoNextEpisode = it
+                            },
+                        )
+                        SwitchRow(
+                            title = "向服务器声明支持 DTS/TrueHD 直放（实验）",
+                            desc = "开启后服务器可能直接给原轨；若本机解不了会退回 mpv，可能出现黑画面/无声，建议先导出诊断对比",
+                            checked = declareDtsDirectPlay,
+                            onChange = {
+                                declareDtsDirectPlay = it
+                                prefs?.declareDtsDirectPlay = it
                             },
                         )
                         Spacer(Modifier.height(10.dp))

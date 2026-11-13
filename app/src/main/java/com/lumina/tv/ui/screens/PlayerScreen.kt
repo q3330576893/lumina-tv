@@ -123,6 +123,11 @@ import com.lumina.tv.player.classifyPlaybackError
 import com.lumina.tv.player.PlaybackWatchdog
 import com.lumina.tv.player.StabilityMetrics
 import com.lumina.tv.player.AudioFocusGuard
+import com.lumina.tv.player.AudioCapabilities
+import com.lumina.tv.player.AudioCodecMatrix
+import com.lumina.tv.player.AudioRouteMonitor
+import com.lumina.tv.player.AudioSupport
+import com.lumina.tv.player.detect
 import com.lumina.tv.diag.PageLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -163,6 +168,26 @@ private fun playbackNetworkMessage(error: Throwable): String {
     }
 }
 
+private fun audioMime(codec: String?): String? {
+    val value = codec.orEmpty().lowercase()
+    return when {
+        value.contains("eac3") || value.contains("e-ac-3") -> if (value.contains("joc") || value.contains("atmos")) "audio/eac3-joc" else "audio/eac3"
+        value.contains("truehd") || value.contains("mlp") -> "audio/true-hd"
+        value.contains("dts") && (value.contains("uhd") || value.contains("p2")) -> "audio/vnd.dts.uhd;profile=p2"
+        value.contains("dts") && (value.contains("hd") || value.contains("ma") || value.contains("lbr")) -> "audio/vnd.dts.hd"
+        value.contains("dts") || value.contains("dca") -> "audio/vnd.dts"
+        value.contains("ac3") -> "audio/ac3"
+        value.contains("ac4") -> "audio/ac4"
+        value.contains("aac") || value.contains("mp4a") -> "audio/mp4a-latm"
+        value.contains("opus") -> "audio/opus"
+        value.contains("mp3") || value.contains("mpeg") -> "audio/mpeg"
+        value.contains("pcm") || value.contains("lpcm") -> "audio/raw"
+        value.contains("flac") -> "audio/flac"
+        value.contains("vorbis") -> "audio/vorbis"
+        else -> null
+    }
+}
+
 
 private fun media3AudioTracks(tracks: Tracks): List<MediaStream> = tracks.groups
     .filter { it.type == C.TRACK_TYPE_AUDIO }
@@ -192,6 +217,8 @@ fun PlayerScreen(
     onPlayNext: ((MediaItem) -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    var audioCaps by remember(item.id) { mutableStateOf(runCatching { detect(context) }.getOrDefault(AudioCapabilities(emptyMap()))) }
+    var audioSupport by remember(item.id) { mutableStateOf(AudioSupport.DECODE_ONLY) }
     val client = AppRuntime.client
     val playerExceptionHandler = remember { CoroutineExceptionHandler { _, error -> android.util.Log.e("LuminaTV", "Player coroutine failed", error) } }
     val scope = rememberCoroutineScope { playerExceptionHandler }
@@ -208,6 +235,14 @@ fun PlayerScreen(
     var degraded by remember { mutableStateOf(false) }
     var audioDecodeMode by remember { mutableStateOf(AppRuntime.prefs?.audioDecodeMode ?: "auto") }
     var audioDecodeNotice by remember { mutableStateOf<String?>(null) }
+    DisposableEffect(context, item.id) {
+        val monitor = AudioRouteMonitor(context) { changedCaps ->
+            audioCaps = changedCaps
+            audioDecodeNotice = "音频输出设备已变化，能力状态已更新"
+        }
+        monitor.register()
+        onDispose { monitor.unregister() }
+    }
     var softDecodeNoticeShown by remember(item.id) { mutableStateOf(false) }
     var mpvFallbackTried by remember(item.id) { mutableStateOf(false) }
     var ffmpegFallback by remember(item.id) { mutableStateOf(false) }
@@ -516,7 +551,12 @@ fun PlayerScreen(
                 val defaultAudio = target.source?.audioStreams?.firstOrNull { it.isDefault }
                     ?: target.source?.audioStreams?.firstOrNull()
                 val audioCodec = listOfNotNull(defaultAudio?.codec, defaultAudio?.profile).joinToString(" ").lowercase()
-                val unsupportedAudio = listOf("truehd", "dts", "dca", "mlp", "atmos", "eac3").any(audioCodec::contains)
+                val codecMime = audioMime(audioCodec)
+                val audioEncoding = AudioCodecMatrix.encoding(codecMime, audioCodec)
+                audioSupport = AudioCodecMatrix.support(
+                    context, audioEncoding, defaultAudio?.channels ?: 2, defaultAudio?.sampleRate ?: 0, audioCaps,
+                    codecMime,
+                )
                 // 统一走 media3 优先：不再因为音轨编码就提前把内核换成 mpv，
                 // 由 media3 真正解码失败后再自动回落，避免“什么都用 MPV 转圈”。
                 // DV Profile 7 是双层封装，media3 解不了基底+增强层，直接交给 mpv
@@ -539,8 +579,8 @@ fun PlayerScreen(
                 if (isDolbyVision && !isDvP7 && !DeviceCodecCapabilities.supportsDolbyVision) {
                     dvDecoderPath = "hevc-fallback"
                 }
-                if (audioDecodeMode == "auto" && unsupportedAudio && !softDecodeNoticeShown) {
-                    audioDecodeNotice = "检测到 ${audioCodec.trim().ifBlank { "高级" }} 音轨，先试本机硬解，失败会自动转本地软解"
+                if (audioCodec.isNotBlank() && audioSupport == AudioSupport.UNSUPPORTED && !softDecodeNoticeShown) {
+                    audioDecodeNotice = "当前音轨（${audioCodec.trim().ifBlank { "未知 codec" }}）本机可能无法解码，可切换其他音轨或改软解"
                     softDecodeNoticeShown = true
                 }
                 if (activeEngine != selectedEngine) {
@@ -730,7 +770,7 @@ fun PlayerScreen(
     fun buildDiagPayload(outcome: String): DiagPayload {
         return buildPlayerDiagPayload(
             context, outcome, activeEngine, mpvBackend, item, playbackSource, currentPlaybackUrl,
-            audioDecodeMode, degraded, engineSwitchTrace, exo, failurePhase, lastPlaybackErrorJson,
+            audioDecodeMode, audioSupport.name, degraded, engineSwitchTrace, exo, failurePhase, lastPlaybackErrorJson,
             mpvState, client?.lastPlaybackInfoJson, showControls, buffering, error, position,
             activeVideoDecoder, dvDecoderPath, playbackStatusNotice,
             negotiationDiagnostics, rangeProbeDiagnostics, phaseTimes, droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,

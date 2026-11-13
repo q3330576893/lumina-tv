@@ -16,6 +16,10 @@ data class SavedServer(
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE)
 
+    var declareDtsDirectPlay: Boolean
+        get() = sp.getBoolean("declare_dts_direct_play", false)
+        set(v) = sp.edit().putBoolean("declare_dts_direct_play", v).apply()
+
     var baseUrl: String
         get() = sp.getString("base_url", "") ?: ""
         set(v) = sp.edit().putString("base_url", v).apply()

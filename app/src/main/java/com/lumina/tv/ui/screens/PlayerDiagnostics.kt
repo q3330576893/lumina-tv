@@ -23,6 +23,7 @@ internal fun buildPlayerDiagPayload(
     playbackSource: MediaSource?,
     currentPlaybackUrl: String?,
     audioDecodeMode: String,
+    audioSupport: String,
     degraded: Boolean,
     engineSwitchTrace: List<String>,
     exo: ExoPlayer,
@@ -105,6 +106,8 @@ internal fun buildPlayerDiagPayload(
                 .put("firstFrameLatencyMs", phases.opt("firstFrameMs"))))
         .put("audioDecode", JSONObject()
             .put("audioDecodeMode", audioDecodeMode)
+            .put("audioSupport", audioSupport)
+            .put("declareDtsDirectPlay", AppRuntime.prefs?.declareDtsDirectPlay ?: false)
             .put("audioDecodePath", when {
                 audioDecodeMode == "passthrough" -> "passthrough"
                 activeEngine == "mpv" -> "local-soft-mpv"

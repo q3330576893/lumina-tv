@@ -1238,9 +1238,22 @@ data class PlaybackTarget(
             val finalPath = android.net.Uri.parse(finalUrl).path.orEmpty()
             android.util.Log.d("EmbyClient", "playback: isStrmItem=$isStrmItem hasDirectLink=${directLinkUrl != null} final=$finalPath")
             // 请求头：#EXTVLCOPT / #EXTHTTP 既可能来自 MediaSources.AdditionalOptions，也可能在 .strm 文本里
-            val headers = buildMap {
+            val sourceHeaders = first?.optJSONObject("RequiredHttpHeaders")
+                ?.let { json -> buildMap { json.keys().forEach { key -> put(key, json.optString(key)) } } }
+                .orEmpty()
+            val strmHeaders = buildMap {
                 putAll(parseStrmOptions(source.additionalOptions))
                 putAll(parseStrmOptions(strmText))
+            }
+            val headers = linkedMapOf<String, String>().apply {
+                putAll(strmHeaders)
+                sourceHeaders.forEach { (name, value) ->
+                    keys.filter { it.equals(name, ignoreCase = true) }.forEach(::remove)
+                    put(name, value)
+                }
+            }
+            if (sourceHeaders.isNotEmpty()) {
+                android.util.Log.d("EmbyClient", "playback headers from source: names=${sourceHeaders.keys.sorted()} count=${sourceHeaders.size}")
             }
             PlaybackTarget(
                 url = finalUrl,
@@ -1281,7 +1294,8 @@ data class PlaybackTarget(
     private fun deviceProfile(): JSONObject = JSONObject()
         .put("DirectPlayProfiles", JSONArray()
             .put(JSONObject().put("Type", "Video").put("Container", "mkv,mp4,m4v,ts,mov")
-                .put("VideoCodec", "h264,hevc").put("AudioCodec", "aac,ac3,eac3,mp3,opus,flac,vorbis"))
+                .put("VideoCodec", "h264,hevc").put("AudioCodec", if (com.lumina.tv.AppRuntime.prefs?.declareDtsDirectPlay == true)
+                    "aac,ac3,eac3,mp3,opus,flac,vorbis,dts,truehd" else "aac,ac3,eac3,mp3,opus,flac,vorbis"))
             .put(JSONObject().put("Type", "Audio").put("Container", "mp3").put("AudioCodec", "mp3")))
         .put("SubtitleProfiles", JSONArray()
             .put(JSONObject().put("Format", "srt").put("Method", "External"))
