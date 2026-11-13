@@ -81,6 +81,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import androidx.media3.common.C
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
@@ -119,6 +120,10 @@ import com.lumina.tv.ui.components.DiagExportDialog
 import com.lumina.tv.player.PlaybackErrorCategory
 import com.lumina.tv.player.PlaybackRangeProbe
 import com.lumina.tv.player.classifyPlaybackError
+import com.lumina.tv.player.PlaybackWatchdog
+import com.lumina.tv.player.StabilityMetrics
+import com.lumina.tv.player.AudioFocusGuard
+import com.lumina.tv.diag.PageLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -216,6 +221,7 @@ fun PlayerScreen(
     var mpvBackend by remember(item.id) { mutableStateOf<MpvPlayerController?>(null) }
     var mpvState by remember(item.id) { mutableStateOf(MpvPlayerController.State()) }
     var currentSurface by remember(item.id) { mutableStateOf<Surface?>(null) }
+    var currentSurfaceSize by remember(item.id) { mutableStateOf<Pair<Int, Int>?>(null) }
     var reloadKey by remember { mutableIntStateOf(0) }
     // 转码流（HLS）解析失败时改拉原文件直连
     var forceDirectNext by remember(item.id) { mutableStateOf(false) }
@@ -245,6 +251,9 @@ fun PlayerScreen(
     var networkRetryJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var networkRetryCount by remember(item.id) { mutableIntStateOf(0) }
     var sessionGeneration by remember(item.id) { mutableIntStateOf(0) }
+    val watchdog = remember(item.id) { PlaybackWatchdog() }
+    var bytesLoaded by remember(item.id) { mutableLongStateOf(0L) }
+    var pendingResumePositionMs by remember(item.id) { mutableLongStateOf(-1L) }
     var loadJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var phaseTimes by remember(item.id) { mutableStateOf(JSONObject()) }
     var droppedFrames by remember(item.id) { mutableLongStateOf(0L) }
@@ -252,6 +261,7 @@ fun PlayerScreen(
     var bufferingCount by remember(item.id) { mutableIntStateOf(0) }
     var bufferingDurationMs by remember(item.id) { mutableLongStateOf(0L) }
     var bufferingStartedAt by remember(item.id) { mutableLongStateOf(0L) }
+    var rebufferStartedAt by remember(item.id) { mutableLongStateOf(0L) }
     var lastPlaybackErrorJson by remember(item.id) { mutableStateOf<String?>(null) }
     var dvDecoderPath by remember(item.id) { mutableStateOf<String?>(null) }
     var activeVideoDecoder by remember(item.id) { mutableStateOf<String?>(null) }
@@ -355,6 +365,7 @@ fun PlayerScreen(
         playerBuilder
             .build()
             .apply {
+                setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
                 playWhenReady = true
                 trackSelectionParameters = trackSelectionParameters.buildUpon()
                     .setPreferredTextLanguages("zh", "chi", "zho")
@@ -418,13 +429,22 @@ fun PlayerScreen(
         }
     }
 
+    fun requestPlaybackReload(positionMs: Long, generation: Int) {
+        if (generation != sessionGeneration) {
+            PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration")
+            return
+        }
+        pendingResumePositionMs = positionMs.takeIf { it > 0L } ?: item.positionTicks / 10_000L
+        reloadKey++
+    }
+
     fun loadSource(
         forceTranscode: Boolean,
         sourceId: String? = currentSourceId,
         audioStreamIndex: Int? = AppRuntime.prefs?.audioTrackFor(item.id),
     ) {
         val c = client ?: return
-        val resumePosition = when (activeEngine) {
+        val resumePosition = pendingResumePositionMs.takeIf { it >= 0L } ?: when (activeEngine) {
             "mpv" -> mpvBackend?.positionMs()?.takeIf { it > 0 } ?: position.takeIf { it > 0 } ?: item.positionTicks / 10_000
             else -> if (exo.mediaItemCount > 0) {
             exo.currentPosition.coerceAtLeast(0L).let { current ->
@@ -436,7 +456,9 @@ fun PlayerScreen(
         loadJob?.cancel()
         networkRetryJob?.cancel()
         rangeProbeJob?.cancel()
+        if (sessionGeneration > 0) StabilityMetrics.retryCount++
         val generation = ++sessionGeneration
+        PageLog.add("playback reload gen=$generation fromGen=${generation - 1} positionMs=$resumePosition engine=$activeEngine")
         playStartAt = android.os.SystemClock.elapsedRealtime()
         phaseTimes = JSONObject().put("session", generation)
         loadJob = scope.launch {
@@ -464,7 +486,7 @@ fun PlayerScreen(
                         maxStreamingBitrate = maxStreamingBitrate,
                     )
                 val target = resolvedTarget
-                if (generation != sessionGeneration) return@launch
+                if (generation != sessionGeneration) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                 phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
                 negotiationDiagnostics = target.negotiationDiagnostics
                 currentPlayMethod = target.playMethod
@@ -585,9 +607,19 @@ fun PlayerScreen(
                 }
                 if (activeEngine == "mpv") {
                     val backend = mpvBackend ?: MpvPlayerController(context) { state ->
+                        if (generation != sessionGeneration) {
+                            PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration")
+                            return@MpvPlayerController
+                        }
                         mpvState = state
                         position = state.positionMs
                         if (state.durationMs > 0L) duration = state.durationMs
+                        if (state.ready && !firstFrameRendered) {
+                            firstFrameRendered = true
+                            val firstFrameMs = android.os.SystemClock.elapsedRealtime() - playStartAt
+                            StabilityMetrics.firstFrameMs = firstFrameMs
+                            phaseTimes.put("firstFrameMs", firstFrameMs)
+                        }
                         buffering = state.buffering
                         isPlaying = state.playing
                         if (state.ended) startAutoNext()
@@ -606,7 +638,7 @@ fun PlayerScreen(
                             degraded = true
                             ffmpegFallback = true
                             activeEngine = "media3"
-                            reloadKey++
+                            requestPlaybackReload(position, generation)
                         }
                     }.also { mpvBackend = it }
                     val mpvAudioStreams = playbackSource?.audioStreams
@@ -616,6 +648,7 @@ fun PlayerScreen(
                     val subtitleSp = when { subScale >= 2.3f -> 38.4f; subScale >= 1.9f -> 32f; subScale >= 1.5f -> 25.6f; subScale >= 1.2f -> 20.8f; else -> 16f }
                     backend.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
                     backend.setAudioTrack(audioStreamIndex ?: -1)
+                    pendingResumePositionMs = -1L
                     val unavailable = backend.unavailableReason
                     if (unavailable != null) {
                         AppRuntime.prefs?.mpvBroken = true
@@ -630,7 +663,7 @@ fun PlayerScreen(
                             "mpv 内核不可用（$unavailable），已临时回退 Media3，可在设置里重选"
                         }
                         activeEngine = "media3"
-                        reloadKey++
+                        requestPlaybackReload(position, generation)
                         return@launch
                     }
                     var waitedMs = 0
@@ -646,20 +679,23 @@ fun PlayerScreen(
                         degraded = true
                         ffmpegFallback = true
                         activeEngine = "media3"
-                        reloadKey++
+                        requestPlaybackReload(position, generation)
                         return@launch
                     }
-                    if (generation != sessionGeneration) return@launch
+                    if (generation != sessionGeneration) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                     backend.attachSurface(surface)
                     val externalSubtitles = subs.mapNotNull { stream ->
                         srcId?.let { c.subtitleUrl(item.id, it, stream.index, "vtt") }
                     }
                     backend.setSpeed(if (boosting) 3f else speed)
-                    if (generation != sessionGeneration) return@launch
+                    if (generation != sessionGeneration) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                     backend.load(target.url, target.startPositionMs, externalSubtitles, target.headers)
+                    pendingResumePositionMs = -1L
                 } else {
                     exo.setMediaSource(merged)
                     exo.prepare()
+                    if (resumePosition > 0L) exo.seekTo(resumePosition)
+                    pendingResumePositionMs = -1L
                     exo.seekTo(target.startPositionMs.coerceAtLeast(0))
                     exo.playWhenReady = true
                     exo.setPlaybackSpeed(if (boosting) 3f else speed)
@@ -672,7 +708,7 @@ fun PlayerScreen(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (generation != sessionGeneration) return@launch
+                if (generation != sessionGeneration) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                 buffering = false
                 if (failurePhase == "未知") failurePhase = "解析"
                 val reason = playbackNetworkMessage(e)
@@ -683,7 +719,7 @@ fun PlayerScreen(
                     activeEngine = "media3"
                     degraded = true
                     ffmpegFallback = true
-                    reloadKey++
+                    requestPlaybackReload(position, sessionGeneration)
                 } else {
                     error = reason
                 }
@@ -703,6 +739,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(item.id) {
+        StabilityMetrics.reset()
         degraded = false
         reloadKey = 0
         currentSourceId = initialSourceId
@@ -742,11 +779,11 @@ fun PlayerScreen(
         when (activeEngine) {
             "mpv" -> {
                 exo.pause()
-                loadSource(forceTranscode = false)
+                requestPlaybackReload(position, sessionGeneration)
             }
             "media3" -> if (mpvBackend != null) {
                 mpvBackend?.pause()
-                loadSource(forceTranscode = ffmpegFallback)
+                requestPlaybackReload(position, sessionGeneration)
             }
         }
     }
@@ -792,6 +829,7 @@ fun PlayerScreen(
                 if (activeEngine != "media3") return
                 val errorClass = classifyPlaybackError(err)
                 android.util.Log.e("LuminaTV", "Media3 playback failed code=${err.errorCode}", err)
+                PageLog.add("playbackError category=${errorClass.category.name} code=${err.errorCode} action=${errorClass.action}")
                 failurePhase = when {
                     errorClass.category == PlaybackErrorCategory.NETWORK_TRANSIENT || errorClass.category == PlaybackErrorCategory.HTTP_PERMISSION -> "连接"
                     errorClass.category == PlaybackErrorCategory.PARSING -> "解封装"
@@ -803,6 +841,7 @@ fun PlayerScreen(
                     .put("errorCodeName", err.errorCodeName)
                     .put("errorCode", err.errorCode)
                     .put("category", errorClass.category.name)
+                    .put("action", errorClass.action)
                     .put("message", err.message)
                     .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
                     .put("dolbyVision", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.let {
@@ -868,7 +907,7 @@ fun PlayerScreen(
                             failurePhase = "解封装"
                             audioDecodeNotice = "直连容器无法解析，正在尝试转码"
                             engineSwitchTrace.add("transcode-fallback:${err.errorCodeName}")
-                            reloadKey++
+                            requestPlaybackReload(position, sessionGeneration)
                         }
                     }
                 } else if (nonVideoResponse) {
@@ -911,7 +950,7 @@ fun PlayerScreen(
                     error = null
                     audioDecodeNotice = if (badHttpFallbackStage == 1) "HTTP 400，正在尝试移除字幕转码参数" else "字幕参数回退失败，正在尝试服务器直连地址"
                     engineSwitchTrace.add("http-400-fallback:$badHttpFallbackStage")
-                    reloadKey++
+                    requestPlaybackReload(position, sessionGeneration)
                 } else if (audioDecodeMode == "passthrough" && decodingUnsupported) {
                     buffering = false
                     audioDecodeNotice = "设备不支持该音轨直通，建议改回自动"
@@ -932,7 +971,7 @@ fun PlayerScreen(
                     error = null
                     audioDecodeNotice = "转码流不可用，已改用直连播放"
                     engineSwitchTrace.add("direct-fallback:${err.errorCodeName}")
-                    reloadKey++
+                    requestPlaybackReload(position, sessionGeneration)
                 } else if (containerUnsupported && currentIsHls) {
                     buffering = false
                     error = "该片源无法播放（转码流与直连都失败）"
@@ -947,7 +986,7 @@ fun PlayerScreen(
                     error = null
                     audioDecodeNotice = "直连容器无法解析，正在尝试转码"
                     engineSwitchTrace.add("transcode-fallback:${err.errorCodeName}")
-                    reloadKey++
+                    requestPlaybackReload(position, sessionGeneration)
                 } else if (containerUnsupported) {
                     buffering = false
                     error = "该片源容器不受支持，转码后仍失败"
@@ -957,13 +996,13 @@ fun PlayerScreen(
                     transcodeFallbackTried = true
                     reloadForceTranscode = true
                     error = "直连失败，自动切换转码…"
-                    reloadKey++
+                    requestPlaybackReload(position, sessionGeneration)
                 } else if (!ffmpegFallback && !containerUnsupported) {
                     error = "媒体服务器转码流失败，重试转码路径…"
                     ffmpegFallback = true
                     reloadForceTranscode = true
                     engineSwitchTrace.add("server-transcode-retry:${err.errorCodeName}")
-                    reloadKey++
+                    requestPlaybackReload(position, sessionGeneration)
                 } else if (mediaSources.size > 1 &&
                     mediaSources.any { it.id != currentSourceId && it.id !in triedSources }
                 ) {
@@ -982,7 +1021,7 @@ fun PlayerScreen(
                     playbackSource = next
                     audioDecodeNotice = "当前版本播不了，换「${next.displayLabel}」再试"
                     engineSwitchTrace.add("source-fallback:${next.id}:${err.errorCodeName}")
-                    reloadKey++
+                    requestPlaybackReload(position, sessionGeneration)
                 } else if (decodingUnsupported && !mpvFallbackTried) {
                     mpvFallbackTried = true
                     enginePinned = "mpv"
@@ -1140,7 +1179,35 @@ fun PlayerScreen(
                 }
             }
 
-            override fun onIsPlayingChanged(p: Boolean) { isPlaying = p }
+            override fun onIsPlayingChanged(p: Boolean) {
+                isPlaying = p
+                if (p) AudioFocusGuard.record("playback-resumed")
+            }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS) {
+                    AudioFocusGuard.record("loss paused=${!playWhenReady}")
+                }
+            }
+            override fun onIsLoadingChanged(isLoading: Boolean) {
+                buffering = isLoading
+                watchdog.onLoadingChanged(isLoading)
+                if (isLoading) {
+                    bufferingCount++
+                    if (firstFrameRendered) {
+                        StabilityMetrics.rebufferCount++
+                        rebufferStartedAt = android.os.SystemClock.elapsedRealtime()
+                    }
+                    bufferingStartedAt = android.os.SystemClock.elapsedRealtime()
+                } else if (bufferingStartedAt > 0L) {
+                    val elapsed = android.os.SystemClock.elapsedRealtime() - bufferingStartedAt
+                    bufferingDurationMs += elapsed
+                    if (rebufferStartedAt > 0L) {
+                        StabilityMetrics.rebufferDurationMs += android.os.SystemClock.elapsedRealtime() - rebufferStartedAt
+                        rebufferStartedAt = 0L
+                    }
+                    bufferingStartedAt = 0L
+                }
+            }
         }
         exo.addListener(listener)
         onDispose { exo.removeListener(listener) }
@@ -1164,7 +1231,13 @@ fun PlayerScreen(
                 renderTimeMs: Long,
             ) {
                 firstFrameRendered = true
-                phaseTimes.put("firstFrameMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
+                val firstFrameMs = android.os.SystemClock.elapsedRealtime() - playStartAt
+                phaseTimes.put("firstFrameMs", firstFrameMs)
+                StabilityMetrics.firstFrameMs = firstFrameMs
+                if (exo.isLoading && rebufferStartedAt == 0L) {
+                    StabilityMetrics.rebufferCount++
+                    rebufferStartedAt = android.os.SystemClock.elapsedRealtime()
+                }
                 readyWithoutFrameSince = 0L
                 playbackStatusNotice = null
                 scope.launch { delay(2_000); if (firstFrameRendered) phaseTimes.put("stableOutputMs", android.os.SystemClock.elapsedRealtime() - playStartAt) }
@@ -1185,6 +1258,7 @@ fun PlayerScreen(
                 bitrateEstimate: Long,
             ) {
                 estimatedBitrate = bitrateEstimate.coerceAtLeast(0L)
+                bytesLoaded = totalBytesLoaded.toLong()
             }
         }
         exo.addAnalyticsListener(analytics)
@@ -1193,6 +1267,20 @@ fun PlayerScreen(
 
     DisposableEffect(item.id) {
         onDispose {
+            watchdog.reset()
+            val session = JSONObject()
+                .put("itemId", item.id).put("itemName", item.name).put("engine", activeEngine)
+                .put("positionMs", position).put("durationMs", duration)
+                .put("codec", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.codec ?: JSONObject.NULL)
+                .put("videoRange", AppRuntime.currentVideoRange)
+                .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
+                .put("surfaceSize", currentSurfaceSize?.let { "${it.first}x${it.second}" } ?: JSONObject.NULL)
+                .put("startedAt", playStartAt).put("endedAt", android.os.SystemClock.elapsedRealtime())
+                .put("endReason", error ?: playbackStatusNotice ?: "player-exit")
+            runCatching {
+                val root = context.getExternalFilesDir(null) ?: context.filesDir
+                java.io.File(root, "last-session.json").writeText(session.toString(2), Charsets.UTF_8)
+            }
             val backend = mpvBackend
             backend?.release("player-disposed")
             if (mpvBackend === backend) mpvBackend = null
@@ -1269,7 +1357,7 @@ fun PlayerScreen(
         var sinceReport = 0
         var bufferingSince = 0L
         while (true) {
-            delay(1000)
+            delay(500)
             position = when (activeEngine) {
                 "mpv" -> mpvBackend?.positionMs() ?: position
                 else -> exo.currentPosition
@@ -1278,6 +1366,17 @@ fun PlayerScreen(
                 "mpv" -> mpvBackend?.durationMs() ?: duration
                 else -> exo.duration.coerceAtLeast(0)
             }
+            watchdog.onTick(
+                positionMs = position,
+                bufferedMs = if (activeEngine == "media3") exo.bufferedPosition else position,
+                state = if (activeEngine == "media3") exo.playbackState else if (mpvState.buffering) Player.STATE_BUFFERING else if (mpvState.playing) Player.STATE_READY else Player.STATE_IDLE,
+                playWhenReady = if (activeEngine == "media3") exo.playWhenReady else mpvState.playing,
+                isSeeking = seekHint != null || seekHoldActive || previewActive,
+                sessionGeneration = sessionGeneration,
+                durationMs = duration,
+                bytesLoaded = bytesLoaded,
+                isLoading = buffering,
+            )
             val endSkipSeconds = AppRuntime.prefs?.endSkipSeconds ?: 30
             val validCreditsStart = currentCreditsStartMs?.takeIf { it > 0L && it < duration }
             if (endSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
@@ -1420,6 +1519,7 @@ fun PlayerScreen(
                         }
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                             currentSurface = holder.surface
+                            currentSurfaceSize = width to height
                             mpvBackend?.attachSurface(holder.surface, width, height)
                         }
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -1431,6 +1531,7 @@ fun PlayerScreen(
             },
             update = { view -> if (view.holder.surface.isValid) {
                 currentSurface = view.holder.surface
+                currentSurfaceSize = view.width to view.height
                 mpvBackend?.attachSurface(view.holder.surface, view.width, view.height)
             } },
             modifier = Modifier.fillMaxSize(),
@@ -1498,7 +1599,7 @@ fun PlayerScreen(
                                 triedSources = emptySet()
                                 reloadForceTranscode = false
                                 error = null
-                                reloadKey++
+                                requestPlaybackReload(position, sessionGeneration)
                             }
                         }) { focused ->
                             Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
@@ -1511,7 +1612,7 @@ fun PlayerScreen(
                     FocusSurface(Modifier.width(190.dp).height(40.dp), corner = 20.dp, onClick = {
                         bufferingTimedOut = false
                         reloadForceTranscode = true
-                        reloadKey++
+                        requestPlaybackReload(position, sessionGeneration)
                     }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
                             Text("立即切换转码", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
@@ -1903,7 +2004,7 @@ fun PlayerScreen(
                             .build()
                     } else {
                         reloadForceTranscode = false
-                        reloadKey++
+                        requestPlaybackReload(position, sessionGeneration)
                     }
                 },
                 onSubtitleSelected = { AppRuntime.prefs?.rememberSubtitleTrack(item.id, it) },
@@ -1934,7 +2035,7 @@ fun PlayerScreen(
                     }
                     engineSwitchTrace.add("audio-decode-mode=$mode")
                     reloadForceTranscode = false
-                    reloadKey++
+                    requestPlaybackReload(position, sessionGeneration)
                 },
                 onSpeed = {
                     setPlaybackSpeed(it)

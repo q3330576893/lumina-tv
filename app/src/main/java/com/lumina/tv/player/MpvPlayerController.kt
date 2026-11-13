@@ -120,6 +120,7 @@ class MpvPlayerController(
                     .forEach { engine.observeProperty(it, MPVLib.MpvFormat.MPV_FORMAT_STRING) }
                 listOf("video-params/w", "video-params/h")
                     .forEach { engine.observeProperty(it, MPVLib.MpvFormat.MPV_FORMAT_INT64) }
+                engine.observeProperty("vo-drop-frame-count", MPVLib.MpvFormat.MPV_FORMAT_INT64)
                 recordPreviousAbnormalSession()
             }.onFailure { failure ->
                 unavailableReason = failure.message ?: "libmpv 初始化失败"

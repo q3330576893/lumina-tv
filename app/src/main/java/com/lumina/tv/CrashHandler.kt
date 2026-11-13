@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Debug
 import android.app.ActivityManager
+import android.app.ApplicationExitInfo
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.NetLog
 import com.lumina.tv.diag.PageLog
@@ -23,10 +24,52 @@ object CrashHandler {
 
     fun install(context: Context) {
         val app = context.applicationContext
+        recordPreviousExit(app)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try { writeCrash(app, thread, throwable) } catch (_: Throwable) { }
             try { previous?.uncaughtException(thread, throwable) } catch (_: Throwable) { }
+        }
+    }
+
+    private fun recordPreviousExit(context: Context) {
+        val exit = runCatching {
+            if (Build.VERSION.SDK_INT >= 30) {
+                (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
+                    .getHistoricalProcessExitReasons(context.packageName, 0, 8).firstOrNull()
+            } else null
+        }.getOrNull()
+        val payload = if (exit != null) JSONObject()
+            .put("reason", when (exit.reason) {
+                ApplicationExitInfo.REASON_ANR -> "ANR"
+                ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY"
+                ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH"
+                ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_KILLED"
+                else -> "OTHER_${exit.reason}"
+            }).put("description", exit.description ?: "")
+            .put("timestamp", exit.timestamp).put("importance", exit.importance)
+        else JSONObject().put("reason", "legacy-crash-file")
+            .put("description", crashFile(context).takeIf(File::exists)?.readLines()?.firstOrNull().orEmpty())
+            .put("timestamp", JSONObject.NULL).put("importance", JSONObject.NULL)
+        runCatching { File(root(context), "exit-reason.json").writeText(payload.toString(2), Charsets.UTF_8) }
+        if (exit?.reason == ApplicationExitInfo.REASON_ANR) {
+            val trace = runCatching { File("/data/anr/traces.txt").readText().takeLast(64 * 1024) }.getOrNull()
+            runCatching { File(root(context), "anr-latest.txt").writeText(trace ?: "anr-trace=unavailable", Charsets.UTF_8) }
+            writeCrashType(context, "ANR", trace ?: "anr-trace=unavailable")
+        } else if (exit?.reason == ApplicationExitInfo.REASON_CRASH_NATIVE) {
+            val tombstones = runCatching { File("/data/tombstones").listFiles()?.sortedByDescending(File::lastModified)?.firstOrNull()?.readText()?.takeLast(64 * 1024) }.getOrNull()
+            val evidence = tombstones ?: "native-tombstone=unavailable"
+            runCatching { File(root(context), "native-latest.txt").writeText(evidence, Charsets.UTF_8) }
+            writeCrashType(context, "NATIVE", evidence)
+        }
+    }
+
+    private fun writeCrashType(context: Context, type: String, evidence: String) {
+        runCatching {
+            val file = statsFile(context)
+            val stats = JSONObject(file.takeIf(File::exists)?.readText().orEmpty())
+            stats.put("lastCrash", JSONObject().put("type", type).put("at", System.currentTimeMillis()).put("evidence", evidence))
+            file.writeText(stats.toString(2), Charsets.UTF_8)
         }
     }
 
@@ -38,7 +81,7 @@ object CrashHandler {
         val now = System.currentTimeMillis()
         val stats = runCatching { JSONObject(statsFile(context).takeIf(File::exists)?.readText().orEmpty()) }.getOrDefault(JSONObject())
         val entry = stats.optJSONObject(fingerprint) ?: JSONObject()
-        entry.put("count", entry.optInt("count", 0) + 1).put("lastAt", now)
+        entry.put("type", "JAVA").put("count", entry.optInt("count", 0) + 1).put("lastAt", now)
         stats.put(fingerprint, entry)
         statsFile(context).writeText(stats.toString(2), Charsets.UTF_8)
         if (entry.optInt("count") > 1) {

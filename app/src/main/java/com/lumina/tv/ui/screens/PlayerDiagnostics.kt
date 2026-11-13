@@ -9,6 +9,7 @@ import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.player.MpvPlayerController
+import com.lumina.tv.player.StabilityMetrics
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
@@ -164,6 +165,13 @@ internal fun buildPlayerDiagPayload(
         .put("mpvErrorPresent", mpvState.error != null)
         .put("mpvSoftwareRetryCount", mpvBackend?.softwareRetryCount() ?: 0)
         .put("audioDecodeFailure", AppRuntime.prefs?.lastPlaybackAudioFailure ?: "")
+        .put("metrics", JSONObject()
+            .put("firstFrameMs", StabilityMetrics.firstFrameMs ?: JSONObject.NULL)
+            .put("rebufferCount", StabilityMetrics.rebufferCount)
+            .put("rebufferDurationMs", StabilityMetrics.rebufferDurationMs)
+            .put("droppedFrames", droppedFrames + (mpvBackend?.diagnosticProperties()?.get("vo-drop-frame-count")?.toLongOrNull() ?: 0L))
+            .put("retryCount", StabilityMetrics.retryCount)
+            .put("watchdogHits", StabilityMetrics.watchdogHits))
     return DiagPayload(
         metaJson = meta.toString(2),
         playbackInfoJson = playbackInfoJson ?: JSONObject().put("reason", "PlaybackInfo was not captured").toString(2),

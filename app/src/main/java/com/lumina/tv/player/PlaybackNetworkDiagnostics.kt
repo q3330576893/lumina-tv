@@ -12,31 +12,54 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
-enum class PlaybackErrorCategory { NETWORK_TRANSIENT, HTTP_PERMISSION, PARSING, DECODING, OTHER }
+enum class PlaybackErrorCategory { NETWORK_TRANSIENT, HTTP_PERMISSION, PARSING, DECODING, OTHER, AUDIO_OUTPUT, RESOURCE_RECLAIMED, SOURCE_GONE, AUTH_FAILED, CERT_INVALID, LIVE_WINDOW }
 
-data class PlaybackErrorClassification(val category: PlaybackErrorCategory, val code: Int)
+data class PlaybackErrorClassification(val category: PlaybackErrorCategory, val code: Int, val action: String)
 
 fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification {
-    val category = when (error.errorCode) {
-        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> PlaybackErrorCategory.NETWORK_TRANSIENT
-        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> if (generateSequence(error as Throwable?) { it.cause }
-            .mapNotNull { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode }
-            .any { it == 401 || it == 403 }) PlaybackErrorCategory.HTTP_PERMISSION else PlaybackErrorCategory.OTHER
-        PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
-        PlaybackException.ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED -> PlaybackErrorCategory.HTTP_PERMISSION
-        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
-        PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-        PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED -> PlaybackErrorCategory.PARSING
-        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
-        PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
-        PlaybackException.ERROR_CODE_DECODING_FAILED,
-        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
-        PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> PlaybackErrorCategory.DECODING
+    val causes = generateSequence(error as Throwable?) { it.cause }.toList()
+    val statusCodes = causes.mapNotNull { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode }
+    val category = when {
+        causes.any { it is javax.net.ssl.SSLHandshakeException || it is java.security.cert.CertPathValidatorException } -> PlaybackErrorCategory.CERT_INVALID
+        error.errorCode == 5001 || error.errorCode == 5002 -> PlaybackErrorCategory.AUDIO_OUTPUT
+        error.errorCode == 4006 -> PlaybackErrorCategory.RESOURCE_RECLAIMED
+        error.errorCode == 2003 || statusCodes.any { it == 404 || it == 410 } -> PlaybackErrorCategory.SOURCE_GONE
+        error.errorCode == 2002 && statusCodes.any { it == 401 || it == 403 } -> PlaybackErrorCategory.AUTH_FAILED
+        error.errorCode == 7002 -> PlaybackErrorCategory.LIVE_WINDOW
+        error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> PlaybackErrorCategory.NETWORK_TRANSIENT
+        error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> if (statusCodes.any { it == 401 || it == 403 }) PlaybackErrorCategory.AUTH_FAILED else PlaybackErrorCategory.OTHER
+        error.errorCode == PlaybackException.ERROR_CODE_IO_NO_PERMISSION ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED -> PlaybackErrorCategory.HTTP_PERMISSION
+        error.errorCode in setOf(
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+        ) -> PlaybackErrorCategory.PARSING
+        error.errorCode in setOf(
+            PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+            PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+        ) -> PlaybackErrorCategory.DECODING
         else -> PlaybackErrorCategory.OTHER
     }
-    return PlaybackErrorClassification(category, error.errorCode)
+    val action = when (category) {
+        PlaybackErrorCategory.AUDIO_OUTPUT -> "switch_mpv_or_reduce_pcm"
+        PlaybackErrorCategory.RESOURCE_RECLAIMED -> "retry"
+        PlaybackErrorCategory.SOURCE_GONE -> "change_source"
+        PlaybackErrorCategory.AUTH_FAILED -> "reauthenticate"
+        PlaybackErrorCategory.CERT_INVALID -> "check_certificate"
+        PlaybackErrorCategory.LIVE_WINDOW -> "seek_live_edge"
+        PlaybackErrorCategory.NETWORK_TRANSIENT -> "retry"
+        PlaybackErrorCategory.HTTP_PERMISSION -> "check_permissions"
+        PlaybackErrorCategory.PARSING -> "change_source_or_transcode"
+        PlaybackErrorCategory.DECODING -> "switch_decoder"
+        PlaybackErrorCategory.OTHER -> "inspect_diagnostics"
+    }
+    return PlaybackErrorClassification(category, error.errorCode, action)
 }
 
 object PlaybackRangeProbe {

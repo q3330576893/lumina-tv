@@ -93,6 +93,10 @@ object DiagExporter {
             "net.json" to NetLog.tail(),
             "pages.txt" to PageLog.tail(),
             "crash-stats.json" to File(root, "crash-stats.json").takeIf(File::exists)?.readText().orEmpty(),
+            "lastSession.json" to File(root, "last-session.json").takeIf(File::exists)?.readText().orEmpty(),
+            "exitReason.json" to File(root, "exit-reason.json").takeIf(File::exists)?.readText().orEmpty(),
+            "anr-latest.txt" to File(root, "anr-latest.txt").takeIf(File::exists)?.readText().orEmpty(),
+            "native-latest.txt" to File(root, "native-latest.txt").takeIf(File::exists)?.readText().orEmpty(),
         )
         (1..5).forEach { n -> File(root, "crash-$n.txt").takeIf(File::exists)?.let { files["crash-$n.txt"] = it.readText() } }
         File(root, "crash-latest.txt").takeIf(File::exists)?.let { files["crash-latest.txt"] = it.readText() }
