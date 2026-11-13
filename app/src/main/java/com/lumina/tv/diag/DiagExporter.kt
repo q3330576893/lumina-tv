@@ -98,12 +98,15 @@ object DiagExporter {
             "anr-latest.txt" to File(root, "anr-latest.txt").takeIf(File::exists)?.readText().orEmpty(),
             "native-latest.txt" to File(root, "native-latest.txt").takeIf(File::exists)?.readText().orEmpty(),
         )
+        File(context.filesDir, "app-prev.log").takeIf(File::exists)?.let {
+            files["app-prev.log"] = it.readText(Charsets.UTF_8)
+        }
         (1..5).forEach { n -> File(root, "crash-$n.txt").takeIf(File::exists)?.let { files["crash-$n.txt"] = it.readText() } }
         File(root, "crash-latest.txt").takeIf(File::exists)?.let { files["crash-latest.txt"] = it.readText() }
         ZipOutputStream(out.outputStream().buffered()).use { zip ->
             files.forEach { (name, original) ->
                 val limit = when (name) {
-                    "app.log" -> 300 * 1024
+                    "app.log", "app-prev.log" -> 120 * 1024
                     "mpv.log" -> 512 * 1024
                     else -> 120 * 1024
                 }

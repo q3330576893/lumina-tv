@@ -85,6 +85,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Lumina phone and TV clients intentionally share the 16:9 landscape layout.
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        initializeAppLog()
         CrashHandler.install(this)
         startupCrashNotice = CrashHandler.takeStartupNotice(this)
         AppRuntime.init(this)
@@ -132,6 +133,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun initializeAppLog() {
+        val current = java.io.File(filesDir, "app.log")
+        val previous = java.io.File(filesDir, "app-prev.log")
+        if (current.isFile && current.length() > 0L) {
+            previous.delete()
+            current.renameTo(previous)
+        }
+        current.writeText("")
     }
 
     override fun onDestroy() {

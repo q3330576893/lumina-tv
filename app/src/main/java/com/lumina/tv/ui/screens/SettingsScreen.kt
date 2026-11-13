@@ -1,5 +1,8 @@
 package com.lumina.tv.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -28,12 +31,16 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,7 +99,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var endCreditsSkipSeconds by remember { mutableStateOf(AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) }
     var themeKey by remember { mutableStateOf(prefs?.themeColor ?: "blue") }
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
-    var detailBackgroundVideo by remember { mutableStateOf(prefs?.detailBackgroundVideo ?: "auto") }
+    var detailBackgroundVideo by remember { mutableStateOf(prefs?.detailBackgroundVideo?.takeIf { it in setOf("off", "720p", "auto") } ?: "auto") }
     var licensesOpen by remember { mutableStateOf(false) }
     var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
     var maxStreamingBitrate by remember { mutableStateOf(prefs?.maxStreamingBitrate ?: 120_000_000L) }
@@ -115,6 +122,8 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var renameServerUrl by remember { mutableStateOf<String?>(null) }
     var renameServerText by remember { mutableStateOf("") }
     var showDiagExport by remember { mutableStateOf(false) }
+    var sourcePreferencesExpanded by rememberSaveable { mutableStateOf(false) }
+    var libraryViewsExpanded by rememberSaveable { mutableStateOf(false) }
 
     renameServerUrl?.let { url ->
         AlertDialog(
@@ -165,13 +174,13 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         }
                     }
                 }
-                Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(12.dp))
 
                 // ---------- 账号与服务器 ----------
                 GlassPanel(Modifier.fillMaxWidth(), corner = 22.dp) {
                     Column(Modifier.padding(22.dp)) {
                         Text("服务器与账号", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
                         Text("当前服务器", color = TextSub, fontSize = 11.sp)
                         Text(AppRuntime.session?.serverName ?: "-", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(4.dp))
@@ -279,7 +288,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 }
                             }
                         }
-                        Spacer(Modifier.height(16.dp))
+                        Spacer(Modifier.height(12.dp))
                         Text("玻璃质感", color = TextSub, fontSize = 11.sp)
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -318,14 +327,14 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp),
                         )
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
                         Text("详情页背景视频", color = TextSub, fontSize = 11.sp)
                         Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             listOf("off" to "关", "720p" to "仅 720p 转码", "auto" to "自动").forEach { (key, label) ->
                                 val active = detailBackgroundVideo == key
                                 FocusSurface(
-                                    modifier = Modifier.height(38.dp).widthIn(min = 72.dp),
+                                    modifier = Modifier.height(34.dp).widthIn(min = 72.dp),
                                     corner = 10.dp,
                                     onClick = {
                                         detailBackgroundVideo = key
@@ -344,7 +353,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 }
                             }
                         }
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
                         SwitchRow(
                             title = "海报评分",
                             desc = "在海报右上角显示 ★ 评分",
@@ -382,7 +391,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         if (views.isEmpty()) {
                             Text("打开一次首页后会自动同步服务器分类", color = TextSub, fontSize = 12.sp)
                         } else {
-                            views.forEach { v ->
+                            (if (libraryViewsExpanded) views else views.take(3)).forEach { v ->
                                 SwitchRow(
                                     title = v.name,
                                     desc = when (v.type) {
@@ -393,11 +402,19 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                         else -> "媒体库"
                                     },
                                     checked = v.id !in hiddenIds,
+                                    rowHeight = 38,
                                     onChange = {
                                         prefs?.toggleViewHidden(v.id)
                                         hiddenIds = prefs?.hiddenViewIds ?: emptySet()
                                     },
                                 )
+                            }
+                            if (views.size > 3) {
+                                FocusSurface(Modifier.fillMaxWidth().height(34.dp), corner = 10.dp, onClick = { libraryViewsExpanded = !libraryViewsExpanded }) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                                        Text(if (libraryViewsExpanded) "收起" else "查看更多（共 ${views.size} 个）", color = TextMain, fontSize = 11.sp)
+                                    }
+                                }
                             }
                             Spacer(Modifier.height(4.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -492,7 +509,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 prefs?.declareDtsDirectPlay = it
                             },
                         )
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
                         Text("文字颜色", color = TextSub, fontSize = 11.sp)
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -582,7 +599,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp),
                         )
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
                         Text("片尾跳过", color = TextSub, fontSize = 11.sp)
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -611,7 +628,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 }
                             }
                         }
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
                         Text("播放内核：ExoPlayer（硬解 · 支持 H.264/H.265/AV1 · 帧率自动匹配）", color = TextSub, fontSize = 11.sp)
                         Text("解码器优先级", color = TextSub, fontSize = 11.sp)
                         Spacer(Modifier.height(8.dp))
@@ -798,7 +815,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 GlassPanel(Modifier.fillMaxWidth(), corner = 18.dp) {
                     Column(Modifier.padding(18.dp)) {
                         Text("播放后端", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             buildList {
                                 add("auto" to "自动")
@@ -830,8 +847,26 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             }
                         }
                         Spacer(Modifier.height(12.dp))
-                        Text("片源偏好", color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                        Spacer(Modifier.height(6.dp))
+                        FocusSurface(Modifier.fillMaxWidth().height(44.dp), corner = 10.dp, onClick = { sourcePreferencesExpanded = !sourcePreferencesExpanded }) { focused ->
+                            Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("片源偏好", color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                Spacer(Modifier.width(12.dp))
+                                val sourceSummary = buildList {
+                                    if (sourceDynamicRange != DynamicRangePref.UNSET) add(when (sourceDynamicRange) {
+                                        DynamicRangePref.DOLBY_VISION -> "DV优先"
+                                        DynamicRangePref.HDR -> "HDR优先"
+                                        DynamicRangePref.SDR -> "SDR优先"
+                                        else -> ""
+                                    })
+                                    if (sourceBitrate != NumericPref.UNSET) add(if (sourceBitrate == NumericPref.HIGH) "码率高优先" else "码率低优先")
+                                    if (sourceFrameRate != NumericPref.UNSET) add(if (sourceFrameRate == NumericPref.HIGH) "帧率高优先" else "帧率低优先")
+                                }.joinToString(" · ").ifBlank { "默认（取第一个源）" }
+                                Text(sourceSummary, Modifier.weight(1f), color = TextSub, fontSize = 10.sp, maxLines = 1)
+                                androidx.compose.material3.Icon(if (sourcePreferencesExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = if (focused) Accent else TextSub, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        AnimatedVisibility(visible = sourcePreferencesExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                        Column {
                         listOf(
                             Triple("动态范围", sourceDynamicRange.name, listOf(
                                 DynamicRangePref.UNSET to "不设置", DynamicRangePref.DOLBY_VISION to "DV优先",
@@ -886,6 +921,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             checked = matchDisplayFrameRate,
                             onChange = { matchDisplayFrameRate = it; prefs?.matchDisplayFrameRate = it },
                         )
+                        }
                         Spacer(Modifier.height(6.dp))
                         Spacer(Modifier.height(12.dp))
                         listOf(
@@ -939,9 +975,9 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 
                 Spacer(Modifier.height(14.dp))
                 // ---------- 关于（放在整页最后） ----------
-                AboutPanel(Modifier.fillMaxWidth(), onLicenses = { licensesOpen = true }, onDiagnostics = { showDiagExport = true })
+                AboutPanel(Modifier.fillMaxWidth(), onLicenses = { licensesOpen = true })
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(12.dp))
             }
 
             // 关于统一放在主列最后（见下方），不再单独占右栏
@@ -961,7 +997,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 }
 
 @Composable
-private fun AboutPanel(modifier: Modifier, onLicenses: () -> Unit, onDiagnostics: () -> Unit) {
+private fun AboutPanel(modifier: Modifier, onLicenses: () -> Unit) {
     GlassPanel(modifier, corner = 26.dp) {
         Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("关于", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -971,19 +1007,14 @@ private fun AboutPanel(modifier: Modifier, onLicenses: () -> Unit, onDiagnostics
                     Text("开源许可", Modifier.padding(horizontal = 12.dp), color = TextMain, fontSize = 12.sp)
                 }
             }
-            FocusSurface(Modifier.fillMaxWidth().height(40.dp), corner = 12.dp, onClick = onDiagnostics) { focused ->
-                Box(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent), contentAlignment = Alignment.CenterStart) {
-                    Text("导出诊断包", Modifier.padding(horizontal = 12.dp), color = TextMain, fontSize = 12.sp)
-                }
-            }
         }
     }
 }
 
 @Composable
-private fun SwitchRow(title: String, desc: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun SwitchRow(title: String, desc: String, checked: Boolean, onChange: (Boolean) -> Unit, rowHeight: Int = 44) {
     FocusSurface(
-        modifier = Modifier.fillMaxWidth().height(56.dp),
+        modifier = Modifier.fillMaxWidth().height(rowHeight.dp),
         corner = 14.dp,
         scaleTo = 1.02f,
         onClick = { onChange(!checked) },
@@ -994,7 +1025,7 @@ private fun SwitchRow(title: String, desc: String, checked: Boolean, onChange: (
         ) {
             Column(Modifier.weight(1f)) {
                 Text(title, color = if (focused) TextMain else TextMain.copy(alpha = 0.86f), fontSize = 13.sp)
-                Text(desc, color = if (focused) TextSub else TextSub.copy(alpha = 0.78f), fontSize = 11.sp)
+                Text(desc, color = if (focused) TextSub else TextSub.copy(alpha = 0.78f), fontSize = 10.sp)
             }
             Switch(
                 modifier = Modifier.focusable(false),
