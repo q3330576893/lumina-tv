@@ -139,6 +139,18 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 onFocused = { focusedRowKey = it },
                                 modifier = Modifier.fillMaxSize(),
                             )
+                            SettingsCategory.Compatibility -> SettingsBackend(
+                                firstFocusRequester = contentFirstRequester,
+                                railRequester = railRequester,
+                                onFocused = { focusedRowKey = it },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                            SettingsCategory.About -> SettingsAbout(
+                                firstFocusRequester = contentFirstRequester,
+                                railRequester = railRequester,
+                                onFocused = { focusedRowKey = it },
+                                modifier = Modifier.fillMaxSize(),
+                            )
                             else -> Box(Modifier.fillMaxSize().padding(top = 36.dp)) {
                                 Text("该分类正在迁移", color = TextSub, fontSize = 14.sp)
                             }
@@ -165,7 +177,7 @@ private fun SettingsCategoryRail(
             Text("设置", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
             Spacer(Modifier.height(10.dp))
             SettingsCategory.entries.forEach { category ->
-                val enabled = category in setOf(SettingsCategory.Appearance, SettingsCategory.Playback, SettingsCategory.Subtitles)
+                val enabled = category in setOf(SettingsCategory.Appearance, SettingsCategory.Playback, SettingsCategory.Subtitles, SettingsCategory.Compatibility, SettingsCategory.About)
                 val selected = category == selectedCategory
                 var focused by remember(category.key) { mutableStateOf(false) }
                 Row(
