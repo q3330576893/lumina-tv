@@ -813,6 +813,12 @@ class EmbyClient(
         return url("/Items/${item.id}/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
+    /** Indexed Hero stills: use the existing authenticated image URL, not an extra metadata request. */
+    fun heroStillUrl(id: String, index: Int): String {
+        require(index in 1..3)
+        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to "480"))
+    }
+
     /** 透明标题图（Emby Logo 图），没有就返回 null 由调用方退回文字标题。 */
     fun logoUrl(item: MediaItem, maxWidth: Int = 900): String? {
         val tag = item.logoTag ?: return null
