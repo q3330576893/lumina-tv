@@ -45,7 +45,6 @@ import com.lumina.tv.ui.screens.HomeScreen
 import com.lumina.tv.ui.screens.LoginScreen
 import com.lumina.tv.ui.screens.PlayerScreen
 import com.lumina.tv.ui.screens.SearchScreen
-import com.lumina.tv.ui.screens.SettingsScreen
 import com.lumina.tv.ui.screens.SplashScreen
 import com.lumina.tv.ui.theme.LuminaTheme
 
