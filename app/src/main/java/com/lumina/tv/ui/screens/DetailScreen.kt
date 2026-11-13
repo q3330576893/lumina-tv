@@ -181,7 +181,7 @@ fun DetailScreen(
     val similarRowState = rememberLazyListState()
     val playFocus = remember { FocusRequester() }
     val sourceFocus = remember { FocusRequester() }
-    var playButtonFocused by remember(id) { mutableStateOf(false) }
+    var playButtonFocused by remember { mutableStateOf(false) }
 
     LaunchedEffect(id, detailRetry) {
         synchronized(failedDetailBackgroundKeys) {
@@ -423,7 +423,6 @@ fun DetailScreen(
 
     LaunchedEffect(item?.id) {
         if (item == null) return@LaunchedEffect
-        playButtonFocused = false
         var focused = false
         for (attempt in 0 until 3) {
             withFrameNanos { }
@@ -501,6 +500,7 @@ fun DetailScreen(
             DetailVideoBackground(
                 url = detailPreviewUrl,
                 mediaKey = detailPreviewKey,
+                requestHeaders = client?.previewHeaders().orEmpty(),
                 playing = !loading,
                 onStatus = { status ->
                     detailVideoPlaying = status == "play"
@@ -645,6 +645,7 @@ fun DetailScreen(
                                 corner = 23.dp,
                                 focusRequester = playFocus,
                                 onFocused = { playButtonFocused = true },
+                                onFocusChanged = { playButtonFocused = it },
                                 onClick = {
                                     val target = if (it0.type == "Series") {
                                         episodes.firstOrNull { !it.played && it.positionTicks > 0 }

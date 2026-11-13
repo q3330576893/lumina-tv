@@ -228,6 +228,7 @@ fun FocusSurface(
     requestFocus: Boolean = false,
     focusRequester: FocusRequester? = null,
     onFocused: (() -> Unit)? = null,
+    onFocusChanged: ((Boolean) -> Unit)? = null,
     onClick: () -> Unit,
     content: @Composable (focused: Boolean) -> Unit,
 ) {
@@ -246,7 +247,10 @@ fun FocusSurface(
         modifier
             .then(if (requestFocus) Modifier.focusRequester(requestFocusRequester) else Modifier)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .onFocusChanged { if (it.isFocused) onFocused?.invoke() }
+            .onFocusChanged {
+                onFocusChanged?.invoke(it.isFocused)
+                if (it.isFocused) onFocused?.invoke()
+            }
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale

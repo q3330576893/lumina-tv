@@ -115,6 +115,8 @@ class EmbyClient(
         return sb.toString()
     }
 
+    fun previewHeaders(): Map<String, String> = mapOf("X-Emby-Authorization" to authHeader())
+
     private fun url(path: String, params: Map<String, String?> = emptyMap()): String {
         val sb = StringBuilder(normalize(baseUrl)).append(path)
         val q = StringBuilder()
@@ -1293,10 +1295,12 @@ data class PlaybackTarget(
                 .put("Protocol", "hls").put("MaxAudioChannels", "2")))
 
     private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
-        val builder = Uri.parse(url).buildUpon().clearQuery()
-        val names = Uri.parse(url).queryParameterNames
+        val uri = Uri.parse(url)
+        if (!uri.isHierarchical) return url
+        val builder = uri.buildUpon().clearQuery()
+        val names = uri.queryParameterNames
         names.filterNot { it.equals("AudioStreamIndex", true) }.forEach { name ->
-            Uri.parse(url).getQueryParameters(name).forEach { value -> builder.appendQueryParameter(name, value) }
+            uri.getQueryParameters(name).forEach { value -> builder.appendQueryParameter(name, value) }
         }
         if ("DeviceId" !in names) builder.appendQueryParameter("DeviceId", deviceId)
         if ("api_key" !in names && token.isNotEmpty()) builder.appendQueryParameter("api_key", token)
@@ -1305,11 +1309,13 @@ data class PlaybackTarget(
     }
 
     private fun removeSubtitleQuery(url: String): String {
-        val builder = Uri.parse(url).buildUpon().clearQuery()
-        Uri.parse(url).queryParameterNames
+        val uri = Uri.parse(url)
+        if (!uri.isHierarchical) return url
+        val builder = uri.buildUpon().clearQuery()
+        uri.queryParameterNames
             .filterNot { it.equals("SubtitleStreamIndex", true) || it.equals("SubtitleMethod", true) }
             .forEach { name ->
-                Uri.parse(url).getQueryParameters(name).forEach { value ->
+                uri.getQueryParameters(name).forEach { value ->
                     builder.appendQueryParameter(name, value)
                 }
             }
@@ -1317,8 +1323,9 @@ data class PlaybackTarget(
     }
 
     private fun addStartTimeIfMissing(url: String, startPositionMs: Long): String {
-        if (startPositionMs <= 0L || Uri.parse(url).queryParameterNames.any { it.equals("StartTimeTicks", true) }) return url
-        return Uri.parse(url).buildUpon()
+        val uri = Uri.parse(url)
+        if (!uri.isHierarchical || startPositionMs <= 0L || uri.queryParameterNames.any { it.equals("StartTimeTicks", true) }) return url
+        return uri.buildUpon()
             .appendQueryParameter("StartTimeTicks", (startPositionMs * 10_000L).toString())
             .build().toString()
     }

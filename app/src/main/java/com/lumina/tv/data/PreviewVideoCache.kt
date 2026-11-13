@@ -19,4 +19,8 @@ object PreviewVideoCache {
             StandaloneDatabaseProvider(context.applicationContext),
         ).also { instance = it }
     }
+
+    fun remove(context: Context, key: String) {
+        runCatching { get(context).removeResource(key) }
+    }
 }

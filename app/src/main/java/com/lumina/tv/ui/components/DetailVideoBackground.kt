@@ -40,6 +40,7 @@ import java.util.concurrent.TimeUnit
 fun DetailVideoBackground(
     url: String?,
     mediaKey: String,
+    requestHeaders: Map<String, String> = emptyMap(),
     playing: Boolean,
     onStatus: (String) -> Unit,
     startAtMs: Long? = null,
@@ -47,9 +48,11 @@ fun DetailVideoBackground(
     modifier: Modifier = Modifier,
 ) {
     var probeResult by remember(url, mediaKey) { mutableStateOf<String?>(null) }
+    var probeAllowsCache by remember(url, mediaKey) { mutableStateOf(false) }
 
     LaunchedEffect(url, mediaKey) {
         probeResult = null
+        probeAllowsCache = false
         if (url.isNullOrBlank()) {
             probeResult = "skip=no-preview-url"
             onStatus("skip=no-preview-url")
@@ -60,7 +63,10 @@ fun DetailVideoBackground(
         val scheme = Uri.parse(url).scheme?.lowercase()
         probeResult = when {
             scheme == "file" || scheme == "content" -> "valid"
-            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url).let {
+            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url, requestHeaders).let {
+                probeAllowsCache = it.valid == true &&
+                    it.contentType.orEmpty().let { type -> type.startsWith("video/", true) || type.startsWith("application/octet-stream", true) } &&
+                    !url.contains(".m3u8", true)
                 if (it.valid == true) "valid" else if (it.reason == "html") "skip=html" else "skip=err"
             }
             else -> "skip=url"
@@ -72,6 +78,13 @@ fun DetailVideoBackground(
         DetailVideoPlayback(
             url = url,
             mediaKey = mediaKey,
+            requestHeaders = requestHeaders,
+            cacheAllowed = probeAllowsCache,
+            stage = when {
+                url.contains(".m3u8", true) -> "hls"
+                Uri.parse(url).getQueryParameter("static") == "true" -> "static"
+                else -> "direct"
+            },
             playing = playing,
             onStatus = onStatus,
             startAtMs = startAtMs,
@@ -85,6 +98,9 @@ fun DetailVideoBackground(
 private fun DetailVideoPlayback(
     url: String,
     mediaKey: String,
+    requestHeaders: Map<String, String>,
+    cacheAllowed: Boolean,
+    stage: String,
     playing: Boolean,
     onStatus: (String) -> Unit,
     startAtMs: Long?,
@@ -114,20 +130,24 @@ private fun DetailVideoPlayback(
             .followSslRedirects(true)
             .build()
         val httpFactory = OkHttpDataSource.Factory(httpClient)
-            .setUserAgent("LuminaTV/1.5 (Android)")
+            .setUserAgent(PREVIEW_USER_AGENT)
+            .setDefaultRequestProperties(requestHeaders)
         val cacheKey = mediaKey.split(':').takeLast(2).let { parts ->
             if (parts.size == 2) "bg:${parts[0]}:${parts[1]}" else "bg:$mediaKey"
         }
-        val cacheFactory = CacheDataSource.Factory()
-            .setCache(PreviewVideoCache.get(context))
-            .setUpstreamDataSourceFactory(httpFactory)
-            .setCacheKeyFactory { dataSpec -> cacheUriKey(Uri.parse(dataSpec.key ?: dataSpec.uri.toString())) }
+        val dataSourceFactory = if (cacheAllowed) {
+            PreviewVideoCache.remove(context, cacheKey)
+            CacheDataSource.Factory()
+                .setCache(PreviewVideoCache.get(context))
+                .setUpstreamDataSourceFactory(httpFactory)
+                .setCacheKeyFactory { dataSpec -> cacheUriKey(Uri.parse(dataSpec.key ?: dataSpec.uri.toString())) }
+        } else httpFactory
         val builder = MediaItem.Builder().setUri(url)
         if (url.contains(".m3u8", true)) builder.setMimeType(MimeTypes.APPLICATION_M3U8)
-        if (!url.contains(".m3u8", true)) builder.setCustomCacheKey(cacheKey)
+        if (cacheAllowed) builder.setCustomCacheKey(cacheKey)
         val mediaItem = builder.build()
         val nextPlayer = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(cacheFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory))
             .build()
             .apply {
                 volume = 0f
@@ -168,6 +188,8 @@ private fun DetailVideoPlayback(
 
             override fun onPlayerError(error: PlaybackException) {
                 failed = true
+                val cause = (error.cause?.toString() ?: error.message.orEmpty()).lineSequence().firstOrNull().orEmpty().take(120)
+                PageLog.add("detailPreview stage=$stage error=${error.errorCodeName} cause=$cause")
                 onStatus("skip=playback-failed")
             }
         }
@@ -211,6 +233,16 @@ private fun DetailVideoPlayback(
             if (player.playbackState == Player.STATE_IDLE) player.prepare()
             player.play()
         } else player.pause()
+    }
+
+    LaunchedEffect(player, playing, firstFrame, failed) {
+        if (stage != "hls" || !playing || firstFrame || failed) return@LaunchedEffect
+        delay(HLS_FIRST_FRAME_TIMEOUT_MS)
+        if (!firstFrame && !failed) {
+            failed = true
+            PageLog.add("detailPreview stage=hls error=STARTUP_TIMEOUT cause=No first frame within ${HLS_FIRST_FRAME_TIMEOUT_MS}ms")
+            onStatus("skip=playback-failed")
+        }
     }
 
     LaunchedEffect(player, playing, failed) {
@@ -272,10 +304,13 @@ private fun DetailVideoPlayback(
     }
 }
 
-private fun cacheUriKey(uri: Uri): String = uri.buildUpon().clearQuery().apply {
-    uri.queryParameterNames.filterNot { it.contains("api_key", true) || it.contains("token", true) || it.contains("authorization", true) }
-        .forEach { name -> uri.getQueryParameters(name).forEach { appendQueryParameter(name, it) } }
-}.build().toString()
+private fun cacheUriKey(uri: Uri): String {
+    if (!uri.isHierarchical) return uri.toString()
+    return uri.buildUpon().clearQuery().apply {
+        uri.queryParameterNames.filterNot { it.contains("api_key", true) || it.contains("token", true) || it.contains("authorization", true) }
+            .forEach { name -> uri.getQueryParameters(name).forEach { appendQueryParameter(name, it) } }
+    }.build().toString()
+}
 
 data class VideoSourceProbeResult(
     val valid: Boolean?,
@@ -308,7 +343,9 @@ object VideoSourceProbe {
             val now = System.currentTimeMillis()
             cache[url]?.takeIf { now - it.atMs < CACHE_TTL_MS }?.let { return@withContext it.result }
             val result = runCatching {
-                val builder = Request.Builder().url(url).header("Range", "bytes=0-511")
+                val builder = Request.Builder().url(url)
+                    .header("User-Agent", PREVIEW_USER_AGENT)
+                if (!url.contains(".m3u8", true)) builder.header("Range", "bytes=0-511")
                 headers.forEach { (name, value) -> builder.header(name, value) }
                 client.newCall(builder.build()).execute().use { response ->
                     val contentType = response.header("Content-Type").orEmpty()
@@ -362,3 +399,5 @@ private const val LOOP_WINDOW_MS = 20_000L
 private const val PROBE_TIMEOUT_SECONDS = 3L
 private const val PROBE_BYTES = 512L
 private const val CACHE_TTL_MS = 120_000L
+private const val HLS_FIRST_FRAME_TIMEOUT_MS = 2_000L
+private const val PREVIEW_USER_AGENT = "LuminaTV/1.5 (Android)"
