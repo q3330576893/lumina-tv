@@ -93,6 +93,7 @@ class MainActivity : ComponentActivity() {
         AppRuntime.prefs?.let {
             com.lumina.tv.ui.theme.ThemeRuntime.applyTheme(it.themeColor)
             com.lumina.tv.ui.theme.ThemeRuntime.applyGlass(it.glassStyle)
+            com.lumina.tv.ui.theme.ThemeRuntime.applyBase(it.baseTheme)
         }
 
         AppRuntime.onRemoteKey = { action -> runOnUiThread { dispatchRemote(action) } }

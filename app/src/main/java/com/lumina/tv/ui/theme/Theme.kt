@@ -16,11 +16,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-val Ink = Color(0xFF070A12)
-val InkSoft = Color(0xFF0E1424)
-val Glass = Color(0x14FFFFFF)
-val GlassStrong = Color(0x1FFFFFFF)
-val GlassLine = Color(0x22FFFFFF)
+val Ink: Color get() = ThemeRuntime.bgTop
+val InkSoft: Color get() = ThemeRuntime.bgCard
+val Glass: Color get() = ThemeRuntime.glassFill
+val GlassStrong: Color get() = ThemeRuntime.glassStrong
+val GlassLine: Color get() = ThemeRuntime.glassLine
 val Mint = Color(0xFF57E3C6)
 val TextMain = Color(0xFFEAF1FF)
 val TextSub = Color(0xFF91A0BA)
@@ -34,6 +34,24 @@ val THEME_PRESETS = listOf(
     ThemePreset("teal", "青碧", Color(0xFF4FD8C4), Color(0xFF6EA8FF)),
     ThemePreset("pink", "樱粉", Color(0xFFFF8FB8), Color(0xFFC48CFF)),
     ThemePreset("gold", "暖金", Color(0xFFF2C46D), Color(0xFFFF9E7A)),
+)
+
+data class BasePreset(
+    val key: String,
+    val label: String,
+    val bgTop: Color,
+    val bgCard: Color,
+    val glassFill: Color,
+    val glassStrong: Color,
+    val glassLine: Color,
+)
+
+val BASE_PRESETS = listOf(
+    BasePreset("ink", "深空蓝", Color(0xFF070A12), Color(0xFF0E1424), Color(0x14FFFFFF), Color(0x1FFFFFFF), Color(0x22FFFFFF)),
+    BasePreset("oled", "纯黑", Color(0xFF000000), Color(0xFF0A0A0C), Color(0x17FFFFFF), Color(0x24FFFFFF), Color(0x26FFFFFF)),
+    BasePreset("graphite", "石墨", Color(0xFF111214), Color(0xFF1A1B1E), Color(0x14FFFFFF), Color(0x1FFFFFFF), Color(0x22FFFFFF)),
+    BasePreset("warm", "暖夜", Color(0xFF0B0908), Color(0xFF14100D), Color(0x16FFFFFF), Color(0x21FFFFFF), Color(0x24FFFFFF)),
+    BasePreset("mint", "墨青", Color(0xFF060D0C), Color(0xFF0C1614), Color(0x15FFFFFF), Color(0x20FFFFFF), Color(0x23FFFFFF)),
 )
 
 /** 玻璃质感档位 */
@@ -50,6 +68,16 @@ val GLASS_PRESETS = listOf(
  * Accent / Accent2 保持 val 语义（getter 读取 state），全部既有调用点无需改动。
  */
 object ThemeRuntime {
+    var bgTop by mutableStateOf(Color(0xFF070A12))
+        private set
+    var bgCard by mutableStateOf(Color(0xFF0E1424))
+        private set
+    var glassFill by mutableStateOf(Color(0x14FFFFFF))
+        private set
+    var glassStrong by mutableStateOf(Color(0x1FFFFFFF))
+        private set
+    var glassLine by mutableStateOf(Color(0x22FFFFFF))
+        private set
     var accent by mutableStateOf(Color(0xFF6EA8FF))
         private set
     var accent2 by mutableStateOf(Color(0xFF9B8CFF))
@@ -65,6 +93,15 @@ object ThemeRuntime {
         val p = THEME_PRESETS.firstOrNull { it.key == colorKey } ?: THEME_PRESETS[0]
         accent = p.accent
         accent2 = p.accent2
+    }
+
+    fun applyBase(key: String) {
+        val p = BASE_PRESETS.firstOrNull { it.key == key } ?: BASE_PRESETS[0]
+        bgTop = p.bgTop
+        bgCard = p.bgCard
+        glassFill = p.glassFill
+        glassStrong = p.glassStrong
+        glassLine = p.glassLine
     }
 
     fun applyGlass(styleKey: String) {

@@ -21,6 +21,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.ui.theme.BASE_PRESETS
 import com.lumina.tv.ui.theme.GLASS_PRESETS
 import com.lumina.tv.ui.theme.THEME_PRESETS
 import com.lumina.tv.ui.theme.TextSub
@@ -36,6 +37,7 @@ fun SettingsAppearance(
     modifier: Modifier = Modifier,
 ) {
     val prefs = AppRuntime.prefs
+    var baseThemeKey by remember { mutableStateOf(prefs?.baseTheme ?: "ink") }
     var themeKey by remember { mutableStateOf(prefs?.themeColor ?: "blue") }
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
     var detailBackgroundVideo by remember {
@@ -48,6 +50,7 @@ fun SettingsAppearance(
 
     val rowSpecs = remember {
         listOf(
+            AppearanceRowSpec("appearance:baseTheme"),
             AppearanceRowSpec("appearance:themeColor"),
             AppearanceRowSpec("appearance:glassStyle"),
             AppearanceRowSpec("appearance:detailBackgroundVideo"),
@@ -57,7 +60,7 @@ fun SettingsAppearance(
     }
     val requesters = remember {
         rowSpecs.associate { spec ->
-            spec.key to if (spec.key == "appearance:themeColor") firstFocusRequester else FocusRequester()
+            spec.key to if (spec.key == "appearance:baseTheme") firstFocusRequester else FocusRequester()
         }
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
@@ -85,6 +88,23 @@ fun SettingsAppearance(
                         val upRequester = if (index == 0) requester else null
                         val downRequester = if (index == rowSpecs.lastIndex) requester else null
                         when (spec.key) {
+                            "appearance:baseTheme" -> BaseThemeRow(
+                                focusKey = spec.key,
+                                title = "底色",
+                                description = "选择页面底色",
+                                options = BASE_PRESETS,
+                                selectedKey = baseThemeKey,
+                                onSelected = { key ->
+                                    baseThemeKey = key
+                                    prefs?.baseTheme = key
+                                    ThemeRuntime.applyBase(key)
+                                },
+                                focusRequester = requester,
+                                leftRequester = railRequester,
+                                downRequester = requesters.getValue("appearance:themeColor"),
+                                onFocused = onFocused,
+                            )
+
                             "appearance:themeColor" -> ChoiceRow(
                                 focusKey = spec.key,
                                 title = "主题色",

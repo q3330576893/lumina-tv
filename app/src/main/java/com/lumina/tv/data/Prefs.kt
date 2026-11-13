@@ -236,6 +236,10 @@ class Prefs(context: Context) {
         get() = sp.getString("theme_color", "blue") ?: "blue"
         set(v) = sp.edit().putString("theme_color", v).apply()
 
+    var baseTheme: String
+        get() = sp.getString("base_theme", "ink")?.takeIf { it in setOf("ink", "oled", "graphite", "warm", "mint") } ?: "ink"
+        set(v) = sp.edit().putString("base_theme", v.takeIf { it in setOf("ink", "oled", "graphite", "warm", "mint") } ?: "ink").apply()
+
     /** 玻璃质感：frosted 磨砂 / clear 清透 / off 关闭（省电） */
     var glassStyle: String
         get() = sp.getString("glass_style", "frosted") ?: "frosted"

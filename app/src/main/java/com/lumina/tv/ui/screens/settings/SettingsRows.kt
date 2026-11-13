@@ -12,6 +12,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -58,6 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.ui.theme.Accent
+import com.lumina.tv.ui.theme.BasePreset
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
@@ -175,6 +177,73 @@ fun ChoiceRow(
             ColorChoiceControl(options, selectedKey)
         } else {
             SegmentedChoiceControl(options, selectedKey)
+        }
+    }
+}
+
+@Composable
+fun BaseThemeRow(
+    focusKey: String,
+    title: String,
+    description: String,
+    options: List<BasePreset>,
+    selectedKey: String,
+    onSelected: (String) -> Unit,
+    focusRequester: FocusRequester,
+    leftRequester: FocusRequester,
+    onFocused: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    upRequester: FocusRequester? = null,
+    downRequester: FocusRequester? = null,
+) {
+    val selectNext = {
+        if (options.isNotEmpty()) {
+            val currentIndex = options.indexOfFirst { it.key == selectedKey }.coerceAtLeast(0)
+            onSelected(options[(currentIndex + 1) % options.size].key)
+        }
+    }
+    SettingsRowFrame(
+        focusKey = focusKey,
+        title = title,
+        description = description,
+        focusRequester = focusRequester,
+        leftRequester = leftRequester,
+        upRequester = upRequester,
+        downRequester = downRequester,
+        onFocused = onFocused,
+        onClick = selectNext,
+        showDivider = true,
+        modifier = modifier.onPreviewKeyEvent { event ->
+            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
+                selectNext()
+                true
+            } else false
+        },
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            options.forEach { option ->
+                val selected = option.key == selectedKey
+                Column(
+                    modifier = Modifier
+                        .width(60.dp)
+                        .clickable { onSelected(option.key) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(
+                        Modifier
+                            .size(width = 56.dp, height = 40.dp)
+                            .graphicsLayer { scaleX = if (selected) 1.06f else 1f; scaleY = if (selected) 1.06f else 1f }
+                            .background(option.bgTop, RoundedCornerShape(6.dp))
+                            .then(if (selected) Modifier.border(2.dp, Accent, RoundedCornerShape(6.dp)) else Modifier),
+                    )
+                    Text(
+                        text = option.label,
+                        color = TextSub.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                    )
+                }
+            }
         }
     }
 }
