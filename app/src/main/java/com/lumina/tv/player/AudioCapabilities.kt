@@ -8,7 +8,8 @@ import android.media.AudioProfile
 import android.media.MediaCodecList
 import android.os.Build
 
-data class AudioCaps(val profiles: Map<Int, Pair<Int, Set<Int>>>)
+data class AudioCapabilities(val profiles: Map<Int, Pair<Int, Set<Int>>>)
+typealias AudioCaps = AudioCapabilities
 
 enum class AudioSupport { PASSTHROUGH, DECODE_ONLY, UNSUPPORTED }
 
@@ -110,8 +111,10 @@ fun detect(context: Context): AudioCaps {
         val intent = context.registerReceiver(null, android.content.IntentFilter(AudioManager.ACTION_HDMI_AUDIO_PLUG))
         val connected = intent?.getIntExtra(AudioManager.EXTRA_AUDIO_PLUG_STATE, 0) == 1
         if (connected) {
-            val encodings = intent?.getIntArrayExtra(AudioManager.EXTRA_ENCODINGS).orEmpty()
-            val maxChannels = intent?.getIntExtra(AudioManager.EXTRA_MAX_CHANNEL_COUNT, 2)?.coerceAtLeast(2) ?: 2
+            val encodings: IntArray =
+                intent?.getIntArrayExtra(AudioManager.EXTRA_ENCODINGS) ?: intArrayOf()
+            val maxChannels: Int =
+                (intent?.getIntExtra(AudioManager.EXTRA_MAX_CHANNEL_COUNT, 2) ?: 2).coerceAtLeast(2)
             encodings.forEach { enc ->
                 val masks = listOf(1, 2, 6, 8).mapNotNull { count ->
                     AudioCodecMatrix.channelMask(count).takeIf { count <= maxChannels }
