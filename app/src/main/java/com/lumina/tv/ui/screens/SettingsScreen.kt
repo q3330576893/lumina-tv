@@ -922,6 +922,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             onChange = { matchDisplayFrameRate = it; prefs?.matchDisplayFrameRate = it },
                         )
                         }
+                        }
                         Spacer(Modifier.height(6.dp))
                         Spacer(Modifier.height(12.dp))
                         listOf(
