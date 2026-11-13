@@ -1,6 +1,7 @@
 ﻿package com.lumina.tv.ui.screens
 
 import android.os.Build
+import android.text.format.DateFormat
 import android.view.SurfaceHolder
 import android.view.Surface
 import android.view.SurfaceView
@@ -12,6 +13,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.SkipNext
@@ -71,6 +74,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -109,7 +113,6 @@ import com.lumina.tv.data.chooseSimilar
 import com.lumina.tv.data.toSourceOption
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
-import com.lumina.tv.ui.components.TvHintBar
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
@@ -138,6 +141,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -225,7 +231,9 @@ fun PlayerScreen(
     val playerExceptionHandler = remember { CoroutineExceptionHandler { _, error -> android.util.Log.e("LuminaTV", "Player coroutine failed", error) } }
     val scope = rememberCoroutineScope { playerExceptionHandler }
 
-    var showControls by remember { mutableStateOf(true) }
+    var controlsVisible by remember { mutableStateOf(true) }
+    var lastInteractionAt by remember { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
+    var clockText by remember { mutableStateOf("") }
     var isPlaying by remember { mutableStateOf(true) }
     var buffering by remember { mutableStateOf(true) }
     var position by remember { mutableLongStateOf(0L) }
@@ -237,6 +245,17 @@ fun PlayerScreen(
     var degraded by remember { mutableStateOf(false) }
     var audioDecodeMode by remember { mutableStateOf(AppRuntime.prefs?.audioDecodeMode ?: "auto") }
     var audioDecodeNotice by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(controlsVisible) {
+        if (controlsVisible) {
+            val pattern = if (DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm a"
+            val formatter = SimpleDateFormat(pattern, Locale.getDefault())
+            while (true) {
+                clockText = formatter.format(Date())
+                delay(1000)
+            }
+        }
+    }
     DisposableEffect(context, item.id) {
         val monitor = AudioRouteMonitor(context) { changedCaps ->
             audioCaps = changedCaps
@@ -807,7 +826,7 @@ fun PlayerScreen(
         return buildPlayerDiagPayload(
             context, outcome, activeEngine, mpvBackend, item, playbackSource, currentPlaybackUrl,
             audioDecodeMode, audioSupport.name, degraded, engineSwitchTrace, exo, failurePhase, lastPlaybackErrorJson,
-            mpvState, client?.lastPlaybackInfoJson, showControls, buffering, error, position,
+            mpvState, client?.lastPlaybackInfoJson, controlsVisible, buffering, error, position,
             activeVideoDecoder, dvDecoderPath, playbackStatusNotice,
             negotiationDiagnostics, rangeProbeDiagnostics, phaseTimes, droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
             currentSourceId, currentPlayMethod, duration,
@@ -1380,7 +1399,7 @@ fun PlayerScreen(
 
     LaunchedEffect(seekHint) {
         if (seekHint != null) {
-            delay(1400)
+            delay(2000)
             seekHint = null
         }
     }
@@ -1399,8 +1418,7 @@ fun PlayerScreen(
             previewTargetMs = to
             lastHoldPreviewAt = android.os.SystemClock.elapsedRealtime()
         }
-        seekHint = if (delta > 0) "»»  快进 ${delta / 1000} 秒    ${formatTime(to)}"
-        else "««  快退 ${-delta / 1000} 秒    ${formatTime(to)}"
+        seekHint = if (delta > 0) "+${delta / 1000}s" else "-${-delta / 1000}s"
     }
 
     fun beginSeekHold(direction: Int) {
@@ -1418,7 +1436,7 @@ fun PlayerScreen(
                 seekBy(direction * 5_000L)
                 seekHoldDelta += direction * 5_000L
                 val seconds = kotlin.math.abs(seekHoldDelta) / 1000
-                seekHint = if (direction > 0) "快进 +${seconds} 秒" else "快退 -${seconds} 秒"
+                seekHint = if (direction > 0) "+${seconds}s" else "-${seconds}s"
                 delay(120)
             }
         }
@@ -1525,18 +1543,19 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(showControls, isPlaying, boosting, optionMenu) {
-        if (showControls && isPlaying && !optionMenu && !boosting) {
-            delay(5000)
-            showControls = false
+    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, boosting, optionMenu) {
+        if (controlsVisible && isPlaying && !optionMenu && !boosting) {
+            val remaining = (lastInteractionAt + 5_000L - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+            delay(remaining)
+            if (android.os.SystemClock.elapsedRealtime() - lastInteractionAt >= 5_000L) controlsVisible = false
         }
     }
 
     // 焦点：控制栏隐藏时由捕获层拿焦点，显示时把焦点交给播放按钮
-    LaunchedEffect(showControls, optionMenu) {
+    LaunchedEffect(controlsVisible, optionMenu) {
         delay(80)
         if (!optionMenu) {
-            if (showControls) runCatching { playFocus.requestFocus() }
+            if (controlsVisible) runCatching { playFocus.requestFocus() }
             else runCatching { hideFocus.requestFocus() }
         }
     }
@@ -1545,7 +1564,7 @@ fun PlayerScreen(
         when {
             chapterPanel -> chapterPanel = false
             optionMenu -> optionMenu = false
-            showControls -> showControls = false
+            controlsVisible -> controlsVisible = false
             else -> {
                 scope.safeLaunch { AppRuntime.client?.reportStop(item.id, position.coerceAtLeast(0L)) }
                 if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
@@ -1554,7 +1573,15 @@ fun PlayerScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
+            if (event.type == KeyEventType.KeyDown) {
+                lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+                if (!controlsVisible) controlsVisible = true
+            }
+            false
+        },
+    ) {
         if (activeEngine == "media3") AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
@@ -1732,7 +1759,7 @@ fun PlayerScreen(
                                     seekPlayerTo(chapter.startMs)
                                     position = chapter.startMs
                                     chapterPanel = false
-                                    showControls = true
+                                    controlsVisible = true
                                 }) { focused ->
                                     Row(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Text(formatTime(chapter.startMs), color = Accent, fontSize = 12.sp)
@@ -1751,7 +1778,7 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = boosting || seekHint != null,
+            visible = boosting,
             enter = fadeIn(), exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
@@ -1820,7 +1847,7 @@ fun PlayerScreen(
         }
 
         // 隐藏控制栏时的按键捕获层：方向键 seek、OK 呼出控制栏、长按 OK 3 倍速
-        if (!showControls && !optionMenu) {
+        if (!controlsVisible && !optionMenu) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -1845,23 +1872,23 @@ fun PlayerScreen(
                                         boosting = false
                                         setPlaybackSpeed(speed)
                                     } else {
-                                        showControls = true
+                                        controlsVisible = true
                                     }
                                     true
                                 }
                             }
                             Key.DirectionLeft -> {
                                 if (ev.type == KeyEventType.KeyDown) beginSeekHold(-1) else endSeekHold(-1)
-                                showControls = true
+                                controlsVisible = true
                                 true
                             }
                             Key.DirectionRight -> {
                                 if (ev.type == KeyEventType.KeyDown) beginSeekHold(1) else endSeekHold(1)
-                                showControls = true
+                                controlsVisible = true
                                 true
                             }
                             Key.DirectionUp, Key.DirectionDown -> {
-                                if (ev.type == KeyEventType.KeyDown) showControls = true
+                                if (ev.type == KeyEventType.KeyDown) controlsVisible = true
                                 true
                             }
                             Key.MediaPlayPause -> {
@@ -1906,7 +1933,7 @@ fun PlayerScreen(
         }
 
         // 跳过片头
-        if (introSeconds > 0 && position > 0 && position < introSeconds * 1000L && error == null && !showControls) {
+        if (introSeconds > 0 && position > 0 && position < introSeconds * 1000L && error == null && !controlsVisible) {
             FocusSurface(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -1925,133 +1952,106 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = showControls && !optionMenu,
-            enter = fadeIn() + slideInVertically { it / 3 },
-            exit = fadeOut() + slideOutVertically { it / 3 },
+            visible = controlsVisible && !optionMenu,
+            enter = fadeIn(animationSpec = tween(200)),
+            exit = fadeOut(animationSpec = tween(200)),
         ) {
-            Column(Modifier.fillMaxSize()) {
-                TvHintBar("◀ ▶ 快退/快进 · 确认键暂停 · 返回键退出")
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(Brush.verticalGradient(listOf(Color(0xD9070A12), Color(0x00070A12))))
-                        .padding(start = 36.dp, end = 36.dp, top = 22.dp, bottom = 30.dp),
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        if (!titleLogo.isNullOrBlank()) {
-                            AsyncImage(
-                                model = titleLogo,
-                                contentDescription = item.seriesName ?: item.name,
-                                contentScale = ContentScale.Fit,
-                                alignment = Alignment.BottomStart,
-                                modifier = Modifier.heightIn(max = 44.dp).widthIn(max = 300.dp),
-                            )
-                        } else {
-                            Text(
-                                item.seriesName ?: item.name,
-                                color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        if (item.seriesName != null) {
-                            Text(item.name, color = TextSub, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                    Text(
-                        listOfNotNull(
-                            currentResolution?.takeIf { it.isNotBlank() },
-                            if (estimatedBitrate > 0L) "%.1f MB/s".format(estimatedBitrate / 8_000_000.0) else null,
-                            if (degraded) "转码" else "直连",
-                            if (activeEngine == "mpv") "mpv 本地软解" else "media3",
-                            "${speed}x",
-                        ).joinToString(" · "),
-                        color = TextSub.copy(alpha = 0.7f), fontSize = 11.sp,
-                    )
-                }
-
-                Spacer(Modifier.weight(1f))
-
-                Box(
-                    Modifier
+            Box(Modifier.fillMaxSize()) {
+                Column(
+                    Modifier.align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .background(Brush.verticalGradient(listOf(Color(0x00070A12), Color(0xE6070A12))))
-                        .padding(horizontal = 36.dp, vertical = 18.dp)
+                        .padding(horizontal = 36.dp, vertical = 18.dp),
                 ) {
-                    Column {
-                        val frame = previewFrame
-                        val target = previewTargetMs
-                        if (previewActive && frame != null && target != null && duration > 0) {
-                            BoxWithConstraints(Modifier.fillMaxWidth().height(100.dp)) {
-                                val previewWidth = 160.dp
-                                val x = (maxWidth * (target.toFloat() / duration).coerceIn(0f, 1f) - previewWidth / 2)
-                                    .coerceIn(0.dp, (maxWidth - previewWidth).coerceAtLeast(0.dp))
-                                Box(
-                                    Modifier.offset(x = x).width(previewWidth).height(90.dp)
-                                        .background(Color(0xE6070A12), RoundedCornerShape(6.dp)),
-                                ) {
-                                    AsyncImage(
-                                        model = frame,
-                                        contentDescription = null,
-                                        contentScale = ContentScale.Crop,
-                                        onError = {
-                                            previewDisabled = true
-                                            previewFrame = null
-                                        },
-                                        modifier = Modifier.fillMaxSize(),
-                                    )
-                                    Text(
-                                        formatTime(target),
-                                        color = TextMain,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                                            .background(Color(0xAA070A12)).padding(vertical = 3.dp),
-                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                    )
-                                }
-                            }
-                        }
-                        SeekBar(
-                            position = position,
-                            duration = duration,
-                            onSeek = { target ->
-                                seekPlayerTo(target)
-                                position = target
-                            },
+                    if (seekHint != null) {
+                        Text(
+                            seekHint.orEmpty(),
+                            color = TextMain,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                                .background(Color(0x99000000), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
                         )
-                        Spacer(Modifier.height(4.dp))
-                        Row {
-                            Text(formatTime(position), color = TextSub, fontSize = 11.sp)
-                            Spacer(Modifier.weight(1f))
-                            Text(formatTime(duration), color = TextSub, fontSize = 11.sp)
+                    }
+                    val frame = previewFrame
+                    val target = previewTargetMs
+                    if (previewActive && frame != null && target != null && duration > 0) {
+                        BoxWithConstraints(Modifier.fillMaxWidth().height(100.dp)) {
+                            val previewWidth = 160.dp
+                            val x = (maxWidth * (target.toFloat() / duration).coerceIn(0f, 1f) - previewWidth / 2)
+                                .coerceIn(0.dp, (maxWidth - previewWidth).coerceAtLeast(0.dp))
+                            Box(
+                                Modifier.offset(x = x).width(previewWidth).height(90.dp)
+                                    .background(Color(0xE6070A12), RoundedCornerShape(6.dp)),
+                            ) {
+                                AsyncImage(
+                                    model = frame,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    onError = {
+                                        previewDisabled = true
+                                        previewFrame = null
+                                    },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                Text(
+                                    formatTime(target),
+                                    color = TextMain,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                                        .background(Color(0xAA070A12)).padding(vertical = 3.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                )
+                            }
                         }
-                        Spacer(Modifier.height(10.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            CtrlButton(Icons.Rounded.FastRewind, "后退 10 秒") { seekBy(-10_000) }
-                            CtrlButton(
-                                if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                if (isPlaying) "暂停" else "播放",
-                                primary = true,
-                                focusRequester = playFocus,
-                            ) { togglePlayback() }
-                            CtrlButton(Icons.Rounded.FastForward, "前进 10 秒") { seekBy(10_000) }
-                            val currentEpisodeIndex = episodes.indexOfFirst { it.id == item.id }
-                            if (currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.lastIndex) {
-                                CtrlButton(Icons.Rounded.SkipNext, "下一集") {
-                                    val next = episodes.getOrNull(currentEpisodeIndex + 1)
-                                    if (next != null) {
-                                        scope.launch { runCatching { client?.reportStop(item.id, position) } }
-                                        onPlayNext?.invoke(next)
-                                    }
-                                }
+                    }
+                    SeekBar(
+                        position = position,
+                        duration = duration,
+                        onSeek = { target ->
+                            seekPlayerTo(target)
+                            position = target
+                        },
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row {
+                        Text(formatTime(position), color = TextSub, fontSize = 11.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(formatTime(duration), color = TextSub, fontSize = 11.sp)
+                    }
+                }
+
+                Box(Modifier.align(Alignment.Center)) {
+                    CtrlButton(
+                        if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        if (isPlaying) "暂停" else "播放",
+                        primary = true,
+                        focusRequester = playFocus,
+                    ) { togglePlayback() }
+                }
+
+                Box(
+                    Modifier.align(Alignment.TopEnd).padding(top = 24.dp, end = 32.dp),
+                ) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(clockText, color = Color.White.copy(alpha = 0.6f), fontSize = 14.sp)
+                        Spacer(Modifier.height(8.dp))
+                        FocusSurface(
+                            modifier = Modifier.size(28.dp),
+                            corner = 6.dp,
+                            scaleTo = 1.08f,
+                            onClick = { optionMenu = true },
+                        ) { focused ->
+                            Box(
+                                Modifier.fillMaxSize().background(
+                                    if (focused) Color(0x44FFFFFF) else Color(0x22FFFFFF), RoundedCornerShape(6.dp),
+                                ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(Icons.Rounded.MoreVert, contentDescription = "更多播放选项", tint = TextMain, modifier = Modifier.size(20.dp))
                             }
-                            CtrlButton(Icons.Rounded.Subtitles, "字幕 / 音轨 / 倍速 / 选集") {
-                                optionMenu = true
-                                showControls = false
-                            }
-                            if (chapters.isNotEmpty()) CtrlButton(Icons.Rounded.Bookmarks, "章节与片段") { chapterPanel = true; showControls = false }
-                            Spacer(Modifier.weight(1f))
-                            Text(item.subtitle, color = TextSub.copy(alpha = 0.75f), fontSize = 11.sp)
                         }
                     }
                 }
