@@ -190,7 +190,7 @@ private fun DetailVideoPlayback(
                 failed = true
                 val cause = (error.cause?.toString() ?: error.message.orEmpty()).lineSequence().firstOrNull().orEmpty().take(120)
                 PageLog.add("detailPreview stage=$stage error=${error.errorCodeName} cause=$cause")
-                onStatus("skip=playback-failed")
+                onStatus("skip=playback-failed cause=$cause")
             }
         }
         player.addListener(listener)

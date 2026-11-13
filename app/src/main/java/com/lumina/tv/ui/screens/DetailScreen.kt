@@ -116,9 +116,13 @@ import com.lumina.tv.ui.components.FrostPanel
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.net.URLEncoder
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
+private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 private const val DETAIL_PREVIEW_FAILURE_TTL_MS = 10 * 60 * 1000L
 
 @Composable
@@ -183,6 +187,31 @@ fun DetailScreen(
     val playFocus = remember { FocusRequester() }
     val sourceFocus = remember { FocusRequester() }
     var playButtonFocused by remember { mutableStateOf(false) }
+
+    LaunchedEffect(id) {
+        detailPreviewFromStage = "hls"
+        detailPreviewFailures = emptyList()
+        detailPreviewStage = null
+        detailPreviewRetry = 0
+        detailPreviewFailure = null
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner, id) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && detailPreviewFromStage == "done") {
+                detailPreviewFromStage = "hls"
+                detailPreviewFailures = emptyList()
+                detailPreviewStage = null
+                detailPreviewFailure = null
+                detailPreviewUrl = null
+                detailVideoPlaying = false
+                detailPreviewRetry++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(id, detailRetry) {
         synchronized(failedDetailBackgroundKeys) {
@@ -383,6 +412,12 @@ fun DetailScreen(
             PageLog.add("detailPreview stage=skip reason=preview-source-null")
             return@LaunchedEffect
         }
+        val hlsKey = "${sourceItem.id}|${resolvedPreviewSource.id}"
+        val backgroundMode = AppRuntime.prefs?.detailBackgroundVideo ?: "auto"
+        if (backgroundMode != "720p" && hlsKey in hlsUnsupportedItems && detailPreviewFromStage == "hls") {
+            detailPreviewFromStage = "direct"
+            PageLog.add("detailPreview stage=skip reason=hls-known-broken")
+        }
         detailPreviewIsTrailer = trailer != null
         detailPreviewStartMs = if (trailer != null) 0L else {
             AppRuntime.prefs?.introSecondsFor(previewItem.id)?.takeIf { it > 0 }?.times(1000L)
@@ -408,10 +443,16 @@ fun DetailScreen(
             )
         }.getOrNull()
         detailPreviewFailures = (detailPreviewFailures + resolution?.failures.orEmpty()).distinct()
+        if (backgroundMode != "720p" && resolution?.failures.orEmpty().any { it == "hls:not-m3u8" }) {
+            hlsUnsupportedItems.add(hlsKey)
+        }
         detailPreviewUrl = resolution?.url
         if (detailPreviewUrl.isNullOrBlank()) {
             detailVideoPlaying = false
-            detailPreviewFailure = detailPreviewFailures.joinToString(" / ").ifBlank { "preview-unavailable" }
+            if (detailPreviewFailures.isEmpty()) {
+                detailPreviewFailures = listOf("no-url:${AppRuntime.prefs?.detailBackgroundVideo ?: "auto"}")
+            }
+            detailPreviewFailure = detailPreviewFailures.joinToString(" / ")
             detailPreviewFromStage = "done"
             PageLog.add("detailPreview stage=done failures=${detailPreviewFailure}")
         } else {
@@ -510,6 +551,9 @@ fun DetailScreen(
                         val reason = "$failedStage:playback-failed"
                         detailPreviewFailures = (detailPreviewFailures + reason).distinct()
                         PageLog.add("detailPreview stage=$failedStage verdict=playback-failed")
+                        if (failedStage == "hls" && status.contains("#EXTM3U", ignoreCase = true) && AppRuntime.prefs?.detailBackgroundVideo != "720p") {
+                            hlsUnsupportedItems.add(detailPreviewKey.split(':').takeLast(2).joinToString("|"))
+                        }
                         detailPreviewUrl = null
                         if (failedStage == "static") {
                             detailPreviewFromStage = "done"
