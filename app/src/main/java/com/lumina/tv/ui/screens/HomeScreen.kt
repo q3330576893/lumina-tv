@@ -3,6 +3,7 @@
 package com.lumina.tv.ui.screens
 
 import android.util.Log
+import android.app.Activity
 import android.app.ActivityManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
@@ -17,6 +18,7 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
@@ -39,6 +41,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyColumn
@@ -305,17 +308,30 @@ fun HomeScreen(
     var focusedMediaSection by rememberSaveable { mutableStateOf<String?>(null) }
     var focusedLibraryId by rememberSaveable { mutableStateOf<String?>(null) }
     var heroIndex by rememberSaveable { mutableStateOf(0) }
+    var lastExitBackAt by remember { mutableStateOf(0L) }
 
     // A genre is an in-page route: Android/TV Back returns to the genre list, then home.
-    BackHandler(enabled = tab != HomeTab.Recommend) {
-        if (tab == HomeTab.Media && selectedLibrary != null) {
-            selectedLibraryId = null
-            gridItems = emptyList()
-            gridLoading = false
-        } else {
-            tab = HomeTab.Recommend
-            selectedLibraryId = null
-            gridItems = emptyList()
+    BackHandler(enabled = true) {
+        when {
+            sortMenuOpen -> closeSortMenu()
+            libraryServerMenuOpen -> libraryServerMenuOpen = false
+            tab != HomeTab.Recommend -> {
+                tab = HomeTab.Recommend
+                selectedLibraryId = null
+                gridItems = emptyList()
+            }
+            recListState.firstVisibleItemIndex > 0 || recListState.firstVisibleItemScrollOffset > 0 -> {
+                scope.launch { recListState.animateScrollToItem(0) }
+            }
+            else -> {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - lastExitBackAt <= 2_000L) {
+                    (context as? Activity)?.finish()
+                } else {
+                    lastExitBackAt = now
+                    android.widget.Toast.makeText(context, "\u518D\u6309\u4E00\u6B21\u9000\u51FA", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -575,6 +591,16 @@ fun HomeScreen(
     val heroItems = remember(heroPool) { pickHeroItems(heroPool, latest.map { it.id }.toHashSet(), 6) }
     LaunchedEffect(heroItems) { heroIndex = 0 }
     val hero = heroItems.getOrNull(heroIndex) ?: resume.firstOrNull()
+    val homeLibraries = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
+    val firstSectionKey: String? = when {
+        resume.isNotEmpty() -> "resume"
+        favorites.isNotEmpty() -> "favorites"
+        latest.isNotEmpty() -> "latest"
+        movies.isNotEmpty() -> "movies"
+        series.isNotEmpty() -> "series"
+        homeLibraries.any { viewContents[it.id].orEmpty().isNotEmpty() } -> "view-" + homeLibraries.first { viewContents[it.id].orEmpty().isNotEmpty() }.id
+        else -> null
+    }
     val navFocus = remember { FocusRequester() }
 
     val heroPlayFocus = remember { FocusRequester() }
@@ -652,28 +678,27 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null, focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
-                    val homeLibraries = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
                             recentBackdropUrls = libraryRecentBackdropUrls,
                             counts = libraryCounts,
-                            requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(),
+                            requestInitialFocus = false,
                             onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
                         )
                     }
-                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty(), focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
-                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty(), focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
-                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty(), focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
-                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty(), focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
+                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
+                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "latest", focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
+                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "movies", focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
+                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "series", focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
                         val items = viewContents[v.id].orEmpty()
                         if (items.isNotEmpty()) {
                             item(key = "home-view-${v.id}") {
-                                RowSection(v.name, items, focusItemId = focusedMediaId, sectionKey = "view-" + v.id, focusedSection = focusedMediaSection, onItemFocused = { focusedMediaId = it; focusedMediaSection = "view-" + v.id }) { onOpenDetail(it.id) }
+                                RowSection(v.name, items, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "view-" + v.id, focusItemId = focusedMediaId, sectionKey = "view-" + v.id, focusedSection = focusedMediaSection, onItemFocused = { focusedMediaId = it; focusedMediaSection = "view-" + v.id }) { onOpenDetail(it.id) }
                             }
                         }
                     }
@@ -864,7 +889,7 @@ fun HomeScreen(
             )
         }
         NavBar(
-            modifier = Modifier.fillMaxSize().zIndex(2f),
+            modifier = Modifier.fillMaxWidth().wrapContentHeight().zIndex(2f),
                 tab = tab,
                 onSelect = { t, _ -> tab = t; selectedLibraryId = null },
                 onSearch = onSearch,
@@ -911,12 +936,13 @@ private fun NavBar(
     contentFocus: FocusRequester,
     hazeState: HazeState,
 ) {
-    Box(modifier.fillMaxSize()) {
+    Box(modifier) {
         ServerCapsule(
             modifier = Modifier.align(Alignment.TopStart).padding(start = Space.l + Space.xs, top = 16.dp),
             onSwitchServer = onSwitchServer,
             onLogout = onLogout,
             onServerSwitched = onServerSwitched,
+            navFocus = navFocus,
             contentFocus = contentFocus,
         )
         TopNavBar(
@@ -938,6 +964,7 @@ private fun ServerCapsule(
     onSwitchServer: () -> Unit,
     onLogout: () -> Unit,
     onServerSwitched: () -> Unit,
+    navFocus: FocusRequester,
     contentFocus: FocusRequester,
 ) {
     val context = LocalContext.current
@@ -958,10 +985,17 @@ private fun ServerCapsule(
                     indication = null,
                     onClick = { serverMenuOpen = true },
                 )
+                .focusProperties { down = contentFocus }
                 .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                        runCatching { contentFocus.requestFocus() }.isSuccess
-                    } else false
+                    if (event.type != KeyEventType.KeyDown) false
+                    else when (event.key) {
+                        Key.DirectionDown -> runCatching { contentFocus.requestFocus() }.isSuccess
+                        Key.DirectionRight -> {
+                            runCatching { navFocus.requestFocus() }
+                            true
+                        }
+                        else -> false
+                    }
                 },
         ) {
             Row(
@@ -1175,6 +1209,7 @@ private fun TopNavBar(
             FocusSurface(
                 modifier = Modifier.fillMaxSize()
                     .then(if (active) Modifier.focusRequester(navFocus) else Modifier)
+                    .focusProperties { down = contentFocus }
                     .onPreviewKeyEvent { event ->
                         // 导航在顶部，下键应当直接进内容区；内容区没目标时放行让系统自己找
                         if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {

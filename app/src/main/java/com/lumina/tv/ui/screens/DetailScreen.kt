@@ -14,6 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -69,6 +70,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.KeyEventType
@@ -102,6 +104,9 @@ import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.DetailVideoBackground
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
+import com.lumina.tv.ui.theme.Glass
+import com.lumina.tv.ui.theme.GlassLine
+import com.lumina.tv.ui.theme.GlassStrong
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
@@ -126,6 +131,7 @@ private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableS
 private const val DETAIL_PREVIEW_FAILURE_TTL_MS = 10 * 60 * 1000L
 
 @Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun DetailScreen(
     id: String,
     onPlay: (MediaItem) -> Unit,
@@ -684,7 +690,7 @@ fun DetailScreen(
                             )
                         }
                         Spacer(Modifier.height(18.dp))
-                        Row {
+                        Row(Modifier.focusGroup()) {
                             FocusSurface(
                                 modifier = Modifier.height(46.dp).width(150.dp),
                                 corner = 23.dp,
@@ -848,7 +854,7 @@ fun DetailScreen(
                     Spacer(Modifier.height(18.dp))
                     Text("季数与剧集", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(seasons, key = { it.id }) { s ->
                             val active = s.id == selectedSeason?.id
                             FocusSurface(
@@ -876,7 +882,7 @@ fun DetailScreen(
 
                 if (episodes.isNotEmpty()) {
                     Spacer(Modifier.height(14.dp))
-                    LazyRow(state = castRowState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LazyRow(state = castRowState, modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(episodes, key = { it.id }) { ep ->
                             EpisodeCard(ep, client?.imageUrl(ep, 360)) { pickEpisode(ep) }
                         }
@@ -893,7 +899,7 @@ fun DetailScreen(
                         modifier = Modifier.padding(vertical = 6.dp),
                     )
                 } else {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
                             PersonCard(person = person, imageUrl = client?.personImageUrl(person))
                         }
@@ -910,7 +916,7 @@ fun DetailScreen(
                         modifier = Modifier.padding(vertical = 6.dp),
                     )
                 } else {
-                    LazyRow(state = similarRowState, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    LazyRow(state = similarRowState, modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         items(similar, key = { it.id }) { related ->
                             PosterCard(
                                 item = related,
@@ -959,7 +965,7 @@ fun DetailScreen(
                     Spacer(Modifier.height(10.dp))
                     val uriHandler = LocalUriHandler.current
                     Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).focusGroup(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         providerLinks.forEachIndexed { index, (label, uri) ->
@@ -970,7 +976,15 @@ fun DetailScreen(
                                 else -> R.drawable.link_brand_douban
                             }
                             val brandHeight = if (index == 0) 8.dp else 12.dp
-                            FocusGlassSurface(Modifier.height(34.dp), corner = 10.dp, normalFill = Color(0x14FFFFFF), onClick = { runCatching { uriHandler.openUri(uri) } }) { focused ->
+                            FocusGlassSurface(
+                                Modifier.height(34.dp).then(
+                                    if (index == 3) Modifier.focusProperties { right = androidx.compose.ui.focus.FocusRequester.Cancel }
+                                    else Modifier
+                                ),
+                                corner = 10.dp,
+                                normalFill = Color(0x14FFFFFF),
+                                onClick = { runCatching { uriHandler.openUri(uri) } },
+                            ) { focused ->
                                 Row(
                                     Modifier.padding(horizontal = 12.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1204,18 +1218,22 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
     if (!hasCards) return
 
     BackHandler(enabled = expanded) { onToggle() }
+    var hasFocus by remember { mutableStateOf(false) }
 
-    FrostPanel(Modifier.fillMaxWidth().height(52.dp), hazeState = hazeState, corner = 14.dp, strong = true) {
-      FocusGlassSurface(
-        modifier = Modifier.fillMaxSize(),
-        corner = 14.dp,
-        onClick = onToggle,
-    ) { focused ->
+    FrostPanel(Modifier.fillMaxWidth().height(52.dp), hazeState = hazeState, corner = 14.dp, strong = false) {
+      Box(
+        Modifier.fillMaxSize()
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (hasFocus) GlassStrong else Glass)
+            .border(1.dp, if (hasFocus) Accent else GlassLine, RoundedCornerShape(14.dp))
+            .onFocusChanged { hasFocus = it.hasFocus }
+            .clickable(onClick = onToggle),
+      ) {
         Row(
             Modifier.fillMaxSize().padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("媒体信息", color = if (focused) Color.White else TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text("媒体信息", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1)
             Spacer(Modifier.width(12.dp))
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 summaryBadges.forEach { SpecBadge(it) }
@@ -1223,9 +1241,9 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
                     if (technicalSummary.isNotBlank()) Text(technicalSummary, color = Color(0xEBFFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            Text(if (expanded) "收起" else "展开", color = if (focused) Color.White else Color(0x73FFFFFF), fontSize = 11.sp)
+            Text(if (expanded) "收起" else "展开", color = TextSub, fontSize = 11.sp)
             Spacer(Modifier.width(6.dp))
-            Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = if (focused) Accent else Color(0x73FFFFFF), modifier = Modifier.size(18.dp))
+            Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = if (hasFocus) Accent else TextSub, modifier = Modifier.size(18.dp))
         }
       }
     }
@@ -1281,7 +1299,7 @@ private fun FocusGlassSurface(
 
 @Composable
 private fun MediaGlassCard(title: String, icon: ImageVector, count: String?, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Box(modifier.clip(RoundedCornerShape(14.dp)).background(Color(0x12FFFFFF)).border(1.dp, Color(0x29FFFFFF), RoundedCornerShape(14.dp))) {
+    Box(modifier.clip(RoundedCornerShape(14.dp)).background(Color(0x12FFFFFF)).border(1.dp, Color(0x29FFFFFF), RoundedCornerShape(14.dp)).focusGroup()) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x0FFFFFFF)))
         Column(Modifier.fillMaxWidth().padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
