@@ -136,25 +136,9 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         .fillMaxHeight()
                         .widthIn(max = SettingsTokens.ContentMaxWidth)
                         .weight(1f)
-                        .focusGroup(),
+                        .focusGroup()
+                        .padding(top = 12.dp),
                 ) {
-                    Text(
-                        text = selectedCategory.label,
-                        color = TextMain,
-                        fontSize = SettingsTokens.TitleSize,
-                        fontWeight = FontWeight.Medium,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = if (selectedCategory == SettingsCategory.Appearance) {
-                            "主题色与玻璃质感 · 即时生效"
-                        } else {
-                            "设置分类"
-                        },
-                        color = TextSub,
-                        fontSize = 12.sp,
-                    )
-                    Spacer(Modifier.height(24.dp))
                     val direction = if (selectedCategory.ordinal >= previousCategory.ordinal) 1f else -1f
                     CompositionLocalProvider(
                         LocalSettingsFocusKeys provides focusRequesters,
