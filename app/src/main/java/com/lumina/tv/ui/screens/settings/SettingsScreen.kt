@@ -1,10 +1,17 @@
 package com.lumina.tv.ui.screens.settings
 
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -20,9 +27,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -33,6 +43,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,23 +52,51 @@ import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.ThemeRuntime
 import com.lumina.tv.ui.components.FrostPanel
+import com.lumina.tv.ui.motion.Motion
+import com.lumina.tv.AppRuntime
+import com.lumina.tv.ui.sound.KeySound
 import androidx.compose.foundation.shape.RoundedCornerShape
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.delay
 
+private object SettingsFocusMemory {
+    var category: SettingsCategory = SettingsCategory.Appearance
+    val rowKeys = mutableMapOf<SettingsCategory, String>()
+    val rowIndices = mutableMapOf<String, Int>()
+    val rowScrollOffsets = mutableMapOf<String, Int>()
+}
+
 @Suppress("UNUSED_PARAMETER")
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     val hazeState = remember { HazeState() }
+    val view = LocalView.current
     val railRequester = remember { FocusRequester() }
     val contentFirstRequester = remember { FocusRequester() }
-    var selectedCategory by remember { mutableStateOf(SettingsCategory.Appearance) }
-    var focusedRowKey by remember { mutableStateOf("appearance:themeColor") }
+    var selectedCategory by remember { mutableStateOf(SettingsFocusMemory.category) }
+    val focusedRowKeys = remember { mutableStateMapOf<SettingsCategory, String>().apply { putAll(SettingsFocusMemory.rowKeys) } }
+    val focusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    val listStates = remember { SettingsCategory.entries.associateWith { LazyListState() } }
+    var focusEpoch by remember { mutableStateOf(0) }
+    var previousCategory by remember { mutableStateOf(selectedCategory) }
+
+    fun rememberRowFocus(category: SettingsCategory, key: String) {
+        focusedRowKeys[category] = key
+        SettingsFocusMemory.rowKeys[category] = key
+        val state = listStates.getValue(category)
+        SettingsFocusMemory.rowIndices[key] = state.firstVisibleItemIndex
+        SettingsFocusMemory.rowScrollOffsets[key] = state.firstVisibleItemScrollOffset
+        val mode = AppRuntime.prefs?.keySound ?: "dpad"
+        if (mode == "dpad" || mode == "all") KeySound.playFocusMove(view)
+        focusEpoch++
+    }
 
     LaunchedEffect(Unit) {
         delay(120)
-        runCatching { railRequester.requestFocus() }
+        if (focusedRowKeys[selectedCategory] == null) {
+            runCatching { railRequester.requestFocus() }
+        }
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -87,7 +126,14 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                     hazeState = hazeState,
                     selectedRequester = railRequester,
                     contentRequester = contentFirstRequester,
-                    onCategorySelected = { selectedCategory = it },
+                    onCategorySelected = {
+                        if (selectedCategory != it) {
+                            previousCategory = selectedCategory
+                            selectedCategory = it
+                            SettingsFocusMemory.category = it
+                        }
+                    },
+                    onRailFocusChanged = { if (it) focusEpoch++ },
                 )
                 Spacer(Modifier.width(SettingsTokens.RailContentGap))
                 Column(
@@ -114,9 +160,25 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         fontSize = 12.sp,
                     )
                     Spacer(Modifier.height(24.dp))
-                    Crossfade(
+                    val direction = if (selectedCategory.ordinal >= previousCategory.ordinal) 1f else -1f
+                    CompositionLocalProvider(
+                        LocalSettingsFocusKeys provides focusRequesters,
+                        LocalSettingsListStates provides listStates,
+                    ) {
+                    AnimatedContent(
                         targetState = selectedCategory,
-                        animationSpec = tween(SettingsTokens.MotionCategoryMs),
+                        transitionSpec = {
+                            (slideInHorizontally(
+                                animationSpec = tween(Motion.CATEGORY, easing = Motion.enterEasing),
+                                initialOffsetX = { (it * Motion.SHIFT_CATEGORY * direction).toInt() },
+                            ) + fadeIn(tween(Motion.CATEGORY, easing = Motion.enterEasing))) togetherWith
+                                (slideOutHorizontally(
+                                    animationSpec = tween(Motion.CATEGORY, easing = Motion.exitEasing),
+                                    targetOffsetX = { (-it * Motion.SHIFT_CATEGORY * direction).toInt() },
+                                ) + fadeOut(tween(Motion.CATEGORY, easing = Motion.exitEasing))) using
+                                SizeTransform(clip = false)
+                        },
+                        contentKey = { it.key },
                         label = "settingsCategory",
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                     ) { category ->
@@ -124,7 +186,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             SettingsCategory.Account -> SettingsAccount(
                                 firstFocusRequester = contentFirstRequester,
                                 railRequester = railRequester,
-                                onFocused = { focusedRowKey = it },
+                                onFocused = { key -> rememberRowFocus(category, key) },
                                 onLogout = onLogout,
                                 onServerSwitched = onBack,
                                 modifier = Modifier.fillMaxSize(),
@@ -132,47 +194,71 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                             SettingsCategory.Appearance -> SettingsAppearance(
                                 firstFocusRequester = contentFirstRequester,
                                 railRequester = railRequester,
-                                onFocused = { focusedRowKey = it },
+                                onFocused = { key -> rememberRowFocus(category, key) },
                                 modifier = Modifier.fillMaxSize(),
                             )
                             SettingsCategory.Playback -> SettingsPlayback(
                                 firstFocusRequester = contentFirstRequester,
                                 railRequester = railRequester,
-                                onFocused = { focusedRowKey = it },
+                                onFocused = { key -> rememberRowFocus(category, key) },
                                 modifier = Modifier.fillMaxSize(),
                             )
                             SettingsCategory.Subtitles -> SettingsSubtitles(
                                 firstFocusRequester = contentFirstRequester,
                                 railRequester = railRequester,
-                                onFocused = { focusedRowKey = it },
+                                onFocused = { key -> rememberRowFocus(category, key) },
                                 modifier = Modifier.fillMaxSize(),
                             )
                             SettingsCategory.Compatibility -> SettingsBackend(
                                 firstFocusRequester = contentFirstRequester,
                                 railRequester = railRequester,
-                                onFocused = { focusedRowKey = it },
+                                onFocused = { key -> rememberRowFocus(category, key) },
                                 modifier = Modifier.fillMaxSize(),
                             )
                             SettingsCategory.About -> SettingsAbout(
                                 firstFocusRequester = contentFirstRequester,
                                 railRequester = railRequester,
-                                onFocused = { focusedRowKey = it },
+                                onFocused = { key -> rememberRowFocus(category, key) },
                                 modifier = Modifier.fillMaxSize(),
                             )
                             SettingsCategory.Home -> SettingsHome(
                                 firstFocusRequester = contentFirstRequester,
                                 railRequester = railRequester,
-                                onFocused = { focusedRowKey = it },
+                                onFocused = { key -> rememberRowFocus(category, key) },
                                 modifier = Modifier.fillMaxSize(),
                             )
-                            else -> Box(Modifier.fillMaxSize().padding(top = 36.dp)) {
-                                Text("该分类正在迁移", color = TextSub, fontSize = 14.sp)
-                            }
                         }
+                    }
                     }
                 }
             }
         }
+    }
+
+    LaunchedEffect(selectedCategory) {
+        val epochAtSwitch = focusEpoch
+        delay(Motion.CATEGORY.toLong())
+        if (focusEpoch != epochAtSwitch) return@LaunchedEffect
+        val key = focusedRowKeys[selectedCategory]
+        if (key == null) {
+            runCatching { railRequester.requestFocus() }
+            return@LaunchedEffect
+        }
+        val index = SettingsFocusMemory.rowIndices[key] ?: 0
+        val scrollOffset = SettingsFocusMemory.rowScrollOffsets[key] ?: 0
+        var restored = false
+        for (attempt in 0 until 10) {
+            if (focusEpoch != epochAtSwitch) return@LaunchedEffect
+            val state = listStates.getValue(selectedCategory)
+            runCatching { state.scrollToItem(index, scrollOffset) }
+            delay(40)
+            val currentRequester = focusRequesters[key]
+            if (currentRequester != null && runCatching { currentRequester.requestFocus() }.isSuccess) {
+                restored = true
+                break
+            }
+        }
+        if (!restored && focusEpoch == epochAtSwitch) runCatching { railRequester.requestFocus() }
     }
 }
 
@@ -184,8 +270,10 @@ private fun SettingsCategoryRail(
     selectedRequester: FocusRequester,
     contentRequester: FocusRequester,
     onCategorySelected: (SettingsCategory) -> Unit,
+    onRailFocusChanged: (Boolean) -> Unit,
 ) {
     val shape = RoundedCornerShape(SettingsTokens.GroupCorner)
+    val view = LocalView.current
     FrostPanel(Modifier.width(railWidth).fillMaxHeight(), hazeState, SettingsTokens.GroupCorner) {
         Column(Modifier.fillMaxSize().glassBorder(shape).focusGroup().padding(horizontal = 10.dp, vertical = 16.dp)) {
             Text("设置", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
@@ -198,9 +286,17 @@ private fun SettingsCategoryRail(
                     Modifier.fillMaxWidth().height(44.dp)
                         .then(if (category == selectedCategory) Modifier.focusRequester(selectedRequester) else Modifier)
                         .focusProperties { if (category == selectedCategory) right = contentRequester }
-                        .onFocusChanged { focused = it.isFocused }
+                        .onFocusChanged {
+                            focused = it.isFocused
+                            onRailFocusChanged(it.isFocused)
+                            val mode = AppRuntime.prefs?.keySound ?: "dpad"
+                            if (it.isFocused && (mode == "dpad" || mode == "all")) KeySound.playFocusMove(view)
+                        }
                         .background(if (selected || focused) ThemeRuntime.frostStrongTint else Color.Transparent, RoundedCornerShape(12.dp))
-                        .then(if (enabled) Modifier.clickable { onCategorySelected(category) } else Modifier),
+                        .then(if (enabled) Modifier.clickable {
+                            if (AppRuntime.prefs?.keySound == "all") KeySound.playConfirm(view)
+                            onCategorySelected(category)
+                        } else Modifier),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (selected || focused) Box(Modifier.width(SettingsTokens.FocusBarW).height(SettingsTokens.FocusBarH).background(Accent, RoundedCornerShape(2.dp)))

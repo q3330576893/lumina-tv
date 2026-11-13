@@ -86,7 +86,7 @@ fun SettingsBackend(
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
 
-    LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
+    LazyColumn(state = settingsListState(SettingsCategory.Compatibility), modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
         item(key = "compat:group-label") {
             Text("播放器与兼容性", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }

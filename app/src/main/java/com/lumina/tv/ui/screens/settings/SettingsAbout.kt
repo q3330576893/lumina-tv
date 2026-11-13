@@ -66,7 +66,7 @@ fun SettingsAbout(
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
 
-    LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
+    LazyColumn(state = settingsListState(SettingsCategory.About), modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
         item(key = "about:group-label") {
             Text("关于与诊断", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }

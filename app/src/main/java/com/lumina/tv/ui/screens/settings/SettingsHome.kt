@@ -65,7 +65,7 @@ fun SettingsHome(
         countLoadComplete = true
     }
 
-    LazyColumn(modifier = modifier) {
+    LazyColumn(state = settingsListState(SettingsCategory.Home), modifier = modifier) {
         item(key = "home:group-label") {
             Text("首页媒体库", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }

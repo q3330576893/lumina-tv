@@ -45,6 +45,7 @@ fun SettingsAppearance(
     }
     var showPosterRating by remember { mutableStateOf(AppRuntime.prefs?.showPosterRating ?: true) }
     var showPosterWatchState by remember { mutableStateOf(AppRuntime.prefs?.showPosterWatchState ?: true) }
+    var keySound by remember { mutableStateOf(prefs?.keySound ?: "dpad") }
 
     val rowSpecs = remember {
         listOf(
@@ -53,6 +54,7 @@ fun SettingsAppearance(
             AppearanceRowSpec("appearance:detailBackgroundVideo"),
             AppearanceRowSpec("appearance:showPosterRating"),
             AppearanceRowSpec("appearance:showPosterWatchState"),
+            AppearanceRowSpec("appearance:keySound"),
         )
     }
     val requesters = remember {
@@ -62,7 +64,7 @@ fun SettingsAppearance(
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
 
-    LazyColumn(modifier = modifier) {
+    LazyColumn(state = settingsListState(SettingsCategory.Appearance), modifier = modifier) {
         item(key = "appearance:group-label") {
             Text(
                 text = "主题与展示",
@@ -170,6 +172,27 @@ fun SettingsAppearance(
                                 onCheckedChange = {
                                     showPosterWatchState = it
                                     AppRuntime.prefs?.showPosterWatchState = it
+                                },
+                                focusRequester = requester,
+                                leftRequester = railRequester,
+                                downRequester = downRequester,
+                                showDivider = false,
+                                onFocused = onFocused,
+                            )
+
+                            "appearance:keySound" -> ChoiceRow(
+                                focusKey = spec.key,
+                                title = "按键音效",
+                                description = "遥控器按键时播放系统音效",
+                                options = listOf(
+                                    SettingChoiceOption("off", "关"),
+                                    SettingChoiceOption("dpad", "仅方向键"),
+                                    SettingChoiceOption("all", "全部"),
+                                ),
+                                selectedKey = keySound,
+                                onSelected = { key ->
+                                    keySound = key
+                                    prefs?.keySound = key
                                 },
                                 focusRequester = requester,
                                 leftRequester = railRequester,

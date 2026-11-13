@@ -76,7 +76,7 @@ fun SettingsPlayback(
     }
 
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
-    LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
+    LazyColumn(state = settingsListState(SettingsCategory.Playback), modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
         item(key = "playback:group-label") {
             Text("播放", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }

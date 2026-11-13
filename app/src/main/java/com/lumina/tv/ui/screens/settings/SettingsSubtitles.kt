@@ -55,7 +55,7 @@ fun SettingsSubtitles(
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
 
-    LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
+    LazyColumn(state = settingsListState(SettingsCategory.Subtitles), modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
         item(key = "subtitles:preview-label") {
             Text("字幕", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }

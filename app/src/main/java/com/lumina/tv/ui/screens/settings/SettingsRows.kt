@@ -1,12 +1,15 @@
 package com.lumina.tv.ui.screens.settings
 
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
@@ -20,10 +23,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +43,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.CompositionLocal
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -52,6 +62,17 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
+import com.lumina.tv.AppRuntime
+import com.lumina.tv.ui.motion.Motion
+import com.lumina.tv.ui.sound.KeySound
+
+internal val LocalSettingsFocusKeys = staticCompositionLocalOf<MutableMap<String, FocusRequester>?> { null }
+internal val LocalSettingsListStates = staticCompositionLocalOf<Map<SettingsCategory, LazyListState>?> { null }
+private val LocalSettingsPressScale = staticCompositionLocalOf { 1f }
+
+@Composable
+internal fun settingsListState(category: SettingsCategory): LazyListState =
+    requireNotNull(LocalSettingsListStates.current?.get(category))
 
 private val DividerColor = Color(0x14FFFFFF)
 private val SelectedChoiceText = Color(0xFF0B1018)
@@ -287,10 +308,12 @@ fun ActionRow(
         modifier = modifier,
         titleColor = if (danger) Danger else TextMain,
     ) {
+        val pressScale = LocalSettingsPressScale.current
         Box(
             Modifier
                 .height(30.dp)
                 .widthIn(min = 72.dp)
+                .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
                 .background(
                     (if (danger) Danger else Accent).copy(alpha = 0.18f),
                     RoundedCornerShape(15.dp),
@@ -337,6 +360,21 @@ private fun SettingsRowFrame(
     control: @Composable BoxScope.() -> Unit,
 ) {
     var focused by remember(focusKey) { mutableStateOf(false) }
+    val view = LocalView.current
+    val focusKeys = LocalSettingsFocusKeys.current
+    val interactionSource = remember(focusKey) { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) Motion.SCALE_PRESSED else 1f,
+        animationSpec = tween(Motion.PRESS),
+        label = "settingsControlPress",
+    )
+    DisposableEffect(focusKey, focusRequester, focusKeys) {
+        focusKeys?.set(focusKey, focusRequester)
+        onDispose {
+            if (focusKeys?.get(focusKey) === focusRequester) focusKeys.remove(focusKey)
+        }
+    }
     val shape = RoundedCornerShape(12.dp)
     Box(
         modifier
@@ -350,11 +388,16 @@ private fun SettingsRowFrame(
             }
             .onFocusChanged {
                 focused = it.isFocused
-                if (it.isFocused) onFocused(focusKey)
+                if (it.isFocused) {
+                    onFocused(focusKey)
+                }
             }
             .background(if (focused) ThemeRuntime.frostStrongTint else Color.Transparent, shape)
             .then(if (focused) Modifier.glassBorder(shape) else Modifier)
-            .clickable(onClick = onClick),
+            .clickable(interactionSource = interactionSource, indication = null) {
+                if (AppRuntime.prefs?.keySound == "all") KeySound.playConfirm(view)
+                onClick()
+            },
     ) {
         if (focused) {
             Box(
@@ -390,7 +433,9 @@ private fun SettingsRowFrame(
                     modifier = Modifier.weight(1f),
                 )
             }
-            Box(contentAlignment = Alignment.CenterEnd, content = control)
+            CompositionLocalProvider(LocalSettingsPressScale provides pressScale) {
+                Box(contentAlignment = Alignment.CenterEnd, content = control)
+            }
         }
         if (showDivider) {
             Box(
@@ -409,7 +454,7 @@ private fun SettingsRowFrame(
 private fun ToggleControl(checked: Boolean) {
     val thumbOffset by animateDpAsState(
         targetValue = if (checked) 16.dp else 2.dp,
-        animationSpec = tween(SettingsTokens.MotionFocusMs),
+        animationSpec = tween(Motion.FOCUS),
         label = "settingsToggleThumb",
     )
     Box(
@@ -431,6 +476,7 @@ private fun ToggleControl(checked: Boolean) {
 
 @Composable
 private fun SegmentedChoiceControl(options: List<SettingChoiceOption>, selectedKey: String) {
+    val pressScale = LocalSettingsPressScale.current
     Row(
         Modifier
             .height(28.dp)
@@ -442,6 +488,7 @@ private fun SegmentedChoiceControl(options: List<SettingChoiceOption>, selectedK
             Box(
                 Modifier
                     .fillMaxHeight()
+                    .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
                     .background(if (selected) Accent else Color.Transparent, RoundedCornerShape(14.dp))
                     .padding(horizontal = 11.dp, vertical = 4.dp),
                 contentAlignment = Alignment.Center,

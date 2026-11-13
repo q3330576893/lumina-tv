@@ -93,7 +93,7 @@ fun SettingsAccount(
         )
     }
 
-    LazyColumn(modifier = modifier) {
+    LazyColumn(state = settingsListState(SettingsCategory.Account), modifier = modifier) {
         item(key = "account:current-label") {
             Text("当前服务器", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }
