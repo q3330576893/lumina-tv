@@ -51,6 +51,8 @@ import com.lumina.tv.BuildConfig
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.PlaybackCache
 import com.lumina.tv.data.PLAYBACK_CACHE_OPTIONS
+import com.lumina.tv.data.DynamicRangePref
+import com.lumina.tv.data.NumericPref
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.DiagExportDialog
 import com.lumina.tv.ui.components.GlassPanel
@@ -97,6 +99,11 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var playbackCacheBytes by remember { mutableStateOf(prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L) }
     var playbackCacheUsed by remember { mutableStateOf(PlaybackCache.spaceBytes(context)) }
     var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
+    var sourceDynamicRange by remember { mutableStateOf(prefs?.sourceDynamicRange ?: DynamicRangePref.UNSET) }
+    var sourceBitrate by remember { mutableStateOf(prefs?.sourceBitratePreference ?: NumericPref.UNSET) }
+    var sourceFrameRate by remember { mutableStateOf(prefs?.sourceFrameRatePreference ?: NumericPref.UNSET) }
+    var sourceReleaseGroups by remember { mutableStateOf(prefs?.sourceReleaseGroups.orEmpty()) }
+    var matchDisplayFrameRate by remember { mutableStateOf(prefs?.matchDisplayFrameRate ?: false) }
     var mpvBroken by remember { mutableStateOf(prefs?.mpvBroken ?: false) }
     var savedServers by remember { mutableStateOf(prefs?.savedServers().orEmpty()) }
     var hiddenIds by remember { mutableStateOf(prefs?.hiddenViewIds ?: emptySet()) }
@@ -822,6 +829,63 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                                 }
                             }
                         }
+                        Spacer(Modifier.height(12.dp))
+                        Text("片源偏好", color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.height(6.dp))
+                        listOf(
+                            Triple("动态范围", sourceDynamicRange.name, listOf(
+                                DynamicRangePref.UNSET to "不设置", DynamicRangePref.DOLBY_VISION to "DV优先",
+                                DynamicRangePref.HDR to "HDR优先", DynamicRangePref.SDR to "SDR优先",
+                            )),
+                        ).forEach { (title, selected, options) ->
+                            Text(title, color = TextSub, fontSize = 10.sp)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                options.forEach { (value, label) ->
+                                    val active = selected == value.name
+                                    FocusSurface(Modifier.height(32.dp).widthIn(min = 72.dp).padding(0.dp), corner = 16.dp, onClick = {
+                                        sourceDynamicRange = value
+                                        prefs?.sourceDynamicRange = value
+                                    }) { focused ->
+                                        Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                                            Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 10.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        listOf(
+                            Triple("码率", sourceBitrate, { v: NumericPref -> sourceBitrate = v; prefs?.sourceBitratePreference = v }),
+                            Triple("帧率", sourceFrameRate, { v: NumericPref -> sourceFrameRate = v; prefs?.sourceFrameRatePreference = v }),
+                        ).forEach { (title, selected, save) ->
+                            Spacer(Modifier.height(6.dp))
+                            Text(title, color = TextSub, fontSize = 10.sp)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf(NumericPref.UNSET to "不设置", NumericPref.HIGH to "高优先", NumericPref.LOW to "低优先").forEach { (value, label) ->
+                                    val active = selected == value
+                                    FocusSurface(Modifier.height(32.dp).widthIn(min = 72.dp), corner = 16.dp, onClick = { save(value) }) { focused ->
+                                        Box(Modifier.fillMaxSize().background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                                            Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 10.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = sourceReleaseGroups,
+                            onValueChange = { sourceReleaseGroups = it; prefs?.sourceReleaseGroups = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("发布组关键词") },
+                            placeholder = { Text("SPARKS,FGT") },
+                            singleLine = true,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        SwitchRow(
+                            title = "匹配显示帧率",
+                            desc = "默认关闭；仅在 API 30 及以上尝试无缝切换",
+                            checked = matchDisplayFrameRate,
+                            onChange = { matchDisplayFrameRate = it; prefs?.matchDisplayFrameRate = it },
+                        )
                         Spacer(Modifier.height(6.dp))
                         Spacer(Modifier.height(12.dp))
                         listOf(

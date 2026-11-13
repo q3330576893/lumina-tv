@@ -260,6 +260,10 @@ class MpvPlayerController(
 
     fun positionMs(): Long = positionMs
     fun durationMs(): Long = durationMs
+
+    fun containerFps(): Float? = runCatching {
+        mpv?.getPropertyString("container-fps")?.toFloatOrNull()?.takeIf { it > 0f }
+    }.getOrNull()
     fun diagnosticLog(): String = synchronized(logLock) {
         val previous = runCatching { previousCrashFile.takeIf(File::exists)?.readText(Charsets.UTF_8) }.getOrNull().orEmpty()
         val current = runCatching { sessionLogFile.takeIf(File::exists)?.readText(Charsets.UTF_8) }

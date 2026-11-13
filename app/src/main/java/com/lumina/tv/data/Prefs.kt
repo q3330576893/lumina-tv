@@ -83,6 +83,37 @@ class Prefs(context: Context) {
             ?: 512L * 1024L * 1024L
         set(v) = sp.edit().putLong("playback_cache_bytes", v.takeIf { it in PLAYBACK_CACHE_OPTIONS } ?: 512L * 1024L * 1024L).apply()
 
+    var sourceDynamicRange: DynamicRangePref
+        get() = runCatching { DynamicRangePref.valueOf(sp.getString("source_dynamic_range", "UNSET") ?: "UNSET") }
+            .getOrDefault(DynamicRangePref.UNSET)
+        set(v) = sp.edit().putString("source_dynamic_range", v.name).apply()
+
+    var sourceBitratePreference: NumericPref
+        get() = runCatching { NumericPref.valueOf(sp.getString("source_bitrate", "UNSET") ?: "UNSET") }
+            .getOrDefault(NumericPref.UNSET)
+        set(v) = sp.edit().putString("source_bitrate", v.name).apply()
+
+    var sourceFrameRatePreference: NumericPref
+        get() = runCatching { NumericPref.valueOf(sp.getString("source_frame_rate", "UNSET") ?: "UNSET") }
+            .getOrDefault(NumericPref.UNSET)
+        set(v) = sp.edit().putString("source_frame_rate", v.name).apply()
+
+    var sourceReleaseGroups: String
+        get() = sp.getString("source_release_groups", "").orEmpty()
+        set(v) = sp.edit().putString("source_release_groups", v).apply()
+
+    val sourceStrategy: SourceStrategy
+        get() = SourceStrategy(
+            dynamicRange = sourceDynamicRange,
+            releaseGroups = sourceReleaseGroups.split(',').map(String::trim).filter(String::isNotEmpty),
+            bitrate = sourceBitratePreference,
+            frameRate = sourceFrameRatePreference,
+        )
+
+    var matchDisplayFrameRate: Boolean
+        get() = sp.getBoolean("match_display_frame_rate", false)
+        set(v) = sp.edit().putBoolean("match_display_frame_rate", v).apply()
+
 
     var savedServersJson: String
         get() = sp.getString("saved_servers", "[]") ?: "[]"

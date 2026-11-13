@@ -2,8 +2,10 @@ package com.lumina.tv
 
 import android.media.AudioManager
 import android.os.Bundle
+import android.content.ComponentCallbacks2
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
+import coil.imageLoader
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.Crossfade
@@ -71,6 +73,13 @@ private fun Screen.depth(): Int = when (this) {
 class MainActivity : ComponentActivity() {
     private var phoneSearch by mutableStateOf<String?>(null)
     private var startupCrashNotice by mutableStateOf<String?>(null)
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW || level == ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
+            imageLoader.memoryCache?.clear()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

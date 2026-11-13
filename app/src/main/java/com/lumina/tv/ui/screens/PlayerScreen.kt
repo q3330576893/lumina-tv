@@ -105,6 +105,8 @@ import com.lumina.tv.data.MediaChapter
 import com.lumina.tv.data.PlaybackMarkers
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
+import com.lumina.tv.data.chooseSimilar
+import com.lumina.tv.data.toSourceOption
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.TvHintBar
@@ -310,6 +312,7 @@ fun PlayerScreen(
     var nextTriggered by remember { mutableStateOf(false) }
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var prewarmedEpisodeId by remember(item.id) { mutableStateOf<String?>(null) }
+    var prewarmJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var seekHint by remember { mutableStateOf<String?>(null) }
     var currentResolution by remember { mutableStateOf<String?>(null) }
     var subScale by remember { mutableFloatStateOf(when (AppRuntime.prefs?.subtitleScale) { null -> 1.3f; 1.5f -> 2.0f; else -> AppRuntime.prefs?.subtitleScale ?: 1.3f }) }
@@ -335,6 +338,36 @@ fun PlayerScreen(
         ?: (AppRuntime.prefs?.introSecondsFor(item.id) ?: 0)
     val creditsStartMs = playbackMarkers?.creditsStartMs
     val currentCreditsStartMs by rememberUpdatedState(creditsStartMs)
+
+    fun prewarmNext(next: MediaItem) {
+        prewarmJob?.cancel()
+        prewarmJob = scope.launch {
+            try {
+                client?.prewarmPlayback(
+                    next,
+                    audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id),
+                    strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy(),
+                )
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                PageLog.add("prewarm failed next=${next.id} err=${failure.message ?: failure.javaClass.simpleName}")
+            }
+        }
+    }
+
+    fun matchDisplayFrameRate(surface: Surface?, fps: Float?) {
+        if (AppRuntime.prefs?.matchDisplayFrameRate != true || Build.VERSION.SDK_INT < 30 || surface == null || fps == null || fps <= 0f) return
+        runCatching {
+            surface.setFrameRate(
+                fps,
+                Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS,
+            )
+        }.onFailure { failure ->
+            PageLog.add("setFrameRate failed fps=$fps err=${failure.message ?: failure.javaClass.simpleName}")
+        }
+    }
 
     // 片名优先用透明 Logo：电影取自身，剧集取详情页缓存的剧集信息（通常已命中）
     val titleLogo = remember(item.id) {
@@ -410,7 +443,7 @@ fun PlayerScreen(
 
     DisposableEffect(exo, item.id) {
         onDispose {
-            exo.release()
+            runCatching { exo.release() }
         }
     }
 
@@ -509,7 +542,8 @@ fun PlayerScreen(
             try {
                 if (forceTranscode) transcodeFallbackTried = true
                 val maxStreamingBitrate = AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
-                val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate)
+                val strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy()
+                val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy)
                     ?.copy(startPositionMs = resumePosition)
                     else null
                 val resolvedTarget = cachedTarget ?: c.resolvePlayback(
@@ -519,6 +553,7 @@ fun PlayerScreen(
                         preferDirectStreamUrl = badHttpFallbackStage == 2,
                         manualAudioStreamSelection = manualAudioStreamSelection,
                         maxStreamingBitrate = maxStreamingBitrate,
+                        strategy = strategy,
                     )
                 val target = resolvedTarget
                 if (generation != sessionGeneration) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
@@ -656,6 +691,7 @@ fun PlayerScreen(
                         if (state.durationMs > 0L) duration = state.durationMs
                         if (state.ready && !firstFrameRendered) {
                             firstFrameRendered = true
+                            matchDisplayFrameRate(currentSurface, mpvBackend?.containerFps())
                             val firstFrameMs = android.os.SystemClock.elapsedRealtime() - playStartAt
                             StabilityMetrics.firstFrameMs = firstFrameMs
                             phaseTimes.put("firstFrameMs", firstFrameMs)
@@ -1047,7 +1083,13 @@ fun PlayerScreen(
                     mediaSources.any { it.id != currentSourceId && it.id !in triedSources }
                 ) {
                     val tried = triedSources + setOfNotNull(currentSourceId)
-                    val next = mediaSources.first { it.id != currentSourceId && it.id !in tried }
+                    val candidates = mediaSources.mapIndexed { index, source -> source.toSourceOption(index) }
+                        .filter { it.id != currentSourceId && it.id !in tried }
+                    val currentOption = mediaSources.firstOrNull { it.id == currentSourceId }?.let { source ->
+                        source.toSourceOption(mediaSources.indexOf(source))
+                    } ?: playbackSource?.toSourceOption(mediaSources.indexOfFirst { it.id == playbackSource?.id }.coerceAtLeast(0))
+                    val nextOption = currentOption?.let { chooseSimilar(candidates, it) }
+                    val next = mediaSources.first { it.id == nextOption?.id }
                     triedSources = tried + next.id
                     currentSourceId = next.id
                     directFallbackTried = false
@@ -1280,6 +1322,7 @@ fun PlayerScreen(
                 }
                 readyWithoutFrameSince = 0L
                 playbackStatusNotice = null
+                matchDisplayFrameRate(output as? Surface, exo.videoFormat?.frameRate)
                 scope.launch { delay(2_000); if (firstFrameRendered) phaseTimes.put("stableOutputMs", android.os.SystemClock.elapsedRealtime() - playStartAt) }
             }
 
@@ -1307,6 +1350,7 @@ fun PlayerScreen(
 
     DisposableEffect(item.id) {
         onDispose {
+            prewarmJob?.cancel()
             watchdog.reset()
             val session = JSONObject()
                 .put("itemId", item.id).put("itemName", item.name).put("engine", activeEngine)
@@ -1428,7 +1472,6 @@ fun PlayerScreen(
                     val c = client ?: return@launch
                     val next = runCatching { c.getNextEpisode(item) }.getOrNull() ?: return@launch
                     nextEpisode = next
-                    runCatching { c.prewarmPlayback(next, audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id)) }
                     nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
                     while (nextCountdown > 0) {
                         delay(1000)
@@ -1442,7 +1485,7 @@ fun PlayerScreen(
                 }
             }
             if (duration > 0 && item.seriesId != null && prewarmedEpisodeId == null &&
-                position >= duration - 90_000L
+                position >= duration - 30_000L
             ) {
                 prewarmedEpisodeId = "pending"
                 scope.launch {
@@ -1450,7 +1493,7 @@ fun PlayerScreen(
                     val next = runCatching { c.getNextEpisode(item) }.getOrNull()
                     if (next != null) {
                         prewarmedEpisodeId = next.id
-                        runCatching { c.prewarmPlayback(next, audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id)) }
+                        prewarmNext(next)
                     } else prewarmedEpisodeId = "none"
                 }
             }
@@ -1629,7 +1672,12 @@ fun PlayerScreen(
                     }
                     if (mediaSources.size > 1) {
                         FocusSurface(Modifier.width(132.dp).height(40.dp), corner = 20.dp, onClick = {
-                            val next = mediaSources.firstOrNull { it.id != currentSourceId }
+                            val current = mediaSources.firstOrNull { it.id == currentSourceId } ?: playbackSource
+                            val candidates = mediaSources.mapIndexed { index, source -> source.toSourceOption(index) }
+                                .filter { it.id != currentSourceId }
+                            val currentOption = current?.toSourceOption(mediaSources.indexOfFirst { it.id == current.id }.coerceAtLeast(0))
+                            val nextId = currentOption?.let { chooseSimilar(candidates, it).id }
+                            val next = mediaSources.firstOrNull { it.id == nextId }
                             if (next != null) {
                                 currentSourceId = next.id
                                 playbackSource = next

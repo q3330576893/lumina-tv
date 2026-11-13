@@ -564,19 +564,18 @@ class EmbyClient(
         return null
     }
 
-    private fun playbackTargetKey(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long) =
-        "$itemId|$forceTranscode|${sourceId.orEmpty()}|${audioStreamIndex ?: ""}|$forceDirect|$maxStreamingBitrate"
+    private fun playbackTargetKey(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long, strategy: SourceStrategy) =
+        "$itemId|$forceTranscode|${sourceId.orEmpty()}|${audioStreamIndex ?: ""}|$forceDirect|$maxStreamingBitrate|$strategy"
 
-    fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long = 120_000_000L): PlaybackTarget? {
-        val cached = playbackTargetCache.remove(playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate)) ?: return null
+    fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long = 120_000_000L, strategy: SourceStrategy = SourceStrategy()): PlaybackTarget? {
+        val cached = playbackTargetCache.remove(playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate, strategy)) ?: return null
         return cached.second.takeIf { System.currentTimeMillis() - cached.first < 120_000L }
     }
 
-    suspend fun prewarmPlayback(item: MediaItem, sourceId: String? = null, audioStreamIndex: Int? = null) {
-        runCatching {
-            resolvePlayback(item, mediaSourceId = sourceId, startPositionMs = item.positionTicks / 10_000L,
-                audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true)
-        }
+    suspend fun prewarmPlayback(item: MediaItem, sourceId: String? = null, audioStreamIndex: Int? = null,
+                                strategy: SourceStrategy = SourceStrategy()) {
+        resolvePlayback(item, mediaSourceId = sourceId, startPositionMs = item.positionTicks / 10_000L,
+            audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true, strategy = strategy)
     }
 
     /** Returns a JPEG frame from Emby's optional BIF file; failures are intentionally silent. */
@@ -1128,6 +1127,7 @@ data class PlaybackTarget(
         maxStreamingBitrate: Long = 120_000_000L,
         recordDiagnostics: Boolean = true,
         cacheResult: Boolean = false,
+        strategy: SourceStrategy = SourceStrategy(),
     ): PlaybackTarget =
         withContext(Dispatchers.IO) {
             val infoBody = JSONObject()
@@ -1148,16 +1148,54 @@ data class PlaybackTarget(
             val info = try {
                 postSync(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
                     .also { if (recordDiagnostics) lastPlaybackInfoJson = it.toString() }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (failure: Exception) {
+                if (cacheResult) throw failure
                 if (recordDiagnostics) lastPlaybackInfoJson = JSONObject().put("reason", failure.message ?: "PlaybackInfo request failed").toString()
                 JSONObject()
             }
             val sources = info.optJSONArray("MediaSources")
-            val chosen = if (mediaSourceId != null) {
-                (0 until (sources?.length() ?: 0)).mapNotNull { i -> sources?.optJSONObject(i) }
-                    .firstOrNull { it.optString("Id") == mediaSourceId }
-            } else null
-            val first = chosen ?: sources?.optJSONObject(0)
+            val sourceOptions = (0 until (sources?.length() ?: 0)).mapNotNull { index ->
+                val option = sources?.optJSONObject(index) ?: return@mapNotNull null
+                val streams = option.optJSONArray("MediaStreams")
+                val video = (0 until (streams?.length() ?: 0)).mapNotNull { streams?.optJSONObject(it) }
+                    .firstOrNull { it.optString("Type").equals("Video", true) }
+                val range = video?.optString("VideoRangeType")?.ifBlank { video.optString("VideoRange") }
+                val codec = video?.optString("Codec")?.ifBlank { null }
+                SourceOption(
+                    id = option.optString("Id"), name = option.optString("Name", "源").ifBlank { "源" }, index = index,
+                    container = option.optString("Container").ifBlank { null }, videoCodec = codec,
+                    videoHeight = video?.optInt("Height")?.takeIf { it > 0 },
+                    bitrate = option.optInt("Bitrate").takeIf { it > 0 },
+                    frameRate = (video?.optDouble("RealFrameRate", 0.0)?.takeIf { it > 0 }
+                        ?: video?.optDouble("AverageFrameRate", 0.0)?.takeIf { it > 0 })?.toFloat(),
+                    isDolbyVision = range.orEmpty().contains("DOVI", true) || range.orEmpty().contains("DOLBY", true) ||
+                        range.equals("DV", true) || codec.orEmpty().contains("dovi", true),
+                    hdrType = range?.takeIf { it.isNotBlank() },
+                )
+            }
+            if (cacheResult && sourceOptions.isEmpty()) throw IOException("PlaybackInfo returned no sources")
+            val selectedOption = when {
+                mediaSourceId != null -> sourceOptions.firstOrNull { it.id == mediaSourceId }
+                strategy.isDefault -> sourceOptions.firstOrNull()
+                else -> sourceOptions.takeIf { it.isNotEmpty() }?.let { chooseSource(it, strategy) }
+            }
+            val first = when {
+                mediaSourceId != null -> selectedOption?.let { sources?.optJSONObject(it.index) } ?: sources?.optJSONObject(0)
+                strategy.isDefault -> sources?.optJSONObject(0)
+                else -> selectedOption?.let { sources?.optJSONObject(it.index) }
+            }
+            if (first != null) {
+                val strategyLabel = if (mediaSourceId != null) "explicit" else listOfNotNull(
+                    strategy.dynamicRange.takeIf { it != DynamicRangePref.UNSET }?.let { "dvh" },
+                    strategy.releaseGroups.takeIf { it.isNotEmpty() }?.let { "codec" },
+                    strategy.bitrate.takeIf { it != NumericPref.UNSET }?.let { "bitrate" },
+                    strategy.frameRate.takeIf { it != NumericPref.UNSET }?.let { "fps" },
+                ).joinToString("+").ifBlank { "default" }
+                val chosenName = first.optString("Name", "源").replace(Regex("https?://\\S+", RegexOption.IGNORE_CASE), "[url]").take(120)
+                android.util.Log.i("EmbyClient", "sourcePick chosen=$chosenName count=${sources?.length() ?: 0} strategy=$strategyLabel")
+            }
             val responsePositionTicks = info.optJSONObject("UserData")
                 ?.optLong("PlaybackPositionTicks", -1L)
                 ?: info.optJSONObject("Item")?.optJSONObject("UserData")?.optLong("PlaybackPositionTicks", -1L)
@@ -1286,7 +1324,7 @@ data class PlaybackTarget(
                     .put("selectedAudioIndex", audioStreamIndex ?: JSONObject.NULL)
                     .put("selectedSubtitleIndex", JSONObject.NULL),
             ).also { target ->
-                if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect, maxStreamingBitrate)] =
+                if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect, maxStreamingBitrate, strategy)] =
                     System.currentTimeMillis() to target
             }
         }
