@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -284,7 +285,9 @@ fun FocusSurface(
 fun PosterCard(
     item: MediaItem,
     imageUrl: String?,
-    width: Dp = 200.dp,
+    width: Dp? = null,
+    aspectRatio: Float = 1.5f,
+    titleOverlay: Boolean = false,
     focusScale: Float = FocusScale.POSTER_LARGE,
     requestInitialFocus: Boolean = false,
     focusRequester: FocusRequester? = null,
@@ -296,6 +299,7 @@ fun PosterCard(
     val initialFocusRequester = remember { FocusRequester() }
     val focused by interaction.collectIsFocusedAsState()
     val posterSpec = FocusFamily.Poster.spec()
+    val cardShape = if (titleOverlay) RoundedCornerShape(10.dp) else ShapeScale.card
     val scale by animateFloatAsState(if (focused) focusScale else 1f, tween(posterSpec.duration), label = "posterScale")
     val alpha by animateFloatAsState(if (focused) 1f else 0.85f, tween(200), label = "posterAlpha")
     LaunchedEffect(requestInitialFocus) {
@@ -306,7 +310,7 @@ fun PosterCard(
     }
     Column(
         Modifier
-            .width(width)
+            .then(if (width != null) Modifier.width(width).aspectRatio(1f / aspectRatio) else Modifier.fillMaxWidth().aspectRatio(1f / aspectRatio))
             .then(if (requestInitialFocus) Modifier.focusRequester(initialFocusRequester) else Modifier)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusProperties { if (upFocus != null) up = upFocus }
@@ -324,13 +328,13 @@ fun PosterCard(
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(width * 1.5f)
-                .clip(ShapeScale.card)
+                .aspectRatio(1f / aspectRatio)
+                .clip(cardShape)
                 .background(Color(0xFF141B2B))
                 .border(
                     if (focused) 2.dp else 1.dp,
                     if (focused) Accent else GlassLine,
-                    ShapeScale.card,
+                    cardShape,
                 )
         ) {
             AsyncImage(
@@ -391,22 +395,39 @@ fun PosterCard(
                     )
                 }
             }
+            if (titleOverlay) {
+                Box(
+                    Modifier.align(Alignment.BottomStart).fillMaxWidth().height(42.dp)
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))))
+                )
+                Text(
+                    item.name,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = 9.dp),
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = item.name,
-            color = if (focused) TextMain else TextMain.copy(alpha = 0.92f),
-            style = TypeScale.title,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = item.subtitle,
-            color = TextSub,
-            style = TypeScale.caption,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        if (!titleOverlay) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = item.name,
+                color = if (focused) TextMain else TextMain.copy(alpha = 0.92f),
+                style = TypeScale.title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = item.subtitle,
+                color = TextSub,
+                style = TypeScale.caption,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

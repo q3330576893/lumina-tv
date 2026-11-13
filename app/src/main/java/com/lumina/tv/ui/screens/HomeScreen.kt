@@ -157,7 +157,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 
-private fun calculateHeroHeight(screenHeight: Dp): Dp = minOf(560.dp, screenHeight * 0.66f)
+private fun calculateHeroHeight(screenHeight: Dp): Dp = minOf(320.dp, screenHeight * 0.55f)
 
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
@@ -436,8 +436,8 @@ fun HomeScreen(
         libraryCounts = libraryCounts + counts
     }
 
-    LaunchedEffect(loading, initialFocusPending, resume, favorites, latest, movies, series) {
-        if (!loading && initialFocusPending && (resume.isNotEmpty() || favorites.isNotEmpty() || latest.isNotEmpty() || movies.isNotEmpty() || series.isNotEmpty())) {
+    LaunchedEffect(loading, initialFocusPending, resume, favorites, latest, movies, series, views) {
+        if (!loading && initialFocusPending && (resume.isNotEmpty() || favorites.isNotEmpty() || latest.isNotEmpty() || movies.isNotEmpty() || series.isNotEmpty() || views.isNotEmpty())) {
             delay(240)
             initialFocusPending = false
         }
@@ -592,15 +592,7 @@ fun HomeScreen(
     LaunchedEffect(heroItems) { heroIndex = 0 }
     val hero = heroItems.getOrNull(heroIndex) ?: resume.firstOrNull()
     val homeLibraries = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
-    val firstSectionKey: String? = when {
-        resume.isNotEmpty() -> "resume"
-        favorites.isNotEmpty() -> "favorites"
-        latest.isNotEmpty() -> "latest"
-        movies.isNotEmpty() -> "movies"
-        series.isNotEmpty() -> "series"
-        homeLibraries.any { viewContents[it.id].orEmpty().isNotEmpty() } -> "view-" + homeLibraries.first { viewContents[it.id].orEmpty().isNotEmpty() }.id
-        else -> null
-    }
+    val firstSectionKey: String? = "libraries"
     val navFocus = remember { FocusRequester() }
 
     val heroPlayFocus = remember { FocusRequester() }
@@ -678,20 +670,19 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
-                    if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
+                    item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
-                            recentBackdropUrls = libraryRecentBackdropUrls,
                             counts = libraryCounts,
-                            requestInitialFocus = false,
+                            requestInitialFocus = initialFocusPending && firstSectionKey == "libraries",
                             onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
+                            onOpenAll = { tab = HomeTab.Media; selectedLibraryId = null; focusedMediaId = null },
                         )
                     }
-                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
-                    if (latest.isNotEmpty()) item { RowSection("最新添加", latest, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "latest", focusItemId = focusedMediaId, sectionKey = "latest", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "latest" }) { onOpenDetail(it.id) } }
-                    if (movies.isNotEmpty()) item { RowSection("电影", movies, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "movies", focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
-                    if (series.isNotEmpty()) item { RowSection("剧集", series, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "series", focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 200.dp, aspectRatio = 16f / 9f, titleOverlay = true, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    if (movies.isNotEmpty()) item { RowSection("电影", movies, width = 130.dp, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "movies", focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
+                    if (series.isNotEmpty()) item { RowSection("剧集", series, width = 130.dp, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "series", focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty() && favorites.isEmpty() && latest.isEmpty() && movies.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
+                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, width = 130.dp, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && resume.isEmpty()) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
@@ -842,10 +833,10 @@ fun HomeScreen(
                     }
                     else LazyVerticalGrid(
                         state = gridState,
-                        columns = GridCells.Adaptive(minSize = 140.dp),
-                        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 160.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        columns = GridCells.Adaptive(minSize = 130.dp),
+                        contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 12.dp, bottom = 160.dp),
+                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(32.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
@@ -862,10 +853,10 @@ fun HomeScreen(
                 }
                 else -> LazyVerticalGrid(
                     state = gridState,
-                            columns = GridCells.Adaptive(minSize = 140.dp),
-                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 76.dp, bottom = 160.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                            columns = GridCells.Adaptive(minSize = 130.dp),
+                    contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 76.dp, bottom = 160.dp),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(32.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     itemsIndexed(gridItems, key = { _, item -> item.id }) { index, it ->
@@ -1350,70 +1341,46 @@ private fun TabChip(
 @Composable
 private fun HomeLibraryRow(
     views: List<LibraryView>,
-    recentBackdropUrls: Map<String, String?>,
     counts: Map<String, Int?>,
     requestInitialFocus: Boolean,
     onOpenLibrary: (LibraryView) -> Unit,
+    onOpenAll: () -> Unit,
 ) {
-    val context = LocalContext.current
-    Column(Modifier.padding(top = Space.section)) {
-        SectionTitle("媒体库", Modifier.padding(start = 34.dp, bottom = 10.dp))
-        LazyRow(
-            modifier = Modifier.focusGroup(),
-            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
-            horizontalArrangement = Arrangement.spacedBy(20.dp),
-        ) {
-            items(views, key = { it.id }) { view ->
-                val imageUrl = remember(view.id, view.imageTag, recentBackdropUrls[view.id]) {
-                    if (!view.imageTag.isNullOrBlank()) AppRuntime.client?.libraryPrimaryImageUrl(view.id)
-                    else recentBackdropUrls[view.id]
+    val focusIds = listOf("all") + views.map { it.id }
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().height(60.dp).focusGroup(),
+        contentPadding = PaddingValues(horizontal = 40.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        items(focusIds, key = { "libpill-$it" }) { id ->
+            val view = views.firstOrNull { it.id == id }
+            val label = view?.name ?: "全部"
+            val count = view?.let { counts[it.id] }
+            val focusRequester = remember(id) { FocusRequester() }
+            val interaction = remember(id) { MutableInteractionSource() }
+            val focused by interaction.collectIsFocusedAsState()
+            val shape = RoundedCornerShape(12.dp)
+            LaunchedEffect(requestInitialFocus) {
+                if (requestInitialFocus && id == focusIds.firstOrNull()) {
+                    delay(120)
+                    runCatching { focusRequester.requestFocus() }
                 }
-                var imageLoaded by remember(view.id, imageUrl) { mutableStateOf(false) }
-                val cardFocusRequester = remember(view.id) { FocusRequester() }
-                val interaction = remember(view.id) { MutableInteractionSource() }
-                val focused by interaction.collectIsFocusedAsState()
-                val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(130), label = "library-card-scale")
-                val imageAlpha by animateFloatAsState(if (imageLoaded) 1f else 0f, tween(150), label = "library-image-fade")
-                LaunchedEffect(requestInitialFocus) {
-                    if (requestInitialFocus && view == views.firstOrNull()) {
-                        delay(120)
-                        runCatching { cardFocusRequester.requestFocus() }
+            }
+            Row(
+                Modifier.height(44.dp)
+                    .clip(shape)
+                    .glassSurface(shape, tone = if (focused) GlassTone.Accent else GlassTone.Normal)
+                    .focusRequester(focusRequester)
+                    .clickable(interactionSource = interaction, indication = null) {
+                        if (view == null) onOpenAll() else onOpenLibrary(view)
                     }
-                }
-                val shape = RoundedCornerShape(12.dp)
-                Box(
-                    Modifier.width(200.dp).height(112.dp)
-                        .graphicsLayer { scaleX = scale; scaleY = scale }
-                        .clip(shape)
-                        .background(Color(0xFF1A2233))
-                        .border(if (focused) 1.5.dp else 0.dp, Accent, shape)
-                        .focusRequester(cardFocusRequester)
-                        .clickable(interactionSource = interaction, indication = null) { onOpenLibrary(view) },
-                ) {
-                        if (imageUrl != null) {
-                            val request = remember(imageUrl) {
-                                ImageRequest.Builder(context)
-                                    .data(imageUrl)
-                                    .memoryCacheKey(imageUrl)
-                                    .memoryCachePolicy(CachePolicy.ENABLED)
-                                    .diskCachePolicy(CachePolicy.ENABLED)
-                                    .crossfade(false)
-                                    .build()
-                            }
-                            AsyncImage(
-                                model = request,
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = imageAlpha },
-                                onSuccess = { imageLoaded = true },
-                            )
-                        }
-                        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth()
-                            .background(Color(0x99070A12)).padding(horizontal = 10.dp, vertical = 6.dp)) {
-                            Text(view.name, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(counts[view.id]?.toString() ?: "—", color = Color(0xFFB7C0CF), fontSize = 10.sp)
-                        }
-                }
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(label, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (count != null) Text(count.toString(), color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
             }
         }
     }
@@ -1912,6 +1879,9 @@ private fun HeroBackdropImage(
 private fun RowSection(
     title: String,
     items: List<MediaItem>,
+    width: Dp = 200.dp,
+    aspectRatio: Float = 1.5f,
+    titleOverlay: Boolean = false,
     requestInitialFocus: Boolean = false,
     focusItemId: String? = null,
     sectionKey: String = title,
@@ -1922,17 +1892,21 @@ private fun RowSection(
 ) {
     val client = AppRuntime.client
     Column(Modifier.padding(top = Space.section)) {
-        SectionTitle(title, Modifier.padding(start = 34.dp, bottom = 10.dp))
+        if (titleOverlay) {
+            Text(title, Modifier.padding(start = 40.dp, bottom = 10.dp), color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+        } else SectionTitle(title, Modifier.padding(start = 40.dp, bottom = 10.dp))
         LazyRow(
             modifier = Modifier.focusGroup(),
-            contentPadding = PaddingValues(start = 34.dp, end = 34.dp),
+            contentPadding = PaddingValues(start = 40.dp, end = 40.dp),
             horizontalArrangement = Arrangement.spacedBy(Space.m),
         ) {
             items(items, key = { it.id }) { it ->
                 PosterCard(
                     item = it,
                     imageUrl = client?.imageUrl(it),
-                    width = 200.dp,
+                    width = width,
+                    aspectRatio = aspectRatio,
+                    titleOverlay = titleOverlay,
                     focusScale = FocusScale.POSTER_MEDIUM,
                     requestInitialFocus = (focusedSection == sectionKey && it.id == focusItemId) ||
                         (requestInitialFocus && it == items.firstOrNull()),
