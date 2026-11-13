@@ -62,6 +62,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Canvas
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
@@ -98,6 +99,9 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
@@ -123,6 +127,8 @@ import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.FocusScale
+import com.lumina.tv.ui.components.GlassTone
+import com.lumina.tv.ui.components.glassSurface
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.SectionTitle
@@ -938,20 +944,15 @@ private fun ServerCapsule(
     var serverMenuOpen by remember { mutableStateOf(false) }
     val capsuleInteraction = remember { MutableInteractionSource() }
     val capsuleFocused by capsuleInteraction.collectIsFocusedAsState()
-    val glassShape = RoundedCornerShape(20.dp)
+    val glassShape = RoundedCornerShape(10.dp)
     val menuShape = ShapeScale.panel
     Box(modifier.wrapContentSize()) {
         Box(
             Modifier
-                .height(40.dp)
+                .height(34.dp)
                 .widthIn(min = 92.dp, max = 204.dp)
                 .clip(glassShape)
-                .background(Color.White.copy(alpha = if (capsuleFocused) 0.14f else 0.08f))
-                .border(
-                    width = if (capsuleFocused) 1.5.dp else 1.dp,
-                    color = if (capsuleFocused) Accent else Color.White.copy(alpha = 0.14f),
-                    shape = glassShape,
-                )
+                .glassSurface(glassShape, tone = if (capsuleFocused) GlassTone.Accent else GlassTone.Normal)
                 .clickable(
                     interactionSource = capsuleInteraction,
                     indication = null,
@@ -972,19 +973,26 @@ private fun ServerCapsule(
                     AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() }
                         ?: AppRuntime.session?.serverName ?: "Emby",
                     modifier = Modifier.weight(1f),
-                    color = Color.White.copy(alpha = 0.9f),
-                    fontSize = 13.sp,
+                    color = Color.White.copy(alpha = 0.94f),
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 0.2.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Box(Modifier.size(8.dp), contentAlignment = Alignment.Center) {
-                    Text("▾", color = Color.White.copy(alpha = 0.9f), fontSize = 8.sp)
+                Canvas(Modifier.size(8.dp)) {
+                    val chevron = Path().apply {
+                        moveTo(1.4.dp.toPx(), 2.9.dp.toPx())
+                        lineTo(4.dp.toPx(), 5.2.dp.toPx())
+                        lineTo(6.6.dp.toPx(), 2.9.dp.toPx())
+                    }
+                    drawPath(
+                        path = chevron,
+                        color = Color.White.copy(alpha = if (capsuleFocused) 0.80f else 0.45f),
+                        style = Stroke(width = 1.2.dp.toPx(), cap = StrokeCap.Round),
+                    )
                 }
             }
-            Box(
-                Modifier.align(Alignment.TopCenter).fillMaxWidth().height(1.dp)
-                    .background(Color.White.copy(alpha = 0.06f))
-            )
         }
         DropdownMenu(
                     expanded = serverMenuOpen,

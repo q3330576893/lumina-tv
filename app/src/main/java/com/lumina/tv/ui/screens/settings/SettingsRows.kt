@@ -47,7 +47,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.CompositionLocal
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -64,7 +63,6 @@ import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.ui.motion.Motion
-import com.lumina.tv.ui.sound.KeySound
 
 internal val LocalSettingsFocusKeys = staticCompositionLocalOf<MutableMap<String, FocusRequester>?> { null }
 internal val LocalSettingsListStates = staticCompositionLocalOf<Map<SettingsCategory, LazyListState>?> { null }
@@ -360,7 +358,6 @@ private fun SettingsRowFrame(
     control: @Composable BoxScope.() -> Unit,
 ) {
     var focused by remember(focusKey) { mutableStateOf(false) }
-    val view = LocalView.current
     val focusKeys = LocalSettingsFocusKeys.current
     val interactionSource = remember(focusKey) { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -395,7 +392,6 @@ private fun SettingsRowFrame(
             .background(if (focused) ThemeRuntime.frostStrongTint else Color.Transparent, shape)
             .then(if (focused) Modifier.glassBorder(shape) else Modifier)
             .clickable(interactionSource = interactionSource, indication = null) {
-                if (AppRuntime.prefs?.keySound == "all") KeySound.playConfirm(view)
                 onClick()
             },
     ) {

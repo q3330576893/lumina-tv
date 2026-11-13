@@ -16,10 +16,6 @@ data class SavedServer(
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE)
 
-    var keySound: String
-        get() = sp.getString("key_sound_mode", "dpad")?.takeIf { it in setOf("off", "dpad", "all") } ?: "dpad"
-        set(v) = sp.edit().putString("key_sound_mode", v.takeIf { it in setOf("off", "dpad", "all") } ?: "dpad").apply()
-
     var declareDtsDirectPlay: Boolean
         get() = sp.getBoolean("declare_dts_direct_play", false)
         set(v) = sp.edit().putBoolean("declare_dts_direct_play", v).apply()

@@ -43,7 +43,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -54,7 +53,6 @@ import com.lumina.tv.ui.theme.ThemeRuntime
 import com.lumina.tv.ui.components.FrostPanel
 import com.lumina.tv.ui.motion.Motion
 import com.lumina.tv.AppRuntime
-import com.lumina.tv.ui.sound.KeySound
 import androidx.compose.foundation.shape.RoundedCornerShape
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
@@ -71,7 +69,6 @@ private object SettingsFocusMemory {
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     val hazeState = remember { HazeState() }
-    val view = LocalView.current
     val railRequester = remember { FocusRequester() }
     val contentFirstRequester = remember { FocusRequester() }
     var selectedCategory by remember { mutableStateOf(SettingsFocusMemory.category) }
@@ -87,8 +84,6 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
         val state = listStates.getValue(category)
         SettingsFocusMemory.rowIndices[key] = state.firstVisibleItemIndex
         SettingsFocusMemory.rowScrollOffsets[key] = state.firstVisibleItemScrollOffset
-        val mode = AppRuntime.prefs?.keySound ?: "dpad"
-        if (mode == "dpad" || mode == "all") KeySound.playFocusMove(view)
         focusEpoch++
     }
 
@@ -273,7 +268,6 @@ private fun SettingsCategoryRail(
     onRailFocusChanged: (Boolean) -> Unit,
 ) {
     val shape = RoundedCornerShape(SettingsTokens.GroupCorner)
-    val view = LocalView.current
     FrostPanel(Modifier.width(railWidth).fillMaxHeight(), hazeState, SettingsTokens.GroupCorner) {
         Column(Modifier.fillMaxSize().glassBorder(shape).focusGroup().padding(horizontal = 10.dp, vertical = 16.dp)) {
             Text("设置", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
@@ -289,12 +283,9 @@ private fun SettingsCategoryRail(
                         .onFocusChanged {
                             focused = it.isFocused
                             onRailFocusChanged(it.isFocused)
-                            val mode = AppRuntime.prefs?.keySound ?: "dpad"
-                            if (it.isFocused && (mode == "dpad" || mode == "all")) KeySound.playFocusMove(view)
                         }
                         .background(if (selected || focused) ThemeRuntime.frostStrongTint else Color.Transparent, RoundedCornerShape(12.dp))
                         .then(if (enabled) Modifier.clickable {
-                            if (AppRuntime.prefs?.keySound == "all") KeySound.playConfirm(view)
                             onCategorySelected(category)
                         } else Modifier),
                     verticalAlignment = Alignment.CenterVertically,
