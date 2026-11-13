@@ -49,6 +49,7 @@ import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
+import com.lumina.tv.ui.components.TvHintBar
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
@@ -133,11 +134,13 @@ internal fun OptionMenu(
     ) {
         GlassPanel(Modifier.width(680.dp), corner = 22.dp, fillColor = Color(0x7510141D)) {
             Column(Modifier.padding(22.dp).verticalScroll(rememberScrollState())) {
+                TvHintBar("上下键切换轨道 · 返回键关闭面板")
                 Text("播放选项", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(14.dp))
 
                 // 选集
                 if (episodes.isNotEmpty()) {
+                    TvHintBar("使用左右方向键选择集数")
                     MenuLabel("选集（共 ${episodes.size} 集）")
                     Column(
                         Modifier.heightIn(max = 168.dp).verticalScroll(rememberScrollState()),

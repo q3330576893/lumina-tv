@@ -201,7 +201,7 @@ fun FrostPanel(
         )
         Box(Modifier.fillMaxSize().border(
             1.dp,
-            if (strong) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge,
+            if (strong) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdgeNeutral,
             shape,
         ))
         content()
@@ -210,12 +210,21 @@ fun FrostPanel(
 
 enum class FocusFamily { Poster, DenseGrid, Button, DetailPanel }
 
+object FocusScale {
+    const val POSTER_LARGE = 1.08f
+    const val POSTER_MEDIUM = 1.06f
+    const val DENSE_GRID = 1.02f
+    const val ULTRA_DENSE = 1.01f
+}
+
+private const val FOCUS_ANIMATION_DURATION_MS = 260
+
 private data class FocusSpec(val scale: Float, val elevation: Float, val duration: Int)
 private fun FocusFamily.spec(): FocusSpec = when (this) {
-    FocusFamily.Poster -> FocusSpec(1.08f, 16f, 220)
-    FocusFamily.DenseGrid -> FocusSpec(1.025f, 8f, 180)
-    FocusFamily.Button -> FocusSpec(1.04f, 10f, 200)
-    FocusFamily.DetailPanel -> FocusSpec(1.02f, 12f, 240)
+    FocusFamily.Poster -> FocusSpec(FocusScale.POSTER_LARGE, 16f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, 8f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.Button -> FocusSpec(1.04f, 10f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.DetailPanel -> FocusSpec(1.02f, 12f, FOCUS_ANIMATION_DURATION_MS)
 }
 
 /** 可聚焦容器：缩放 + 高光描边的统一交互语言。 */
@@ -276,6 +285,7 @@ fun PosterCard(
     item: MediaItem,
     imageUrl: String?,
     width: Dp = 200.dp,
+    focusScale: Float = FocusScale.POSTER_LARGE,
     requestInitialFocus: Boolean = false,
     focusRequester: FocusRequester? = null,
     upFocus: FocusRequester? = null,
@@ -286,7 +296,8 @@ fun PosterCard(
     val initialFocusRequester = remember { FocusRequester() }
     val focused by interaction.collectIsFocusedAsState()
     val posterSpec = FocusFamily.Poster.spec()
-    val scale by animateFloatAsState(if (focused) posterSpec.scale else 1f, tween(posterSpec.duration), label = "posterScale")
+    val scale by animateFloatAsState(if (focused) focusScale else 1f, tween(posterSpec.duration), label = "posterScale")
+    val alpha by animateFloatAsState(if (focused) 1f else 0.85f, tween(200), label = "posterAlpha")
     LaunchedEffect(requestInitialFocus) {
         if (requestInitialFocus) {
             kotlinx.coroutines.delay(120)
@@ -303,6 +314,7 @@ fun PosterCard(
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
+                this.alpha = alpha
                 shadowElevation = if (focused) posterSpec.elevation else 0f
                 shape = ShapeScale.card
                 clip = false
@@ -395,6 +407,16 @@ fun PosterCard(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+@Composable
+fun TvHintBar(text: String, modifier: Modifier = Modifier) {
+    Box(
+        modifier.fillMaxWidth().height(24.dp).padding(start = 34.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(text, color = Color.White.copy(alpha = 0.45f), fontSize = 12.sp, maxLines = 1)
     }
 }
 

@@ -106,6 +106,7 @@ import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
+import com.lumina.tv.ui.components.TvHintBar
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
@@ -1740,6 +1741,7 @@ fun PlayerScreen(
             exit = fadeOut() + slideOutVertically { it / 3 },
         ) {
             Column(Modifier.fillMaxSize()) {
+                TvHintBar("◀ ▶ 快退/快进 · 确认键暂停 · 返回键退出")
                 Row(
                     Modifier
                         .fillMaxWidth()

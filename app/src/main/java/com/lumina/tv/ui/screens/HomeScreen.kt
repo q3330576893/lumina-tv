@@ -72,8 +72,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -88,8 +90,11 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
@@ -117,6 +122,7 @@ import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.ui.components.FocusSurface
+import com.lumina.tv.ui.components.FocusScale
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.SectionTitle
@@ -140,6 +146,7 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.Job
 
 private fun calculateHeroHeight(screenHeight: Dp): Dp = minOf(560.dp, screenHeight * 0.66f)
 
@@ -1528,6 +1535,80 @@ private fun Hero(
         onDispose { onComposed(false) }
     }
     val context = LocalContext.current
+    val transitionScope = rememberCoroutineScope()
+    val client = AppRuntime.client
+    val resolveHeroImage: (MediaItem?) -> String? = { heroItem ->
+        heroItem?.let { client?.backdropUrl(it, 1280) }
+            ?.takeIf { it.isNotBlank() }
+            ?: heroItem?.let { client?.imageUrl(it, 720) }
+    }
+    val zoomStates = remember(items) { mutableMapOf<String, Animatable<Float, AnimationVector1D>>() }
+    val zoomJobs = remember(items) { mutableMapOf<String, Job>() }
+    val wipeProgress = remember(items) { Animatable(1f) }
+    var bottomImage by remember(items, client) { mutableStateOf(resolveHeroImage(item)) }
+    var topImage by remember(items, client) { mutableStateOf<String?>(null) }
+    var topLoaded by remember(items, client) { mutableStateOf(false) }
+    var isForward by remember(items) { mutableStateOf(true) }
+    var lastRequestedIndex by remember(items) { mutableStateOf(currentIndex) }
+    var transitionGeneration by remember(items) { mutableStateOf(0) }
+    var transitionJob by remember(items) { mutableStateOf<Job?>(null) }
+
+    fun zoomFor(image: String): Animatable<Float, AnimationVector1D> =
+        zoomStates.getOrPut(image) { Animatable(0f) }
+
+    LaunchedEffect(items) {
+        bottomImage?.let { image ->
+            val zoom = zoomFor(image)
+            zoom.snapTo(0f)
+            zoom.animateTo(1f, tween(15_000, easing = LinearEasing))
+        }
+    }
+    LaunchedEffect(currentIndex, items) {
+        val targetImage = resolveHeroImage(items.getOrNull(currentIndex))
+        if (targetImage == null || targetImage == topImage || (topImage == null && targetImage == bottomImage)) {
+            lastRequestedIndex = currentIndex
+            return@LaunchedEffect
+        }
+
+        transitionJob?.cancel()
+        transitionGeneration += 1
+        if (topLoaded && wipeProgress.value > 0f) {
+            topImage?.let { bottomImage = it }
+        }
+        val forwardDistance = (currentIndex - lastRequestedIndex + items.size) % items.size
+        val backwardDistance = (lastRequestedIndex - currentIndex + items.size) % items.size
+        isForward = forwardDistance <= backwardDistance
+        lastRequestedIndex = currentIndex
+        topImage = targetImage
+        topLoaded = false
+        wipeProgress.snapTo(0f)
+    }
+    LaunchedEffect(topLoaded, transitionGeneration) {
+        val image = topImage ?: return@LaunchedEffect
+        if (!topLoaded) return@LaunchedEffect
+        val generation = transitionGeneration
+        val zoom = zoomFor(image)
+        zoomJobs.remove(image)?.cancel()
+        zoomJobs[image] = transitionScope.launch {
+            zoom.snapTo(0f)
+            zoom.animateTo(1f, tween(15_000, easing = LinearEasing))
+        }
+        transitionJob?.cancel()
+        transitionJob = transitionScope.launch {
+            wipeProgress.animateTo(1f, tween(600, easing = FastOutSlowInEasing))
+            if (generation == transitionGeneration && image == topImage) {
+                bottomImage = image
+                topImage = null
+                topLoaded = false
+            }
+        }
+    }
+    DisposableEffect(items) {
+        onDispose {
+            transitionJob?.cancel()
+            zoomJobs.values.forEach { it.cancel() }
+        }
+    }
     var lastInteractionAt by remember(items) { mutableStateOf(System.currentTimeMillis()) }
     var focusedTargets by remember { mutableStateOf<Set<String>>(emptySet()) }
     fun reportFocus(key: String, focused: Boolean) {
@@ -1581,71 +1662,37 @@ private fun Hero(
                     }
                 }
         ) {
-            Crossfade(targetState = currentIndex, animationSpec = tween(420), label = "hero-backdrop") { index ->
-                val heroItem = items.getOrNull(index)
-                val client = AppRuntime.client
-                val image = heroItem?.let { client?.backdropUrl(it, 1280) }
-                    ?.takeIf { it.isNotBlank() }
-                    ?: heroItem?.let { client?.imageUrl(it, 720) }
-                var zoomStart by remember(index) { mutableStateOf(0f) }
-                LaunchedEffect(index) { zoomStart = 1f }
-                val zoom by animateFloatAsState(
-                    targetValue = zoomStart,
-                    animationSpec = tween(14_000, easing = LinearEasing),
-                    label = "hero-zoom",
+            bottomImage?.let { image ->
+                HeroBackdropImage(
+                    imageUrl = image,
+                    zoom = zoomFor(image).value,
                 )
-                if (!image.isNullOrBlank()) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(context).data(image).crossfade(false).build(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        alignment = Alignment.TopCenter,
-                        modifier = Modifier.fillMaxSize().graphicsLayer {
-                            // 14 秒缓慢推近 7%，静态图也有呼吸感
-                            val z = 1f + zoom * 0.07f
-                            scaleX = z
-                            scaleY = z
-                            transformOrigin = TransformOrigin(0.5f, 0.32f)
-                        },
-                    )
-                }
+            }
+            topImage?.let { image ->
+                HeroBackdropImage(
+                    imageUrl = image,
+                    zoom = zoomFor(image).value,
+                    wipeProgress = wipeProgress.value,
+                    isForward = isForward,
+                    onLoaded = {
+                        if (image == topImage) topLoaded = true
+                    },
+                )
             }
         Box(
             Modifier.fillMaxSize().background(
-                Brush.horizontalGradient(listOf(Color(0xF2070A12), Color(0xB3070A12), Color(0x00070A12)))
-            )
-        )
-        Box(
-            Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
-                    0f to Color(0x00070A12),
-                    0.66f to Color(0x00070A12),
-                    0.82f to Color(0x66070A12),
-                    1f to Color(0xF2070A12),
+                    0.00f to Color.Transparent,
+                    0.50f to Ink.copy(alpha = 0.00f),
+                    0.62f to Ink.copy(alpha = 0.16f),
+                    0.78f to Ink.copy(alpha = 0.58f),
+                    0.92f to Ink.copy(alpha = 0.88f),
+                    1.00f to Ink,
                 )
             )
-        )
-        Box(
-            Modifier
-                .fillMaxHeight()
-                .fillMaxWidth(0.46f)
-                .align(Alignment.CenterStart)
-                .background(Brush.horizontalGradient(listOf(Color(0x66000000), Color.Transparent)))
-        )
-        Box(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(240.dp)
-                .background(
-                    Brush.verticalGradient(
-                        0.00f to Color.Transparent,
-                        0.22f to Ink.copy(alpha = 0.12f),
-                        0.45f to Ink.copy(alpha = 0.38f),
-                        0.70f to Ink.copy(alpha = 0.72f),
-                        1.00f to Ink,
-                    )
-                )
         )
         Column(
-            Modifier.align(Alignment.BottomStart).padding(start = 34.dp, bottom = 24.dp, end = 200.dp)
+            Modifier.align(Alignment.BottomStart).padding(start = 34.dp, bottom = 24.dp).widthIn(max = 520.dp)
         ) {
             Text("为你推荐", color = Accent, fontSize = 11.sp, letterSpacing = 2.sp)
             Spacer(Modifier.height(8.dp))
@@ -1661,7 +1708,7 @@ private fun Hero(
                 Text(
                     item.seriesName ?: item.name,
                     color = TextMain, style = TypeScale.display,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
                 )
             }
             val hasOwnRating = (item.rating ?: item.communityRating) != null
@@ -1680,7 +1727,7 @@ private fun Hero(
                 Text(
                     it, color = Color(0xFFC9D5E8), fontSize = 12.sp, lineHeight = 19.sp,
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.width(560.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
             Spacer(Modifier.height(14.dp))
@@ -1769,6 +1816,56 @@ private fun Hero(
 }
 
 @Composable
+private fun HeroBackdropImage(
+    imageUrl: String,
+    zoom: Float,
+    wipeProgress: Float = 1f,
+    isForward: Boolean = true,
+    onLoaded: () -> Unit = {},
+) {
+    val context = LocalContext.current
+    AsyncImage(
+        model = remember(imageUrl) {
+            ImageRequest.Builder(context).data(imageUrl).crossfade(false).build()
+        },
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        alignment = Alignment.TopCenter,
+        onSuccess = { onLoaded() },
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                val z = 1f + zoom * 0.05f
+                scaleX = z
+                scaleY = z
+                translationX = (if (isForward) 1f else -1f) * 18.dp.toPx() * (1f - wipeProgress)
+                transformOrigin = TransformOrigin(0.5f, 0.32f)
+                clip = true
+                compositingStrategy = CompositingStrategy.Offscreen
+            }
+            .drawWithContent {
+                if (wipeProgress <= 0f) return@drawWithContent
+                drawContent()
+                if (wipeProgress < 1f) {
+                    val softEdge = 36.dp.toPx()
+                    val edge = if (isForward) size.width * wipeProgress else size.width * (1f - wipeProgress)
+                    val startX = if (isForward) (edge - softEdge).coerceAtLeast(0f) else edge
+                    val endX = if (isForward) edge else (edge + softEdge).coerceAtMost(size.width)
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colors = if (isForward) listOf(Color.White, Color.Transparent)
+                            else listOf(Color.Transparent, Color.White),
+                            startX = startX,
+                            endX = endX.coerceAtLeast(startX + 0.1f),
+                        ),
+                        blendMode = BlendMode.DstIn,
+                    )
+                }
+            },
+    )
+}
+
+@Composable
 private fun RowSection(
     title: String,
     items: List<MediaItem>,
@@ -1793,6 +1890,7 @@ private fun RowSection(
                     item = it,
                     imageUrl = client?.imageUrl(it),
                     width = 200.dp,
+                    focusScale = FocusScale.POSTER_MEDIUM,
                     requestInitialFocus = (focusedSection == sectionKey && it.id == focusItemId) ||
                         (requestInitialFocus && it == items.firstOrNull()),
                     upFocus = upFocus,

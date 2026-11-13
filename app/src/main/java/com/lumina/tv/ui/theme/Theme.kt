@@ -82,8 +82,8 @@ object ThemeRuntime {
 
     val blurRadiusDp: Dp get() = glassBlurRadius
 
-    val frostTint: Color get() = if (glassStyle == "clear") Color(0x14FFFFFF) else Color(0x20FFFFFF)
-    val frostStrongTint: Color get() = if (glassStyle == "clear") Color(0x24FFFFFF) else Color(0x38FFFFFF)
+    val frostTint: Color get() = if (glassStyle == "clear") Color(0x14FFFFFF) else Color(0x1AFFFFFF)
+    val frostStrongTint: Color get() = if (glassStyle == "clear") Color(0x24FFFFFF) else Color(0x2EFFFFFF)
     val frostFallback: Color get() = if (glassStyle == "off") Color(0xFF141B2B) else Color(0xE6151B2A)
     val frostStrongFallback: Color get() = if (glassStyle == "off") Color(0xFF1B2438) else Color(0xF21A2232)
     val glassHighlight: Color get() = Color(0x0FFFFFFF)
@@ -108,6 +108,7 @@ object ThemeRuntime {
         else -> if (focused) accent.copy(alpha = 0.9f) else Color(0x22FFFFFF)
     }
     val glassEdge: Color get() = glassLine(false)
+    val glassEdgeNeutral: Color get() = Color(0x2EFFFFFF)
     val glassEdgeStrong: Color get() = accent.copy(alpha = 0.72f)
 }
 

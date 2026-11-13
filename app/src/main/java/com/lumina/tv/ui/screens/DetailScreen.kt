@@ -96,6 +96,7 @@ import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
+import com.lumina.tv.ui.components.FocusScale
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.DetailVideoBackground
@@ -871,6 +872,7 @@ fun DetailScreen(
                                 item = related,
                                 imageUrl = client?.imageUrl(related),
                                 width = 138.dp,
+                                focusScale = FocusScale.DENSE_GRID,
                                 requestInitialFocus = related.id == focusedRelatedId,
                                 onFocused = { focusedRelatedId = related.id },
                                 onClick = { onOpenDetail(related.id) },
