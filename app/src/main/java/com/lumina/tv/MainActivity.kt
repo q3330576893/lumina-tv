@@ -352,7 +352,7 @@ private fun AppRoot(
 
             is Screen.Settings -> {
                 BackHandler { goBack() }
-                SettingsScreen(
+                com.lumina.tv.ui.screens.settings.SettingsScreen(
                     onBack = { goBack() },
                     onLogout = { AppRuntime.logout(); replaceRoot(Screen.Login) },
                 )
