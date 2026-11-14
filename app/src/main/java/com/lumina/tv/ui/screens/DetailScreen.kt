@@ -191,6 +191,7 @@ fun DetailScreen(
     var focusedRelatedId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     val castRowState = rememberLazyListState()
     val similarRowState = rememberLazyListState()
+    val detailScrollState = rememberScrollState()
     val playFocus = remember { FocusRequester() }
     val sourceFocus = remember { FocusRequester() }
     var playButtonFocused by remember { mutableStateOf(false) }
@@ -633,14 +634,17 @@ fun DetailScreen(
             LoadingView(text = "未找到该内容")
         } else {
             Column(
-                Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-                    .padding(start = 48.dp, end = 48.dp, top = 34.dp, bottom = 24.dp)
+                Modifier.fillMaxSize().verticalScroll(detailScrollState)
+                    .padding(start = 48.dp, end = 48.dp, top = 64.dp, bottom = 24.dp)
             ) {
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .background(Color(0x14FFFFFF), RoundedCornerShape(26.dp))
                         .padding(20.dp)
+                        .onFocusChanged {
+                            if (it.hasFocus) scope.launch { detailScrollState.animateScrollTo(0) }
+                        }
                 ) {
                     Poster(it0!!, client?.imageUrl(it0, 720))
                     Spacer(Modifier.width(30.dp))
@@ -1498,8 +1502,8 @@ private fun TrackSheet(
 private fun Poster(item: MediaItem, url: String?) {
     Box(
         Modifier
-            .width(196.dp)
-            .height(294.dp)
+            .width(190.dp)
+            .height(285.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(Color(0x1AFFFFFF))
     ) {
