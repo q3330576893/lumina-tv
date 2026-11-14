@@ -32,6 +32,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items as rowItems
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -44,6 +49,8 @@ import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.FastForward
+import androidx.compose.material.icons.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material3.CircularProgressIndicator
@@ -80,6 +87,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -243,6 +251,14 @@ fun PlayerScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var speed by remember { mutableFloatStateOf(AppRuntime.prefs?.defaultSpeed ?: 1.0f) }
     var optionMenu by remember { mutableStateOf(false) }
+    var quickPanel by remember { mutableStateOf(QuickPanel.NONE) }
+    var exitPromptAt by remember { mutableLongStateOf(0L) }
+    var showExitPrompt by remember { mutableStateOf(false) }
+    var seasons by remember(item.seriesId) { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var quickEpisodes by remember(item.seriesId) { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var selectedSeasonId by remember(item.seriesId, item.seasonId) { mutableStateOf(item.seasonId) }
+    var seasonsLoading by remember { mutableStateOf(false) }
+    var episodesLoading by remember { mutableStateOf(false) }
     var degraded by remember { mutableStateOf(false) }
     var audioDecodeMode by remember { mutableStateOf(AppRuntime.prefs?.audioDecodeMode ?: "auto") }
     var audioDecodeNotice by remember { mutableStateOf<String?>(null) }
@@ -408,7 +424,14 @@ fun PlayerScreen(
 
     val hideFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    val speedFocus = remember { FocusRequester() }
+    val episodeFocus = remember { FocusRequester() }
     val menuFocus = remember { FocusRequester() }
+    val speedFirstFocus = remember { FocusRequester() }
+    val seasonFocuses = remember(seasons) { seasons.map { FocusRequester() } }
+    val episodeItemFocuses = remember(quickEpisodes) { quickEpisodes.map { FocusRequester() } }
+    var quickContentHasFocus by remember { mutableStateOf(false) }
+    var restoreMenuFocusUntil by remember { mutableLongStateOf(0L) }
     var titleLogoFailed by remember(item.id) { mutableStateOf(false) }
 
     var okDownAt by remember(item.id) { mutableLongStateOf(0L) }
@@ -1555,8 +1578,8 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, boosting, optionMenu) {
-        if (controlsVisible && isPlaying && !optionMenu && !boosting) {
+    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, boosting, optionMenu, quickPanel) {
+        if (controlsVisible && isPlaying && !optionMenu && quickPanel == QuickPanel.NONE && !boosting) {
             val remaining = (lastInteractionAt + 5_000L - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
             delay(remaining)
             if (android.os.SystemClock.elapsedRealtime() - lastInteractionAt >= 5_000L) controlsVisible = false
@@ -1564,31 +1587,117 @@ fun PlayerScreen(
     }
 
     // 焦点：控制栏隐藏时由捕获层拿焦点，显示时把焦点交给播放按钮
-    LaunchedEffect(controlsVisible, optionMenu) {
+    LaunchedEffect(controlsVisible, optionMenu, quickPanel) {
         delay(80)
-        if (!optionMenu) {
+        if (!optionMenu && quickPanel == QuickPanel.NONE &&
+            android.os.SystemClock.elapsedRealtime() >= restoreMenuFocusUntil
+        ) {
             if (controlsVisible) runCatching { playFocus.requestFocus() }
             else runCatching { hideFocus.requestFocus() }
         }
     }
 
+    LaunchedEffect(item.seriesId) {
+        val sid = item.seriesId ?: return@LaunchedEffect
+        seasonsLoading = true
+        seasons = runCatching { client?.getSeasons(sid) }.getOrDefault(emptyList()).orEmpty()
+        seasonsLoading = false
+    }
+    LaunchedEffect(quickPanel, selectedSeasonId, item.seriesId) {
+        if (quickPanel != QuickPanel.EPISODES) return@LaunchedEffect
+        val sid = item.seriesId ?: return@LaunchedEffect
+        episodesLoading = true
+        quickEpisodes = LibraryCache.episodesOf(sid, selectedSeasonId)
+            ?: runCatching { client?.getEpisodes(sid, selectedSeasonId) }.getOrDefault(null).orEmpty()
+        if (quickEpisodes.isEmpty()) quickEpisodes = episodes
+        episodesLoading = false
+    }
+    LaunchedEffect(quickPanel, seasons, quickEpisodes) {
+        if (quickPanel == QuickPanel.NONE) return@LaunchedEffect
+        quickContentHasFocus = false
+        val firstFocus = if (quickPanel == QuickPanel.SPEED) {
+            speedFirstFocus
+        } else {
+            seasonFocuses.firstOrNull() ?: episodeItemFocuses.firstOrNull()
+        }
+        val triggerFocus = if (quickPanel == QuickPanel.SPEED) speedFocus else episodeFocus
+        if (firstFocus == null) return@LaunchedEffect
+        repeat(15) {
+            delay(50)
+            lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+            runCatching { firstFocus.requestFocus() }
+            if (quickContentHasFocus) return@LaunchedEffect
+        }
+        runCatching { triggerFocus.requestFocus() }
+    }
+
+    LaunchedEffect(showExitPrompt, exitPromptAt) {
+        if (showExitPrompt) {
+            delay(2_000)
+            if (android.os.SystemClock.elapsedRealtime() - exitPromptAt >= 2_000L) {
+                showExitPrompt = false
+                exitPromptAt = 0L
+            }
+        }
+    }
+
+    fun exitPlayback() {
+        showExitPrompt = false
+        exitPromptAt = 0L
+        scope.safeLaunch { AppRuntime.client?.reportStop(item.id, position.coerceAtLeast(0L)) }
+        if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
+        onBack()
+    }
+
+    fun closeOptionMenu() {
+        restoreMenuFocusUntil = android.os.SystemClock.elapsedRealtime() + 300L
+        optionMenu = false
+        scope.launch {
+            delay(80)
+            runCatching { menuFocus.requestFocus() }
+        }
+    }
+
     BackHandler {
+        lastInteractionAt = android.os.SystemClock.elapsedRealtime()
         when {
-            chapterPanel -> chapterPanel = false
-            optionMenu -> optionMenu = false
-            controlsVisible -> controlsVisible = false
+            chapterPanel -> {
+                chapterPanel = false
+                scope.launch { delay(80); runCatching { menuFocus.requestFocus() } }
+            }
+            optionMenu -> closeOptionMenu()
+            quickPanel != QuickPanel.NONE -> {
+                val was = quickPanel
+                quickPanel = QuickPanel.NONE
+                scope.launch {
+                    delay(80)
+                    runCatching { (if (was == QuickPanel.SPEED) speedFocus else episodeFocus).requestFocus() }
+                }
+            }
+            controlsVisible -> {
+                controlsVisible = false
+                showExitPrompt = true
+                exitPromptAt = android.os.SystemClock.elapsedRealtime()
+            }
+            showExitPrompt && android.os.SystemClock.elapsedRealtime() - exitPromptAt < 2_000L -> exitPlayback()
             else -> {
-                scope.safeLaunch { AppRuntime.client?.reportStop(item.id, position.coerceAtLeast(0L)) }
-                if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
-                onBack()
+                showExitPrompt = true
+                exitPromptAt = android.os.SystemClock.elapsedRealtime()
+                controlsVisible = false
             }
         }
     }
 
     Box(
         Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
-            if (event.type == KeyEventType.KeyDown) {
+            if (event.type == KeyEventType.KeyDown && event.key != Key.Back) {
                 lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+                if (event.key == Key.DirectionUp || event.key == Key.DirectionDown ||
+                    event.key == Key.DirectionLeft || event.key == Key.DirectionRight
+                ) {
+                    showExitPrompt = false
+                    exitPromptAt = 0L
+                }
                 if (!controlsVisible) controlsVisible = true
             }
             false
@@ -1661,6 +1770,20 @@ fun PlayerScreen(
 
         if ((if (activeEngine == "mpv") mpvState.buffering else buffering) && error == null && playbackStatusNotice == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxSize().background(Color.Black))
+                val bufferingImage = client?.backdropUrl(item, 1280)
+                    ?: client?.imageUrl(item, 720)
+                    ?: item.seriesId?.let { sid -> LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, 1280) } }
+                if (bufferingImage != null) {
+                    AsyncImage(
+                        model = bufferingImage,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        alignment = Alignment.Center,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Accent, strokeWidth = 2.5.dp, modifier = Modifier.size(36.dp))
                     Spacer(Modifier.height(10.dp))
@@ -2019,6 +2142,15 @@ fun PlayerScreen(
                             }
                         }
                     }
+                    if (item.seriesId != null && item.indexNumber != null) {
+                        Text(
+                            "第 ${item.indexNumber} 集",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            modifier = Modifier.padding(bottom = 6.dp),
+                        )
+                    }
                     SeekBar(
                         position = position,
                         duration = duration,
@@ -2037,8 +2169,8 @@ fun PlayerScreen(
 
                 Box(
                     Modifier.align(Alignment.Center).focusProperties {
-                        right = menuFocus
-                        down = menuFocus
+                        right = speedFocus
+                        down = speedFocus
                     },
                 ) {
                     CtrlButton(
@@ -2094,27 +2226,196 @@ fun PlayerScreen(
                     }
                 }
 
-                Box(Modifier.align(Alignment.BottomEnd).padding(end = 36.dp, bottom = 112.dp)) {
-                    FocusSurface(
-                        modifier = Modifier.size(36.dp).focusRequester(menuFocus).focusProperties {
-                            left = playFocus
-                            up = playFocus
-                        },
-                        corner = 6.dp,
-                        scaleTo = 1.08f,
-                        onClick = { optionMenu = true },
-                    ) { focused ->
-                        Box(
-                            Modifier.fillMaxSize().background(
-                                if (focused) Color(0x44FFFFFF) else Color(0x22FFFFFF), RoundedCornerShape(6.dp),
-                            ),
-                            contentAlignment = Alignment.Center,
+                Row(
+                    Modifier.align(Alignment.BottomEnd).padding(end = 36.dp, bottom = 112.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val hasEpisodeButton = item.seriesId != null
+                    OsdIconButton(Icons.Rounded.FastForward, "倍速播放", speedFocus, playFocus, if (hasEpisodeButton) episodeFocus else menuFocus, playFocus) {
+                        quickPanel = QuickPanel.SPEED
+                        optionMenu = false
+                    }
+                    if (hasEpisodeButton) {
+                        OsdIconButton(Icons.Rounded.PlaylistPlay, "选集", episodeFocus, speedFocus, menuFocus, playFocus) {
+                            quickPanel = QuickPanel.EPISODES
+                            optionMenu = false
+                        }
+                    }
+                    OsdIconButton(Icons.Rounded.MoreVert, "更多播放选项", menuFocus, if (hasEpisodeButton) episodeFocus else speedFocus, playFocus, playFocus) {
+                        quickPanel = QuickPanel.NONE
+                        optionMenu = true
+                    }
+                }
+            }
+        }
+
+        if (quickPanel != QuickPanel.NONE && controlsVisible && !optionMenu) {
+            val triggerFocus = if (quickPanel == QuickPanel.SPEED) speedFocus else episodeFocus
+            val speedItemFocuses = remember { SPEEDS.indices.map { if (it == 0) speedFirstFocus else FocusRequester() } }
+            val panelWidth = if (quickPanel == QuickPanel.SPEED) 260.dp else 420.dp
+            Column(
+                Modifier.align(Alignment.BottomEnd).padding(end = 36.dp, bottom = 164.dp)
+                    .width(panelWidth).heightIn(max = 300.dp)
+                    .background(Color(0xF20B1018), RoundedCornerShape(16.dp))
+                    .border(1.dp, Color(0x553B4655), RoundedCornerShape(16.dp))
+                    .padding(14.dp),
+            ) {
+                Text(
+                    if (quickPanel == QuickPanel.SPEED) "倍速播放" else "选集",
+                    color = TextSub,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 10.dp),
+                )
+                if (quickPanel == QuickPanel.SPEED) {
+                    LazyColumn(
+                        Modifier.heightIn(max = 250.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        items(SPEEDS.size) { index ->
+                            val s = SPEEDS[index]
+                            val active = kotlin.math.abs(speed - s) < 0.01f
+                            FocusSurface(
+                                modifier = Modifier.fillMaxWidth().height(36.dp)
+                                    .focusRequester(speedItemFocuses[index])
+                                    .focusProperties {
+                                        up = if (index == 0) triggerFocus else FocusRequester.Default
+                                        down = if (index == SPEEDS.lastIndex) triggerFocus else FocusRequester.Default
+                                        left = speedItemFocuses[index]
+                                        right = speedItemFocuses[index]
+                                    },
+                                corner = 8.dp,
+                                scaleTo = 1.08f,
+                                onFocusChanged = { if (it) quickContentHasFocus = true },
+                                onClick = {
+                                    setPlaybackSpeed(s)
+                                    quickPanel = QuickPanel.NONE
+                                    scope.launch { delay(80); runCatching { speedFocus.requestFocus() } }
+                                },
+                            ) { focused ->
+                                Box(
+                                    Modifier.fillMaxSize().background(
+                                        if (active) Accent else if (focused) Color(0x55FFFFFF) else Color(0x18FFFFFF),
+                                        RoundedCornerShape(8.dp),
+                                    ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        if (s == 1f) "1.0x" else "${s}x",
+                                        color = if (active) Color(0xFF06101F) else TextMain,
+                                        fontSize = 13.sp,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if (seasons.isNotEmpty()) {
+                        LazyRow(
+                            Modifier.fillMaxWidth().height(40.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Icon(Icons.Rounded.MoreVert, contentDescription = "更多播放选项", tint = TextMain, modifier = Modifier.size(22.dp))
+                            rowItems(seasons, key = { it.id }) { season ->
+                                val index = seasons.indexOf(season)
+                                val active = season.id == selectedSeasonId
+                                FocusSurface(
+                                    modifier = Modifier.widthIn(min = 54.dp).height(32.dp)
+                                        .focusRequester(seasonFocuses[index])
+                                        .focusProperties {
+                                            left = if (index == 0) seasonFocuses[index] else seasonFocuses[index - 1]
+                                            right = if (index == seasons.lastIndex) seasonFocuses[index] else seasonFocuses[index + 1]
+                                            up = triggerFocus
+                                        },
+                                    corner = 6.dp,
+                                    scaleTo = 1.08f,
+                                    onFocusChanged = { if (it) quickContentHasFocus = true },
+                                    onClick = { selectedSeasonId = season.id },
+                                ) { focused ->
+                                    Box(
+                                        Modifier.fillMaxSize().background(
+                                            if (active) Accent else if (focused) Color(0x55FFFFFF) else Color(0x18FFFFFF),
+                                            RoundedCornerShape(6.dp),
+                                        ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp)) else Modifier),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(season.name, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp, maxLines = 1)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Box(Modifier.weight(1f, fill = false)) {
+                        if (episodesLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.align(Alignment.Center).size(20.dp),
+                                color = Accent,
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(5),
+                                modifier = Modifier.heightIn(max = if (seasons.isEmpty()) 250.dp else 205.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                gridItems(quickEpisodes, key = { it.id }) { ep ->
+                                    val index = quickEpisodes.indexOf(ep)
+                                    val active = ep.id == item.id
+                                    FocusSurface(
+                                        modifier = Modifier.size(width = 64.dp, height = 40.dp)
+                                            .focusRequester(episodeItemFocuses[index])
+                                            .focusProperties {
+                                                left = if (index % 5 == 0) episodeItemFocuses[index] else episodeItemFocuses[index - 1]
+                                                right = if (index % 5 == 4 || index == quickEpisodes.lastIndex) episodeItemFocuses[index] else episodeItemFocuses[index + 1]
+                                                up = if (index < 5) (seasonFocuses.firstOrNull() ?: triggerFocus) else episodeItemFocuses[index - 5]
+                                                down = if (index + 5 >= quickEpisodes.size) triggerFocus else FocusRequester.Default
+                                            },
+                                        corner = 6.dp,
+                                        scaleTo = 1.08f,
+                                        onFocusChanged = { if (it) quickContentHasFocus = true },
+                                        onClick = {
+                                            if (!active) {
+                                                quickPanel = QuickPanel.NONE
+                                                scope.launch { runCatching { client?.reportStop(item.id, position) } }
+                                                onPlayNext?.invoke(ep)
+                                            }
+                                        },
+                                    ) { focused ->
+                                        Box(
+                                            Modifier.fillMaxSize().background(
+                                                if (active) Accent else if (focused) Color(0x55FFFFFF) else Color(0x18FFFFFF),
+                                                RoundedCornerShape(6.dp),
+                                            ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp)) else Modifier),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text(
+                                                ep.indexNumber?.toString() ?: "-",
+                                                color = if (active) Color(0xFF06101F) else TextMain,
+                                                fontSize = 12.sp,
+                                                maxLines = 1,
+                                                textAlign = TextAlign.Center,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+
+        if (showExitPrompt) {
+            Text(
+                "再按一次返回退出播放",
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp)
+                    .background(Color(0xCC0B1018), RoundedCornerShape(18.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                color = TextMain,
+                fontSize = 12.sp,
+                maxLines = 1,
+            )
         }
 
         AnimatedVisibility(
@@ -2199,7 +2500,7 @@ fun PlayerScreen(
                 onlyMedia3Available = false,
                 onResizeMode = { resizeMode = it },
                 onSwitchSource = { sid ->
-                    optionMenu = false
+                    closeOptionMenu()
                     directFallbackTried = false
                     transcodeFallbackTried = false
                     forceDirectNext = false
@@ -2213,9 +2514,9 @@ fun PlayerScreen(
                 },
                 onRememberIntro = {
                     AppRuntime.prefs?.setIntroSeconds(item.id, (position / 1000L).toInt())
-                    optionMenu = false
+                    closeOptionMenu()
                 },
-                onClose = { optionMenu = false },
+                onClose = { closeOptionMenu() },
             )
         }
         audioDecodeNotice?.let { notice ->
@@ -2255,5 +2556,44 @@ fun PlayerScreen(
     DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
         val payload = buildDiagPayload(outcome).copy(appLog = withContext(Dispatchers.IO) { DiagExporter.appLogTail() })
         withContext(Dispatchers.IO) { DiagExporter.export(context, payload, "playback") }
+    }
+}
+
+private enum class QuickPanel { NONE, SPEED, EPISODES }
+
+@Composable
+private fun OsdIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    requester: FocusRequester,
+    left: FocusRequester,
+    right: FocusRequester,
+    play: FocusRequester,
+    onClick: () -> Unit,
+) {
+    FocusSurface(
+        modifier = Modifier.size(36.dp).focusRequester(requester).focusProperties {
+            this.left = left
+            this.right = right
+            up = play
+            down = play
+        },
+        corner = 6.dp,
+        scaleTo = 1.15f,
+        onClick = onClick,
+    ) { focused ->
+        Box(
+            Modifier.fillMaxSize()
+                .background(if (focused) Color(0xFFE8ECF2) else Color(0x22FFFFFF), RoundedCornerShape(6.dp))
+                .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp)) else Modifier),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                icon,
+                contentDescription = description,
+                tint = if (focused) Color(0xFF0B1018) else TextMain,
+                modifier = Modifier.size(22.dp),
+            )
+        }
     }
 }

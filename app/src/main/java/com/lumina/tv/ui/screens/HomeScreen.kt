@@ -635,47 +635,6 @@ fun HomeScreen(
             runCatching { navFocus.requestFocus() }.isSuccess
         } else false
     }) {
-        if (tab == HomeTab.Recommend) {
-            val displayedHeroItems = heroItems.ifEmpty { listOfNotNull(hero) }
-            Hero(
-                items = displayedHeroItems,
-                currentIndex = heroIndex,
-                onPrevious = {
-                    if (displayedHeroItems.isNotEmpty()) {
-                        heroIndex = (heroIndex - 1 + displayedHeroItems.size) % displayedHeroItems.size
-                    }
-                },
-                onNext = {
-                    if (displayedHeroItems.isNotEmpty()) {
-                        heroIndex = (heroIndex + 1) % displayedHeroItems.size
-                    }
-                },
-                onSelectIndex = { heroIndex = it },
-                onPlay = onPlay,
-                onOpenDetail = onOpenDetail,
-                playFocus = heroPlayFocus,
-                onPlayFocused = { scope.launch { recListState.animateScrollToItem(0) } },
-                onNextCardDown = {
-                    val target = topRenderedRow
-                    if (target == null) false else {
-                        // Reuse RowSection's existing first-card focus/restore path.
-                        scope.launch {
-                            focusedMediaId = null
-                            focusedMediaSection = null
-                            val firstContentIndex = 2 + if (resume.isEmpty() && favorites.isEmpty()) 1 else 0
-                            recListState.animateScrollToItem(firstContentIndex)
-                            withFrameNanos { }
-                            withFrameNanos { }
-                            focusedMediaSection = target.first
-                            focusedMediaId = target.second.first().id
-                        }
-                        true
-                    }
-                },
-                hazeState = hazeState,
-                onComposed = { heroComposed = it },
-            )
-        }
         when {
             loading -> LoadingView(text = "正在读取影库…")
                 error != null -> Column(
@@ -692,12 +651,52 @@ fun HomeScreen(
                         Text("诊断：$failure", color = TextSub.copy(alpha = 0.6f), fontSize = 10.sp, maxLines = 2)
                     }
                 }
-                tab == HomeTab.Recommend -> Box(Modifier.fillMaxSize()) {
+                tab == HomeTab.Recommend -> Box(Modifier.fillMaxSize().background(Ink)) {
                     LazyColumn(
                         state = recListState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize().background(Ink),
                     ) {
-                    item { Spacer(Modifier.height(250.dp)) }
+                    item {
+                        val displayedHeroItems = heroItems.ifEmpty { listOfNotNull(hero) }
+                        Hero(
+                            items = displayedHeroItems,
+                            currentIndex = heroIndex,
+                            onPrevious = {
+                                if (displayedHeroItems.isNotEmpty()) {
+                                    heroIndex = (heroIndex - 1 + displayedHeroItems.size) % displayedHeroItems.size
+                                }
+                            },
+                            onNext = {
+                                if (displayedHeroItems.isNotEmpty()) {
+                                    heroIndex = (heroIndex + 1) % displayedHeroItems.size
+                                }
+                            },
+                            onSelectIndex = { heroIndex = it },
+                            onPlay = onPlay,
+                            onOpenDetail = onOpenDetail,
+                            playFocus = heroPlayFocus,
+                            onPlayFocused = { scope.launch { recListState.animateScrollToItem(0) } },
+                            onNextCardDown = {
+                                val target = topRenderedRow
+                                if (target == null) false else {
+                                    // Reuse RowSection's existing first-card focus/restore path.
+                                    scope.launch {
+                                        focusedMediaId = null
+                                        focusedMediaSection = null
+                                        val firstContentIndex = 2 + if (resume.isEmpty() && favorites.isEmpty()) 1 else 0
+                                        recListState.animateScrollToItem(firstContentIndex)
+                                        withFrameNanos { }
+                                        withFrameNanos { }
+                                        focusedMediaSection = target.first
+                                        focusedMediaId = target.second.first().id
+                                    }
+                                    true
+                                }
+                            },
+                            hazeState = hazeState,
+                            onComposed = { heroComposed = it },
+                        )
+                    }
                     if (!loading && resume.isEmpty() && favorites.isEmpty()) {
                         item {
                             FocusSurface(
@@ -740,12 +739,6 @@ fun HomeScreen(
                     }
                     item { Spacer(Modifier.height(140.dp)) }
                     }
-                    Text(
-                        "↓ 下面还有 ${homeLibraries.count { viewContents[it.id].orEmpty().isNotEmpty() } + (if (resume.isNotEmpty()) 1 else 0) + (if (favorites.isNotEmpty()) 1 else 0)} 行",
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
-                        color = TextSub.copy(alpha = 0.6f),
-                        fontSize = 11.sp,
-                    )
                 }
                 tab == HomeTab.Media && selectedLibrary == null -> MediaLibrary(
                     views = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) },
@@ -1579,6 +1572,9 @@ private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: I
     }
 }
 
+private fun calculateHeroHeight(screenHeight: Dp): Dp =
+    (screenHeight * 0.60f).coerceAtLeast(300.dp)
+
 @Composable
 private fun Hero(
     items: List<MediaItem>,
@@ -1604,6 +1600,7 @@ private fun Hero(
         onDispose { onComposed(false) }
     }
     val context = LocalContext.current
+    val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
     val detailFocus = remember { FocusRequester() }
@@ -1716,7 +1713,13 @@ private fun Hero(
         val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
         context.imageLoader.enqueue(request)
     }
-    Box(Modifier.hazeSource(hazeState).fillMaxSize()) {
+    Box(
+        Modifier
+            .hazeSource(hazeState)
+            .fillMaxWidth()
+            .height(heroHeight)
+            .clip(RoundedCornerShape(bottomEnd = 24.dp))
+    ) {
         Box(
             Modifier
                 .fillMaxSize()
@@ -1755,17 +1758,13 @@ private fun Hero(
         Box(
             Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
-                    0.00f to Color.Transparent,
-                    0.42f to Color.Transparent,
-                    0.58f to Ink.copy(alpha = 0.25f),
-                    0.72f to Ink.copy(alpha = 0.62f),
-                    0.88f to Ink.copy(alpha = 0.86f),
-                    1.00f to Ink.copy(alpha = 0.94f),
+                    0.55f to Ink.copy(alpha = 0f),
+                    1.00f to Ink.copy(alpha = 0.92f),
                 )
             )
         )
         Column(
-            Modifier.align(Alignment.TopStart).padding(start = 40.dp, top = 110.dp).widthIn(max = 520.dp)
+            Modifier.align(Alignment.BottomStart).padding(start = 40.dp, bottom = 28.dp).widthIn(max = 520.dp)
         ) {
             Text("为你推荐", color = TextSub, fontSize = 11.sp, letterSpacing = 2.sp)
             Spacer(Modifier.height(8.dp))
@@ -1848,7 +1847,7 @@ private fun Hero(
             }
         }
             Column(
-                Modifier.align(Alignment.TopEnd).padding(end = 40.dp, top = 150.dp),
+                Modifier.align(Alignment.BottomEnd).padding(end = 40.dp, bottom = 28.dp),
                 horizontalAlignment = Alignment.End,
             ) {
                 Row(

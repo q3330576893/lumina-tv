@@ -195,6 +195,11 @@ fun DetailScreen(
     val playFocus = remember { FocusRequester() }
     val sourceFocus = remember { FocusRequester() }
     var playButtonFocused by remember { mutableStateOf(false) }
+    var topRegionFocused by remember { mutableStateOf(false) }
+
+    LaunchedEffect(playButtonFocused, topRegionFocused) {
+        if (playButtonFocused || topRegionFocused) detailScrollState.scrollTo(0)
+    }
 
     LaunchedEffect(id) {
         detailPreviewFromStage = "hls"
@@ -633,19 +638,19 @@ fun DetailScreen(
         } else if (item == null) {
             LoadingView(text = "未找到该内容")
         } else {
-            Column(
-                Modifier.fillMaxSize().verticalScroll(detailScrollState)
-                    .padding(start = 48.dp, end = 48.dp, top = 64.dp, bottom = 24.dp)
-            ) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(Color(0x14FFFFFF), RoundedCornerShape(26.dp))
-                        .padding(20.dp)
-                        .onFocusChanged {
-                            if (it.hasFocus) scope.launch { detailScrollState.animateScrollTo(0) }
-                        }
+            Column(Modifier.fillMaxSize().padding(top = 64.dp)) {
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(detailScrollState)
+                        .padding(start = 48.dp, end = 48.dp, bottom = 24.dp)
                 ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(Color(0x14FFFFFF), RoundedCornerShape(26.dp))
+                            .padding(20.dp)
+                            .focusGroup()
+                            .onFocusChanged { topRegionFocused = it.hasFocus }
+                    ) {
                     Poster(it0!!, client?.imageUrl(it0, 720))
                     Spacer(Modifier.width(30.dp))
                     Column(Modifier.weight(1f).padding(top = 30.dp)) {
@@ -695,7 +700,7 @@ fun DetailScreen(
                             )
                         }
                         Spacer(Modifier.height(18.dp))
-                        Row(Modifier.focusGroup()) {
+                        Row(Modifier.focusGroup().focusProperties { up = playFocus }) {
                             FocusSurface(
                                 modifier = Modifier.height(52.dp).width(150.dp),
                                 corner = 23.dp,
@@ -1012,6 +1017,7 @@ fun DetailScreen(
                 }
 
                 Spacer(Modifier.height(28.dp))
+            }
             }
         }
 

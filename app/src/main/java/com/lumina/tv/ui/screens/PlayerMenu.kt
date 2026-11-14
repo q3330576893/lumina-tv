@@ -2,6 +2,7 @@
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -65,7 +66,7 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import kotlinx.coroutines.delay
 
-private val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
+internal val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
 
 @Composable
 internal fun OptionMenu(
@@ -156,16 +157,7 @@ internal fun OptionMenu(
         contentAlignment = Alignment.Center,
     ) {
         GlassPanel(Modifier.width(680.dp), corner = 22.dp, fillColor = Color(0x7510141D)) {
-            Column(
-                Modifier.padding(22.dp).onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                    when (event.key) {
-                        Key.DirectionUp -> { runCatching { tabFocus.requestFocus() }; true }
-                        Key.DirectionDown -> { runCatching { contentFocus.requestFocus() }; true }
-                        else -> false
-                    }
-                },
-            ) {
+            Column(Modifier.padding(22.dp)) {
                 TvHintBar("上下键切换轨道 · 返回键关闭面板")
                 Text("播放选项", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(14.dp))
@@ -204,6 +196,7 @@ internal fun OptionMenu(
                     }
                 }
 
+                Column(Modifier.onFocusChanged { if (it.hasFocus) contentHasFocus = true }) {
                 // 选集
                 if (episodes.isNotEmpty()) {
                     if (selectedTab == "选集") {
@@ -213,15 +206,16 @@ internal fun OptionMenu(
                             val active = ep.id == item.id
                             FocusSurface(
                                 modifier = Modifier.width(160.dp).height(90.dp)
-                                    .then(if (ep == episodes.firstOrNull()) Modifier.focusRequester(contentFocus).onFocusChanged { contentHasFocus = it.isFocused } else Modifier),
-                                corner = 10.dp, scaleTo = 1.0f,
+                                    .then(if (ep == episodes.firstOrNull()) Modifier.focusRequester(contentFocus) else Modifier)
+                                    .onFocusChanged { if (it.isFocused) contentHasFocus = true },
+                                corner = 10.dp, scaleTo = 1.08f,
                                 onClick = { if (!active) onPickEpisode(ep) },
                             ) { focused ->
                                 Column(
                                     Modifier.fillMaxSize().background(
                                         when {
                                             active -> Accent.copy(alpha = 0.9f)
-                                            focused -> Color(0x2EFFFFFF)
+                                            focused -> Color(0x55FFFFFF)
                                             else -> Color(0x14FFFFFF)
                                         }, RoundedCornerShape(10.dp)
                                     ).padding(8.dp),
@@ -256,12 +250,12 @@ internal fun OptionMenu(
                 } else FocusSurface(
                     modifier = Modifier.fillMaxWidth().height(38.dp).focusRequester(contentFocus)
                         .onFocusChanged { contentHasFocus = it.isFocused },
-                    corner = 10.dp, scaleTo = 1.0f,
+                    corner = 10.dp, scaleTo = 1.08f,
                     onClick = onSwitchEngine,
                 ) { focused ->
                     Row(
                         Modifier.fillMaxSize().background(
-                            if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
+                            if (focused) Color(0x55FFFFFF) else Color(0x14FFFFFF),
                             RoundedCornerShape(10.dp),
                         ).padding(horizontal = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -457,17 +451,18 @@ internal fun OptionMenu(
                             val active = s.id == currentSourceId
                             FocusSurface(
                                 modifier = Modifier.fillMaxWidth().height(40.dp),
-                                corner = 12.dp, scaleTo = 1.0f,
+                                corner = 12.dp, scaleTo = 1.08f,
                                 onClick = { onSwitchSource(s.id) },
                             ) { focused ->
                                 Row(
                                     Modifier.fillMaxSize().background(
                                         when {
                                             active -> Accent.copy(alpha = 0.9f)
-                                            focused -> Color(0x2EFFFFFF)
+                                            focused -> Color(0x55FFFFFF)
                                             else -> Color(0x14FFFFFF)
                                         }, RoundedCornerShape(12.dp)
-                                    ).padding(horizontal = 12.dp),
+                                    ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(12.dp)) else Modifier)
+                                        .padding(horizontal = 12.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
@@ -500,6 +495,7 @@ internal fun OptionMenu(
                     onClick = onClose,
                 )
                 }
+                }
             }
         }
     }
@@ -530,11 +526,11 @@ private fun MenuChip(
             Modifier.fillMaxSize().background(
                 when {
                     active -> activeColor.copy(alpha = 0.9f)
-                    focused -> Color(0x2EFFFFFF)
+                    focused -> Color(0x55FFFFFF)
                     !enabled -> Color(0x0AFFFFFF)
                     else -> Color(0x14FFFFFF)
                 }, RoundedCornerShape(12.dp)
-            ),
+            ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(12.dp)) else Modifier),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -548,7 +544,7 @@ private fun MenuChip(
     }
     if (enabled) FocusSurface(
         modifier = m,
-        corner = 12.dp, scaleTo = 1f,
+        corner = 12.dp, scaleTo = 1.08f,
         onFocusChanged = onFocusChanged,
         onClick = onClick,
     ) { focused -> content(focused) } else Box(m) { content(false) }
