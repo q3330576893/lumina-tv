@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -139,7 +140,16 @@ internal fun OptionMenu(
     var selectedTab by remember(item.id, hasEpisodes) { mutableStateOf(if (hasEpisodes) "选集" else "字幕") }
     val tabFocus = remember { FocusRequester() }
     val contentFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { delay(80); runCatching { if (hasEpisodes) contentFocus.requestFocus() else tabFocus.requestFocus() } }
+    var contentHasFocus by remember { mutableStateOf(false) }
+    LaunchedEffect(selectedTab) {
+        contentHasFocus = false
+        repeat(15) {
+            delay(50)
+            runCatching { contentFocus.requestFocus() }
+            if (contentHasFocus) return@LaunchedEffect
+        }
+        runCatching { tabFocus.requestFocus() }
+    }
 
     Box(
         Modifier.fillMaxSize().background(Color(0x66000000)),
@@ -198,11 +208,12 @@ internal fun OptionMenu(
                 if (episodes.isNotEmpty()) {
                     if (selectedTab == "选集") {
                     MenuLabel("第 ${item.indexNumber ?: 1} 集 / 共 ${episodes.size} 集")
-                    LazyRow(Modifier.heightIn(min = 180.dp, max = 240.dp).focusRequester(contentFocus).focusable(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    LazyRow(Modifier.heightIn(min = 180.dp, max = 240.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         items(episodes, key = { it.id }) { ep ->
                             val active = ep.id == item.id
                             FocusSurface(
-                                modifier = Modifier.width(160.dp).height(90.dp),
+                                modifier = Modifier.width(160.dp).height(90.dp)
+                                    .then(if (ep == episodes.firstOrNull()) Modifier.focusRequester(contentFocus).onFocusChanged { contentHasFocus = it.isFocused } else Modifier),
                                 corner = 10.dp, scaleTo = 1.0f,
                                 onClick = { if (!active) onPickEpisode(ep) },
                             ) { focused ->
@@ -243,7 +254,8 @@ internal fun OptionMenu(
                         Text("M3（当前设备仅支持此内核）", color = TextSub, fontSize = 11.sp)
                     }
                 } else FocusSurface(
-                    modifier = Modifier.fillMaxWidth().height(38.dp),
+                    modifier = Modifier.fillMaxWidth().height(38.dp).focusRequester(contentFocus)
+                        .onFocusChanged { contentHasFocus = it.isFocused },
                     corner = 10.dp, scaleTo = 1.0f,
                     onClick = onSwitchEngine,
                 ) { focused ->
@@ -270,8 +282,12 @@ internal fun OptionMenu(
                 MenuLabel("音频解码")
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("auto" to "自动", "soft" to "本地软解", "passthrough" to "强制直通").forEach { (mode, label) ->
-                        MenuChip(label = label, width = 112.dp, active = audioDecodeMode == mode, activeColor = Accent,
-                            onClick = { onAudioDecodeMode(mode) })
+                        MenuChip(
+                            label = label, width = 112.dp, active = audioDecodeMode == mode, activeColor = Accent,
+                            focusRequester = if (onlyMedia3Available && mode == "auto") contentFocus else null,
+                            onFocusChanged = if (onlyMedia3Available && mode == "auto") ({ contentHasFocus = it }) else null,
+                            onClick = { onAudioDecodeMode(mode) },
+                        )
                     }
                 }
 
@@ -318,6 +334,8 @@ internal fun OptionMenu(
                         label = "关闭字幕", width = 104.dp,
                         active = textDisabled,
                         activeColor = Accent,
+                        focusRequester = contentFocus,
+                        onFocusChanged = { contentHasFocus = it },
                         onClick = {
                             textDisabled = true
                             onSubtitleSelected(null)
@@ -392,6 +410,8 @@ internal fun OptionMenu(
                             active = selectedAudioStreamIndex == stream.index ||
                                 (selectedAudioStreamIndex == null && stream.isDefault),
                             activeColor = Accent,
+                            focusRequester = if (stream == audioStreams.firstOrNull()) contentFocus else null,
+                            onFocusChanged = if (stream == audioStreams.firstOrNull()) ({ contentHasFocus = it }) else null,
                             onClick = {
                                 val override = decodedTrack?.let { (group, index) ->
                                     TrackSelectionOverride(group.mediaTrackGroup, index)
@@ -499,6 +519,7 @@ private fun MenuChip(
     activeColor: Color,
     height: Dp = 38.dp,
     focusRequester: FocusRequester? = null,
+    onFocusChanged: ((Boolean) -> Unit)? = null,
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
@@ -528,6 +549,7 @@ private fun MenuChip(
     if (enabled) FocusSurface(
         modifier = m,
         corner = 12.dp, scaleTo = 1f,
+        onFocusChanged = onFocusChanged,
         onClick = onClick,
     ) { focused -> content(focused) } else Box(m) { content(false) }
 }

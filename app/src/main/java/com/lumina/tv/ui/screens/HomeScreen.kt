@@ -620,12 +620,20 @@ fun HomeScreen(
     val navFocus = remember { FocusRequester() }
     val libraryBackFocus = remember { FocusRequester() }
     val librarySortFocus = remember { FocusRequester() }
+    val favoritesContentFocus = remember { FocusRequester() }
+    val mediaLibraryContentFocus = remember { FocusRequester() }
     val libraryGridColumns = ((LocalConfiguration.current.screenWidthDp - 80 + 20) / 150).coerceAtLeast(1)
 
     val heroPlayFocus = remember { FocusRequester() }
     // Hero 在 LazyColumn 里，滚出屏幕会被回收 → heroPlayFocus 变成未挂载，
     // 此时其它行的 focusProperties.up 指向它就会抛 "FocusRequester is not initialized" 而闪退。
     var heroComposed by remember { mutableStateOf(false) }
+    val navContentFocus = when (tab) {
+        HomeTab.Recommend -> if (heroComposed) heroPlayFocus else FocusRequester.Cancel
+        HomeTab.Favorites -> if (gridItems.isNotEmpty()) favoritesContentFocus else FocusRequester.Cancel
+        HomeTab.Media -> if (selectedLibraryId == null && views.any { !(AppRuntime.prefs?.isViewHidden(it.id) ?: false) }) mediaLibraryContentFocus else FocusRequester.Cancel
+        else -> FocusRequester.Cancel
+    }
 
     // 导航在顶部，右键不再劫持（原来的右键跳竖栏逻辑会让影片行无法继续右移）
     Box(Modifier.fillMaxSize().background(Ink).onPreviewKeyEvent { event ->
@@ -743,6 +751,7 @@ fun HomeScreen(
                     focusedLibraryId = focusedLibraryId,
                     onLibraryFocused = { focusedLibraryId = it },
                     onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
+                    firstItemFocus = mediaLibraryContentFocus,
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
@@ -907,6 +916,7 @@ fun HomeScreen(
                             item = it,
                             imageUrl = client?.imageUrl(it),
                             requestInitialFocus = focusedMediaId == it.id || (initialFocusPending && focusedMediaId == null && it == gridItems.firstOrNull()),
+                            focusRequester = if (tab == HomeTab.Favorites && index == 0) favoritesContentFocus else null,
                             onFocused = { focusedMediaId = it.id },
                             onClick = { onOpenDetail(it.id) },
                         )
@@ -950,7 +960,7 @@ fun HomeScreen(
                     reloadToken++
                 },
                 navFocus = navFocus,
-                contentFocus = heroPlayFocus,
+                contentFocus = navContentFocus,
                 hazeState = hazeState,
             )
     }
@@ -1451,6 +1461,7 @@ private fun MediaLibrary(
     focusedLibraryId: String?,
     onLibraryFocused: (String) -> Unit,
     onOpenLibrary: (LibraryView) -> Unit,
+    firstItemFocus: FocusRequester,
 ) {
     if (views.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1476,6 +1487,7 @@ private fun MediaLibrary(
                         modifier = Modifier.width(300.dp).height(132.dp),
                         corner = 20.dp,
                         scaleTo = 1.04f,
+                        focusRequester = if (v == views.firstOrNull()) firstItemFocus else null,
                         requestFocus = focusedLibraryId == v.id,
                         onFocused = { onLibraryFocused(v.id) },
                         onClick = { onOpenLibrary(v) },
