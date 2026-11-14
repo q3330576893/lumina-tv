@@ -366,6 +366,7 @@ class EmbyClient(
         startIndex: Int = 0,
         searchTerm: String? = null,
         genre: String? = null,
+        personIds: String? = null,
         filters: String? = null,
         fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
         requestTimeoutSeconds: Int? = null,
@@ -384,6 +385,7 @@ class EmbyClient(
         if (types != null) params["IncludeItemTypes"] = types
         if (searchTerm != null) params["SearchTerm"] = searchTerm
         if (genre != null) params["Genres"] = genre
+        if (personIds != null) params["PersonIds"] = personIds
         if (filters != null) params["Filters"] = filters
         val response = getSync(url("/Users/$userId/Items", params), timeoutSeconds = requestTimeoutSeconds)
         lastTotalRecordCount = response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
@@ -455,7 +457,7 @@ class EmbyClient(
     suspend fun getItemForDetail(id: String): MediaItem = withContext(Dispatchers.IO) {
         val params = mapOf("UserId" to userId,
             "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds")
-        parseItem(getSync(url("/Users/$userId/Items/$id", params)))
+        parseItem(getSync(url("/Users/$userId/Items/$id", params), timeoutSeconds = 4))
     }
 
     suspend fun getLocalTrailers(itemId: String): List<MediaItem> = withContext(Dispatchers.IO) {
@@ -656,14 +658,46 @@ class EmbyClient(
     }
 
     /** Emby returns cast/crew in People when requested through Fields=People. */
-    suspend fun getSimilarItems(itemId: String, limit: Int = 12): List<MediaItem> = withContext(Dispatchers.IO) {
-        runCatching {
+    suspend fun getSimilarItems(itemId: String, limit: Int = 12): List<MediaItem> =
+        withTimeoutOrNull(4_000L) { withContext(Dispatchers.IO) {
+            runCatching {
             val params = mapOf("UserId" to userId, "Limit" to limit.toString(),
                 "Fields" to "Overview,PrimaryImageAspectRatio,Genres,ProductionYear,UserData",
                 "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo")
             val arr = getSync(url("/Items/$itemId/Similar", params)).optJSONArray("Items") ?: JSONArray()
             parseItems(arr).filterNot { it.id == itemId }.take(limit)
-        }.getOrDefault(emptyList())
+            }.getOrDefault(emptyList())
+        } } ?: emptyList()
+
+    /** PersonIds is preferred; SearchTerm is a compatibility fallback and is always People-verified. */
+    suspend fun getPersonItems(
+        person: MediaPerson,
+        startIndex: Int = 0,
+        limit: Int = 16,
+    ): List<MediaItem> = withContext(Dispatchers.IO) {
+        fun matches(item: MediaItem): Boolean = item.people.any { candidate ->
+            (person.id != null && candidate.id == person.id) ||
+                candidate.name.equals(person.name, ignoreCase = true)
+        }
+        val fields = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People"
+        val byId = person.id?.let { personId ->
+            runCatching {
+                getItems(
+                    types = "Movie,Series", sortBy = "DateCreated", sortOrder = "Descending",
+                    limit = limit, startIndex = startIndex, personIds = personId,
+                    fields = fields, requestTimeoutSeconds = 5,
+                )
+            }.getOrDefault(emptyList()).filter(::matches)
+        }.orEmpty()
+        if (byId.isNotEmpty()) return@withContext byId
+
+        runCatching {
+            getItems(
+                types = "Movie,Series", sortBy = "DateCreated", sortOrder = "Descending",
+                limit = limit, startIndex = startIndex, searchTerm = person.name,
+                fields = fields, requestTimeoutSeconds = 5,
+            )
+        }.getOrDefault(emptyList()).filter(::matches)
     }
 
     suspend fun getSeasons(seriesId: String): List<MediaItem> = withContext(Dispatchers.IO) {

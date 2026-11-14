@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
@@ -115,10 +116,11 @@ import com.lumina.tv.ui.theme.GlassStrong
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lumina.tv.ui.components.GlassPanel
@@ -145,6 +147,32 @@ private object DetailNoBringIntoViewSpec : BringIntoViewSpec {
     }
 }
 private const val DETAIL_PREVIEW_FAILURE_TTL_MS = 10 * 60 * 1000L
+
+private suspend fun loadDetailRecommendations(
+    client: com.lumina.tv.data.EmbyClient,
+    itemId: String,
+    current: MediaItem,
+): List<MediaItem> {
+    val genres = current.genres.map { it.trim() }.filter(String::isNotBlank).distinctBy { it.lowercase() }
+    val genreKey = genres.map { it.lowercase() }.sorted().joinToString("|")
+    val cacheKey = "detail-related:$itemId:$genreKey"
+    LibraryCache.browseOf(cacheKey)?.let { return it }
+    val type = if (current.type == "Series") "Series" else "Movie"
+    val results = coroutineScope {
+        val byGenre = async {
+            genres.firstOrNull()?.let { genre -> runCatching {
+                client.getItems(types = type, sortBy = "CommunityRating", sortOrder = "Descending", limit = 12, genre = genre, requestTimeoutSeconds = 5)
+            }.getOrDefault(emptyList()) }.orEmpty()
+        }
+        val similar = async { runCatching { client.getSimilarItems(itemId, 12) }.getOrDefault(emptyList()) }
+        (byGenre.await() + similar.await())
+            .distinctBy { it.id }
+            .filter { it.id != itemId && it.type == current.type }
+            .take(12)
+    }
+    LibraryCache.putBrowse(cacheKey, results)
+    return results
+}
 
 @Composable
 @OptIn(ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
@@ -185,6 +213,14 @@ fun DetailScreen(
     val previewResults = remember(id) { mutableMapOf<String, Triple<String?, String, Boolean>>() }
     val previewStartTimes = remember(id) { mutableMapOf<String, Long?>() }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var similarLoading by remember { mutableStateOf(false) }
+    var selectedPerson by remember { mutableStateOf<MediaPerson?>(null) }
+    var personItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var personItemsLoading by remember { mutableStateOf(false) }
+    var personItemsNextIndex by remember { mutableIntStateOf(0) }
+    var personItemsHasMore by remember { mutableStateOf(false) }
+    val personFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    var personReturnKey by remember { mutableStateOf<String?>(null) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
     var selectedSourceId by remember(id) { mutableStateOf<String?>(null) }
@@ -247,6 +283,7 @@ fun DetailScreen(
             failedDetailBackgroundKeys.entries.removeAll { now - it.value >= DETAIL_PREVIEW_FAILURE_TTL_MS }
         }
         similar = emptyList()
+        similarLoading = true
         showSourceMenu = false
         AppRuntime.screenLabel = "详情"
         val c = client ?: run {
@@ -267,24 +304,28 @@ fun DetailScreen(
             selectedSeason = cached.seasons.firstOrNull()
             loading = false
             sourcesLoading = cached.sources.isEmpty()
-            // Cache renders immediately; refresh people and recommendations quietly.
-            coroutineScope {
-                val fresh = async { runCatching { c.getItem(id) }.getOrNull() }
-                val related = async { runCatching { c.getSimilarItems(id, 12) }.getOrDefault(emptyList()) }
-                val freshSources = async {
-                    if (cached.sources.isEmpty()) {
-                        runCatching { c.getMediaSources(id) }.getOrDefault(emptyList())
-                    } else cached.sources
-                }
-                sources = freshSources.await()
-                sourcesLoading = false
-                val freshItem = fresh.await()
+            val startedAt = System.currentTimeMillis()
+            PageLog.add("detailLoad id=$id stage=cache-main ms=0")
+            val freshItemJob = scope.launch {
+                val freshItem = runCatching { c.getItem(id) }.getOrNull()
                 if (freshItem != null) item = freshItem
-                LibraryCache.putDetail(
-                    id,
-                    cached.copy(item = freshItem ?: cached.item, sources = sources, at = System.currentTimeMillis()),
-                )
-                similar = related.await()
+                PageLog.add("detailLoad id=$id stage=main-refresh ms=${System.currentTimeMillis() - startedAt}")
+            }
+            val sourceJob = scope.launch {
+                sources = if (cached.sources.isEmpty()) runCatching { c.getMediaSources(id) }.getOrDefault(emptyList()) else cached.sources
+                sourcesLoading = false
+                PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - startedAt}")
+            }
+            val recommendationJob = scope.launch {
+                val current = cached.item ?: return@launch
+                similar = loadDetailRecommendations(c, id, current)
+                similarLoading = false
+                PageLog.add("detailLoad id=$id stage=similar ms=${System.currentTimeMillis() - startedAt}")
+            }
+            scope.launch {
+                joinAll(freshItemJob, sourceJob, recommendationJob)
+                LibraryCache.putDetail(id, cached.copy(item = item ?: cached.item, sources = sources, at = System.currentTimeMillis()))
+                PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - startedAt}")
             }
             return@LaunchedEffect
         }
@@ -294,23 +335,37 @@ fun DetailScreen(
         itemNotFound = false
         sourcesLoading = true
         // 详情 / 分季 / 多源并行拉取，避免串行等待
+        val loadStartedAt = System.currentTimeMillis()
+        PageLog.add("detailLoad id=$id stage=start")
+        val mainWaitNotice = scope.launch {
+            delay(5_000L)
+            if (loading && item == null) {
+                loading = false
+                loadFailed = true
+                PageLog.add("detailLoad id=$id stage=main-wait-limit ms=5000")
+            }
+        }
         var main: MediaItem? = null
         var loadError: Throwable? = null
-        for (attempt in 0..2) {
-            try {
-                main = c.getItemForDetail(id)
-                loadError = null
-                break
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                loadError = e
-                if (attempt < 2 && (e as? EmbyException)?.httpStatus != 404) {
-                    delay(if (attempt == 0) 1_000L else 3_000L)
-                } else if ((e as? EmbyException)?.httpStatus == 404) {
+        try {
+            for (attempt in 0..2) {
+                try {
+                    main = c.getItemForDetail(id)
+                    loadError = null
                     break
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    loadError = e
+                    if ((e as? EmbyException)?.httpStatus == 404) {
+                        break
+                    }
+                    val networkFailure = generateSequence(e as Throwable?) { it.cause }.any { it is java.io.IOException }
+                    if (attempt < 2 && networkFailure) delay(if (attempt == 0) 250L else 500L) else break
                 }
             }
+        } finally {
+            mainWaitNotice.cancel()
         }
         if (loadError != null) {
             loading = false
@@ -319,31 +374,12 @@ fun DetailScreen(
             loadFailed = !itemNotFound
             return@LaunchedEffect
         }
-        val it0 = coroutineScope {
-            val sA = async { runCatching { c.getSeasons(id) }.getOrDefault(emptyList()) }
-            val srcA = async { runCatching { c.getMediaSources(id) }.getOrDefault(emptyList()) }
-            val relatedA = async { runCatching { c.getSimilarItems(id, 12) }.getOrDefault(emptyList()) }
-            similar = relatedA.await()
-            sources = srcA.await()
-            if (main?.type == "Series") {
-                val ss = sA.await()
-                seasons = ss
-                val first = ss.firstOrNull()
-                selectedSeason = first
-                LibraryCache.episodesOf(id, first?.id)?.let { episodes = it }
-            }
-            main
-        }
+        val it0 = main
         item = it0
         loading = false
-        sourcesLoading = false
-        LibraryCache.putDetail(
-            id,
-            LibraryCache.DetailData(
-                item = it0, seasons = seasons, episodes = episodes,
-                sources = sources, at = System.currentTimeMillis(),
-            )
-        )
+        loadFailed = false
+        sourcesLoading = true
+        PageLog.add("detailLoad id=$id stage=main-ready ms=${System.currentTimeMillis() - loadStartedAt}")
         // TMDB 补充：仅当 Emby 自身无评分时异步拉取，失败静默
         if (it0 != null && it0.rating == null && it0.communityRating == null) {
             tmdb = runCatching { TmdbClient.lookup(it0.type, it0.seriesName ?: it0.name, it0.year) }.getOrNull()
@@ -351,6 +387,36 @@ fun DetailScreen(
         if (it0 != null) {
             isFav = it0.isFavorite
             isPlayed = it0.played
+        }
+        if (it0 != null) {
+            val seasonJob = scope.launch {
+                val loadedSeasons = if (it0.type == "Series") runCatching { c.getSeasons(id) }.getOrDefault(emptyList()) else emptyList()
+                seasons = loadedSeasons
+                val first = loadedSeasons.firstOrNull()
+                val loadedEpisodes = if (first != null) {
+                    LibraryCache.episodesOf(id, first.id) ?: runCatching { c.getEpisodes(id, first.id) }.getOrDefault(emptyList())
+                } else emptyList()
+                if (first != null) LibraryCache.putEpisodes(id, first.id, loadedEpisodes)
+                episodes = loadedEpisodes
+                selectedSeason = first
+                PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
+            }
+            val sourceJob = scope.launch {
+                sources = runCatching { c.getMediaSources(id) }.getOrDefault(emptyList())
+                sourcesLoading = false
+                PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - loadStartedAt}")
+            }
+            similarLoading = true
+            val recommendationJob = scope.launch {
+                similar = loadDetailRecommendations(c, id, it0)
+                similarLoading = false
+                PageLog.add("detailLoad id=$id stage=similar ms=${System.currentTimeMillis() - loadStartedAt}")
+            }
+            scope.launch {
+                joinAll(seasonJob, sourceJob, recommendationJob)
+                LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()))
+                PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - loadStartedAt}")
+            }
         }
     }
 
@@ -541,21 +607,6 @@ fun DetailScreen(
         if (current.people.isNotEmpty()) return@LaunchedEffect
         val extra = runCatching { client?.getItemPeople(id) }.getOrNull().orEmpty()
         if (extra.isNotEmpty()) item = current.copy(people = extra)
-    }
-
-    // 相关推荐为空 → 退化成同类型高分片，避免整栏空白
-    LaunchedEffect(id, item) {
-        if (similar.isNotEmpty()) return@LaunchedEffect
-        val current = item ?: return@LaunchedEffect
-        val genre = current.genres.firstOrNull { it.isNotBlank() } ?: return@LaunchedEffect
-        val c = client ?: return@LaunchedEffect
-        similar = runCatching {
-            c.getItems(
-                types = if (current.type == "Series") "Series" else "Movie,Series",
-                sortBy = "CommunityRating", sortOrder = "Descending",
-                limit = 14, genre = genre,
-            )
-        }.getOrDefault(emptyList()).filterNot { it.id == id }.take(12)
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -909,7 +960,23 @@ fun DetailScreen(
                     Spacer(Modifier.height(12.dp))
                     LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
-                            PersonCard(person = person, imageUrl = client?.personImageUrl(person))
+                            val personKey = person.id ?: "${person.name}-${person.role.orEmpty()}"
+                            val personRequester = personFocusRequesters.getOrPut(personKey) { FocusRequester() }
+                            PersonCard(person = person, imageUrl = client?.personImageUrl(person), focusRequester = personRequester) {
+                                personReturnKey = personKey
+                                selectedPerson = person
+                                personItems = emptyList()
+                                personItemsNextIndex = 0
+                                personItemsHasMore = true
+                                personItemsLoading = true
+                                scope.launch {
+                                    val firstPage = runCatching { client?.getPersonItems(person, 0, 16) }.getOrDefault(emptyList()).orEmpty()
+                                    personItems = firstPage
+                                    personItemsNextIndex = firstPage.size
+                                    personItemsHasMore = firstPage.size == 16
+                                    personItemsLoading = false
+                                }
+                            }
                         }
                     }
                 }
@@ -917,7 +984,13 @@ fun DetailScreen(
                 Spacer(Modifier.height(24.dp))
                 Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(12.dp))
-                if (similar.isEmpty()) {
+                if (similarLoading) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        repeat(4) {
+                            Box(Modifier.width(138.dp).height(190.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x1AFFFFFF)))
+                        }
+                    }
+                } else if (similar.isEmpty()) {
                     Text(
                         "暂无相关推荐",
                         color = TextSub, fontSize = 12.sp,
@@ -1094,16 +1167,72 @@ fun DetailScreen(
                 onClose = { showSourceMenu = false },
             )
         }
+
+        selectedPerson?.let { person ->
+            val closePersonPanel: () -> Unit = {
+                selectedPerson = null
+                scope.launch {
+                    withFrameNanos { }
+                    personReturnKey?.let { personFocusRequesters[it]?.requestFocus() }
+                }
+                Unit
+            }
+            Dialog(onDismissRequest = closePersonPanel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+                BackHandler(onBack = closePersonPanel)
+                Box(Modifier.fillMaxSize().background(Color(0x66000000)), contentAlignment = Alignment.Center) {
+                    Column(
+                        Modifier.widthIn(max = 650.dp).fillMaxWidth(0.72f).heightIn(max = 520.dp)
+                            .clip(RoundedCornerShape(8.dp)).background(GlassStrong).border(1.dp, GlassLine, RoundedCornerShape(8.dp))
+                            .padding(20.dp),
+                    ) {
+                        Text("${person.name} · 参演作品", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(12.dp))
+                        when {
+                            personItemsLoading && personItems.isEmpty() -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                repeat(3) { Box(Modifier.fillMaxWidth().height(70.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x1AFFFFFF))) }
+                            }
+                            personItems.isEmpty() -> Text("暂无参演作品", color = TextSub, fontSize = 12.sp, modifier = Modifier.padding(vertical = 28.dp))
+                            else -> LazyColumn(Modifier.heightIn(max = 390.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(personItems, key = { it.id }) { credit ->
+                                    FocusSurface(modifier = Modifier.fillMaxWidth().height(68.dp), corner = 6.dp, onClick = { selectedPerson = null; onOpenDetail(credit.id) }) { focused ->
+                                        Row(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent, RoundedCornerShape(6.dp)).padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            AsyncImage(model = client?.imageUrl(credit, 240), contentDescription = credit.name, contentScale = ContentScale.Crop, modifier = Modifier.width(40.dp).height(56.dp).clip(RoundedCornerShape(4.dp)))
+                                            Spacer(Modifier.width(12.dp))
+                                            Text(credit.name, color = if (focused) Accent else TextMain, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                }
+                                if (personItemsHasMore) item {
+                                    FocusSurface(modifier = Modifier.fillMaxWidth().height(42.dp), corner = 6.dp, onClick = {
+                                        if (!personItemsLoading) {
+                                            personItemsLoading = true
+                                            scope.launch {
+                                                val next = runCatching { client?.getPersonItems(person, personItemsNextIndex, 16) }.getOrDefault(emptyList()).orEmpty()
+                                                personItems = (personItems + next).distinctBy { it.id }
+                                                personItemsNextIndex += next.size
+                                                personItemsHasMore = next.size == 16
+                                                personItemsLoading = false
+                                            }
+                                        }
+                                    }) { focused -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (personItemsLoading) "正在加载…" else "加载更多", color = if (focused) Accent else TextSub, fontSize = 12.sp) } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun PersonCard(person: MediaPerson, imageUrl: String?) {
-    Box(Modifier.width(112.dp)) {
+private fun PersonCard(person: MediaPerson, imageUrl: String?, focusRequester: FocusRequester, onClick: () -> Unit) {
+    FocusSurface(modifier = Modifier.width(112.dp).focusRequester(focusRequester), corner = 8.dp, onClick = onClick) { focused ->
+      Box(Modifier.fillMaxWidth().background(if (focused) Color(0x20FFFFFF) else Color.Transparent, RoundedCornerShape(8.dp)).padding(6.dp)) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 Modifier.size(96.dp).clip(CircleShape)
-                    .background(Color(0x1AFFFFFF)),
+                    .background(Color(0x1AFFFFFF)).then(if (focused) Modifier.border(2.dp, Accent, CircleShape) else Modifier),
                 contentAlignment = Alignment.Center,
             ) {
                 if (imageUrl != null) {
@@ -1117,6 +1246,7 @@ private fun PersonCard(person: MediaPerson, imageUrl: String?) {
             Text(person.name, color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(person.role ?: person.type ?: "演职人员", color = Color.White.copy(alpha = 0.6f), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+      }
     }
 }
 

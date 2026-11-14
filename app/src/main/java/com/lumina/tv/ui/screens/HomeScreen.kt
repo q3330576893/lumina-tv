@@ -219,6 +219,7 @@ fun HomeScreen(
     var gridItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var libraryTotalCount by remember { mutableStateOf<Int?>(null) }
     var gridLoading by remember { mutableStateOf(false) }
+    var gridRefreshing by remember { mutableStateOf(false) }
     var gridAppending by remember { mutableStateOf(false) }
     var gridNextIndex by remember { mutableStateOf(0) }
     var gridHasMore by remember { mutableStateOf(true) }
@@ -476,14 +477,17 @@ fun HomeScreen(
         val c = client ?: return@LaunchedEffect
         if (requestTab == HomeTab.Movies && movies.isNotEmpty()) {
             gridItems = movies
+            gridRefreshing = false
             return@LaunchedEffect
         }
         if (requestTab == HomeTab.Series && series.isNotEmpty()) {
             gridItems = series
+            gridRefreshing = false
             return@LaunchedEffect
         }
         if (requestTab == HomeTab.Favorites && favorites.isNotEmpty()) {
             gridItems = favorites
+            gridRefreshing = false
             return@LaunchedEffect
         }
         val key = when (requestTab) {
@@ -500,9 +504,11 @@ fun HomeScreen(
                 gridNextIndex = it.size
                 gridHasMore = it.size == 50
             }
+            gridRefreshing = false
             return@LaunchedEffect
         }
         gridLoading = requestTab == HomeTab.Media || gridItems.isEmpty()
+        if (requestTab == HomeTab.Media && gridItems.isNotEmpty()) gridRefreshing = true
         try {
             val result = runCatching {
                 when (requestTab) {
@@ -540,7 +546,10 @@ fun HomeScreen(
                 gridItems = emptyList()
             }
         } finally {
-            if (tab == requestTab && selectedLibrary == requestLibrary && librarySort == requestSort && librarySortOrder == requestOrder) gridLoading = false
+            if (tab == requestTab && selectedLibrary == requestLibrary && librarySort == requestSort && librarySortOrder == requestOrder) {
+                gridLoading = false
+                gridRefreshing = false
+            }
         }
     }
 
@@ -828,6 +837,7 @@ fun HomeScreen(
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text("排序", color = if (focused) Accent else TextSub, fontSize = 9.sp, lineHeight = 11.sp)
                                         Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                        if (gridRefreshing) Text("刷新中", color = Accent, fontSize = 9.sp, lineHeight = 10.sp)
                                     }
                                 }
                             }
@@ -859,6 +869,7 @@ fun HomeScreen(
                                                         indication = null,
                                                     ) {
                                                         librarySort = key
+                                                        gridRefreshing = gridItems.isNotEmpty()
                                                         AppRuntime.prefs?.librarySort = key
                                                         // 换排序等于换内容顺序，旧位置作废
                                                         LibraryCache.clearGridPosition(gridStateKey)
@@ -889,6 +900,7 @@ fun HomeScreen(
                                                         indication = null,
                                                     ) {
                                                         librarySortOrder = order
+                                                        gridRefreshing = gridItems.isNotEmpty()
                                                         AppRuntime.prefs?.librarySortOrder = order
                                                         LibraryCache.clearGridPosition(gridStateKey)
                                                         scope.launch { runCatching { gridState.scrollToItem(0) } }
