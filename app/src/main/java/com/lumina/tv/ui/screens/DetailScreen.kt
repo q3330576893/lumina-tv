@@ -38,6 +38,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -129,10 +133,21 @@ import java.net.URLEncoder
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
 private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+@OptIn(ExperimentalFoundationApi::class)
+private object DetailNoBringIntoViewSpec : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+        if (offset >= 0f && offset + size <= containerSize) return 0f
+        return when {
+            size > containerSize || offset < 0f -> offset
+            else -> offset + size - containerSize
+        }
+    }
+}
 private const val DETAIL_PREVIEW_FAILURE_TTL_MS = 10 * 60 * 1000L
 
 @Composable
-@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@OptIn(ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun DetailScreen(
     id: String,
     onPlay: (MediaItem) -> Unit,
@@ -552,6 +567,12 @@ fun DetailScreen(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().blur(42.dp).hazeSource(detailHazeState),
             )
+            AsyncImage(
+                model = client?.backdropUrl(it0, 1920),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
             DetailVideoBackground(
                 url = detailPreviewUrl,
                 mediaKey = detailPreviewKey,
@@ -585,24 +606,6 @@ fun DetailScreen(
                 loopWholeItem = detailPreviewIsTrailer,
                 modifier = Modifier.fillMaxSize(),
             )
-            detailPreviewFailure?.takeIf { detailPreviewFromStage == "done" }?.let { failure ->
-                Row(
-                    Modifier.align(Alignment.TopStart).padding(start = 48.dp, top = 10.dp)
-                        .clickable {
-                            detailPreviewFailure = null
-                            detailPreviewFailures = emptyList()
-                            detailPreviewFromStage = "hls"
-                            detailPreviewStage = null
-                            detailPreviewUrl = null
-                            detailPreviewRetry++
-                        }
-                        .background(Color(0x66000000), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 6.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("背景视频不可用：$failure · 点击重试", color = TextMain.copy(alpha = 0.62f), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-            }
             // 模糊海报 → 主色铺满：重模糊后叠深色渐层，页面颜色随封面走
             val videoPlaying = detailVideoPlaying
             val v0 by animateColorAsState(if (videoPlaying) Color(0x00000000) else Color(0x4D000000), tween(500), label = "detailMaskTop")
@@ -638,11 +641,12 @@ fun DetailScreen(
         } else if (item == null) {
             LoadingView(text = "未找到该内容")
         } else {
-            Column(Modifier.fillMaxSize().padding(top = 64.dp)) {
-                Column(
-                    Modifier.fillMaxSize().verticalScroll(detailScrollState)
-                        .padding(start = 48.dp, end = 48.dp, bottom = 24.dp)
-                ) {
+            Column(Modifier.fillMaxSize().padding(top = 40.dp)) {
+                CompositionLocalProvider(LocalBringIntoViewSpec provides DetailNoBringIntoViewSpec) {
+                    Column(
+                        Modifier.fillMaxSize().verticalScroll(detailScrollState)
+                            .padding(start = 48.dp, end = 48.dp, bottom = 24.dp)
+                    ) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -899,16 +903,10 @@ fun DetailScreen(
                     }
                 }
                 val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
-                Spacer(Modifier.height(22.dp))
-                Text("演职人员", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                Spacer(Modifier.height(12.dp))
-                if (cast.isEmpty()) {
-                    Text(
-                        "暂无演职人员信息",
-                        color = TextSub, fontSize = 12.sp,
-                        modifier = Modifier.padding(vertical = 6.dp),
-                    )
-                } else {
+                if (cast.isNotEmpty()) {
+                    Spacer(Modifier.height(22.dp))
+                    Text("演职人员", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(12.dp))
                     LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
                             PersonCard(person = person, imageUrl = client?.personImageUrl(person))
@@ -1017,7 +1015,8 @@ fun DetailScreen(
                 }
 
                 Spacer(Modifier.height(28.dp))
-            }
+                    }
+                }
             }
         }
 

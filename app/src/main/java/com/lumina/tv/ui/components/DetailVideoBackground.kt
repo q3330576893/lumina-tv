@@ -2,16 +2,22 @@ package com.lumina.tv.ui.components
 
 import android.net.Uri
 import android.view.TextureView
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.viewinterop.AndroidView
@@ -157,9 +163,16 @@ private fun DetailVideoPlayback(
     }
 
     val player = playerState.value ?: return
+    var videoAspectRatio by remember(player) { mutableFloatStateOf(0f) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    videoAspectRatio = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
+                }
+            }
+
             override fun onRenderedFirstFrame() {
                 firstFrame = true
                 onStatus("play")
@@ -257,13 +270,22 @@ private fun DetailVideoPlayback(
     }
 
     if (!failed) {
-        Box(
+        BoxWithConstraints(
             modifier = modifier.fillMaxSize().clipToBounds().graphicsLayer {
                 alpha = if (firstFrame && playing) 1f else 0f
             },
+            contentAlignment = Alignment.Center,
         ) {
+            val containerAspectRatio = if (maxHeight.value > 0f) maxWidth.value / maxHeight.value else videoAspectRatio
+            val videoModifier = if (videoAspectRatio > 0f && videoAspectRatio > containerAspectRatio) {
+                Modifier.fillMaxWidth().aspectRatio(videoAspectRatio)
+            } else if (videoAspectRatio > 0f) {
+                Modifier.fillMaxHeight().aspectRatio(videoAspectRatio)
+            } else {
+                Modifier.fillMaxSize()
+            }
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                modifier = videoModifier,
                 factory = { ctx ->
                     TextureView(ctx).apply {
                         isFocusable = false

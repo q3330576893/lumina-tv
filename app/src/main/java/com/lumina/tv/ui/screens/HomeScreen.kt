@@ -27,6 +27,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -77,13 +78,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -425,12 +424,13 @@ fun HomeScreen(
                         LibraryCache.browseOf(cacheKey).orEmpty()
                     }
                     val recentBackdropUrl = viewItems.firstNotNullOfOrNull { item -> c.backdropUrl(item, 640) }
+                    viewContents = viewContents + (view.id to viewItems)
+                    libraryRecentBackdropUrls = libraryRecentBackdropUrls + (view.id to recentBackdropUrl)
                     Triple(view, viewItems, recentBackdropUrl)
                 }
             }.awaitAll()
         }
         viewContents = viewContents + prefetchedViews.associate { it.first.id to it.second }
-        libraryRecentBackdropUrls = libraryRecentBackdropUrls + prefetchedViews.associate { it.first.id to it.third }
     }
 
     LaunchedEffect(views, client, reloadToken) {
@@ -720,30 +720,10 @@ fun HomeScreen(
                                     heroIndex = (heroIndex + 1) % displayedHeroItems.size
                                 }
                             },
-                            onSelectIndex = { heroIndex = it },
                             onPlay = onPlay,
                             onOpenDetail = onOpenDetail,
                             playFocus = heroPlayFocus,
                             onPlayFocused = { scope.launch { recListState.animateScrollToItem(0) } },
-                            onNextCardDown = {
-                                val target = topRenderedRow
-                                val hasLibraryTarget = firstSectionKey?.startsWith("library-") == true
-                                if (target == null && !hasLibraryTarget) false else {
-                                    scope.launch {
-                                        focusedMediaId = null
-                                        focusedMediaSection = null
-                                        recListState.animateScrollToItem(0)
-                                        withFrameNanos { }
-                                        withFrameNanos { }
-                                        if (target != null && target.first == firstSectionKey) {
-                                            focusedMediaSection = target.first
-                                            focusedMediaId = target.second.first().id
-                                        }
-                                        runCatching { firstContentFocus.requestFocus() }
-                                    }
-                                    true
-                                }
-                            },
                             hazeState = hazeState,
                         )
                     }
@@ -781,8 +761,12 @@ fun HomeScreen(
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
-                        val items = viewContents[v.id].orEmpty()
-                        if (items.isNotEmpty()) {
+                        val items = viewContents[v.id]
+                        if (items == null) {
+                            item(key = "home-view-skeleton-${v.id}") {
+                                HomeRowSkeleton(v.name)
+                            }
+                        } else if (items.isNotEmpty()) {
                             item(key = "home-view-${v.id}") {
                                 RowSection(v.name, items, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "view-" + v.id, focusItemId = focusedMediaId, sectionKey = "view-" + v.id, focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "view-${v.id}") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "view-" + v.id) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "view-" + v.id }) { onOpenDetail(it.id) }
                             }
@@ -1637,12 +1621,10 @@ private fun Hero(
     currentIndex: Int,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
-    onSelectIndex: (Int) -> Unit,
     onPlay: (MediaItem) -> Unit,
     onOpenDetail: (String) -> Unit,
     playFocus: FocusRequester,
     onPlayFocused: () -> Unit,
-    onNextCardDown: () -> Boolean,
     hazeState: HazeState,
     onComposed: (Boolean) -> Unit = {},
 ) {
@@ -1659,8 +1641,6 @@ private fun Hero(
     val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
-    val detailFocus = remember { FocusRequester() }
-    val nextCardFocus = remember { FocusRequester() }
     val resolveHeroImage: (MediaItem?) -> String? = { heroItem ->
         heroItem?.let { client?.backdropUrl(it, 1280) }
             ?.takeIf { it.isNotBlank() }
@@ -1734,11 +1714,6 @@ private fun Hero(
         }
     }
     var lastInteractionAt by remember(items) { mutableStateOf(System.currentTimeMillis()) }
-    var focusedTargets by remember { mutableStateOf<Set<String>>(emptySet()) }
-    fun reportFocus(key: String, focused: Boolean) {
-        val next = if (focused) focusedTargets + key else focusedTargets - key
-        focusedTargets = next
-    }
     LaunchedEffect(items) {
         if (items.size < 2) return@LaunchedEffect
         while (true) {
@@ -1782,11 +1757,6 @@ private fun Hero(
                 .background(Ink)
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
-                    // Let normal focus search handle the play -> detail -> next-card path.
-                    val navigatingNextCard = "next-card" in focusedTargets ||
-                        (items.size > 1 && ("detail" in focusedTargets ||
-                            ("play" in focusedTargets && event.key == Key.DirectionRight)))
-                    if (navigatingNextCard) return@onPreviewKeyEvent false
                     when (event.key) {
                         Key.DirectionLeft -> { lastInteractionAt = System.currentTimeMillis(); onPrevious(); true }
                         Key.DirectionRight -> { lastInteractionAt = System.currentTimeMillis(); onNext(); true }
@@ -1861,9 +1831,7 @@ private fun Hero(
             Spacer(Modifier.height(14.dp))
             Row {
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(128.dp)
-                        .focusProperties { if (items.size > 1) down = nextCardFocus }
-                        .onFocusChanged { reportFocus("play", it.hasFocus || it.isFocused) },
+                    modifier = Modifier.height(42.dp).width(128.dp),
                     corner = 21.dp,
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
@@ -1887,12 +1855,9 @@ private fun Hero(
                 }
                 Spacer(Modifier.width(12.dp))
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(108.dp)
-                        .focusProperties { if (items.size > 1) { right = nextCardFocus; down = nextCardFocus } }
-                        .onFocusChanged { reportFocus("detail", it.hasFocus || it.isFocused) },
+                    modifier = Modifier.height(42.dp).width(108.dp),
                     corner = 21.dp,
                     scaleTo = 1.05f,
-                    focusRequester = detailFocus,
                     onClick = { onOpenDetail(item.seriesId ?: item.id) },
                 ) { focused ->
                     Box(
@@ -1906,67 +1871,32 @@ private fun Hero(
                 Modifier.align(Alignment.BottomEnd).padding(end = 40.dp, bottom = 28.dp),
                 horizontalAlignment = Alignment.End,
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    items.indices.forEach { index ->
-                        val width by animateDpAsState(if (index == currentIndex) 22.dp else 8.dp, label = "hero-indicator-width")
-                        FocusSurface(
-                            modifier = Modifier.width(width).height(8.dp)
-                                .onFocusChanged { reportFocus("indicator-$index", it.hasFocus || it.isFocused) },
-                            corner = 4.dp,
-                            scaleTo = 1f,
-                            onClick = { lastInteractionAt = System.currentTimeMillis(); onSelectIndex(index) },
-                        ) { focused ->
-                            Box(
-                                Modifier.fillMaxSize()
-                                    .background(
-                                        if (index == currentIndex) Color(0xFFE8ECF2) else Color(0x55FFFFFF),
-                                        RoundedCornerShape(4.dp),
-                                    )
-                                    .then(
-                                        if (focused) Modifier.border(1.dp, Color(0xFFC9D2DE), RoundedCornerShape(4.dp))
-                                        else Modifier
-                                    )
-                            )
-                        }
-                    }
-                }
-                if (items.size > 1) {
-                    Spacer(Modifier.height(10.dp))
-                    val nextItem = items[(currentIndex + 1) % items.size]
-                    val nextImage = nextItem.let { client?.backdropUrl(it, 1280) }
-                        ?.takeIf { it.isNotBlank() }
-                        ?: nextItem.let { client?.imageUrl(it, 720) }
-                    FocusSurface(
-                        modifier = Modifier.size(width = 168.dp, height = 94.dp)
-                            .focusRequester(nextCardFocus)
-                            .focusProperties { left = detailFocus }
-                            .onFocusChanged { reportFocus("next-card", it.isFocused) }
-                            .onPreviewKeyEvent { event ->
-                                event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown && onNextCardDown()
-                            },
-                        corner = 9.dp,
-                        scaleTo = FocusScale.POSTER_MEDIUM,
-                        onFocused = { lastInteractionAt = System.currentTimeMillis() },
-                        onClick = { lastInteractionAt = System.currentTimeMillis(); onNext() },
-                    ) { focused ->
-                        Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (focused) 1f else 0.75f }) {
-                            if (!nextImage.isNullOrBlank()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items.take(3).forEachIndexed { slot, _ ->
+                        val thumbnailItem = items[(currentIndex + slot) % items.size]
+                        val thumbnailImage = resolveHeroImage(thumbnailItem)
+                        Box(
+                            Modifier.size(width = 112.dp, height = 63.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(InkSoft)
+                        ) {
+                            if (!thumbnailImage.isNullOrBlank()) {
                                 AsyncImage(
-                                    model = ImageRequest.Builder(context).data(nextImage).crossfade(true).build(),
-                                    contentDescription = nextItem.seriesName ?: nextItem.name,
+                                    model = ImageRequest.Builder(context).data(thumbnailImage).crossfade(true).build(),
+                                    contentDescription = null,
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier.fillMaxSize(),
                                 )
                             }
-                            if (focused) Box(Modifier.fillMaxSize().border(1.5.dp, Color(0xFFC9D2DE), RoundedCornerShape(9.dp)))
+                            Box(
+                                Modifier.fillMaxSize().border(
+                                    if (slot == 0) 2.dp else 1.dp,
+                                    if (slot == 0) Accent else Color(0x33FFFFFF),
+                                    RoundedCornerShape(6.dp),
+                                )
+                            )
                         }
                     }
-                }
-                AnimatedVisibility(visible = focusedTargets.any { it.startsWith("indicator-") }) {
-                    Text("${currentIndex + 1} / ${items.size}", color = TextSub, fontSize = 11.sp)
                 }
             }
         }
@@ -2063,6 +1993,31 @@ private fun RowSection(
                     upFocus = upFocus,
                     onFocused = { onItemFocused?.invoke(it.id) },
                     onClick = { onClick(it) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeRowSkeleton(title: String) {
+    Column(Modifier.padding(top = Space.section)) {
+        Text(
+            title,
+            Modifier.padding(start = 40.dp, bottom = 10.dp),
+            color = TextMain.copy(alpha = 0.38f),
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 40.dp),
+            horizontalArrangement = Arrangement.spacedBy(Space.m),
+        ) {
+            repeat(5) {
+                Box(
+                    Modifier.width(170.dp).aspectRatio(1f / 1.5f)
+                        .clip(ShapeScale.card)
+                        .background(Color(0xFF18202D))
                 )
             }
         }
