@@ -35,8 +35,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items as rowItems
+import androidx.compose.foundation.lazy.itemsIndexed as rowItemsIndexed
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -428,8 +430,8 @@ fun PlayerScreen(
     val episodeFocus = remember { FocusRequester() }
     val menuFocus = remember { FocusRequester() }
     val speedFirstFocus = remember { FocusRequester() }
-    val seasonFocuses = remember(seasons) { seasons.map { FocusRequester() } }
-    val episodeItemFocuses = remember(quickEpisodes) { quickEpisodes.map { FocusRequester() } }
+    val seasonFocuses = remember(item.seriesId) { mutableMapOf<String, FocusRequester>() }
+    val episodeItemFocuses = remember(item.seriesId) { mutableMapOf<String, FocusRequester>() }
     var quickContentHasFocus by remember { mutableStateOf(false) }
     var restoreMenuFocusUntil by remember { mutableLongStateOf(0L) }
     var titleLogoFailed by remember(item.id) { mutableStateOf(false) }
@@ -1618,7 +1620,8 @@ fun PlayerScreen(
         val firstFocus = if (quickPanel == QuickPanel.SPEED) {
             speedFirstFocus
         } else {
-            seasonFocuses.firstOrNull() ?: episodeItemFocuses.firstOrNull()
+            seasons.firstOrNull()?.let { seasonFocuses.getOrPut(it.id) { FocusRequester() } }
+                ?: quickEpisodes.firstOrNull()?.let { episodeItemFocuses.getOrPut(it.id) { FocusRequester() } }
         }
         val triggerFocus = if (quickPanel == QuickPanel.SPEED) speedFocus else episodeFocus
         if (firstFocus == null) return@LaunchedEffect
@@ -2316,15 +2319,15 @@ fun PlayerScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            rowItems(seasons, key = { it.id }) { season ->
-                                val index = seasons.indexOf(season)
+                            rowItemsIndexed(seasons, key = { _, season -> season.id }) { index, season ->
+                                val seasonFocus = seasonFocuses.getOrPut(season.id) { FocusRequester() }
                                 val active = season.id == selectedSeasonId
                                 FocusSurface(
                                     modifier = Modifier.widthIn(min = 54.dp).height(32.dp)
-                                        .focusRequester(seasonFocuses[index])
+                                        .focusRequester(seasonFocus)
                                         .focusProperties {
-                                            left = if (index == 0) seasonFocuses[index] else seasonFocuses[index - 1]
-                                            right = if (index == seasons.lastIndex) seasonFocuses[index] else seasonFocuses[index + 1]
+                                            left = FocusRequester.Default
+                                            right = FocusRequester.Default
                                             up = triggerFocus
                                         },
                                     corner = 6.dp,
@@ -2359,16 +2362,16 @@ fun PlayerScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                gridItems(quickEpisodes, key = { it.id }) { ep ->
-                                    val index = quickEpisodes.indexOf(ep)
+                                gridItemsIndexed(quickEpisodes, key = { _, ep -> ep.id }) { index, ep ->
+                                    val episodeFocus = episodeItemFocuses.getOrPut(ep.id) { FocusRequester() }
                                     val active = ep.id == item.id
                                     FocusSurface(
                                         modifier = Modifier.size(width = 64.dp, height = 40.dp)
-                                            .focusRequester(episodeItemFocuses[index])
+                                            .focusRequester(episodeFocus)
                                             .focusProperties {
-                                                left = if (index % 5 == 0) episodeItemFocuses[index] else episodeItemFocuses[index - 1]
-                                                right = if (index % 5 == 4 || index == quickEpisodes.lastIndex) episodeItemFocuses[index] else episodeItemFocuses[index + 1]
-                                                up = if (index < 5) (seasonFocuses.firstOrNull() ?: triggerFocus) else episodeItemFocuses[index - 5]
+                                                left = FocusRequester.Default
+                                                right = FocusRequester.Default
+                                                up = if (index < 5) triggerFocus else FocusRequester.Default
                                                 down = if (index + 5 >= quickEpisodes.size) triggerFocus else FocusRequester.Default
                                             },
                                         corner = 6.dp,
