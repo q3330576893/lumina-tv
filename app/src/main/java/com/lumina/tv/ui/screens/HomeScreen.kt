@@ -113,6 +113,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Dp
@@ -140,6 +141,7 @@ import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.SectionTitle
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Ink
+import com.lumina.tv.ui.theme.InkSoft
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
@@ -595,11 +597,15 @@ fun HomeScreen(
     LaunchedEffect(heroItems) { heroIndex = 0 }
     val hero = heroItems.getOrNull(heroIndex) ?: resume.firstOrNull()
     val homeLibraries = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
-    val firstSectionKey: String? = "libraries"
+    val firstSectionKey: String? = when {
+        resume.isNotEmpty() -> "resume"
+        favorites.isNotEmpty() -> "favorites"
+        else -> homeLibraries.firstNotNullOfOrNull { view ->
+            viewContents[view.id]?.takeIf { it.isNotEmpty() }?.let { "view-${view.id}" }
+        }
+    }
     val topRenderedRow = when {
         resume.isNotEmpty() -> "resume" to resume
-        movies.isNotEmpty() -> "movies" to movies
-        series.isNotEmpty() -> "series" to series
         favorites.isNotEmpty() -> "favorites" to favorites
         else -> homeLibraries.firstNotNullOfOrNull { view ->
             viewContents[view.id]?.takeIf { it.isNotEmpty() }?.let { "view-${view.id}" to it }
@@ -700,18 +706,15 @@ fun HomeScreen(
                             }
                         }
                     }
-                    item(key = "home-libraries") {
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 200.dp, aspectRatio = 16f / 9f, titleOverlay = true, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
+                            contents = viewContents,
                             counts = libraryCounts,
-                            requestInitialFocus = initialFocusPending && firstSectionKey == "libraries",
                             onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
-                            onOpenAll = { tab = HomeTab.Media; selectedLibraryId = null; focusedMediaId = null },
                         )
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 200.dp, aspectRatio = 16f / 9f, titleOverlay = true, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
-                    if (movies.isNotEmpty()) item { RowSection("电影", movies, width = 130.dp, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "movies", focusItemId = focusedMediaId, sectionKey = "movies", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "movies") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "movies" }) { onOpenDetail(it.id) } }
-                    if (series.isNotEmpty()) item { RowSection("剧集", series, width = 130.dp, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "series", focusItemId = focusedMediaId, sectionKey = "series", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "series") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "series" }) { onOpenDetail(it.id) } }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, width = 130.dp, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "favorites") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
@@ -1019,23 +1022,20 @@ private fun ServerCapsule(
                     }
                 },
         ) {
-            Row(
-                Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Box(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 Text(
                     AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() }
                         ?: AppRuntime.session?.serverName ?: "Emby",
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp).align(Alignment.Center),
                     color = Color.White.copy(alpha = 0.94f),
                     fontSize = 13.5.sp,
                     fontWeight = FontWeight.Medium,
                     letterSpacing = 0.2.sp,
+                    textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Canvas(Modifier.size(8.dp)) {
+                Canvas(Modifier.size(8.dp).align(Alignment.CenterEnd)) {
                     val chevron = Path().apply {
                         moveTo(1.4.dp.toPx(), 2.9.dp.toPx())
                         lineTo(4.dp.toPx(), 5.2.dp.toPx())
@@ -1371,46 +1371,70 @@ private fun TabChip(
 @Composable
 private fun HomeLibraryRow(
     views: List<LibraryView>,
+    contents: Map<String, List<MediaItem>>,
     counts: Map<String, Int?>,
-    requestInitialFocus: Boolean,
     onOpenLibrary: (LibraryView) -> Unit,
-    onOpenAll: () -> Unit,
 ) {
-    val focusIds = listOf("all") + views.map { it.id }
-    LazyRow(
-        modifier = Modifier.fillMaxWidth().height(60.dp).focusGroup(),
-        contentPadding = PaddingValues(horizontal = 40.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        items(focusIds, key = { "libpill-$it" }) { id ->
-            val view = views.firstOrNull { it.id == id }
-            val label = view?.name ?: "全部"
-            val count = view?.let { counts[it.id] }
-            val focusRequester = remember(id) { FocusRequester() }
-            val interaction = remember(id) { MutableInteractionSource() }
-            val focused by interaction.collectIsFocusedAsState()
-            val shape = RoundedCornerShape(12.dp)
-            LaunchedEffect(requestInitialFocus) {
-                if (requestInitialFocus && id == focusIds.firstOrNull()) {
-                    delay(120)
-                    runCatching { focusRequester.requestFocus() }
+    Column(Modifier.padding(top = Space.section)) {
+        Text(
+            "媒体库",
+            color = TextMain,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(start = 40.dp, bottom = 10.dp),
+        )
+        LazyRow(
+            modifier = Modifier.fillMaxWidth().focusGroup(),
+            contentPadding = PaddingValues(horizontal = 40.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            items(views, key = { "libcard-${it.id}" }) { view ->
+                val shape = RoundedCornerShape(10.dp)
+                val ownImage = remember(view.id, view.imageTag) {
+                    view.imageTag?.let { AppRuntime.client?.libraryPrimaryImageUrl(view.id) }
                 }
-            }
-            Row(
-                Modifier.height(44.dp)
-                    .clip(shape)
-                    .glassSurface(shape, tone = if (focused) GlassTone.Accent else GlassTone.Normal)
-                    .focusRequester(focusRequester)
-                    .clickable(interactionSource = interaction, indication = null) {
-                        if (view == null) onOpenAll() else onOpenLibrary(view)
+                val posterImage = contents[view.id]?.firstOrNull()?.let { AppRuntime.client?.imageUrl(it) }
+                val imageUrl = ownImage ?: posterImage
+                FocusSurface(
+                    modifier = Modifier.width(280.dp).height(150.dp),
+                    corner = 10.dp,
+                    scaleTo = 1.04f,
+                    onClick = { onOpenLibrary(view) },
+                ) { focused ->
+                    Box(Modifier.fillMaxSize().background(InkSoft, shape)) {
+                        if (imageUrl != null) {
+                            AsyncImage(
+                                model = imageUrl,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                        Box(
+                            Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(0.4f)
+                                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f)))),
+                        )
+                        Text(
+                            view.name,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp)
+                                .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                        )
+                        counts[view.id]?.let { count ->
+                            Text(
+                                "$count 部",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 11.sp,
+                                modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 12.dp),
+                            )
+                        }
+                        if (focused) Box(Modifier.fillMaxSize().border(1.5.dp, Accent, shape))
                     }
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(label, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (count != null) Text(count.toString(), color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
+                }
             }
         }
     }
@@ -1805,7 +1829,7 @@ private fun Hero(
                         Spacer(Modifier.width(6.dp))
                         Text(
                             if (item.positionTicks > 0) "继续播放" else "立即播放",
-                            color = Color(0xFF06101F), fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            color = Color(0xFF06101F), fontSize = 16.sp, fontWeight = FontWeight.Bold,
                         )
                     }
                 }

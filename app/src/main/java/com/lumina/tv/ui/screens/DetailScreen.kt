@@ -693,7 +693,7 @@ fun DetailScreen(
                         Spacer(Modifier.height(18.dp))
                         Row(Modifier.focusGroup()) {
                             FocusSurface(
-                                modifier = Modifier.height(46.dp).width(150.dp),
+                                modifier = Modifier.height(52.dp).width(150.dp),
                                 corner = 23.dp,
                                 focusRequester = playFocus,
                                 onFocused = { playButtonFocused = true },
@@ -719,13 +719,13 @@ fun DetailScreen(
                                                 Accent2.copy(alpha = if (focused) 1f else 0.9f),
                                             )
                                         )
-                                    ),
+                                    ).padding(horizontal = 28.dp),
                                     horizontalArrangement = Arrangement.Center,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF06101F), modifier = Modifier.size(22.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("播放", color = Color(0xFF06101F), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                    Text("播放", color = Color(0xFF06101F), fontSize = 17.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                             if (sources.isNotEmpty()) {
@@ -831,20 +831,20 @@ fun DetailScreen(
                             }
                             Spacer(Modifier.width(12.dp))
                             FocusSurface(
-                                modifier = Modifier.height(46.dp).width(120.dp),
+                                modifier = Modifier.height(48.dp).width(120.dp),
                                 corner = 23.dp,
                                 onClick = onBack,
                             ) { focused ->
                                 Row(
                                     Modifier.fillMaxSize().background(
                                         if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
-                                    ),
+                                    ).padding(horizontal = 24.dp),
                                     horizontalArrangement = Arrangement.Center,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Icon(Icons.Rounded.ArrowBack, null, tint = TextMain, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("返回", color = TextMain, fontSize = 13.sp)
+                                    Text("返回", color = TextMain, fontSize = 15.sp)
                                 }
                             }
                         }
