@@ -7,6 +7,7 @@ import android.view.Surface
 import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -72,6 +73,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -1661,6 +1663,15 @@ fun PlayerScreen(
         }
     }
 
+    fun closeQuickPanel(triggerFocus: FocusRequester) {
+        restoreMenuFocusUntil = android.os.SystemClock.elapsedRealtime() + 300L
+        quickPanel = QuickPanel.NONE
+        scope.launch {
+            delay(80)
+            runCatching { triggerFocus.requestFocus() }
+        }
+    }
+
     BackHandler {
         lastInteractionAt = android.os.SystemClock.elapsedRealtime()
         when {
@@ -1671,11 +1682,7 @@ fun PlayerScreen(
             optionMenu -> closeOptionMenu()
             quickPanel != QuickPanel.NONE -> {
                 val was = quickPanel
-                quickPanel = QuickPanel.NONE
-                scope.launch {
-                    delay(80)
-                    runCatching { (if (was == QuickPanel.SPEED) speedFocus else episodeFocus).requestFocus() }
-                }
+                closeQuickPanel(if (was == QuickPanel.SPEED) speedFocus else episodeFocus)
             }
             controlsVisible -> {
                 controlsVisible = false
@@ -1771,7 +1778,9 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        if ((if (activeEngine == "mpv") mpvState.buffering else buffering) && error == null && playbackStatusNotice == null) {
+        val isBufferingForDisplay = (if (activeEngine == "mpv") mpvState.buffering else buffering) &&
+            error == null && playbackStatusNotice == null
+        if (isBufferingForDisplay) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Box(Modifier.fillMaxSize().background(Color.Black))
                 val bufferingImage = client?.backdropUrl(item, 1280)
@@ -1782,6 +1791,13 @@ fun PlayerScreen(
                         model = bufferingImage,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
+                        alignment = Alignment.Center,
+                        modifier = Modifier.fillMaxSize().blur(32.dp),
+                    )
+                    AsyncImage(
+                        model = bufferingImage,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
                         alignment = Alignment.Center,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -2090,9 +2106,9 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = controlsVisible && !optionMenu,
+            visible = controlsVisible && !optionMenu && !isBufferingForDisplay,
             enter = fadeIn(animationSpec = tween(200)),
-            exit = fadeOut(animationSpec = tween(200)),
+            exit = if (isBufferingForDisplay) ExitTransition.None else fadeOut(animationSpec = tween(200)),
         ) {
             Box(Modifier.fillMaxSize()) {
                 Column(
@@ -2236,12 +2252,14 @@ fun PlayerScreen(
                 ) {
                     val hasEpisodeButton = item.seriesId != null
                     OsdIconButton(Icons.Rounded.FastForward, "倍速播放", speedFocus, playFocus, if (hasEpisodeButton) episodeFocus else menuFocus, playFocus) {
-                        quickPanel = QuickPanel.SPEED
+                        if (quickPanel == QuickPanel.SPEED) closeQuickPanel(speedFocus)
+                        else quickPanel = QuickPanel.SPEED
                         optionMenu = false
                     }
                     if (hasEpisodeButton) {
                         OsdIconButton(Icons.Rounded.PlaylistPlay, "选集", episodeFocus, speedFocus, menuFocus, playFocus) {
-                            quickPanel = QuickPanel.EPISODES
+                            if (quickPanel == QuickPanel.EPISODES) closeQuickPanel(episodeFocus)
+                            else quickPanel = QuickPanel.EPISODES
                             optionMenu = false
                         }
                     }
@@ -2292,8 +2310,7 @@ fun PlayerScreen(
                                 onFocusChanged = { if (it) quickContentHasFocus = true },
                                 onClick = {
                                     setPlaybackSpeed(s)
-                                    quickPanel = QuickPanel.NONE
-                                    scope.launch { delay(80); runCatching { speedFocus.requestFocus() } }
+                                    closeQuickPanel(speedFocus)
                                 },
                             ) { focused ->
                                 Box(
@@ -2429,10 +2446,8 @@ fun PlayerScreen(
             OptionMenu(
                 exo = exo,
                 item = item,
-                speed = speed,
                 resizeMode = resizeMode,
                 currentSourceId = currentSourceId,
-                episodes = episodes,
                 subScale = subScale,
                 audioDecodeMode = audioDecodeMode,
                 subtitleOffsetMs = subtitleOffsetMs,
@@ -2488,9 +2503,6 @@ fun PlayerScreen(
                     reloadForceTranscode = false
                     requestPlaybackReload(position, sessionGeneration)
                 },
-                onSpeed = {
-                    setPlaybackSpeed(it)
-                },
                 onSwitchEngine = {
                     error = "正在切换播放内核…"
                     val engines = listOf("media3", "mpv")
@@ -2509,11 +2521,6 @@ fun PlayerScreen(
                     forceDirectNext = false
                     degraded = false
                     loadSource(AppRuntime.prefs?.forceTranscode ?: false, sid)
-                },
-                onPickEpisode = { ep ->
-                    optionMenu = false
-                    scope.launch { runCatching { client?.reportStop(item.id, position) } }
-                    onPlayNext?.invoke(ep)
                 },
                 onRememberIntro = {
                     AppRuntime.prefs?.setIntroSeconds(item.id, (position / 1000L).toInt())

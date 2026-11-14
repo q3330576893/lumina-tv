@@ -3,7 +3,6 @@
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,19 +20,12 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.foundation.focusable
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.type
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -72,10 +65,8 @@ internal val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
 internal fun OptionMenu(
     exo: ExoPlayer,
     item: MediaItem,
-    speed: Float,
     resizeMode: Int,
     currentSourceId: String?,
-    episodes: List<MediaItem>,
     subScale: Float,
     audioDecodeMode: String,
     subtitleOffsetMs: Long,
@@ -88,11 +79,9 @@ internal fun OptionMenu(
     onSubtitleOffset: (Long) -> Unit,
     onSubScale: (Float) -> Unit,
     onAudioDecodeMode: (String) -> Unit,
-    onSpeed: (Float) -> Unit,
     onSwitchEngine: () -> Unit,
     onResizeMode: (Int) -> Unit,
     onSwitchSource: (String) -> Unit,
-    onPickEpisode: (MediaItem) -> Unit,
     onRememberIntro: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -136,20 +125,25 @@ internal fun OptionMenu(
         }
     }
 
-    val hasEpisodes = episodes.isNotEmpty()
-    val tabs = if (hasEpisodes) listOf("选集", "字幕", "音轨", "更多") else listOf("字幕", "音轨", "更多")
-    var selectedTab by remember(item.id, hasEpisodes) { mutableStateOf(if (hasEpisodes) "选集" else "字幕") }
-    val tabFocus = remember { FocusRequester() }
+    val tabs = listOf("字幕", "音轨", "更多")
+    var selectedTab by remember(item.id) { mutableStateOf("字幕") }
+    val tabFocuses = remember { tabs.map { FocusRequester() } }
     val contentFocus = remember { FocusRequester() }
     var contentHasFocus by remember { mutableStateOf(false) }
-    LaunchedEffect(selectedTab) {
+    var contentFocusRequest by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        delay(100)
+        runCatching { tabFocuses.first().requestFocus() }
+    }
+    LaunchedEffect(selectedTab, contentFocusRequest) {
+        if (contentFocusRequest == 0) return@LaunchedEffect
         contentHasFocus = false
         repeat(15) {
             delay(50)
             runCatching { contentFocus.requestFocus() }
             if (contentHasFocus) return@LaunchedEffect
         }
-        runCatching { tabFocus.requestFocus() }
+        runCatching { tabFocuses[tabs.indexOf(selectedTab).coerceAtLeast(0)].requestFocus() }
     }
 
     Box(
@@ -163,165 +157,67 @@ internal fun OptionMenu(
                 Spacer(Modifier.height(14.dp))
 
                 Row(
-                    Modifier.fillMaxWidth().height(44.dp).focusRequester(tabFocus).focusable()
-                        .onPreviewKeyEvent { event ->
-                            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                            val index = tabs.indexOf(selectedTab).coerceAtLeast(0)
-                            val next = when (event.key) {
-                                Key.DirectionLeft -> (index - 1).coerceAtLeast(0)
-                                Key.DirectionRight -> (index + 1).coerceAtMost(tabs.lastIndex)
-                                else -> return@onPreviewKeyEvent false
-                            }
-                            selectedTab = tabs[next]
-                            runCatching { contentFocus.requestFocus() }
-                            true
-                        },
-                    horizontalArrangement = Arrangement.spacedBy(32.dp),
+                    Modifier.fillMaxWidth().height(48.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    tabs.forEach { tab ->
-                        Column(
-                            Modifier.height(44.dp).clickable {
+                    tabs.forEachIndexed { index, tab ->
+                        val selected = selectedTab == tab
+                        FocusSurface(
+                            modifier = Modifier.width(96.dp).height(44.dp)
+                                .focusRequester(tabFocuses[index])
+                                .focusProperties {
+                                    left = tabFocuses[(index - 1).coerceAtLeast(0)]
+                                    right = tabFocuses[(index + 1).coerceAtMost(tabs.lastIndex)]
+                                    up = tabFocuses[index]
+                                    down = contentFocus
+                                },
+                            corner = 8.dp,
+                            scaleTo = 1.06f,
+                            onClick = {
                                 selectedTab = tab
-                                runCatching { contentFocus.requestFocus() }
+                                contentFocusRequest++
                             },
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                        ) {
-                            Text(tab, color = if (selectedTab == tab) TextMain else TextSub,
-                                fontSize = 14.sp, fontWeight = if (selectedTab == tab) FontWeight.Medium else FontWeight.Normal)
-                            Spacer(Modifier.height(5.dp))
-                            Box(Modifier.width(28.dp).height(2.dp).background(if (selectedTab == tab) Accent else Color.Transparent))
-                        }
-                    }
-                }
-
-                Column(Modifier.onFocusChanged { if (it.hasFocus) contentHasFocus = true }) {
-                // 选集
-                if (episodes.isNotEmpty()) {
-                    if (selectedTab == "选集") {
-                    MenuLabel("第 ${item.indexNumber ?: 1} 集 / 共 ${episodes.size} 集")
-                    LazyRow(Modifier.heightIn(min = 180.dp, max = 240.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        items(episodes, key = { it.id }) { ep ->
-                            val active = ep.id == item.id
-                            FocusSurface(
-                                modifier = Modifier.width(160.dp).height(90.dp)
-                                    .then(if (ep == episodes.firstOrNull()) Modifier.focusRequester(contentFocus) else Modifier)
-                                    .onFocusChanged { if (it.isFocused) contentHasFocus = true },
-                                corner = 10.dp, scaleTo = 1.08f,
-                                onClick = { if (!active) onPickEpisode(ep) },
-                            ) { focused ->
-                                Column(
-                                    Modifier.fillMaxSize().background(
-                                        when {
-                                            active -> Accent.copy(alpha = 0.9f)
-                                            focused -> Color(0x55FFFFFF)
-                                            else -> Color(0x14FFFFFF)
-                                        }, RoundedCornerShape(10.dp)
-                                    ).padding(8.dp),
-                                    verticalArrangement = Arrangement.Bottom,
-                                ) {
-                                    Text(
-                                        "第 ${ep.indexNumber ?: 0} 集 · ${ep.name}",
-                                        color = if (active) Color(0xFF06101F) else TextMain,
-                                        fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Box(Modifier.fillMaxWidth().height(3.dp).background(Color(0x55000000), RoundedCornerShape(2.dp))) {
-                                        Box(Modifier.fillMaxWidth((ep.playedPercentage / 100.0).toFloat().coerceIn(0f, 1f)).height(3.dp).background(Accent, RoundedCornerShape(2.dp)))
-                                    }
-                                }
+                        ) { focused ->
+                            Column(
+                                Modifier.fillMaxSize().background(
+                                    when {
+                                        focused -> Color(0xE6FFFFFF)
+                                        selected -> Accent.copy(alpha = 0.22f)
+                                        else -> Color.Transparent
+                                    },
+                                    RoundedCornerShape(8.dp),
+                                ),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
+                            ) {
+                                Text(
+                                    tab,
+                                    color = when {
+                                        focused -> Color(0xFF101722)
+                                        selected -> Accent
+                                        else -> TextSub
+                                    },
+                                    fontSize = 14.sp,
+                                    fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                                Spacer(Modifier.height(5.dp))
+                                Box(
+                                    Modifier.width(28.dp).height(2.dp).background(
+                                        if (selected) Accent else Color.Transparent,
+                                    ),
+                                )
                             }
                         }
                     }
-                    }
                 }
 
-                if (selectedTab == "更多") {
-                Spacer(Modifier.height(8.dp))
-                if (onlyMedia3Available) Box(
-                    Modifier.fillMaxWidth().height(38.dp).background(Color(0x14FFFFFF), RoundedCornerShape(10.dp)),
+                Column(
+                    Modifier.heightIn(max = 430.dp).verticalScroll(rememberScrollState())
+                        .padding(horizontal = 4.dp, vertical = 8.dp)
+                        .onFocusChanged { if (it.hasFocus) contentHasFocus = true },
                 ) {
-                    Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("播放内核", color = TextSub, fontSize = 12.sp)
-                        Spacer(Modifier.weight(1f))
-                        Text("M3（当前设备仅支持此内核）", color = TextSub, fontSize = 11.sp)
-                    }
-                } else FocusSurface(
-                    modifier = Modifier.fillMaxWidth().height(38.dp).focusRequester(contentFocus)
-                        .onFocusChanged { contentHasFocus = it.isFocused },
-                    corner = 10.dp, scaleTo = 1.08f,
-                    onClick = onSwitchEngine,
-                ) { focused ->
-                    Row(
-                        Modifier.fillMaxSize().background(
-                            if (focused) Color(0x55FFFFFF) else Color(0x14FFFFFF),
-                            RoundedCornerShape(10.dp),
-                        ).padding(horizontal = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("播放内核", color = if (focused) Accent else TextMain, fontSize = 12.sp)
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            if (activeEngine == "mpv") "mpv" else "M3",
-                            color = TextSub,
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
-
-                // 倍速
-                MenuLabel("倍速播放")
-                Spacer(Modifier.height(8.dp))
-                MenuLabel("音频解码")
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("auto" to "自动", "soft" to "本地软解", "passthrough" to "强制直通").forEach { (mode, label) ->
-                        MenuChip(
-                            label = label, width = 112.dp, active = audioDecodeMode == mode, activeColor = Accent,
-                            focusRequester = if (onlyMedia3Available && mode == "auto") contentFocus else null,
-                            onFocusChanged = if (onlyMedia3Available && mode == "auto") ({ contentHasFocus = it }) else null,
-                            onClick = { onAudioDecodeMode(mode) },
-                        )
-                    }
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SPEEDS.forEach { s ->
-                        val active = kotlin.math.abs(speed - s) < 0.01f
-                        MenuChip(
-                            label = if (s == 1.0f) "1.0x" else "${s}x",
-                            width = 78.dp, active = active, activeColor = Accent,
-                            onClick = { onSpeed(s) },
-                            focusRequester = null,
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(8.dp))
-                MenuLabel("字幕同步 ${if (subtitleOffsetMs >= 0) "+" else ""}${subtitleOffsetMs}ms")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(-100L, 0L, 100L).forEach { step ->
-                        MenuChip(
-                            label = if (step == 0L) "重置" else if (step > 0) "+${step}ms" else "${step}ms",
-                            width = 90.dp,
-                            active = step == 0L && subtitleOffsetMs == 0L,
-                            activeColor = Accent,
-                            onClick = { onSubtitleOffset(if (step == 0L) 0L else subtitleOffsetMs + step) },
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MenuChip(label = "-0.5s", width = 90.dp, active = false, activeColor = Accent,
-                        onClick = { onSubtitleOffset(subtitleOffsetMs - 500L) })
-                    MenuChip(label = "+0.5s", width = 90.dp, active = false, activeColor = Accent,
-                        onClick = { onSubtitleOffset(subtitleOffsetMs + 500L) })
-                }
-
-                Spacer(Modifier.height(16.dp))
-
-                }
                 if (selectedTab == "字幕") {
-                // 字幕
                 MenuLabel("字幕")
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MenuChip(
@@ -383,8 +279,6 @@ internal fun OptionMenu(
                 }
                 if (selectedTab == "音轨") {
                 Spacer(Modifier.height(16.dp))
-
-                // 音轨
                 MenuLabel("音轨")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     audioStreams.forEach { stream ->
@@ -425,7 +319,70 @@ internal fun OptionMenu(
                 if (selectedTab == "更多") {
                 Spacer(Modifier.height(16.dp))
 
-                // 画面比例
+                MenuLabel("常用")
+                MenuLabel("音频解码")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("auto" to "自动", "soft" to "本地软解", "passthrough" to "强制直通").forEachIndexed { index, (mode, label) ->
+                        MenuChip(
+                            label = label,
+                            width = 112.dp,
+                            active = audioDecodeMode == mode,
+                            activeColor = Accent,
+                            focusRequester = if (index == 0) contentFocus else null,
+                            onFocusChanged = if (index == 0) ({ contentHasFocus = it }) else null,
+                            onClick = { onAudioDecodeMode(mode) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                MenuLabel("字幕同步 ${if (subtitleOffsetMs >= 0) "+" else ""}${subtitleOffsetMs}ms")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(-100L, 0L, 100L).forEach { step ->
+                        MenuChip(
+                            label = if (step == 0L) "重置" else if (step > 0) "+${step}ms" else "${step}ms",
+                            width = 90.dp,
+                            active = step == 0L && subtitleOffsetMs == 0L,
+                            activeColor = Accent,
+                            onClick = { onSubtitleOffset(if (step == 0L) 0L else subtitleOffsetMs + step) },
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MenuChip(label = "-0.5s", width = 90.dp, active = false, activeColor = Accent,
+                        onClick = { onSubtitleOffset(subtitleOffsetMs - 500L) })
+                    MenuChip(label = "+0.5s", width = 90.dp, active = false, activeColor = Accent,
+                        onClick = { onSubtitleOffset(subtitleOffsetMs + 500L) })
+                }
+
+                Spacer(Modifier.height(16.dp))
+                MenuLabel("播放")
+                if (onlyMedia3Available) Box(
+                    Modifier.fillMaxWidth().height(38.dp).background(Color(0x14FFFFFF), RoundedCornerShape(10.dp)),
+                ) {
+                    Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("播放内核", color = TextSub, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text("M3（当前设备仅支持此内核）", color = TextSub, fontSize = 11.sp)
+                    }
+                } else FocusSurface(
+                    modifier = Modifier.fillMaxWidth().height(38.dp)
+                        .onFocusChanged { if (it.isFocused) contentHasFocus = true },
+                    corner = 10.dp, scaleTo = 1.08f,
+                    onClick = onSwitchEngine,
+                ) { focused ->
+                    Row(
+                        Modifier.fillMaxSize().background(
+                            if (focused) Color(0x55FFFFFF) else Color(0x14FFFFFF),
+                            RoundedCornerShape(10.dp),
+                        ).padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("播放内核", color = if (focused) Accent else TextMain, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(if (activeEngine == "mpv") "mpv" else "M3", color = TextSub, fontSize = 12.sp)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
                 MenuLabel("画面比例")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(
@@ -443,7 +400,7 @@ internal fun OptionMenu(
 
                 Spacer(Modifier.height(16.dp))
 
-                // 版本（多源）
+                MenuLabel("其它")
                 if (sources.size > 1) {
                     MenuLabel("版本（${sources.size} 个源）")
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -477,7 +434,6 @@ internal fun OptionMenu(
                     Spacer(Modifier.height(16.dp))
                 }
 
-                // 片头记忆
                 MenuLabel("片头")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     MenuChip(
@@ -519,14 +475,21 @@ private fun MenuChip(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
-    var m = Modifier.width(width).height(height)
-    if (focusRequester != null) m = m.focusRequester(focusRequester)
+    val chipFocus = focusRequester ?: remember { FocusRequester() }
+    val m = Modifier.width(width).height(height)
+        .focusRequester(chipFocus)
+        .focusProperties {
+            up = FocusRequester.Default
+            down = FocusRequester.Default
+            left = FocusRequester.Default
+            right = FocusRequester.Default
+        }
     val content: @Composable (Boolean) -> Unit = { focused ->
         Box(
             Modifier.fillMaxSize().background(
                 when {
+                    focused -> Color(0xE6FFFFFF)
                     active -> activeColor.copy(alpha = 0.9f)
-                    focused -> Color(0x55FFFFFF)
                     !enabled -> Color(0x0AFFFFFF)
                     else -> Color(0x14FFFFFF)
                 }, RoundedCornerShape(12.dp)
@@ -535,7 +498,7 @@ private fun MenuChip(
         ) {
             Text(
                 label,
-                color = if (active) Color(0xFF06101F) else if (enabled) TextMain else TextSub.copy(alpha = 0.55f),
+                color = if (focused || active) Color(0xFF06101F) else if (enabled) TextMain else TextSub.copy(alpha = 0.55f),
                 fontSize = 12.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 8.dp),
