@@ -28,7 +28,6 @@ import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -89,8 +88,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -163,7 +160,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 
-private fun calculateHeroHeight(screenHeight: Dp): Dp = minOf(320.dp, screenHeight * 0.55f)
+private fun calculateHeroHeight(screenHeight: Dp): Dp = screenHeight * 0.5f
 
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
@@ -681,7 +678,8 @@ fun HomeScreen(
                             onPlay = onPlay,
                             onOpenDetail = onOpenDetail,
                             playFocus = heroPlayFocus,
-                            onStillsDown = {
+                            onPlayFocused = { scope.launch { recListState.animateScrollToItem(0) } },
+                            onNextCardDown = {
                                 val target = topRenderedRow
                                 if (target == null) false else {
                                     // Reuse RowSection's existing first-card focus/restore path.
@@ -722,7 +720,7 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 200.dp, aspectRatio = 16f / 9f, titleOverlay = true, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, aspectRatio = 16f / 9f, titleOverlay = true, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
@@ -1602,7 +1600,8 @@ private fun Hero(
     onPlay: (MediaItem) -> Unit,
     onOpenDetail: (String) -> Unit,
     playFocus: FocusRequester,
-    onStillsDown: () -> Boolean,
+    onPlayFocused: () -> Unit,
+    onNextCardDown: () -> Boolean,
     hazeState: HazeState,
     onComposed: (Boolean) -> Unit = {},
 ) {
@@ -1619,8 +1618,7 @@ private fun Hero(
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
     val detailFocus = remember { FocusRequester() }
-    val stillsFocus = remember { FocusRequester() }
-    var stillsAvailable by remember { mutableStateOf(false) }
+    val nextCardFocus = remember { FocusRequester() }
     val resolveHeroImage: (MediaItem?) -> String? = { heroItem ->
         heroItem?.let { client?.backdropUrl(it, 1280) }
             ?.takeIf { it.isNotBlank() }
@@ -1739,11 +1737,11 @@ private fun Hero(
                 .background(Ink)
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
-                    // Let normal focus search handle the appended play -> detail -> stills path.
-                    val navigatingStills = "stills" in focusedTargets ||
-                        (stillsAvailable && ("detail" in focusedTargets ||
+                    // Let normal focus search handle the play -> detail -> next-card path.
+                    val navigatingNextCard = "next-card" in focusedTargets ||
+                        (items.size > 1 && ("detail" in focusedTargets ||
                             ("play" in focusedTargets && event.key == Key.DirectionRight)))
-                    if (navigatingStills) return@onPreviewKeyEvent false
+                    if (navigatingNextCard) return@onPreviewKeyEvent false
                     when (event.key) {
                         Key.DirectionLeft -> { lastInteractionAt = System.currentTimeMillis(); onPrevious(); true }
                         Key.DirectionRight -> { lastInteractionAt = System.currentTimeMillis(); onNext(); true }
@@ -1823,10 +1821,12 @@ private fun Hero(
             Row {
                 FocusSurface(
                     modifier = Modifier.height(42.dp).width(128.dp)
+                        .focusProperties { if (items.size > 1) down = nextCardFocus }
                         .onFocusChanged { reportFocus("play", it.hasFocus || it.isFocused) },
                     corner = 21.dp,
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
+                    onFocused = onPlayFocused,
                     onClick = { lastInteractionAt = System.currentTimeMillis(); onPlay(item) },
                 ) { focused ->
                     Row(
@@ -1852,7 +1852,7 @@ private fun Hero(
                 Spacer(Modifier.width(12.dp))
                 FocusSurface(
                     modifier = Modifier.height(42.dp).width(108.dp)
-                        .focusProperties { if (stillsAvailable) right = stillsFocus }
+                        .focusProperties { if (items.size > 1) { right = nextCardFocus; down = nextCardFocus } }
                         .onFocusChanged { reportFocus("detail", it.hasFocus || it.isFocused) },
                     corner = 21.dp,
                     scaleTo = 1.05f,
@@ -1866,22 +1866,6 @@ private fun Hero(
                 }
             }
         }
-            // Overlay, not a weighted Row: the existing 520dp information panel stays unchanged.
-            HeroStills(
-                itemId = item.id,
-                detailId = item.seriesId ?: item.id,
-                focusRequester = stillsFocus,
-                detailFocus = detailFocus,
-                modifier = Modifier.matchParentSize(),
-                onAvailable = { stillsAvailable = it },
-                onFocusChanged = {
-                    reportFocus("stills", it)
-                    if (it) lastInteractionAt = System.currentTimeMillis()
-                },
-                onDown = onStillsDown,
-                onOpenDetail = onOpenDetail,
-            )
-
             Column(
                 Modifier.align(Alignment.BottomEnd).padding(end = 34.dp, bottom = 34.dp),
                 horizontalAlignment = Alignment.End,
@@ -1910,6 +1894,52 @@ private fun Hero(
                                         else Modifier
                                     )
                             )
+                        }
+                    }
+                }
+                if (items.size > 1) {
+                    Spacer(Modifier.height(10.dp))
+                    val nextItem = items[(currentIndex + 1) % items.size]
+                    val nextImage = nextItem.let { client?.backdropUrl(it, 1280) }
+                        ?.takeIf { it.isNotBlank() }
+                        ?: nextItem.let { client?.imageUrl(it, 720) }
+                    FocusSurface(
+                        modifier = Modifier.size(width = 168.dp, height = 94.dp)
+                            .focusRequester(nextCardFocus)
+                            .focusProperties { left = detailFocus }
+                            .onFocusChanged { reportFocus("next-card", it.isFocused) }
+                            .onPreviewKeyEvent { event ->
+                                event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown && onNextCardDown()
+                            },
+                        corner = 9.dp,
+                        scaleTo = FocusScale.POSTER_MEDIUM,
+                        onFocused = { lastInteractionAt = System.currentTimeMillis() },
+                        onClick = { lastInteractionAt = System.currentTimeMillis(); onNext() },
+                    ) { focused ->
+                        Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (focused) 1f else 0.75f }) {
+                            if (!nextImage.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = ImageRequest.Builder(context).data(nextImage).crossfade(true).build(),
+                                    contentDescription = nextItem.seriesName ?: nextItem.name,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                            Box(
+                                Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(48.dp)
+                                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6000000)))),
+                            )
+                            Column(Modifier.align(Alignment.BottomStart).padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                Text("下一个", color = Accent, fontSize = 10.sp, maxLines = 1)
+                                Text(
+                                    nextItem.seriesName ?: nextItem.name,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (focused) Box(Modifier.fillMaxSize().border(1.5.dp, Accent, RoundedCornerShape(9.dp)))
                         }
                     }
                 }
@@ -1972,122 +2002,10 @@ private fun HeroBackdropImage(
 }
 
 @Composable
-private fun HeroStills(
-    itemId: String,
-    detailId: String,
-    focusRequester: FocusRequester,
-    detailFocus: FocusRequester,
-    modifier: Modifier = Modifier,
-    onAvailable: (Boolean) -> Unit,
-    onFocusChanged: (Boolean) -> Unit,
-    onDown: () -> Boolean,
-    onOpenDetail: (String) -> Unit,
-) {
-    val context = LocalContext.current
-    val client = AppRuntime.client
-    val requestedStills = remember(itemId, client) { (1..3).map { index -> client?.heroStillUrl(itemId, index) } }
-    val loadStates = remember { mutableStateMapOf<Int, Boolean>() }
-    val currentOnAvailable by rememberUpdatedState(onAvailable)
-    val alpha = remember { Animatable(0f) }
-    var activeItemId by remember { mutableStateOf(itemId) }
-    var activeStills by remember { mutableStateOf(requestedStills) }
-    var fading by remember { mutableStateOf(false) }
-    val loadedCount = loadStates.count { it.value }
-    val canRender = loadStates[1] == true && loadedCount >= 2
-    val available = !fading && activeItemId == itemId && canRender
-
-    LaunchedEffect(itemId) {
-        if (activeItemId != itemId) {
-            fading = true
-            alpha.animateTo(0f, tween(120))
-            activeItemId = itemId
-            activeStills = requestedStills
-            loadStates.clear()
-            fading = false
-        }
-    }
-    LaunchedEffect(available, activeItemId) {
-        currentOnAvailable(available)
-        if (available) alpha.animateTo(1f, tween(200))
-    }
-
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        val count = if (maxHeight >= 290.dp) 3 else 2
-        val displayed = (1..count).filter { loadStates[it] == true }
-        (1..count).filter { loadStates[it] == null }.forEach { index ->
-            val url = activeStills.getOrNull(index - 1)
-            if (url != null) {
-                AsyncImage(
-                    model = remember(url, client) {
-                        ImageRequest.Builder(context).data(url).crossfade(false).apply {
-                            client?.previewHeaders()?.forEach { (name, value) -> addHeader(name, value) }
-                            addHeader("User-Agent", "LuminaTV/1.22.54 (Android)")
-                        }.build()
-                    },
-                    contentDescription = null,
-                    onSuccess = { loadStates[index] = true },
-                    onError = { loadStates[index] = false },
-                    modifier = Modifier.size(width = 156.dp, height = 88.dp).graphicsLayer { this.alpha = 0f },
-                )
-            }
-        }
-        if (canRender && displayed.size >= 2) {
-            val focused = remember { mutableStateOf(false) }
-            val interaction = remember { MutableInteractionSource() }
-            val imageHeight = 88.dp
-            Column(
-                Modifier.align(Alignment.CenterEnd)
-                    .padding(end = 40.dp)
-                    .width(156.dp)
-                    .graphicsLayer { this.alpha = alpha.value }
-                    .then(if (available) Modifier
-                        .focusRequester(focusRequester)
-                        .focusProperties { left = detailFocus }
-                        .onFocusChanged { focused.value = it.isFocused; onFocusChanged(it.isFocused) }
-                        .onPreviewKeyEvent { event ->
-                            event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown && onDown()
-                        }
-                        .clickable(interactionSource = interaction, indication = null) { onOpenDetail(detailId) }
-                        else Modifier),
-                horizontalAlignment = Alignment.End,
-            ) {
-                Text("剧照", color = Color.White.copy(alpha = if (focused.value) 0.9f else 0.6f), fontSize = 10.sp)
-                Spacer(Modifier.height(4.dp))
-                displayed.forEach { index ->
-                    val url = activeStills.getOrNull(index - 1) ?: return@forEach
-                    Box(
-                        Modifier.width(156.dp).height(imageHeight)
-                            .clip(RoundedCornerShape(8.dp))
-                            .graphicsLayer { this.alpha = if (focused.value && index != 1) 0.65f else 1f },
-                    ) {
-                        AsyncImage(
-                            model = remember(url, client) {
-                                ImageRequest.Builder(context).data(url).crossfade(false).apply {
-                                    client?.previewHeaders()?.forEach { (name, value) -> addHeader(name, value) }
-                                    addHeader("User-Agent", "LuminaTV/1.22.54 (Android)")
-                                }.build()
-                            },
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            onSuccess = { loadStates[index] = true },
-                            onError = { loadStates[index] = false },
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                        if (focused.value && index == 1 && available) {
-                            Box(Modifier.fillMaxSize().border(1.5.dp, Accent, RoundedCornerShape(8.dp)))
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun RowSection(
     title: String,
     items: List<MediaItem>,
-    width: Dp = 200.dp,
+    width: Dp = 170.dp,
     aspectRatio: Float = 1.5f,
     titleOverlay: Boolean = false,
     requestInitialFocus: Boolean = false,
