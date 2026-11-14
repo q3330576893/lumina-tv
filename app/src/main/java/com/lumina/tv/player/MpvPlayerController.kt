@@ -27,6 +27,7 @@ class MpvPlayerController(
         val ended: Boolean = false,
         val error: String? = null,
         val audioSilentCodec: String? = null,
+        val cacheSpeedBytesPerSecond: Long = 0L,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -71,6 +72,7 @@ class MpvPlayerController(
     private var audioStreams: List<MediaStream> = emptyList()
     private var preferredAudioIndex: Int? = null
     private var audioSilentCodec: String? = null
+    private var cacheSpeedBytesPerSecond = 0L
     private val audioOutputCheck = Runnable { checkAudioOutput() }
 
     init {
@@ -110,6 +112,7 @@ class MpvPlayerController(
                 engine.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 engine.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 engine.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+                engine.observeProperty("cache-speed", MPVLib.MpvFormat.MPV_FORMAT_INT64)
                 engine.observeProperty("video-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
                 engine.observeProperty("audio-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
                 engine.observeProperty("audio-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
@@ -431,6 +434,10 @@ class MpvPlayerController(
         }
     }
     override fun eventProperty(property: String, value: Long) {
+        if (property == "cache-speed") {
+            cacheSpeedBytesPerSecond = value.coerceAtLeast(0L)
+            emit()
+        }
         if (property == "video-params/w" || property == "video-params/h") {
             synchronized(observedProperties) { observedProperties[property] = value.toString() }
             appendMpvLog("${timestamp()} property $property=$value")
@@ -500,7 +507,7 @@ class MpvPlayerController(
         ended: Boolean = false,
         error: String? = null,
     ) {
-        onState(State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec))
+        onState(State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec, cacheSpeedBytesPerSecond))
     }
 
     private companion object {

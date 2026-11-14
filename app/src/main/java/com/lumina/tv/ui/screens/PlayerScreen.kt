@@ -65,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -395,9 +396,20 @@ fun PlayerScreen(
         if (own != null) own
         else item.seriesId?.let { sid -> LibraryCache.detailStale(sid)?.item?.let { c?.logoUrl(it) } }
     }
+    val displayTitle = buildString {
+        append(item.seriesName ?: item.name)
+        if (item.seriesId != null && item.indexNumber != null) {
+            append(" · S")
+            append((item.parentIndexNumber ?: 0).toString().padStart(2, '0'))
+            append("E")
+            append(item.indexNumber.toString().padStart(2, '0'))
+        }
+    }
 
     val hideFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    val menuFocus = remember { FocusRequester() }
+    var titleLogoFailed by remember(item.id) { mutableStateOf(false) }
 
     var okDownAt by remember(item.id) { mutableLongStateOf(0L) }
 
@@ -2023,7 +2035,12 @@ fun PlayerScreen(
                     }
                 }
 
-                Box(Modifier.align(Alignment.Center)) {
+                Box(
+                    Modifier.align(Alignment.Center).focusProperties {
+                        right = menuFocus
+                        down = menuFocus
+                    },
+                ) {
                     CtrlButton(
                         if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                         if (isPlaying) "暂停" else "播放",
@@ -2032,26 +2049,68 @@ fun PlayerScreen(
                     ) { togglePlayback() }
                 }
 
-                Box(
+                Box(Modifier.align(Alignment.TopStart).padding(start = 32.dp, top = 24.dp).widthIn(max = 320.dp)) {
+                    if (!titleLogo.isNullOrBlank() && !titleLogoFailed) {
+                        AsyncImage(
+                            model = titleLogo,
+                            contentDescription = displayTitle,
+                            contentScale = ContentScale.Fit,
+                            alignment = Alignment.CenterStart,
+                            onError = { titleLogoFailed = true },
+                            modifier = Modifier.widthIn(max = 320.dp).heightIn(max = 52.dp),
+                        )
+                    } else {
+                        Text(
+                            displayTitle,
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                Column(
                     Modifier.align(Alignment.TopEnd).padding(top = 24.dp, end = 32.dp),
+                    horizontalAlignment = Alignment.End,
                 ) {
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(clockText, color = Color.White.copy(alpha = 0.6f), fontSize = 14.sp)
-                        Spacer(Modifier.height(8.dp))
-                        FocusSurface(
-                            modifier = Modifier.size(28.dp),
-                            corner = 6.dp,
-                            scaleTo = 1.08f,
-                            onClick = { optionMenu = true },
-                        ) { focused ->
-                            Box(
-                                Modifier.fillMaxSize().background(
-                                    if (focused) Color(0x44FFFFFF) else Color(0x22FFFFFF), RoundedCornerShape(6.dp),
-                                ),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(Icons.Rounded.MoreVert, contentDescription = "更多播放选项", tint = TextMain, modifier = Modifier.size(20.dp))
-                            }
+                    Text(
+                        if (speed == 1f) clockText else "$clockText  ${"%.1f".format(Locale.US, speed)}x",
+                        color = Color.White.copy(alpha = 0.8f),
+                        fontSize = 14.sp,
+                    )
+                    val networkBytesPerSecond = if (activeEngine == "mpv") {
+                        mpvState.cacheSpeedBytesPerSecond
+                    } else {
+                        estimatedBitrate / 8L
+                    }
+                    if (networkBytesPerSecond > 0L) {
+                        val networkSpeed = if (networkBytesPerSecond >= 1_000_000L) {
+                            "%.1f MB/s".format(Locale.US, networkBytesPerSecond / 1_000_000.0)
+                        } else {
+                            "${(networkBytesPerSecond / 1_000L).coerceAtLeast(1L)} KB/s"
+                        }
+                        Text(networkSpeed, color = Color.White.copy(alpha = 0.68f), fontSize = 12.sp)
+                    }
+                }
+
+                Box(Modifier.align(Alignment.BottomEnd).padding(end = 36.dp, bottom = 112.dp)) {
+                    FocusSurface(
+                        modifier = Modifier.size(36.dp).focusRequester(menuFocus).focusProperties {
+                            left = playFocus
+                            up = playFocus
+                        },
+                        corner = 6.dp,
+                        scaleTo = 1.08f,
+                        onClick = { optionMenu = true },
+                    ) { focused ->
+                        Box(
+                            Modifier.fillMaxSize().background(
+                                if (focused) Color(0x44FFFFFF) else Color(0x22FFFFFF), RoundedCornerShape(6.dp),
+                            ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Rounded.MoreVert, contentDescription = "更多播放选项", tint = TextMain, modifier = Modifier.size(22.dp))
                         }
                     }
                 }
