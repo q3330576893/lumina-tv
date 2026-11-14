@@ -20,6 +20,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.delay
@@ -320,6 +321,10 @@ fun HomeScreen(
         when {
             sortMenuOpen -> closeSortMenu()
             libraryServerMenuOpen -> libraryServerMenuOpen = false
+            tab == HomeTab.Media && selectedLibraryId != null -> {
+                selectedLibraryId = null
+                gridItems = emptyList()
+            }
             tab != HomeTab.Recommend -> {
                 tab = HomeTab.Recommend
                 selectedLibraryId = null
@@ -613,6 +618,9 @@ fun HomeScreen(
     }
     val topRenderedRowKey = topRenderedRow?.first
     val navFocus = remember { FocusRequester() }
+    val libraryBackFocus = remember { FocusRequester() }
+    val librarySortFocus = remember { FocusRequester() }
+    val libraryGridColumns = ((LocalConfiguration.current.screenWidthDp - 80 + 20) / 150).coerceAtLeast(1)
 
     val heroPlayFocus = remember { FocusRequester() }
     // Hero 在 LazyColumn 里，滚出屏幕会被回收 → heroPlayFocus 变成未挂载，
@@ -738,28 +746,31 @@ fun HomeScreen(
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
-                        Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 92.dp, bottom = 12.dp),
+                        Modifier.fillMaxWidth().height(96.dp).padding(start = 40.dp, end = 40.dp, top = 24.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        FocusSurface(modifier = Modifier.height(40.dp).width(44.dp), corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text("‹", color = if (focused) Accent else TextMain, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                        FocusSurface(modifier = Modifier.size(40.dp).focusRequester(libraryBackFocus).focusProperties { right = librarySortFocus }, corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
+                            Box(
+                                Modifier.fillMaxSize().then(if (focused) Modifier.border(1.dp, Accent, CircleShape) else Modifier),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("‹", color = if (focused) Accent else TextMain, fontSize = 20.sp, fontWeight = FontWeight.Medium)
                             }
                         }
                         Spacer(Modifier.width(16.dp))
                         Column(Modifier.widthIn(max = 260.dp)) {
                             Text(
                                 selectedLibrary?.name.orEmpty(),
-                                color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                                color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Medium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
-                            Text(libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextSub, fontSize = 11.sp)
+                            Text(libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextMain.copy(alpha = 0.6f), fontSize = 11.sp)
                         }
                         Spacer(Modifier.weight(1f))
                         Box {
                             FocusSurface(
-                                modifier = Modifier.height(40.dp).width(112.dp),
-                                corner = 20.dp, scaleTo = 1.03f,
+                                modifier = Modifier.height(36.dp).widthIn(min = 116.dp).focusRequester(librarySortFocus).focusProperties { left = libraryBackFocus },
+                                corner = 18.dp, scaleTo = 1.06f,
                                 requestFocus = restoreSortFocus,
                                 onClick = { sortMenuOpen = true },
                             ) { focused ->
@@ -767,17 +778,20 @@ fun HomeScreen(
                                     Modifier.fillMaxSize()
                                         .background(
                                             if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
-                                            RoundedCornerShape(20.dp),
+                                            RoundedCornerShape(18.dp),
                                         )
                                         .then(
-                                            if (focused) Modifier.border(1.dp, Accent.copy(alpha = 0.7f), RoundedCornerShape(20.dp))
-                                            else Modifier.border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(20.dp))
+                                            if (focused) Modifier.border(1.dp, Accent.copy(alpha = 0.7f), RoundedCornerShape(18.dp))
+                                            else Modifier.border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(18.dp))
                                         ),
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("排序", color = if (focused) Accent else TextSub, fontSize = 9.sp, lineHeight = 11.sp)
-                                        Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                    Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                                        Spacer(Modifier.width(5.dp))
+                                        Text(if (librarySortOrder == "Ascending") "↑" else "↓", color = if (focused) Accent else TextMain, fontSize = 10.sp)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("⌄", color = if (focused) Accent else TextSub, fontSize = 12.sp)
                                     }
                                 }
                             }
@@ -824,34 +838,33 @@ fun HomeScreen(
                                                 Text(label, color = if (itemFocused || selected) TextMain else TextSub, fontSize = 14.sp)
                                             }
                                         }
-                                        var orderFocused by remember { mutableStateOf(false) }
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(44.dp)
-                                                .onFocusChanged { orderFocused = it.isFocused }
-                                                .focusable()
-                                                .clickable(
-                                                    interactionSource = remember { MutableInteractionSource() },
-                                                    indication = null,
-                                                ) {
-                                                    val nextOrder = if (librarySortOrder == "Ascending") "Descending" else "Ascending"
-                                                    librarySortOrder = nextOrder
-                                                    AppRuntime.prefs?.librarySortOrder = nextOrder
-                                                    LibraryCache.clearGridPosition(gridStateKey)
-                                                    scope.launch { runCatching { gridState.scrollToItem(0) } }
-                                                    closeSortMenu()
-                                                }
-                                                .background(if (orderFocused) Color(0x26FFFFFF) else Color.Transparent, RoundedCornerShape(10.dp))
-                                                .padding(horizontal = 18.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Spacer(Modifier.width(22.dp))
-                                            Text(
-                                                if (librarySortOrder == "Ascending") "升序 ↑" else "降序 ↓",
-                                                color = TextMain,
-                                                fontSize = 14.sp,
-                                            )
+                                        Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).height(1.dp).background(Color(0x26FFFFFF)))
+                                        listOf("Descending" to "降序 ↓", "Ascending" to "升序 ↑").forEach { (order, label) ->
+                                            val selected = librarySortOrder == order
+                                            var orderFocused by remember(order) { mutableStateOf(false) }
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(44.dp)
+                                                    .onFocusChanged { orderFocused = it.isFocused }
+                                                    .focusable()
+                                                    .clickable(
+                                                        interactionSource = remember { MutableInteractionSource() },
+                                                        indication = null,
+                                                    ) {
+                                                        librarySortOrder = order
+                                                        AppRuntime.prefs?.librarySortOrder = order
+                                                        LibraryCache.clearGridPosition(gridStateKey)
+                                                        scope.launch { runCatching { gridState.scrollToItem(0) } }
+                                                        closeSortMenu()
+                                                    }
+                                                    .background(if (orderFocused) Color(0x26FFFFFF) else if (selected) Accent.copy(alpha = 0.20f) else Color.Transparent, RoundedCornerShape(10.dp))
+                                                    .padding(horizontal = 18.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Text(if (selected) "✓" else "", color = Accent, fontSize = 14.sp, modifier = Modifier.width(22.dp))
+                                                Text(label, color = if (orderFocused || selected) TextMain else TextSub, fontSize = 14.sp)
+                                            }
                                         }
                                     }
                             }
@@ -873,7 +886,7 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
-                            PosterCard(item = media, imageUrl = client?.imageUrl(media), requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0), onFocused = { focusedMediaId = media.id }, onClick = { onOpenDetail(media.id) })
+                            PosterCard(item = media, imageUrl = client?.imageUrl(media), requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0), upFocus = if (index < libraryGridColumns) librarySortFocus else null, onFocused = { focusedMediaId = media.id }, onClick = { onOpenDetail(media.id) })
                         }
                         if (gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
                             androidx.compose.material3.CircularProgressIndicator(Modifier.padding(20.dp).size(24.dp), color = Accent, strokeWidth = 2.dp)
@@ -912,7 +925,7 @@ fun HomeScreen(
                 modifier = Modifier.align(Alignment.TopEnd).zIndex(3f).padding(top = 18.dp, end = 34.dp),
             )
         }
-        NavBar(
+        if (!(tab == HomeTab.Media && selectedLibraryId != null)) NavBar(
             modifier = Modifier.fillMaxWidth().wrapContentHeight().zIndex(2f),
                 tab = tab,
                 onSelect = { t, _ -> tab = t; selectedLibraryId = null },
@@ -1297,6 +1310,8 @@ private fun sortParams(sort: String, order: String): Pair<String, String> = when
     "rating" -> "CommunityRating" to order
     "year" -> "ProductionYear" to order
     "plays" -> "PlayCount" to order
+    "runtime" -> "Runtime" to order
+    "random" -> "Random" to "Ascending"
     else -> "DateCreated" to order
 }
 
@@ -1306,6 +1321,8 @@ private val SORT_LABELS = linkedMapOf(
     "rating" to "评分",
     "year" to "年份",
     "plays" to "播放次数",
+    "runtime" to "时长",
+    "random" to "随机",
 )
 
 @Composable
