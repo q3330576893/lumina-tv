@@ -160,8 +160,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 
-private fun calculateHeroHeight(screenHeight: Dp): Dp = screenHeight * 0.5f
-
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
     Media("媒体库"),
@@ -622,8 +620,7 @@ fun HomeScreen(
     val libraryGridColumns = ((LocalConfiguration.current.screenWidthDp - 80 + 20) / 150).coerceAtLeast(1)
 
     val heroPlayFocus = remember { FocusRequester() }
-    // Hero 在 LazyColumn 里，滚出屏幕会被回收 → heroPlayFocus 变成未挂载，
-    // 此时其它行的 focusProperties.up 指向它就会抛 "FocusRequester is not initialized" 而闪退。
+    // Keep a Cancel fallback until the persistent hero focus target is composed.
     var heroComposed by remember { mutableStateOf(false) }
     val navContentFocus = when (tab) {
         HomeTab.Recommend -> if (heroComposed) heroPlayFocus else FocusRequester.Cancel
@@ -638,6 +635,47 @@ fun HomeScreen(
             runCatching { navFocus.requestFocus() }.isSuccess
         } else false
     }) {
+        if (tab == HomeTab.Recommend) {
+            val displayedHeroItems = heroItems.ifEmpty { listOfNotNull(hero) }
+            Hero(
+                items = displayedHeroItems,
+                currentIndex = heroIndex,
+                onPrevious = {
+                    if (displayedHeroItems.isNotEmpty()) {
+                        heroIndex = (heroIndex - 1 + displayedHeroItems.size) % displayedHeroItems.size
+                    }
+                },
+                onNext = {
+                    if (displayedHeroItems.isNotEmpty()) {
+                        heroIndex = (heroIndex + 1) % displayedHeroItems.size
+                    }
+                },
+                onSelectIndex = { heroIndex = it },
+                onPlay = onPlay,
+                onOpenDetail = onOpenDetail,
+                playFocus = heroPlayFocus,
+                onPlayFocused = { scope.launch { recListState.animateScrollToItem(0) } },
+                onNextCardDown = {
+                    val target = topRenderedRow
+                    if (target == null) false else {
+                        // Reuse RowSection's existing first-card focus/restore path.
+                        scope.launch {
+                            focusedMediaId = null
+                            focusedMediaSection = null
+                            val firstContentIndex = 2 + if (resume.isEmpty() && favorites.isEmpty()) 1 else 0
+                            recListState.animateScrollToItem(firstContentIndex)
+                            withFrameNanos { }
+                            withFrameNanos { }
+                            focusedMediaSection = target.first
+                            focusedMediaId = target.second.first().id
+                        }
+                        true
+                    }
+                },
+                hazeState = hazeState,
+                onComposed = { heroComposed = it },
+            )
+        }
         when {
             loading -> LoadingView(text = "正在读取影库…")
                 error != null -> Column(
@@ -659,47 +697,7 @@ fun HomeScreen(
                         state = recListState,
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                    item {
-                        val displayedHeroItems = heroItems.ifEmpty { listOfNotNull(hero) }
-                        Hero(
-                            items = displayedHeroItems,
-                            currentIndex = heroIndex,
-                            onPrevious = {
-                                if (displayedHeroItems.isNotEmpty()) {
-                                    heroIndex = (heroIndex - 1 + displayedHeroItems.size) % displayedHeroItems.size
-                                }
-                            },
-                            onNext = {
-                                if (displayedHeroItems.isNotEmpty()) {
-                                    heroIndex = (heroIndex + 1) % displayedHeroItems.size
-                                }
-                            },
-                            onSelectIndex = { heroIndex = it },
-                            onPlay = onPlay,
-                            onOpenDetail = onOpenDetail,
-                            playFocus = heroPlayFocus,
-                            onPlayFocused = { scope.launch { recListState.animateScrollToItem(0) } },
-                            onNextCardDown = {
-                                val target = topRenderedRow
-                                if (target == null) false else {
-                                    // Reuse RowSection's existing first-card focus/restore path.
-                                    scope.launch {
-                                        focusedMediaId = null
-                                        focusedMediaSection = null
-                                        val firstContentIndex = 2 + if (resume.isEmpty() && favorites.isEmpty()) 1 else 0
-                                        recListState.animateScrollToItem(firstContentIndex)
-                                        withFrameNanos { }
-                                        withFrameNanos { }
-                                        focusedMediaSection = target.first
-                                        focusedMediaId = target.second.first().id
-                                    }
-                                    true
-                                }
-                            },
-                            hazeState = hazeState,
-                            onComposed = { heroComposed = it },
-                        )
-                    }
+                    item { Spacer(Modifier.height(250.dp)) }
                     if (!loading && resume.isEmpty() && favorites.isEmpty()) {
                         item {
                             FocusSurface(
@@ -720,7 +718,7 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, aspectRatio = 16f / 9f, titleOverlay = true, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, titleOverlay = true, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, upFocus = if (hero != null && heroComposed && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
@@ -742,6 +740,12 @@ fun HomeScreen(
                     }
                     item { Spacer(Modifier.height(140.dp)) }
                     }
+                    Text(
+                        "↓ 下面还有 ${homeLibraries.count { viewContents[it.id].orEmpty().isNotEmpty() } + (if (resume.isNotEmpty()) 1 else 0) + (if (favorites.isNotEmpty()) 1 else 0)} 行",
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
+                        color = TextSub.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                    )
                 }
                 tab == HomeTab.Media && selectedLibrary == null -> MediaLibrary(
                     views = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) },
@@ -1207,7 +1211,6 @@ private fun TopNavBar(
     contentFocus: FocusRequester,
     hazeState: HazeState,
 ) {
-    val glassShape = RoundedCornerShape(24.dp)
     val entries = listOf(
         Triple("首页", Icons.Rounded.Home, tab == HomeTab.Recommend),
         Triple("收藏", Icons.Rounded.Favorite, tab == HomeTab.Favorites),
@@ -1217,20 +1220,6 @@ private fun TopNavBar(
     )
     Row(
         modifier
-            .shadow(18.dp, glassShape, clip = false)
-            .clip(glassShape)
-            .then(
-                if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
-                    state = hazeState,
-                    style = HazeStyle(
-                        backgroundColor = ThemeRuntime.frostFallback,
-                        tint = HazeTint(ThemeRuntime.frostTint),
-                        blurRadius = ThemeRuntime.glassBlurRadius,
-                        noiseFactor = 0f,
-                    ),
-                ) else Modifier.background(ThemeRuntime.frostFallback)
-            )
-            .border(1.dp, ThemeRuntime.glassEdge, glassShape)
             .height(48.dp)
             .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1727,13 +1716,10 @@ private fun Hero(
         val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
         context.imageLoader.enqueue(request)
     }
-    val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
-    Box(Modifier.hazeSource(hazeState).fillMaxWidth()) {
+    Box(Modifier.hazeSource(hazeState).fillMaxSize()) {
         Box(
             Modifier
-                .fillMaxWidth()
-                .height(heroHeight)
-                .clip(RoundedCornerShape(bottomEnd = 34.dp))
+                .fillMaxSize()
                 .background(Ink)
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
@@ -1770,18 +1756,18 @@ private fun Hero(
             Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
                     0.00f to Color.Transparent,
-                    0.50f to Ink.copy(alpha = 0.00f),
-                    0.62f to Ink.copy(alpha = 0.16f),
-                    0.78f to Ink.copy(alpha = 0.58f),
-                    0.92f to Ink.copy(alpha = 0.88f),
-                    1.00f to Ink,
+                    0.42f to Color.Transparent,
+                    0.58f to Ink.copy(alpha = 0.25f),
+                    0.72f to Ink.copy(alpha = 0.62f),
+                    0.88f to Ink.copy(alpha = 0.86f),
+                    1.00f to Ink.copy(alpha = 0.94f),
                 )
             )
         )
         Column(
-            Modifier.align(Alignment.BottomStart).padding(start = 34.dp, bottom = 24.dp).widthIn(max = 520.dp)
+            Modifier.align(Alignment.TopStart).padding(start = 40.dp, top = 110.dp).widthIn(max = 520.dp)
         ) {
-            Text("为你推荐", color = Accent, fontSize = 11.sp, letterSpacing = 2.sp)
+            Text("为你推荐", color = TextSub, fontSize = 11.sp, letterSpacing = 2.sp)
             Spacer(Modifier.height(8.dp))
             if (!titleLogo.isNullOrBlank()) {
                 AsyncImage(
@@ -1831,21 +1817,16 @@ private fun Hero(
                 ) { focused ->
                     Row(
                         Modifier.fillMaxSize().background(
-                            Brush.horizontalGradient(
-                                listOf(
-                                    Accent.copy(alpha = if (focused) 1f else 0.9f),
-                                    Color(0xFF9B8CFF).copy(alpha = if (focused) 1f else 0.9f),
-                                )
-                            )
+                            Color(0xFFE8ECF2)
                         ),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF06101F), modifier = Modifier.size(20.dp))
+                        Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF0B1018), modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
                             if (item.positionTicks > 0) "继续播放" else "立即播放",
-                            color = Color(0xFF06101F), fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                            color = Color(0xFF0B1018), fontSize = 16.sp, fontWeight = FontWeight.Bold,
                         )
                     }
                 }
@@ -1860,14 +1841,14 @@ private fun Hero(
                     onClick = { onOpenDetail(item.seriesId ?: item.id) },
                 ) { focused ->
                     Box(
-                        Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
+                        Modifier.fillMaxSize().background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF)),
                         contentAlignment = Alignment.Center,
-                    ) { Text("查看详情", color = TextMain, fontSize = 13.sp) }
+                    ) { Text("查看详情", color = Color(0xFFE8ECF2), fontSize = 13.sp) }
                 }
             }
         }
             Column(
-                Modifier.align(Alignment.BottomEnd).padding(end = 34.dp, bottom = 34.dp),
+                Modifier.align(Alignment.TopEnd).padding(end = 40.dp, top = 150.dp),
                 horizontalAlignment = Alignment.End,
             ) {
                 Row(
@@ -1886,11 +1867,11 @@ private fun Hero(
                             Box(
                                 Modifier.fillMaxSize()
                                     .background(
-                                        if (index == currentIndex) Accent else Color(0x99FFFFFF),
+                                        if (index == currentIndex) Color(0xFFE8ECF2) else Color(0x55FFFFFF),
                                         RoundedCornerShape(4.dp),
                                     )
                                     .then(
-                                        if (focused) Modifier.border(1.dp, Accent, RoundedCornerShape(4.dp))
+                                        if (focused) Modifier.border(1.dp, Color(0xFFC9D2DE), RoundedCornerShape(4.dp))
                                         else Modifier
                                     )
                             )
@@ -1925,21 +1906,7 @@ private fun Hero(
                                     modifier = Modifier.fillMaxSize(),
                                 )
                             }
-                            Box(
-                                Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(48.dp)
-                                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6000000)))),
-                            )
-                            Column(Modifier.align(Alignment.BottomStart).padding(horizontal = 8.dp, vertical = 6.dp)) {
-                                Text("下一个", color = Accent, fontSize = 10.sp, maxLines = 1)
-                                Text(
-                                    nextItem.seriesName ?: nextItem.name,
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            if (focused) Box(Modifier.fillMaxSize().border(1.5.dp, Accent, RoundedCornerShape(9.dp)))
+                            if (focused) Box(Modifier.fillMaxSize().border(1.5.dp, Color(0xFFC9D2DE), RoundedCornerShape(9.dp)))
                         }
                     }
                 }
