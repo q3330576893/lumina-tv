@@ -769,8 +769,8 @@ fun HomeScreen(
                         Spacer(Modifier.weight(1f))
                         Box {
                             FocusSurface(
-                                modifier = Modifier.height(36.dp).widthIn(min = 116.dp).focusRequester(librarySortFocus).focusProperties { left = libraryBackFocus },
-                                corner = 18.dp, scaleTo = 1.06f,
+                                modifier = Modifier.height(40.dp).width(112.dp).focusRequester(librarySortFocus).focusProperties { left = libraryBackFocus },
+                                corner = 20.dp, scaleTo = 1.03f,
                                 requestFocus = restoreSortFocus,
                                 onClick = { sortMenuOpen = true },
                             ) { focused ->
@@ -778,20 +778,17 @@ fun HomeScreen(
                                     Modifier.fillMaxSize()
                                         .background(
                                             if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
-                                            RoundedCornerShape(18.dp),
+                                            RoundedCornerShape(20.dp),
                                         )
                                         .then(
-                                            if (focused) Modifier.border(1.dp, Accent.copy(alpha = 0.7f), RoundedCornerShape(18.dp))
-                                            else Modifier.border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(18.dp))
+                                            if (focused) Modifier.border(1.dp, Accent.copy(alpha = 0.7f), RoundedCornerShape(20.dp))
+                                            else Modifier.border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(20.dp))
                                         ),
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-                                        Spacer(Modifier.width(5.dp))
-                                        Text(if (librarySortOrder == "Ascending") "↑" else "↓", color = if (focused) Accent else TextMain, fontSize = 10.sp)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("⌄", color = if (focused) Accent else TextSub, fontSize = 12.sp)
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text("排序", color = if (focused) Accent else TextSub, fontSize = 9.sp, lineHeight = 11.sp)
+                                        Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                                     }
                                 }
                             }
@@ -1430,16 +1427,6 @@ private fun HomeLibraryRow(
                         Box(
                             Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(0.4f)
                                 .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f)))),
-                        )
-                        Text(
-                            view.name,
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 12.dp)
-                                .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
-                                .padding(horizontal = 8.dp, vertical = 3.dp),
                         )
                         counts[view.id]?.let { count ->
                             Text(
