@@ -299,7 +299,7 @@ fun PlayerScreen(
     }
     var softDecodeNoticeShown by remember(item.id) { mutableStateOf(false) }
     var mpvFallbackTried by remember(item.id) { mutableStateOf(false) }
-    var ffmpegFallback by remember(item.id) { mutableStateOf(false) }
+    var rebuildRetry by remember(item.id) { mutableStateOf(false) }
     // 用户手动选过内核、或已确认 media3 解不了时，把内核钉住，后续重载不再强行弹回 media3
     var enginePinned by remember(item.id) { mutableStateOf<String?>(null) }
     var activeEngine by remember(item.id) {
@@ -367,7 +367,12 @@ fun PlayerScreen(
     var prewarmJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var seekHint by remember { mutableStateOf<String?>(null) }
     var currentResolution by remember { mutableStateOf<String?>(null) }
-    var subScale by remember { mutableFloatStateOf(when (AppRuntime.prefs?.subtitleScale) { null -> 1.3f; 1.5f -> 2.0f; else -> AppRuntime.prefs?.subtitleScale ?: 1.3f }) }
+    var subScale by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitleScale ?: 1.0f) }
+    var subtitleColor by remember { mutableIntStateOf(AppRuntime.prefs?.subtitleColor ?: android.graphics.Color.WHITE) }
+    var subtitleOutline by remember { mutableStateOf(AppRuntime.prefs?.subtitleOutline ?: true) }
+    var subtitlePosition by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitlePosition ?: 0.08f) }
+    var subtitleBg by remember { mutableStateOf(AppRuntime.prefs?.subtitleBg ?: false) }
+    var subtitlePreference by remember(item.id) { mutableStateOf(AppRuntime.prefs?.subtitlePreferenceFor(item.id)) }
     var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
     var nextEpisode by remember { mutableStateOf<MediaItem?>(null) }
     var nextCountdown by remember { mutableIntStateOf(0) }
@@ -463,7 +468,7 @@ fun PlayerScreen(
     val subtitleRenderersFactory = remember(item.id) { SubtitleRenderersFactory(context) }
     val fastStart = AppRuntime.prefs?.fastStart != false
 
-    val exo = remember(item.id, ffmpegFallback, fastStart) {
+    val exo = remember(item.id, rebuildRetry, fastStart) {
         val preference = AppRuntime.prefs?.decoderPreference ?: "auto"
         val codecSelector = MediaCodecSelector { mimeType, secure, tunneling ->
             val dvMime = mimeType.equals("video/dolby-vision", ignoreCase = true)
@@ -627,6 +632,7 @@ fun PlayerScreen(
                     )
                 val target = resolvedTarget
                 if (generation != sessionGeneration) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
+                httpFactory.setDefaultRequestProperties(target.headers)
                 phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
                 negotiationDiagnostics = target.negotiationDiagnostics
                 currentPlayMethod = target.playMethod
@@ -694,8 +700,6 @@ fun PlayerScreen(
                 }
                 currentResolution = target.source?.resolution
                     ?: if (target.direct) null else "转码"
-                // 透传 STRM 的 Referer/User-Agent 等请求头
-                if (target.headers.isNotEmpty()) httpFactory.setDefaultRequestProperties(target.headers)
                 val cacheLimit = AppRuntime.prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L
                 PlaybackCache.setLimit(cacheLimit)
                 val upstreamFactory = DefaultHttpDataSource.Factory()
@@ -757,6 +761,11 @@ fun PlayerScreen(
                             return@MpvPlayerController
                         }
                         mpvState = state
+                        if (state.subtitleNotice != null) {
+                            AppRuntime.prefs?.rememberSubtitleTrack(item.id, "auto")
+                            subtitlePreference = "auto"
+                            playbackStatusNotice = state.subtitleNotice
+                        }
                         position = state.positionMs
                         if (state.durationMs > 0L) duration = state.durationMs
                         if (state.ready && !firstFrameRendered) {
@@ -782,7 +791,7 @@ fun PlayerScreen(
                             mpvBackend?.release("mpv-state-error")
                             mpvBackend = null
                             degraded = true
-                            ffmpegFallback = true
+                            rebuildRetry = true
                             activeEngine = "media3"
                             requestPlaybackReload(position, generation)
                         }
@@ -791,9 +800,20 @@ fun PlayerScreen(
                         ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
                         ?: mediaSources.firstOrNull()?.audioStreams.orEmpty()
                     backend.setAudioStreams(mpvAudioStreams)
+                    val mpvSubtitleStreams = playbackSource?.subtitleStreams
+                        ?: mediaSources.firstOrNull { it.id == currentSourceId }?.subtitleStreams
+                        ?: mediaSources.firstOrNull()?.subtitleStreams.orEmpty()
+                    backend.setSubtitleStreams(mpvSubtitleStreams)
                     val subtitleSp = when { subScale >= 2.3f -> 38.4f; subScale >= 1.9f -> 32f; subScale >= 1.5f -> 25.6f; subScale >= 1.2f -> 20.8f; else -> 16f }
                     backend.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
+                    backend.setSubtitleStyle(subtitleColor, subtitleOutline, subtitlePosition, subtitleBg)
                     backend.setAudioTrack(audioStreamIndex ?: -1)
+                    when (AppRuntime.prefs?.subtitleModeFor(item.id)) {
+                        com.lumina.tv.data.Prefs.SubtitleMode.OFF -> backend.disableSubtitle()
+                        com.lumina.tv.data.Prefs.SubtitleMode.TRACK -> AppRuntime.prefs?.subtitleTrackFor(item.id)
+                            ?.removePrefix("emby:")?.toIntOrNull()?.let { backend.setSubtitleTrack(it) }
+                        else -> backend.enableSubtitleAuto()
+                    }
                     pendingResumePositionMs = -1L
                     val unavailable = backend.unavailableReason
                     if (unavailable != null) {
@@ -802,7 +822,7 @@ fun PlayerScreen(
                         mpvBackend = null
                         runCatching { backend.release("mpv-unavailable") }
                         degraded = true
-                        ffmpegFallback = true
+                        rebuildRetry = true
                         error = if (AppRuntime.prefs?.playerEngine == "auto") {
                             "该设备不支持 mpv 内核，已回退 Media3"
                         } else {
@@ -823,7 +843,7 @@ fun PlayerScreen(
                         mpvBackend = null
                         error = "播放画面未就绪（Surface 未创建），已回退 Media3"
                         degraded = true
-                        ffmpegFallback = true
+                        rebuildRetry = true
                         activeEngine = "media3"
                         requestPlaybackReload(position, generation)
                         return@launch
@@ -864,7 +884,7 @@ fun PlayerScreen(
                     error = "mpv 初始化失败，正在回退 Media3：$reason"
                     activeEngine = "media3"
                     degraded = true
-                    ffmpegFallback = true
+                    rebuildRetry = true
                     requestPlaybackReload(position, sessionGeneration)
                 } else {
                     error = reason
@@ -1143,9 +1163,9 @@ fun PlayerScreen(
                     reloadForceTranscode = true
                     error = "直连失败，自动切换转码…"
                     requestPlaybackReload(position, sessionGeneration)
-                } else if (!ffmpegFallback && !containerUnsupported) {
+                } else if (!rebuildRetry && !containerUnsupported) {
                     error = "媒体服务器转码流失败，重试转码路径…"
-                    ffmpegFallback = true
+                    rebuildRetry = true
                     reloadForceTranscode = true
                     engineSwitchTrace.add("server-transcode-retry:${err.errorCodeName}")
                     requestPlaybackReload(position, sessionGeneration)
@@ -1263,6 +1283,26 @@ fun PlayerScreen(
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 if (activeEngine != "media3") return
+                val embyAudio = playbackSource?.audioStreams.orEmpty()
+                val embySubs = playbackSource?.subtitleStreams.orEmpty()
+                val mediaAudio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }.flatMap { group ->
+                    (0 until group.length).map { index -> group to index }
+                }
+                val mediaSubs = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { group ->
+                    (0 until group.length).map { index -> group to index }
+                }
+                fun mappingSummary(streams: List<MediaStream>, candidates: List<Pair<Tracks.Group, Int>>): String =
+                    streams.take(8).joinToString { stream ->
+                        val direct = candidates.firstOrNull { (group, index) -> group.getTrackFormat(index).id?.toIntOrNull() == stream.index }
+                        val fallback = direct ?: candidates.firstOrNull { (group, index) ->
+                            val format = group.getTrackFormat(index)
+                            (!stream.language.isNullOrBlank() && format.language.equals(stream.language, true)) ||
+                                (!stream.title.isNullOrBlank() && format.label?.contains(stream.title, true) == true)
+                        }
+                        "${stream.index}->${fallback?.let { it.first.mediaTrackGroup.id + ":" + it.second } ?: "?"}${if (direct != null) "(id)" else if (fallback != null) "(fallback)" else "(unmapped)"}"
+                    }
+                PageLog.add("Media3 audio mapping count=${embyAudio.size}/${mediaAudio.size} ${mappingSummary(embyAudio, mediaAudio)}")
+                PageLog.add("Media3 subtitle mapping count=${embySubs.size}/${mediaSubs.size} ${mappingSummary(embySubs, mediaSubs)}")
                 val hasAudioTrack = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
                 if (!hasAudioTrack && playbackSource?.audioStreams?.isNotEmpty() == true && !noAudioRetryTried) {
                     scope.launch {
@@ -1290,10 +1330,11 @@ fun PlayerScreen(
                     }
                 }
                 if (subtitleSelectionApplied) return
-                val remembered = AppRuntime.prefs?.subtitleTrackFor(item.id)
                 val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
                 if (textGroups.isEmpty()) return
-                if (remembered == "-1") {
+                val mode = AppRuntime.prefs?.subtitleModeFor(item.id) ?: com.lumina.tv.data.Prefs.SubtitleMode.AUTO
+                val remembered = AppRuntime.prefs?.subtitleTrackFor(item.id)
+                if (mode == com.lumina.tv.data.Prefs.SubtitleMode.OFF) {
                     subtitleSelectionApplied = true
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
@@ -1304,21 +1345,20 @@ fun PlayerScreen(
                 val all = textGroups.flatMap { group ->
                     (0 until group.length).map { index -> Triple(group, index, group.getTrackFormat(index)) }
                 }
-                val selected = remembered?.let { key ->
+                val selected = remembered?.takeIf { mode == com.lumina.tv.data.Prefs.SubtitleMode.TRACK }?.let { key ->
                     all.firstOrNull { (group, index, _) -> group.mediaTrackGroup.id + ":" + index == key }
                         ?: key.substringBefore(':').toIntOrNull()?.let { streamIndex ->
                             all.firstOrNull { (_, index, format) -> format.id?.toIntOrNull() == streamIndex || index == streamIndex }
                         }
                 }
-                val chinese = all.firstOrNull { (_, _, format) ->
-                    val description = listOfNotNull(format.language, format.label, format.id).joinToString(" ")
-                    description.contains(Regex("zh|chi|zho|中文|简体|繁體|繁体|中字", RegexOption.IGNORE_CASE))
+                if (mode == com.lumina.tv.data.Prefs.SubtitleMode.TRACK && selected == null) {
+                    AppRuntime.prefs?.rememberSubtitleTrack(item.id, "auto")
+                    subtitlePreference = "auto"
+                    playbackStatusNotice = "记住的字幕轨不存在，已恢复自动选择"
                 }
-                val keepDefault = all.firstOrNull { (group, index, _) -> group.isTrackSelected(index) }
-                val choice = selected ?: chinese ?: keepDefault
                 subtitleSelectionApplied = true
-                if (choice != null) {
-                    val (group, index, _) = choice
+                if (mode == com.lumina.tv.data.Prefs.SubtitleMode.TRACK && selected != null) {
+                    val (group, index, _) = selected
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                         .clearOverridesOfType(C.TRACK_TYPE_TEXT)
@@ -1326,8 +1366,8 @@ fun PlayerScreen(
                         .build()
                 } else {
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                        .build()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT).build()
                 }
             }
 
@@ -1530,11 +1570,11 @@ fun PlayerScreen(
                 bytesLoaded = bytesLoaded,
                 isLoading = buffering,
             )
-            val endSkipSeconds = AppRuntime.prefs?.endSkipSeconds ?: 30
+            val creditsSkipSeconds = AppRuntime.prefs?.endCreditsSkipSeconds ?: 30
             val validCreditsStart = currentCreditsStartMs?.takeIf { it > 0L && it < duration }
-            if (endSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
+            if (creditsSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
                 ((validCreditsStart != null && position >= validCreditsStart) ||
-                    (validCreditsStart == null && endSkipSeconds > 0 && position >= duration - endSkipSeconds * 1000L))
+                    (validCreditsStart == null && creditsSkipSeconds > 0 && position >= duration - creditsSkipSeconds * 1000L))
             ) {
                 nextTriggered = true
                 scope.launch {
@@ -1738,24 +1778,19 @@ fun PlayerScreen(
                 pv.resizeMode = resizeMode
                 pv.subtitleView?.apply {
                     visibility = android.view.View.VISIBLE
-                    val subtitleColor = when {
-                        subScale >= 1.6f -> android.graphics.Color.WHITE
-                        subScale >= 1.25f -> android.graphics.Color.rgb(217, 217, 217)
-                        else -> android.graphics.Color.rgb(179, 179, 179)
-                    }
                     setApplyEmbeddedStyles(false)
                     setApplyEmbeddedFontSizes(false)
-                    setFractionalTextSize(0.0533f)
-                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    setFractionalTextSize(0.0533f * subScale.coerceIn(0.5f, 3f))
+                    setBackgroundColor(if (subtitleBg) android.graphics.Color.argb(128, 0, 0, 0) else android.graphics.Color.TRANSPARENT)
                     setStyle(androidx.media3.ui.CaptionStyleCompat(
                         subtitleColor,
                         android.graphics.Color.TRANSPARENT,
                         android.graphics.Color.TRANSPARENT,
-                        androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                        android.graphics.Color.BLACK,
+                        if (subtitleOutline) androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_OUTLINE else androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE,
+                        if (subtitleOutline) android.graphics.Color.BLACK else android.graphics.Color.TRANSPARENT,
                         null,
                     ))
-                    setBottomPaddingFraction(0.08f)
+                    setBottomPaddingFraction(subtitlePosition.coerceIn(0f, 0.25f))
                 }
             },
             modifier = Modifier.fillMaxSize(),
@@ -2515,11 +2550,15 @@ fun PlayerScreen(
                 audioDecodeMode = audioDecodeMode,
                 subtitleOffsetMs = subtitleOffsetMs,
                 activeEngine = activeEngine,
-                audioStreams = if (activeEngine == "media3") media3AudioTracks(exo.currentTracks) else {
-                    playbackSource?.audioStreams
-                        ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
-                        ?: mediaSources.firstOrNull()?.audioStreams.orEmpty()
-                },
+                subtitleStreams = playbackSource?.subtitleStreams
+                    ?: mediaSources.firstOrNull { it.id == currentSourceId }?.subtitleStreams
+                    ?: mediaSources.firstOrNull()?.subtitleStreams.orEmpty(),
+                subtitlePreference = subtitlePreference,
+                currentMpvSubtitleIndex = mpvBackend?.currentSubtitleEmbyIndex(),
+                currentMpvSubtitleDisabled = mpvBackend?.isSubtitleDisabled() == true,
+                audioStreams = playbackSource?.audioStreams
+                    ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
+                    ?: mediaSources.firstOrNull()?.audioStreams.orEmpty(),
                 selectedAudioStreamIndex = AppRuntime.prefs?.audioTrackFor(item.id),
                 onAudioStreamSelected = { streamIndex, override ->
                     manualAudioStreamSelection = true
@@ -2536,7 +2575,37 @@ fun PlayerScreen(
                         requestPlaybackReload(position, sessionGeneration)
                     }
                 },
-                onSubtitleSelected = { AppRuntime.prefs?.rememberSubtitleTrack(item.id, it) },
+                onSubtitleSelected = { key ->
+                    val stored = when {
+                        key == null -> "off"
+                        key == "auto" -> "auto"
+                        else -> "track:$key"
+                    }
+                    AppRuntime.prefs?.rememberSubtitleTrack(item.id, stored)
+                    subtitlePreference = stored
+                    if (activeEngine == "mpv") {
+                        if (key == null) mpvBackend?.disableSubtitle()
+                        else if (key == "auto") mpvBackend?.enableSubtitleAuto()
+                        else key.removePrefix("emby:").toIntOrNull()?.let { mpvBackend?.setSubtitleTrack(it) }
+                    } else {
+                        when {
+                            key == null -> exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).clearOverridesOfType(C.TRACK_TYPE_TEXT).build()
+                            key == "auto" -> exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).clearOverridesOfType(C.TRACK_TYPE_TEXT).build()
+                            else -> {
+                                val id = key.substringBeforeLast(':', "")
+                                val index = key.substringAfterLast(':').toIntOrNull()
+                                val group = exo.currentTracks.groups.firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.mediaTrackGroup.id == id }
+                                if (group != null && index != null && index in 0 until group.length) {
+                                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                                        .addOverride(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
+                                }
+                            }
+                        }
+                    }
+                },
                 onSubtitleOffset = {
                     subtitleOffsetMs = it.coerceIn(-10_000L, 10_000L)
                     mpvBackend?.setSubtitleOffset(subtitleOffsetMs)

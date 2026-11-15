@@ -51,6 +51,7 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
+import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.TvHintBar
@@ -71,6 +72,10 @@ internal fun OptionMenu(
     audioDecodeMode: String,
     subtitleOffsetMs: Long,
     activeEngine: String,
+    subtitleStreams: List<MediaStream>,
+    subtitlePreference: String?,
+    currentMpvSubtitleIndex: Int?,
+    currentMpvSubtitleDisabled: Boolean,
     audioStreams: List<MediaStream>,
     selectedAudioStreamIndex: Int?,
     onAudioStreamSelected: (Int, TrackSelectionOverride?) -> Unit,
@@ -95,7 +100,7 @@ internal fun OptionMenu(
 
     // 轨道状态化：切换后 UI 立刻刷新
     var tracks by remember { mutableStateOf(exo.currentTracks) }
-    var textDisabled by remember {
+    var textDisabled by remember(activeEngine) {
         mutableStateOf(exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT))
     }
     DisposableEffect(exo) {
@@ -221,19 +226,47 @@ internal fun OptionMenu(
                 MenuLabel("字幕")
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MenuChip(
-                        label = "关闭字幕", width = 104.dp,
-                        active = textDisabled,
+                        label = "自动（跟随片源）", width = 142.dp,
+                        active = subtitlePreference == null || subtitlePreference == "auto",
                         activeColor = Accent,
                         focusRequester = contentFocus,
                         onFocusChanged = { contentHasFocus = it },
                         onClick = {
-                            textDisabled = true
-                            onSubtitleSelected(null)
-                            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+                            textDisabled = false
+                            onSubtitleSelected("auto")
+                            if (activeEngine == "media3") {
+                                exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                    .clearOverridesOfType(C.TRACK_TYPE_TEXT).build()
+                            }
                         },
                     )
-                    textGroups.forEach { g ->
+                    MenuChip(
+                        label = "关闭字幕", width = 104.dp,
+                        active = subtitlePreference == "off" || (subtitlePreference == null &&
+                            if (activeEngine == "mpv") currentMpvSubtitleDisabled else textDisabled),
+                        activeColor = Accent,
+                        onClick = {
+                            textDisabled = true
+                            onSubtitleSelected(null)
+                            if (activeEngine == "media3") {
+                                exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+                            }
+                        },
+                    )
+                    if (activeEngine == "mpv") subtitleStreams.forEach { stream ->
+                        val key = "emby:${stream.index}"
+                        val label = listOfNotNull(stream.displayTitle ?: stream.title ?: "字幕 ${stream.index}", stream.language, stream.codec?.uppercase()).distinct().joinToString(" · ")
+                        MenuChip(
+                            label = label, width = 148.dp,
+                            active = subtitlePreference == "track:$key" ||
+                                (subtitlePreference == null && currentMpvSubtitleIndex == stream.index),
+                            activeColor = Accent,
+                            onClick = { onSubtitleSelected(key) },
+                        )
+                    }
+                    if (activeEngine == "media3") textGroups.forEach { g ->
                       for (trackIndex in 0 until g.length) {
                         val key = g.mediaTrackGroup.id
                         val f0 = g.getTrackFormat(trackIndex)
@@ -243,7 +276,8 @@ internal fun OptionMenu(
                         }
                         MenuChip(
                             label = label, width = 148.dp,
-                            active = !textDisabled && selectedText == (key to trackIndex),
+                            active = subtitlePreference == "track:$key:$trackIndex" ||
+                                (subtitlePreference == null && !textDisabled && selectedText == (key to trackIndex)),
                             activeColor = Accent,
                             onClick = {
                                 textDisabled = false
@@ -258,7 +292,7 @@ internal fun OptionMenu(
                       }
                     }
                 }
-                if (textGroups.isEmpty()) {
+                if (textGroups.isEmpty() && (activeEngine == "media3" || subtitleStreams.isEmpty())) {
                     Spacer(Modifier.height(6.dp))
                     Text("没有检测到内嵌字幕轨道（外挂字幕会自动加载）", color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp)
                 }
@@ -266,7 +300,7 @@ internal fun OptionMenu(
                 Spacer(Modifier.height(10.dp))
                 MenuLabel("字幕字号")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(1.0f to "小", 1.3f to "标准", 1.6f to "大", 2.0f to "特大", 2.4f to "超大").forEach { (s, label) ->
+                    listOf(0.85f to "小", 1.0f to "标准", 1.25f to "大", 1.5f to "特大").forEach { (s, label) ->
                         MenuChip(
                             label = label, width = 84.dp,
                             active = kotlin.math.abs(subScale - s) < 0.01f,
@@ -283,16 +317,21 @@ internal fun OptionMenu(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     audioStreams.forEach { stream ->
                         val label = listOfNotNull(stream.displayTitle ?: stream.title, stream.language, stream.codec?.uppercase()).distinct().joinToString(" · ").ifBlank { "音轨 ${stream.index}" }
-                        val decodedTrack = audioGroups.asSequence().flatMap { group ->
+                        val candidates = audioGroups.asSequence().flatMap { group ->
                             (0 until group.length).asSequence().map { index -> group to index }
-                        }.firstOrNull { (group, index) ->
-                            val format = group.getTrackFormat(index)
-                            val sameLanguage = stream.language.isNullOrBlank() ||
-                                format.language.equals(stream.language, ignoreCase = true)
-                            val sameCodec = stream.codec.isNullOrBlank() ||
-                                format.sampleMimeType?.substringAfter('/')?.equals(stream.codec, true) == true
-                            sameLanguage && sameCodec
+                        }.toList()
+                        val direct = candidates.firstOrNull { (group, index) ->
+                            group.getTrackFormat(index).id?.toIntOrNull() == stream.index
                         }
+                        val decodedTrack = direct ?: candidates.map { (group, index) ->
+                            val format = group.getTrackFormat(index)
+                            val codec = format.sampleMimeType?.substringAfter('/') ?: format.codecs
+                            val score = (if (!stream.language.isNullOrBlank() && format.language.equals(stream.language, true)) 8 else 0) +
+                                (if (!stream.codec.isNullOrBlank() && codec?.contains(stream.codec, true) == true) 8 else 0) +
+                                (if (stream.channels != null && stream.channels == format.channelCount) 4 else 0) +
+                                (if (!stream.title.isNullOrBlank() && format.label?.contains(stream.title, true) == true) 2 else 0)
+                            Triple(group, index, score)
+                        }.maxByOrNull { it.third }?.takeIf { it.third > 0 }?.let { it.first to it.second }
                         MenuChip(
                             label = label, width = 148.dp,
                             active = selectedAudioStreamIndex == stream.index ||
@@ -304,6 +343,8 @@ internal fun OptionMenu(
                                 val override = decodedTrack?.let { (group, index) ->
                                     TrackSelectionOverride(group.mediaTrackGroup, index)
                                 }
+                                val mapped = decodedTrack
+                                PageLog.add("Media3 audio mapping embyIndex=${stream.index} -> ${mapped?.let { it.first.mediaTrackGroup.id + ":" + it.second } ?: "unmapped"} mapping=${if (direct != null) "explicit" else if (mapped != null) "fallback" else "failed"}")
                                 onAudioStreamSelected(stream.index, override)
                             },
                         )

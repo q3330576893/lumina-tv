@@ -12,7 +12,7 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
-enum class PlaybackErrorCategory { NETWORK_TRANSIENT, HTTP_PERMISSION, PARSING, DECODING, OTHER, AUDIO_OUTPUT, RESOURCE_RECLAIMED, SOURCE_GONE, AUTH_FAILED, CERT_INVALID, LIVE_WINDOW }
+enum class PlaybackErrorCategory { NETWORK_TRANSIENT, HTTP_PERMISSION, HTTP_CONTENT_INVALID, PARSING, DECODING, OTHER, AUDIO_OUTPUT, RESOURCE_RECLAIMED, SOURCE_GONE, AUTH_FAILED, CERT_INVALID }
 
 data class PlaybackErrorClassification(val category: PlaybackErrorCategory, val code: Int, val action: String)
 
@@ -21,11 +21,11 @@ fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification
     val statusCodes = causes.mapNotNull { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode }
     val category = when {
         causes.any { it is javax.net.ssl.SSLHandshakeException || it is java.security.cert.CertPathValidatorException } -> PlaybackErrorCategory.CERT_INVALID
-        error.errorCode == 5001 || error.errorCode == 5002 -> PlaybackErrorCategory.AUDIO_OUTPUT
-        error.errorCode == 4006 -> PlaybackErrorCategory.RESOURCE_RECLAIMED
-        error.errorCode == 2003 || statusCodes.any { it == 404 || it == 410 } -> PlaybackErrorCategory.SOURCE_GONE
-        error.errorCode == 2002 && statusCodes.any { it == 401 || it == 403 } -> PlaybackErrorCategory.AUTH_FAILED
-        error.errorCode == 7002 -> PlaybackErrorCategory.LIVE_WINDOW
+        error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
+            error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> PlaybackErrorCategory.AUDIO_OUTPUT
+        error.errorCode == PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED -> PlaybackErrorCategory.RESOURCE_RECLAIMED
+        error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND || statusCodes.any { it == 404 || it == 410 } -> PlaybackErrorCategory.SOURCE_GONE
+        error.errorCode == PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> PlaybackErrorCategory.HTTP_CONTENT_INVALID
         error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> PlaybackErrorCategory.NETWORK_TRANSIENT
         error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> if (statusCodes.any { it == 401 || it == 403 }) PlaybackErrorCategory.AUTH_FAILED else PlaybackErrorCategory.OTHER
@@ -50,9 +50,9 @@ fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification
         PlaybackErrorCategory.AUDIO_OUTPUT -> "switch_mpv_or_reduce_pcm"
         PlaybackErrorCategory.RESOURCE_RECLAIMED -> "retry"
         PlaybackErrorCategory.SOURCE_GONE -> "change_source"
+        PlaybackErrorCategory.HTTP_CONTENT_INVALID -> "retry_or_change_source"
         PlaybackErrorCategory.AUTH_FAILED -> "reauthenticate"
         PlaybackErrorCategory.CERT_INVALID -> "check_certificate"
-        PlaybackErrorCategory.LIVE_WINDOW -> "seek_live_edge"
         PlaybackErrorCategory.NETWORK_TRANSIENT -> "retry"
         PlaybackErrorCategory.HTTP_PERMISSION -> "check_permissions"
         PlaybackErrorCategory.PARSING -> "change_source_or_transcode"

@@ -16,6 +16,16 @@ data class SavedServer(
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE)
 
+    init {
+        if (sp.contains("end_skip_seconds")) {
+            val edit = sp.edit()
+            if (!sp.contains("end_credits_skip_seconds")) {
+                edit.putInt("end_credits_skip_seconds", sp.getInt("end_skip_seconds", 30).coerceIn(0, 60))
+            }
+            edit.remove("end_skip_seconds").apply()
+        }
+    }
+
     var declareDtsDirectPlay: Boolean
         get() = sp.getBoolean("declare_dts_direct_play", false)
         set(v) = sp.edit().putBoolean("declare_dts_direct_play", v).apply()
@@ -183,13 +193,40 @@ class Prefs(context: Context) {
         .put("token", token)
         .put("lastUsed", lastUsed)
 
-    fun subtitleTrackFor(itemId: String): String? = sp.getString("subtitle_track_$itemId", null)
+    enum class SubtitleMode { OFF, AUTO, TRACK }
+
+    fun subtitleModeFor(itemId: String): SubtitleMode = when {
+        subtitlePreferenceFor(itemId) == "off" -> SubtitleMode.OFF
+        subtitlePreferenceFor(itemId)?.startsWith("track:") == true -> SubtitleMode.TRACK
+        else -> SubtitleMode.AUTO
+    }
+
+    fun subtitlePreferenceFor(itemId: String): String? {
+        val key = "subtitle_track_$itemId"
+        val stored = sp.getString(key, null) ?: return sp.getString("subtitle_mode_global", null)
+        return when {
+            stored == "off" || stored == "auto" || stored.startsWith("track:") -> stored
+            stored == "-1" -> "off".also { sp.edit().putString(key, it).putString("subtitle_mode_global", it).apply() }
+            else -> "track:$stored".also { sp.edit().putString(key, it).putString("subtitle_mode_global", it).apply() }
+        }
+    }
+
+    fun subtitleTrackFor(itemId: String): String? = subtitlePreferenceFor(itemId)
+        ?.takeIf { it.startsWith("track:") }
+        ?.removePrefix("track:")
 
     fun rememberSubtitleTrack(itemId: String, trackKey: String?) {
-        sp.edit().apply {
-            if (trackKey.isNullOrBlank()) remove("subtitle_track_$itemId")
-            else putString("subtitle_track_$itemId", trackKey)
-        }.apply()
+        val value = when {
+            trackKey == null || trackKey == "off" -> "off"
+            trackKey == "auto" -> "auto"
+            trackKey == "-1" -> "off"
+            trackKey.startsWith("track:") -> trackKey
+            else -> "track:$trackKey"
+        }
+        sp.edit()
+            .putString("subtitle_track_$itemId", value)
+            .putString("subtitle_mode_global", value)
+            .apply()
     }
 
     fun audioTrackFor(itemId: String): Int? = sp.getInt("audio_track_$itemId", -1).takeIf { it >= 0 }
@@ -273,10 +310,6 @@ class Prefs(context: Context) {
     var autoNextEpisode: Boolean
         get() = sp.getBoolean("auto_next", false)
         set(v) = sp.edit().putBoolean("auto_next", v).apply()
-
-    var endSkipSeconds: Int
-        get() = sp.getInt("end_skip_seconds", 30).coerceIn(0, 60)
-        set(v) = sp.edit().putInt("end_skip_seconds", v.coerceIn(0, 60)).apply()
 
     var searchHistoryJson: String
         get() = sp.getString("search_history", "[]") ?: "[]"

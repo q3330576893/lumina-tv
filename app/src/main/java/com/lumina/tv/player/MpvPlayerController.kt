@@ -18,6 +18,15 @@ class MpvPlayerController(
     context: Context,
     private val onState: (State) -> Unit,
 ) : MPVLib.EventObserver {
+    private data class MpvTrack(
+        val id: Int,
+        val ffIndex: Int?,
+        val language: String?,
+        val codec: String?,
+        val title: String?,
+        val channels: Int?,
+    )
+
     data class State(
         val positionMs: Long = 0L,
         val durationMs: Long = 0L,
@@ -28,6 +37,7 @@ class MpvPlayerController(
         val error: String? = null,
         val audioSilentCodec: String? = null,
         val cacheSpeedBytesPerSecond: Long = 0L,
+        val subtitleNotice: String? = null,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -71,6 +81,10 @@ class MpvPlayerController(
     private val loadTimeout = Runnable { onLoadTimeout() }
     private var audioStreams: List<MediaStream> = emptyList()
     private var preferredAudioIndex: Int? = null
+    private var subtitleStreams: List<MediaStream> = emptyList()
+    private var preferredSubtitleIndex: Int? = null
+    private var subtitleDisabled = false
+    private var subtitleMappingNotice: String? = null
     private var audioSilentCodec: String? = null
     private var cacheSpeedBytesPerSecond = 0L
     private val audioOutputCheck = Runnable { checkAudioOutput() }
@@ -170,12 +184,33 @@ class MpvPlayerController(
         if (!released) runCatching { mpv?.setOptionString("sub-font-size", sizePx.coerceIn(16, 120).toString()) }
     }
 
+    fun setSubtitleStyle(color: Int, outline: Boolean, position: Float, background: Boolean) {
+        if (released) return
+        val colorHex = "#%08X".format(color)
+        val options = listOf(
+            "sub-color" to colorHex,
+            "sub-border-size" to if (outline) "2.0" else "0.0",
+            "sub-pos" to ((1f - position.coerceIn(0f, 0.25f)) * 100f).toInt().toString(),
+            "sub-back-color" to if (background) "#80000000" else "#00000000",
+        )
+        options.forEach { (key, value) ->
+            runCatching { mpv?.setOptionString(key, value) }
+                .onFailure { appendMpvLog("${timestamp()} mpv subtitle style unsupported: $key (${it.message})") }
+        }
+    }
+
     fun setSubtitleOffset(offsetMs: Long) {
         if (!released) runCatching { mpv?.setPropertyDouble("sub-delay", offsetMs / 1000.0) }
     }
 
     fun setAudioStreams(streams: List<MediaStream>) {
         audioStreams = streams.filter { it.type.equals("Audio", true) }
+        logTrackMapping("audio", audioStreams, "audio")
+    }
+
+    fun setSubtitleStreams(streams: List<MediaStream>) {
+        subtitleStreams = streams.filter { it.type.equals("Subtitle", true) }
+        logTrackMapping("subtitle", subtitleStreams, "sub")
     }
 
     fun setAudioTrack(index: Int) {
@@ -184,12 +219,45 @@ class MpvPlayerController(
         if (fileLoaded && preferredAudioIndex != null) applyPreferredAudioTrack()
     }
 
+    fun setSubtitleTrack(embyStreamIndex: Int) {
+        if (released) return
+        preferredSubtitleIndex = embyStreamIndex
+        subtitleDisabled = false
+        if (fileLoaded) applyPreferredSubtitleTrack()
+    }
+
+    fun disableSubtitle() {
+        if (released) return
+        preferredSubtitleIndex = null
+        subtitleDisabled = true
+        runCatching { mpv?.setPropertyString("sid", "no") }
+            .onFailure { appendMpvLog("${timestamp()} mpv subtitle disable failed: ${it.message}") }
+    }
+
+    fun enableSubtitleAuto() {
+        if (released) return
+        preferredSubtitleIndex = null
+        subtitleDisabled = false
+        runCatching { mpv?.setPropertyString("sid", "auto") }
+            .onFailure { appendMpvLog("${timestamp()} mpv subtitle auto failed: ${it.message}") }
+    }
+
+    fun currentSubtitleEmbyIndex(): Int? {
+        val sid = runCatching { mpv?.getPropertyString("sid")?.toIntOrNull() }.getOrNull() ?: return null
+        return findEmbyIndex("sub", sid, subtitleStreams)
+    }
+
+    fun isSubtitleDisabled(): Boolean = runCatching {
+        mpv?.getPropertyString("sid")?.equals("no", true) == true
+    }.getOrDefault(false)
+
     fun load(url: String, startPositionMs: Long, subtitleUrls: List<String> = emptyList(), headers: Map<String, String> = emptyMap()) {
         if (released || mpv == null) return
         clearSessionLog()
         audioSilentCodec = null
         handler.removeCallbacks(audioOutputCheck)
         pendingUrl = url
+        subtitleMappingNotice = null
         pendingPositionMs = startPositionMs.coerceAtLeast(0L)
         ready = false
         fileLoaded = false
@@ -286,21 +354,98 @@ class MpvPlayerController(
 
     private fun applyPreferredAudioTrack() {
         val embyIndex = preferredAudioIndex ?: return
-        val ordinal = audioStreams.indexOfFirst { it.index == embyIndex }.takeIf { it >= 0 }?.plus(1)
-            ?: return
-        val audioIds = readMpvAudioTrackIds()
-        val aid = audioIds.getOrNull(ordinal - 1) ?: ordinal
-        appendMpvLog("${timestamp()} mpv audio map: embyIndex=$embyIndex -> audioOrdinal=$ordinal -> aid=$aid")
-        mpv?.setPropertyInt("aid", aid)
+        val id = findMpvId("audio", embyIndex, audioStreams)
+        if (id == null) {
+            appendMpvLog("${timestamp()} mpv audio map failed: embyIndex=$embyIndex mapping=fallback-unavailable")
+            return
+        }
+        appendMpvLog("${timestamp()} mpv audio map: embyIndex=$embyIndex -> aid=$id")
+        mpv?.setPropertyInt("aid", id)
     }
 
-    private fun readMpvAudioTrackIds(): List<Int> = runCatching<List<Int>> {
+    private fun applyPreferredSubtitleTrack() {
+        if (subtitleDisabled) return
+        val embyIndex = preferredSubtitleIndex ?: return
+        val id = findMpvId("sub", embyIndex, subtitleStreams)
+        if (id == null) {
+            appendMpvLog("${timestamp()} mpv subtitle map failed: embyIndex=$embyIndex mapping=fallback-unavailable")
+            subtitleMappingNotice = "记住的字幕轨不存在，已恢复自动选择"
+            preferredSubtitleIndex = null
+            subtitleDisabled = false
+            runCatching { mpv?.setPropertyString("sid", "auto") }
+            emit()
+            return
+        }
+        appendMpvLog("${timestamp()} mpv subtitle map: embyIndex=$embyIndex -> sid=$id")
+        mpv?.setPropertyInt("sid", id)
+    }
+
+    private fun logTrackMapping(type: String, streams: List<MediaStream>, mpvType: String) {
+        val mappings = readMpvTracks(mpvType)
+        val summary = streams.take(8).joinToString { stream ->
+            val mapped = mappings.firstOrNull { it.ffIndex == stream.index }?.id
+                ?: mappings.getOrNull(streams.indexOf(stream))?.id
+            "${stream.index}->${mapped ?: "?"}(${stream.language.orEmpty()}/${stream.codec.orEmpty()})"
+        }
+        val line = "${timestamp()} mpv $type mapping count=${streams.size}/${mappings.size} entries=[$summary]"
+        appendMpvLog(line)
+        PageLog.add(line)
+    }
+
+    private fun findMpvId(type: String, embyIndex: Int, streams: List<MediaStream>): Int? {
+        val tracks = readMpvTracks(type)
+        val targetStream = streams.firstOrNull { it.index == embyIndex }
+        val exact = tracks.firstOrNull { it.ffIndex == embyIndex }?.takeIf { track ->
+            targetStream?.codec.isNullOrBlank() || track.codec.isNullOrBlank() ||
+                targetStream?.codec?.contains(track.codec.orEmpty(), true) == true ||
+                track.codec?.contains(targetStream?.codec.orEmpty(), true) == true
+        }?.id
+        if (exact != null) return exact
+        val ordinal = streams.indexOfFirst { it.index == embyIndex }
+        val target = streams.getOrNull(ordinal)
+        val scored = tracks.map { track ->
+            val score = (if (!target?.language.isNullOrBlank() && target?.language.equals(track.language, true)) 8 else 0) +
+                (if (!target?.codec.isNullOrBlank() && target?.codec.equals(track.codec, true)) 8 else 0) +
+                (if (target?.channels != null && target.channels == track.channels) 4 else 0) +
+                (if (!target?.title.isNullOrBlank() && target?.title.equals(track.title, true)) 2 else 0)
+            track to score
+        }.maxByOrNull { it.second }?.takeIf { it.second > 0 }?.first
+        val ordinalTrack = tracks.getOrNull(ordinal)?.takeIf { streams.size == tracks.size && scored == null }
+        val selected = scored ?: ordinalTrack
+        val id = selected?.id
+        val mapping = when {
+            scored != null -> "fallback-metadata"
+            ordinalTrack != null -> "fallback-ordinal"
+            else -> "failed"
+        }
+        val line = "${timestamp()} mpv $type mapping=$mapping embyIndex=$embyIndex ordinal=$ordinal id=${id ?: "none"} streamCount=${streams.size} trackCount=${tracks.size}"
+        appendMpvLog(line)
+        PageLog.add(line)
+        return id
+    }
+
+    private fun findEmbyIndex(type: String, id: Int, streams: List<MediaStream>): Int? {
+        val tracks = readMpvTracks(type)
+        val ffIndex = tracks.firstOrNull { it.id == id }?.ffIndex
+        return streams.firstOrNull { it.index == ffIndex }?.index
+            ?: tracks.indexOfFirst { it.id == id }.takeIf { it >= 0 && it < streams.size }?.let { streams[it].index }
+    }
+
+    private fun readMpvTracks(type: String): List<MpvTrack> = runCatching {
         val raw = mpv?.getPropertyString("track-list") ?: return@runCatching emptyList()
         val tracks = JSONArray(raw)
         (0 until tracks.length()).mapNotNull { index ->
             val track = tracks.optJSONObject(index) ?: return@mapNotNull null
-            if (!track.optString("type").equals("audio", true)) return@mapNotNull null
-            track.optInt("id", -1).takeIf { it > 0 }
+            if (!track.optString("type").equals(type, true)) return@mapNotNull null
+            val id = track.optInt("id", -1).takeIf { it > 0 } ?: return@mapNotNull null
+            MpvTrack(
+                id = id,
+                ffIndex = track.optInt("ff-index", -1).takeIf { it >= 0 },
+                language = track.optString("lang").takeIf(String::isNotBlank),
+                codec = track.optString("codec").takeIf(String::isNotBlank),
+                title = track.optString("title").takeIf(String::isNotBlank),
+                channels = track.optInt("demux-channel-count", -1).takeIf { it > 0 },
+            )
         }
     }.getOrDefault(emptyList())
 
@@ -424,6 +569,14 @@ class MpvPlayerController(
             persistSessionState()
         }
         when (property) {
+            "track-list" -> {
+                logTrackMapping("audio", audioStreams, "audio")
+                logTrackMapping("subtitle", subtitleStreams, "sub")
+                if (fileLoaded) {
+                    if (subtitleDisabled) disableSubtitle() else applyPreferredSubtitleTrack()
+                    if (preferredAudioIndex != null) applyPreferredAudioTrack()
+                }
+            }
             "end-file" -> Log.w(TAG, "${timestamp()} END_FILE reason: $value")
             "video-out-params" -> {
                 ready = true
@@ -483,6 +636,10 @@ class MpvPlayerController(
                 handler.postDelayed(heartbeat, SESSION_HEARTBEAT_MS)
                 pendingSubtitles.forEach { mpv?.command(arrayOf("sub-add", it, "auto")) }
                 pendingSubtitles = emptyList()
+                logTrackMapping("audio", audioStreams, "audio")
+                logTrackMapping("subtitle", subtitleStreams, "sub")
+                if (subtitleDisabled) disableSubtitle()
+                else if (preferredSubtitleIndex != null) applyPreferredSubtitleTrack()
                 emit(buffering = false)
             }
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
@@ -507,7 +664,7 @@ class MpvPlayerController(
         ended: Boolean = false,
         error: String? = null,
     ) {
-        onState(State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec, cacheSpeedBytesPerSecond))
+        onState(State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec, cacheSpeedBytesPerSecond, subtitleMappingNotice))
     }
 
     private companion object {

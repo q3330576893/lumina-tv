@@ -150,7 +150,7 @@ fun SettingsAbout(
                         .onFailure { Toast.makeText(context, it.message ?: "复制失败", Toast.LENGTH_SHORT).show() }
                 }, requesters.getValue(rowKeys[3]), railRequester, onFocused,
                     upRequester = requesters.getValue(rowKeys[2]), downRequester = requesters.getValue(rowKeys[4]))
-                NavigationRow("about:licenses", "开源许可", "Media3、mpv 与本机 FFmpeg", "查看", {
+                NavigationRow("about:licenses", "开源许可", "Media3 与 mpv", "查看", {
                     licensesOpen = true
                 }, requesters.getValue(rowKeys[4]), railRequester, onFocused,
                     upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[4]), showDivider = false)
@@ -161,7 +161,7 @@ fun SettingsAbout(
     if (licensesOpen) AlertDialog(
         onDismissRequest = { licensesOpen = false },
         title = { Text("开源许可") },
-        text = { Text("Media3\nmpv\n本机 FFmpeg") },
+        text = { Text("Media3\nmpv") },
         confirmButton = { TextButton(onClick = { licensesOpen = false }) { Text("关闭") } },
     )
     DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
