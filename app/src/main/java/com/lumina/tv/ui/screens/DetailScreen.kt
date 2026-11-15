@@ -86,6 +86,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.res.painterResource
@@ -103,6 +104,10 @@ import com.lumina.tv.data.MdblistClient
 import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.MediaStream
+import com.lumina.tv.player.AudioCapabilities
+import com.lumina.tv.player.AudioCaps
+import com.lumina.tv.player.detect
+import com.lumina.tv.player.sourceHint
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
@@ -260,6 +265,8 @@ fun DetailScreen(
     onOpenDetail: (String) -> Unit,
     onBack: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val sourceAudioCaps = remember { runCatching { detect(context) }.getOrDefault(AudioCapabilities(emptyMap())) }
     val client = AppRuntime.client
     val detailHazeState = remember { HazeState() }
     val scope = rememberCoroutineScope()
@@ -295,6 +302,12 @@ fun DetailScreen(
     var showSourceMenu by remember { mutableStateOf(false) }
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
     var selectedSourceId by remember(id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(id, sources, sourcesLoading) {
+        if (!sourcesLoading && selectedSourceId == null) {
+            val remembered = AppRuntime.prefs?.lastSourceFor(id)
+            if (remembered != null && sources.any { it.id == remembered }) selectedSourceId = remembered
+        }
+    }
     var showSettingsPicker by remember { mutableStateOf(false) }
     var showTrackSheet by remember { mutableStateOf(false) }
     var pickerTitle by remember { mutableStateOf("") }
@@ -1269,9 +1282,12 @@ fun DetailScreen(
                 sources = episodeSources,
                 sourcesLoading = episodeSourcesLoading,
                 currentSourceId = episodeSources.firstOrNull()?.id,
+                engine = AppRuntime.prefs?.playerEngine ?: "media3",
+                audioCaps = sourceAudioCaps,
                 title = "选择版本 · ${ep.name}",
                 onPick = { sid ->
                     showEpisodeSourceMenu = false
+                    AppRuntime.prefs?.rememberSource(ep.id, sid)
                     onPlayWithSource(ep, sid)
                 },
                 onClose = { showEpisodeSourceMenu = false },
@@ -1284,8 +1300,11 @@ fun DetailScreen(
                 sources = sources,
                 sourcesLoading = sourcesLoading,
                 currentSourceId = selectedSourceId ?: sources.firstOrNull()?.id,
+                engine = AppRuntime.prefs?.playerEngine ?: "media3",
+                audioCaps = sourceAudioCaps,
                 onPick = { sid ->
                     selectedSourceId = sid
+                    AppRuntime.prefs?.rememberSource(id, sid)
                     showSourceMenu = false
                 },
                 onClose = { showSourceMenu = false },
@@ -1336,11 +1355,19 @@ private fun SourceMenu(
     sources: List<MediaSource>,
     sourcesLoading: Boolean,
     currentSourceId: String?,
+    engine: String,
+    audioCaps: AudioCaps,
     onPick: (String) -> Unit,
     onClose: () -> Unit,
     title: String = "选择版本",
 ) {
-    PickerDialog(title, sources.map { it.id to it.displayLabel }, currentSourceId, onPick, onClose, loading = sourcesLoading)
+    val options = sources.withIndex()
+        .sortedWith(compareBy<IndexedValue<MediaSource>> { sourceHint(it.value, engine, audioCaps).priority }.thenBy { it.index })
+        .map { (_, source) ->
+            val hint = sourceHint(source, engine, audioCaps)
+            source.id to (source.displayLabel + (hint.label?.let { "  ·  $it" } ?: ""))
+        }
+    PickerDialog(title, options, currentSourceId, onPick, onClose, loading = sourcesLoading)
 }
 
 @Composable

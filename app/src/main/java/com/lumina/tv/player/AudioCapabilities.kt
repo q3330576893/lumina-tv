@@ -8,7 +8,13 @@ import android.media.AudioProfile
 import android.media.MediaCodecList
 import android.os.Build
 
-data class AudioCapabilities(val profiles: Map<Int, Pair<Int, Set<Int>>>)
+data class AudioProfileInfo(
+    val maxChannels: Int,
+    val channelMasks: Set<Int>,
+    val sampleRates: Set<Int>,
+)
+
+data class AudioCapabilities(val profiles: Map<Int, AudioProfileInfo>)
 typealias AudioCaps = AudioCapabilities
 
 enum class AudioSupport { PASSTHROUGH, DECODE_ONLY, UNSUPPORTED }
@@ -64,10 +70,14 @@ object AudioCodecMatrix {
         if (selectedEncoding == 0) return false
         val profile = caps.profiles[selectedEncoding] ?: return false
         val mask = channelMask(channels)
-        return channels > 0 && channels <= profile.first && mask != 0 && mask in profile.second
+        val rateOk = sampleRate <= 0 || profile.sampleRates.isEmpty() || sampleRate in profile.sampleRates
+        return channels > 0 && channels <= profile.maxChannels && mask != 0 && mask in profile.channelMasks && rateOk
     }
 
-    fun support(@Suppress("UNUSED_PARAMETER") context: Context, enc: Int, channels: Int, sampleRate: Int, caps: AudioCaps, mime: String?): AudioSupport {
+    fun support(context: Context, enc: Int, channels: Int, sampleRate: Int, caps: AudioCaps, mime: String?): AudioSupport =
+        support(enc, channels, sampleRate, caps, mime)
+
+    fun support(enc: Int, channels: Int, sampleRate: Int, caps: AudioCaps, mime: String?): AudioSupport {
         if (canPassthrough(enc, channels, sampleRate, caps)) return AudioSupport.PASSTHROUGH
         if (enc == 0 && mime == "audio/raw") return AudioSupport.DECODE_ONLY
         val audioMime = mime ?: mimeForEncoding(enc)
@@ -94,7 +104,7 @@ object AudioCodecMatrix {
 
 fun detect(context: Context): AudioCaps {
     val profiles = linkedMapOf(
-        AudioFormat.ENCODING_PCM_16BIT to (2 to setOf(AudioFormat.CHANNEL_OUT_STEREO)),
+        AudioFormat.ENCODING_PCM_16BIT to AudioProfileInfo(2, setOf(AudioFormat.CHANNEL_OUT_STEREO), emptySet()),
     )
     if (Build.VERSION.SDK_INT >= 33) {
         val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -104,7 +114,7 @@ fun detect(context: Context): AudioCaps {
             val masks = profile.channelMasks.filter { it != 0 }.toSet()
             if (masks.isNotEmpty()) {
                 val maxChannels = masks.maxOf { mask -> if (mask == 6396) 8 else Integer.bitCount(mask) }
-                profiles[profile.format] = maxChannels to masks
+                profiles[profile.format] = AudioProfileInfo(maxChannels, masks, profile.sampleRates.toSet())
             }
         }
     } else {
@@ -119,7 +129,7 @@ fun detect(context: Context): AudioCaps {
                 val masks = listOf(1, 2, 6, 8).mapNotNull { count ->
                     AudioCodecMatrix.channelMask(count).takeIf { count <= maxChannels }
                 }.toSet()
-                if (masks.isNotEmpty()) profiles[enc] = maxChannels to masks
+                if (masks.isNotEmpty()) profiles[enc] = AudioProfileInfo(maxChannels, masks, emptySet())
             }
         }
     }

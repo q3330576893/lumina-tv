@@ -51,6 +51,10 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
+import com.lumina.tv.player.AudioSupport
+import com.lumina.tv.player.AudioTrackCandidate
+import com.lumina.tv.player.bestAudioTrack
+import com.lumina.tv.player.sourceHint
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.GlassPanel
@@ -70,8 +74,10 @@ internal fun OptionMenu(
     currentSourceId: String?,
     subScale: Float,
     audioDecodeMode: String,
+    audioSupport: AudioSupport,
     subtitleOffsetMs: Long,
     activeEngine: String,
+    audioCaps: com.lumina.tv.player.AudioCaps,
     subtitleStreams: List<MediaStream>,
     subtitlePreference: String?,
     currentMpvSubtitleIndex: Int?,
@@ -314,24 +320,21 @@ internal fun OptionMenu(
                 if (selectedTab == "音轨") {
                 Spacer(Modifier.height(16.dp))
                 MenuLabel("音轨")
+                val audioStatus = when (audioSupport) {
+                    AudioSupport.PASSTHROUGH -> "设备报告：可直通"
+                    AudioSupport.DECODE_ONLY -> "本地解码"
+                    AudioSupport.UNSUPPORTED -> "可能无法解码"
+                }
+                Text("音频输出：$audioStatus", color = TextSub, fontSize = 11.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     audioStreams.forEach { stream ->
                         val label = listOfNotNull(stream.displayTitle ?: stream.title, stream.language, stream.codec?.uppercase()).distinct().joinToString(" · ").ifBlank { "音轨 ${stream.index}" }
                         val candidates = audioGroups.asSequence().flatMap { group ->
-                            (0 until group.length).asSequence().map { index -> group to index }
+                            (0 until group.length).asSequence().map { index ->
+                                AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index))
+                            }
                         }.toList()
-                        val direct = candidates.firstOrNull { (group, index) ->
-                            group.getTrackFormat(index).id?.toIntOrNull() == stream.index
-                        }
-                        val decodedTrack = direct ?: candidates.map { (group, index) ->
-                            val format = group.getTrackFormat(index)
-                            val codec = format.sampleMimeType?.substringAfter('/') ?: format.codecs
-                            val score = (if (!stream.language.isNullOrBlank() && format.language.equals(stream.language, true)) 8 else 0) +
-                                (if (!stream.codec.isNullOrBlank() && codec?.contains(stream.codec, true) == true) 8 else 0) +
-                                (if (stream.channels != null && stream.channels == format.channelCount) 4 else 0) +
-                                (if (!stream.title.isNullOrBlank() && format.label?.contains(stream.title, true) == true) 2 else 0)
-                            Triple(group, index, score)
-                        }.maxByOrNull { it.third }?.takeIf { it.third > 0 }?.let { it.first to it.second }
+                        val decodedTrack = bestAudioTrack(stream, candidates)
                         MenuChip(
                             label = label, width = 148.dp,
                             active = selectedAudioStreamIndex == stream.index ||
@@ -340,11 +343,12 @@ internal fun OptionMenu(
                             focusRequester = if (stream == audioStreams.firstOrNull()) contentFocus else null,
                             onFocusChanged = if (stream == audioStreams.firstOrNull()) ({ contentHasFocus = it }) else null,
                             onClick = {
-                                val override = decodedTrack?.let { (group, index) ->
-                                    TrackSelectionOverride(group.mediaTrackGroup, index)
+                                val override = decodedTrack?.let { candidate ->
+                                    TrackSelectionOverride(candidate.group, candidate.index)
                                 }
                                 val mapped = decodedTrack
-                                PageLog.add("Media3 audio mapping embyIndex=${stream.index} -> ${mapped?.let { it.first.mediaTrackGroup.id + ":" + it.second } ?: "unmapped"} mapping=${if (direct != null) "explicit" else if (mapped != null) "fallback" else "failed"}")
+                                val explicit = mapped?.format?.id?.toIntOrNull() == stream.index
+                                PageLog.add("Media3 audio mapping embyIndex=${stream.index} -> ${mapped?.let { it.group.id + ":" + it.index } ?: "unmapped"} mapping=${if (explicit) "explicit" else if (mapped != null) "fallback" else "failed"}")
                                 onAudioStreamSelected(stream.index, override)
                             },
                         )
@@ -445,8 +449,9 @@ internal fun OptionMenu(
                 if (sources.size > 1) {
                     MenuLabel("版本（${sources.size} 个源）")
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        sources.forEach { s ->
+                        sources.withIndex().sortedWith(compareBy<IndexedValue<MediaSource>> { sourceHint(it.value, activeEngine, audioCaps).priority }.thenBy { it.index }).forEach { (_, s) ->
                             val active = s.id == currentSourceId
+                            val hint = sourceHint(s, activeEngine, audioCaps)
                             FocusSurface(
                                 modifier = Modifier.fillMaxWidth().height(40.dp),
                                 corner = 12.dp, scaleTo = 1.08f,
@@ -464,7 +469,7 @@ internal fun OptionMenu(
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
-                                        s.displayLabel + if (active) "  ✓" else "",
+                                        s.displayLabel + (hint.label?.let { "  ·  $it" } ?: "") + if (active) "  ✓" else "",
                                         color = if (active) Color(0xFF06101F) else TextMain,
                                         fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     )

@@ -153,6 +153,9 @@ import com.lumina.tv.player.AudioCapabilities
 import com.lumina.tv.player.AudioCodecMatrix
 import com.lumina.tv.player.AudioRouteMonitor
 import com.lumina.tv.player.AudioSupport
+import com.lumina.tv.player.AudioTrackCandidate
+import com.lumina.tv.player.bestAudioTrack
+import com.lumina.tv.player.sourceHint
 import com.lumina.tv.player.detect
 import com.lumina.tv.diag.PageLog
 import kotlinx.coroutines.Dispatchers
@@ -293,14 +296,6 @@ fun PlayerScreen(
             }
         }
     }
-    DisposableEffect(context, item.id) {
-        val monitor = AudioRouteMonitor(context) { changedCaps ->
-            audioCaps = changedCaps
-            audioDecodeNotice = "音频输出设备已变化，能力状态已更新"
-        }
-        monitor.register()
-        onDispose { monitor.unregister() }
-    }
     var softDecodeNoticeShown by remember(item.id) { mutableStateOf(false) }
     var mpvFallbackTried by remember(item.id) { mutableStateOf(false) }
     var rebuildRetry by remember(item.id) { mutableStateOf(false) }
@@ -353,6 +348,7 @@ fun PlayerScreen(
     var firstFrameAt by remember(item.id) { mutableLongStateOf(0L) }
     var bytesLoaded by remember(item.id) { mutableLongStateOf(0L) }
     var pendingResumePositionMs by remember(item.id) { mutableLongStateOf(startPositionMs ?: -1L) }
+    var lastRequestedStartMs by remember(item.id) { mutableLongStateOf(0L) }
     var loadJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var phaseTimes by remember(item.id) { mutableStateOf(JSONObject()) }
     var droppedFrames by remember(item.id) { mutableLongStateOf(0L) }
@@ -608,6 +604,47 @@ fun PlayerScreen(
         reloadKey++
     }
 
+    LaunchedEffect(item.id, mediaSources, initialSourceId, currentSourceId) {
+        if (initialSourceId == null && currentSourceId == null) {
+            val remembered = AppRuntime.prefs?.lastSourceFor(item.id)
+            if (remembered != null && mediaSources.any { it.id == remembered }) {
+                currentSourceId = remembered
+                if (sessionGeneration > 0 && playbackSource?.id != remembered) {
+                    requestPlaybackReload(position, sessionGeneration)
+                }
+            }
+        }
+    }
+
+    val latestAudioRouteHandler by rememberUpdatedState<(AudioCapabilities) -> Unit> { changedCaps ->
+            audioCaps = changedCaps
+            val currentAudio = (playbackSource ?: mediaSources.firstOrNull { it.id == currentSourceId })
+                ?.audioStreams?.firstOrNull { it.isDefault }
+                ?: playbackSource?.audioStreams?.firstOrNull()
+            val codec = listOfNotNull(currentAudio?.codec, currentAudio?.profile).joinToString(" ").lowercase()
+            val mime = audioMime(codec)
+            val enc = AudioCodecMatrix.encoding(mime, codec)
+            audioSupport = AudioCodecMatrix.support(context, enc, currentAudio?.channels ?: 2, currentAudio?.sampleRate ?: 0, changedCaps, mime)
+            audioDecodeNotice = when (audioSupport) {
+                AudioSupport.PASSTHROUGH -> "音频输出已变化：当前音轨可直通"
+                AudioSupport.DECODE_ONLY -> "音频输出已变化：改为本地解码"
+                AudioSupport.UNSUPPORTED -> "音频输出已变化：当前音轨可能无法播放"
+            }
+            if (audioDecodeMode == "passthrough" && audioSupport != AudioSupport.PASSTHROUGH) {
+                audioDecodeMode = "auto"
+                AppRuntime.prefs?.audioDecodeMode = "auto"
+                enginePinned = null
+                requestPlaybackReload(position, sessionGeneration)
+            }
+    }
+    DisposableEffect(context, item.id) {
+        val monitor = AudioRouteMonitor(context) { changedCaps ->
+            latestAudioRouteHandler(changedCaps)
+        }
+        monitor.register()
+        onDispose { monitor.unregister() }
+    }
+
     fun loadSource(
         forceTranscode: Boolean,
         sourceId: String? = currentSourceId,
@@ -627,6 +664,7 @@ fun PlayerScreen(
             }
             } else position.takeIf { it > 0 } ?: item.positionTicks / 10_000
         }
+        lastRequestedStartMs = resumePosition
         loadJob?.cancel()
         networkRetryJob?.cancel()
         rangeProbeJob?.cancel()
@@ -671,6 +709,10 @@ fun PlayerScreen(
                 phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
                 negotiationDiagnostics = target.negotiationDiagnostics
                 currentPlayMethod = target.playMethod
+                PageLog.add("timeline requestStartMs=$resumePosition playMethod=${target.playMethod} direct=${target.direct} sourceId=${target.source?.id} url=${target.url.substringBefore('?').take(120)}")
+                phaseTimes.put("requestedStartMs", resumePosition)
+                    .put("playMethod", target.playMethod)
+                    .put("direct", target.direct)
                 failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
@@ -718,6 +760,18 @@ fun PlayerScreen(
                         AppRuntime.prefs?.playerEngine == "mpv" -> "mpv"
                         else -> "media3"
                     }
+                val video = target.source?.streams?.firstOrNull { it.type == "Video" }
+                val videoResolution = video?.let { stream ->
+                    if (stream.width != null && stream.height != null) "${stream.width}x${stream.height}" else null
+                } ?: target.source?.resolution
+                PageLog.add("engineDecision codec=${video?.codec} res=$videoResolution dvProfile=${video?.dvProfile} dvRange=${video?.videoRangeType} hwDv=${DeviceCodecCapabilities.supportsDolbyVision} engine=$selectedEngine")
+                phaseTimes.put("engineDecision", JSONObject()
+                    .put("codec", video?.codec ?: JSONObject.NULL)
+                    .put("resolution", videoResolution ?: JSONObject.NULL)
+                    .put("dvProfile", video?.dvProfile ?: JSONObject.NULL)
+                    .put("videoRange", video?.videoRangeType ?: JSONObject.NULL)
+                    .put("hwDv", DeviceCodecCapabilities.supportsDolbyVision)
+                    .put("engine", selectedEngine))
                 if (isDvP7 && !softDecodeNoticeShown) {
                     audioDecodeNotice = "Dolby Vision Profile 7，已用 mpv 软解"
                     softDecodeNoticeShown = true
@@ -1293,6 +1347,11 @@ fun PlayerScreen(
                     bufferingStartedAt = 0L
                 }
                 if (state == Player.STATE_READY) {
+                    val actual = exo.currentPosition
+                    val requested = lastRequestedStartMs
+                    val offset = requested - actual
+                    phaseTimes.put("readyPositionMs", actual).put("seekOffsetMs", offset)
+                    PageLog.add("timeline ready gen=$sessionGeneration request=$requested actual=$actual offset=$offset duration=${exo.duration}")
                     if (readyAt == 0L) readyAt = android.os.SystemClock.elapsedRealtime()
                     val loadToReadyMs = (readyAt - loadStartedAt).coerceAtLeast(0L)
                     phaseTimes.put("loadToReadyMs", loadToReadyMs)
@@ -1346,7 +1405,14 @@ fun PlayerScreen(
                         }
                         "${stream.index}->${fallback?.let { it.first.mediaTrackGroup.id + ":" + it.second } ?: "?"}${if (direct != null) "(id)" else if (fallback != null) "(fallback)" else "(unmapped)"}"
                     }
-                PageLog.add("Media3 audio mapping count=${embyAudio.size}/${mediaAudio.size} ${mappingSummary(embyAudio, mediaAudio)}")
+                val audioCandidates = mediaAudio.map { (group, index) ->
+                    AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index))
+                }
+                val audioMapping = embyAudio.take(8).joinToString { stream ->
+                    val match = bestAudioTrack(stream, audioCandidates)
+                    "${stream.index}->${match?.let { it.group.id + ":" + it.index } ?: "?"}${if (match?.format?.id?.toIntOrNull() == stream.index) "(id)" else if (match != null) "(fallback)" else "(unmapped)"}"
+                }
+                PageLog.add("Media3 audio mapping count=${embyAudio.size}/${mediaAudio.size} $audioMapping")
                 PageLog.add("Media3 subtitle mapping count=${embySubs.size}/${mediaSubs.size} ${mappingSummary(embySubs, mediaSubs)}")
                 val hasAudioTrack = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
                 if (!hasAudioTrack && playbackSource?.audioStreams?.isNotEmpty() == true && !noAudioRetryTried) {
@@ -1468,6 +1534,7 @@ fun PlayerScreen(
                 renderTimeMs: Long,
             ) {
                 firstFrameRendered = true
+                phaseTimes.put("firstFramePositionMs", exo.currentPosition)
                 firstFrameAt = android.os.SystemClock.elapsedRealtime()
                 val effectiveReadyAt = readyAt.takeIf { it > 0L } ?: firstFrameAt
                 if (readyAt == 0L) readyAt = effectiveReadyAt
@@ -2080,6 +2147,7 @@ fun PlayerScreen(
                             val next = mediaSources.firstOrNull { it.id == nextId }
                             if (next != null) {
                                 currentSourceId = next.id
+                                AppRuntime.prefs?.rememberSource(item.id, next.id)
                                 playbackSource = next
                                 forceDirectNext = false
                                 directFallbackTried = false
@@ -2686,8 +2754,10 @@ fun PlayerScreen(
                 currentSourceId = currentSourceId,
                 subScale = subScale,
                 audioDecodeMode = audioDecodeMode,
+                audioSupport = audioSupport,
                 subtitleOffsetMs = subtitleOffsetMs,
                 activeEngine = activeEngine,
+                audioCaps = audioCaps,
                 subtitleStreams = playbackSource?.subtitleStreams
                     ?: mediaSources.firstOrNull { it.id == currentSourceId }?.subtitleStreams
                     ?: mediaSources.firstOrNull()?.subtitleStreams.orEmpty(),
@@ -2760,7 +2830,7 @@ fun PlayerScreen(
                     AppRuntime.prefs?.audioDecodeMode = mode
                     audioDecodeNotice = when (mode) {
                         "soft" -> "全部音轨将在本地软解（已切到 mpv）"
-                        "passthrough" -> "已切换到音频直通"
+                        "passthrough" -> "已尝试音频直通（设备报告支持，实际输出以电视/功放为准）"
                         else -> "已切换到自动音频解码"
                     }
                     // 显式选择才切内核：默认永远是 media3，避免"什么都用 MPV 转圈"
@@ -2786,6 +2856,7 @@ fun PlayerScreen(
                 onResizeMode = { resizeMode = it },
                 onSwitchSource = { sid ->
                     closeOptionMenu()
+                    AppRuntime.prefs?.rememberSource(item.id, sid)
                     directFallbackTried = false
                     transcodeFallbackTried = false
                     forceDirectNext = false

@@ -49,7 +49,7 @@ class AudioRouteMonitor(
         if (newCaps == lastCaps) return
         lastCaps = newCaps
         val encodings = newCaps.profiles.keys.filter { it != android.media.AudioFormat.ENCODING_PCM_16BIT }.sorted()
-        val maxChannels = newCaps.profiles.values.maxOfOrNull { it.first } ?: 2
+        val maxChannels = newCaps.profiles.values.maxOfOrNull { it.maxChannels } ?: 2
         Log.i("LuminaTV", "audioRoute changed encodings=$encodings maxCh=$maxChannels")
         onCapsChanged(newCaps)
     }
