@@ -1440,49 +1440,57 @@ data class PlaybackTarget(
     // ---------------- 进度上报 ----------------
 
     suspend fun reportStart(itemId: String, positionMs: Long, mediaSourceId: String?, playMethod: String) = withContext(Dispatchers.IO) {
-        runCatching {
-            postSync(url("/Sessions/Playing", emptyMap()), JSONObject()
-                .put("ItemId", itemId)
-                .put("PositionTicks", positionMs * 10_000)
-                .put("CanSeek", true)
-                .put("IsPaused", false)
-                .put("PlayMethod", playMethod)
-                .put("MediaSourceId", mediaSourceId ?: itemId)
-                .toString())
-        }.onFailure { lastApiFailure = "reportStart: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }
+        if (sendStart(itemId, positionMs, mediaSourceId, playMethod)) {
+            progressQueue?.removeThrough(itemId, positionMs, "start")
+        } else {
+            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis(), "start", mediaSourceId = mediaSourceId, playMethod = playMethod))
+        }
     }
 
     suspend fun reportProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String) = withContext(Dispatchers.IO) {
-        runCatching {
-            postSync(url("/Sessions/Playing/Progress", emptyMap()), JSONObject()
-                .put("ItemId", itemId)
-                .put("PositionTicks", positionMs * 10_000)
-                .put("IsPaused", paused)
-                .put("CanSeek", true)
-                .put("PlayMethod", playMethod)
-                .put("MediaSourceId", mediaSourceId ?: itemId)
-                .toString())
-        }.onSuccess {
-            progressQueue?.removeThrough(itemId, positionMs)
-        }.onFailure {
-            lastApiFailure = "reportProgress: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}"
-            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis()))
+        if (sendProgress(itemId, positionMs, paused, mediaSourceId, playMethod)) {
+            progressQueue?.removeThrough(itemId, positionMs, "progress")
+        } else {
+            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis(), "progress", paused, mediaSourceId, playMethod))
         }
     }
 
     suspend fun reportStop(itemId: String, positionMs: Long) = withContext(Dispatchers.IO) {
-        runCatching {
-            postSync(url("/Sessions/Playing/Stopped", emptyMap()), JSONObject()
-                .put("ItemId", itemId)
-                .put("PositionTicks", positionMs * 10_000)
-                .toString())
-        }.onSuccess {
-            progressQueue?.removeThrough(itemId, positionMs)
-        }.onFailure {
-            lastApiFailure = "reportStop: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}"
-            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis()))
+        if (sendStop(itemId, positionMs)) {
+            progressQueue?.removeThrough(itemId, positionMs, "stop")
+        } else {
+            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis(), "stop"))
         }
     }
+
+    private suspend fun sendStart(itemId: String, positionMs: Long, mediaSourceId: String?, playMethod: String): Boolean = runCatching {
+        postSync(url("/Sessions/Playing", emptyMap()), JSONObject()
+            .put("ItemId", itemId)
+            .put("PositionTicks", positionMs * 10_000)
+            .put("CanSeek", true)
+            .put("IsPaused", false)
+            .put("PlayMethod", playMethod)
+            .put("MediaSourceId", mediaSourceId ?: itemId)
+            .toString())
+    }.onFailure { lastApiFailure = "reportStart: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }.isSuccess
+
+    private suspend fun sendProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String): Boolean = runCatching {
+        postSync(url("/Sessions/Playing/Progress", emptyMap()), JSONObject()
+            .put("ItemId", itemId)
+            .put("PositionTicks", positionMs * 10_000)
+            .put("IsPaused", paused)
+            .put("CanSeek", true)
+            .put("PlayMethod", playMethod)
+            .put("MediaSourceId", mediaSourceId ?: itemId)
+            .toString())
+    }.onFailure { lastApiFailure = "reportProgress: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }.isSuccess
+
+    private suspend fun sendStop(itemId: String, positionMs: Long): Boolean = runCatching {
+        postSync(url("/Sessions/Playing/Stopped", emptyMap()), JSONObject()
+            .put("ItemId", itemId)
+            .put("PositionTicks", positionMs * 10_000)
+            .toString())
+    }.onFailure { lastApiFailure = "reportStop: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }.isSuccess
 
     fun requestProgressFlush() {
         val queue = progressQueue ?: return
@@ -1506,13 +1514,16 @@ data class PlaybackTarget(
         val queue = progressQueue ?: return@withLock
         lastProgressFlushAt = System.currentTimeMillis()
         queue.peek().forEach { progress ->
-            val sent = runCatching {
-                postSync(url("/Sessions/Playing/Stopped", emptyMap()), JSONObject()
-                    .put("ItemId", progress.itemId)
-                    .put("PositionTicks", progress.positionMs * 10_000)
-                    .toString())
-            }.isSuccess
-            if (sent) queue.remove(progress)
+            val sent = when (progress.eventType) {
+                "progress" -> sendProgress(progress.itemId, progress.positionMs, progress.paused, progress.mediaSourceId, progress.playMethod)
+                "start" -> sendStart(progress.itemId, progress.positionMs, progress.mediaSourceId, progress.playMethod)
+                else -> sendStop(progress.itemId, progress.positionMs)
+            }
+            if (sent) {
+                if (progress.eventType == "progress" || progress.eventType == "stop") {
+                    queue.removeThrough(progress.itemId, progress.positionMs, progress.eventType)
+                } else queue.remove(progress)
+            }
         }
     }
 

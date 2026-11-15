@@ -146,6 +146,7 @@ import com.lumina.tv.player.PlaybackErrorCategory
 import com.lumina.tv.player.PlaybackRangeProbe
 import com.lumina.tv.player.classifyPlaybackError
 import com.lumina.tv.player.PlaybackWatchdog
+import com.lumina.tv.player.WatchdogReason
 import com.lumina.tv.player.StabilityMetrics
 import com.lumina.tv.player.AudioFocusGuard
 import com.lumina.tv.player.AudioCapabilities
@@ -241,6 +242,7 @@ private fun media3AudioTracks(tracks: Tracks): List<MediaStream> = tracks.groups
 fun PlayerScreen(
     item: MediaItem,
     initialSourceId: String? = null,
+    startPositionMs: Long? = null,
     onBack: () -> Unit,
     onPlayNext: ((MediaItem) -> Unit)? = null,
 ) {
@@ -343,8 +345,14 @@ fun PlayerScreen(
     var networkRetryCount by remember(item.id) { mutableIntStateOf(0) }
     var sessionGeneration by remember(item.id) { mutableIntStateOf(0) }
     val watchdog = remember(item.id) { PlaybackWatchdog() }
+    var recoveryCount by remember(item.id) { mutableIntStateOf(0) }
+    var lastRecoveryAt by remember(item.id) { mutableLongStateOf(0L) }
+    var recovering by remember(item.id) { mutableStateOf(false) }
+    var loadStartedAt by remember(item.id) { mutableLongStateOf(0L) }
+    var readyAt by remember(item.id) { mutableLongStateOf(0L) }
+    var firstFrameAt by remember(item.id) { mutableLongStateOf(0L) }
     var bytesLoaded by remember(item.id) { mutableLongStateOf(0L) }
-    var pendingResumePositionMs by remember(item.id) { mutableLongStateOf(-1L) }
+    var pendingResumePositionMs by remember(item.id) { mutableLongStateOf(startPositionMs ?: -1L) }
     var loadJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var phaseTimes by remember(item.id) { mutableStateOf(JSONObject()) }
     var droppedFrames by remember(item.id) { mutableLongStateOf(0L) }
@@ -395,6 +403,13 @@ fun PlayerScreen(
     var previewDisabled by remember(item.id) { mutableStateOf(false) }
     var lastHoldPreviewAt by remember(item.id) { mutableLongStateOf(0L) }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
+
+    fun reportStopInAppScope(positionMs: Long) {
+        val stopClient = client ?: return
+        val stopItemId = item.id
+        val stopPosition = positionMs.coerceAtLeast(0L)
+        AppRuntime.appScope.launch { runCatching { stopClient.reportStop(stopItemId, stopPosition) } }
+    }
 
     val introSeconds = playbackMarkers?.introEndMs?.takeIf { it > 0L && (duration <= 0L || it < duration) }
         ?.div(1000L)?.toInt()
@@ -552,6 +567,10 @@ fun PlayerScreen(
 
     fun startAutoNext() {
         if (nextTriggered || AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null) return
+        loadStartedAt = android.os.SystemClock.elapsedRealtime()
+        readyAt = 0L
+        firstFrameAt = 0L
+        watchdog.reset()
         nextTriggered = true
         loadJob?.cancel()
         networkRetryJob?.cancel()
@@ -559,11 +578,12 @@ fun PlayerScreen(
         val generation = ++sessionGeneration
         playStartAt = android.os.SystemClock.elapsedRealtime()
         phaseTimes = JSONObject().put("session", generation).put("decoderInitMs", JSONObject.NULL)
-            .put("compatMappingMs", JSONObject.NULL).put("firstFrameMs", JSONObject.NULL).put("stableOutputMs", JSONObject.NULL)
+            .put("compatMappingMs", JSONObject.NULL).put("loadToReadyMs", JSONObject.NULL)
+            .put("loadToFirstFrameMs", JSONObject.NULL).put("readyToFirstFrameMs", JSONObject.NULL)
+            .put("firstFrameMs", JSONObject.NULL).put("stableOutputMs", JSONObject.NULL)
         loadJob = scope.launch {
             val c = client ?: return@launch
             val next = runCatching { c.getNextEpisode(item) }.getOrNull() ?: return@launch
-            runCatching { c.reportStop(item.id, position) }
             nextEpisode = next
             nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
             while (nextCountdown > 0) {
@@ -573,6 +593,7 @@ fun PlayerScreen(
             }
             if (nextEpisode?.id == next.id) {
                 nextEpisode = null
+                reportStopInAppScope(position)
                 onPlayNext?.invoke(next)
             }
         }
@@ -593,6 +614,10 @@ fun PlayerScreen(
         audioStreamIndex: Int? = AppRuntime.prefs?.audioTrackFor(item.id),
     ) {
         val c = client ?: return
+        loadStartedAt = android.os.SystemClock.elapsedRealtime()
+        readyAt = 0L
+        firstFrameAt = 0L
+        watchdog.reset()
         val resumePosition = pendingResumePositionMs.takeIf { it >= 0L } ?: when (activeEngine) {
             "mpv" -> mpvBackend?.positionMs()?.takeIf { it > 0 } ?: position.takeIf { it > 0 } ?: item.positionTicks / 10_000
             else -> if (exo.mediaItemCount > 0) {
@@ -610,6 +635,10 @@ fun PlayerScreen(
         PageLog.add("playback reload gen=$generation fromGen=${generation - 1} positionMs=$resumePosition engine=$activeEngine")
         playStartAt = android.os.SystemClock.elapsedRealtime()
         phaseTimes = JSONObject().put("session", generation)
+            .put("loadToReadyMs", JSONObject.NULL)
+            .put("loadToFirstFrameMs", JSONObject.NULL)
+            .put("readyToFirstFrameMs", JSONObject.NULL)
+            .put("firstFrameMs", JSONObject.NULL)
         loadJob = scope.launch {
             error = null
             buffering = true
@@ -777,9 +806,17 @@ fun PlayerScreen(
                         if (state.ready && !firstFrameRendered) {
                             firstFrameRendered = true
                             matchDisplayFrameRate(currentSurface, mpvBackend?.containerFps())
-                            val firstFrameMs = android.os.SystemClock.elapsedRealtime() - playStartAt
+                            firstFrameAt = android.os.SystemClock.elapsedRealtime()
+                            if (readyAt == 0L) readyAt = firstFrameAt
+                            val loadToReadyMs = (readyAt - loadStartedAt).coerceAtLeast(0L)
+                            val loadToFirstFrameMs = (firstFrameAt - loadStartedAt).coerceAtLeast(0L)
+                            val readyToFirstFrameMs = (firstFrameAt - readyAt).coerceAtLeast(0L)
+                            phaseTimes.put("loadToReadyMs", loadToReadyMs)
+                                .put("loadToFirstFrameMs", loadToFirstFrameMs)
+                                .put("readyToFirstFrameMs", readyToFirstFrameMs)
+                                .put("firstFrameMs", loadToFirstFrameMs)
+                            val firstFrameMs = loadToFirstFrameMs
                             StabilityMetrics.firstFrameMs = firstFrameMs
-                            phaseTimes.put("firstFrameMs", firstFrameMs)
                         }
                         buffering = state.buffering
                         isPlaying = state.playing
@@ -1256,7 +1293,9 @@ fun PlayerScreen(
                     bufferingStartedAt = 0L
                 }
                 if (state == Player.STATE_READY) {
-                    playStartAt = android.os.SystemClock.elapsedRealtime()
+                    if (readyAt == 0L) readyAt = android.os.SystemClock.elapsedRealtime()
+                    val loadToReadyMs = (readyAt - loadStartedAt).coerceAtLeast(0L)
+                    phaseTimes.put("loadToReadyMs", loadToReadyMs)
                     if (!firstFrameRendered) readyWithoutFrameSince = System.currentTimeMillis()
                     if (degraded) error = null
                 } else if (state == Player.STATE_BUFFERING) {
@@ -1270,7 +1309,6 @@ fun PlayerScreen(
                         val c = client ?: return@launch
                         val next = runCatching { c.getNextEpisode(item) }.getOrNull()
                         if (next != null) {
-                            runCatching { c.reportStop(item.id, position) }
                             nextEpisode = next
                             nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
                             while (nextCountdown > 0) {
@@ -1280,6 +1318,7 @@ fun PlayerScreen(
                             }
                             if (nextEpisode?.id == next.id) {
                                 nextEpisode = null
+                                reportStopInAppScope(position)
                                 onPlayNext?.invoke(next)
                             }
                         }
@@ -1429,9 +1468,17 @@ fun PlayerScreen(
                 renderTimeMs: Long,
             ) {
                 firstFrameRendered = true
-                val firstFrameMs = android.os.SystemClock.elapsedRealtime() - playStartAt
-                phaseTimes.put("firstFrameMs", firstFrameMs)
-                StabilityMetrics.firstFrameMs = firstFrameMs
+                firstFrameAt = android.os.SystemClock.elapsedRealtime()
+                val effectiveReadyAt = readyAt.takeIf { it > 0L } ?: firstFrameAt
+                if (readyAt == 0L) readyAt = effectiveReadyAt
+                val loadToReadyMs = (effectiveReadyAt - loadStartedAt).coerceAtLeast(0L)
+                val loadToFirstFrameMs = (firstFrameAt - loadStartedAt).coerceAtLeast(0L)
+                val readyToFirstFrameMs = (firstFrameAt - effectiveReadyAt).coerceAtLeast(0L)
+                phaseTimes.put("loadToReadyMs", loadToReadyMs)
+                    .put("loadToFirstFrameMs", loadToFirstFrameMs)
+                    .put("readyToFirstFrameMs", readyToFirstFrameMs)
+                    .put("firstFrameMs", loadToFirstFrameMs)
+                StabilityMetrics.firstFrameMs = loadToFirstFrameMs
                 if (exo.isLoading && rebufferStartedAt == 0L) {
                     StabilityMetrics.rebufferCount++
                     rebufferStartedAt = android.os.SystemClock.elapsedRealtime()
@@ -1466,6 +1513,7 @@ fun PlayerScreen(
 
     DisposableEffect(item.id) {
         onDispose {
+            reportStopInAppScope(position)
             prewarmJob?.cancel()
             watchdog.reset()
             val session = JSONObject()
@@ -1475,6 +1523,7 @@ fun PlayerScreen(
                 .put("videoRange", AppRuntime.currentVideoRange)
                 .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
                 .put("surfaceSize", currentSurfaceSize?.let { "${it.first}x${it.second}" } ?: JSONObject.NULL)
+                .put("phaseTimes", phaseTimes)
                 .put("startedAt", playStartAt).put("endedAt", android.os.SystemClock.elapsedRealtime())
                 .put("endReason", error ?: playbackStatusNotice ?: "player-exit")
             runCatching {
@@ -1575,6 +1624,46 @@ fun PlayerScreen(
         seekHoldDelta = 0L
     }
 
+    fun requestWatchdogRecovery(reason: WatchdogReason) {
+        if (recovering || optionMenu || error != null) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (lastRecoveryAt > 0L && now - lastRecoveryAt < 60_000L) return
+        if (recoveryCount >= 3) {
+            playbackStatusNotice = "播放卡住：可按 OK 换源"
+            return
+        }
+        recovering = true
+        recoveryCount++
+        lastRecoveryAt = now
+        val recoveryPosition = position
+        val generation = sessionGeneration
+        PageLog.add("watchdog recover n=$recoveryCount reason=${reason.name} pos=$recoveryPosition")
+        watchdog.reset()
+        scope.launch {
+            delay(300)
+            if (generation != sessionGeneration) {
+                recovering = false
+                return@launch
+            }
+            if (recoveryCount == 1) {
+                requestPlaybackReload(recoveryPosition, generation)
+            } else {
+                val next = mediaSources.firstOrNull { it.id != currentSourceId && it.id !in triedSources }
+                if (next != null) {
+                    triedSources = triedSources + listOfNotNull(currentSourceId)
+                    currentSourceId = next.id
+                    badHttpFallbackStage = 0
+                    directFallbackTried = false
+                    requestPlaybackReload(recoveryPosition, generation)
+                } else {
+                    playbackStatusNotice = "没有可切换的片源"
+                }
+            }
+            delay(2_000)
+            recovering = false
+        }
+    }
+
     LaunchedEffect(Unit) {
         var sinceReport = 0
         var bufferingSince = 0L
@@ -1588,7 +1677,7 @@ fun PlayerScreen(
                 "mpv" -> mpvBackend?.durationMs() ?: duration
                 else -> exo.duration.coerceAtLeast(0)
             }
-            watchdog.onTick(
+            val reason = watchdog.onTick(
                 positionMs = position,
                 bufferedMs = if (activeEngine == "media3") exo.bufferedPosition else position,
                 state = if (activeEngine == "media3") exo.playbackState else if (mpvState.buffering) Player.STATE_BUFFERING else if (mpvState.playing) Player.STATE_READY else Player.STATE_IDLE,
@@ -1599,6 +1688,7 @@ fun PlayerScreen(
                 bytesLoaded = bytesLoaded,
                 isLoading = buffering,
             )
+            if (reason != null) requestWatchdogRecovery(reason)
             val creditsSkipSeconds = AppRuntime.prefs?.endCreditsSkipSeconds ?: 30
             val validCreditsStart = currentCreditsStartMs?.takeIf { it > 0L && it < duration }
             if (creditsSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
@@ -1730,7 +1820,7 @@ fun PlayerScreen(
     fun exitPlayback() {
         showExitPrompt = false
         exitPromptAt = 0L
-        scope.safeLaunch { AppRuntime.client?.reportStop(item.id, position.coerceAtLeast(0L)) }
+        reportStopInAppScope(position)
         if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
         onBack()
     }
@@ -2113,7 +2203,7 @@ fun PlayerScreen(
                             modifier = Modifier.height(34.dp).width(96.dp),
                             corner = 17.dp, scaleTo = 1.04f,
                             onClick = {
-                                scope.launch { runCatching { client?.reportStop(item.id, position) } }
+                                reportStopInAppScope(position)
                                 nextEpisode = null
                                 onPlayNext?.invoke(ne)
                             },
@@ -2543,7 +2633,7 @@ fun PlayerScreen(
                                         onClick = {
                                             if (!active) {
                                                 quickPanel = QuickPanel.NONE
-                                                scope.launch { runCatching { client?.reportStop(item.id, position) } }
+                                                reportStopInAppScope(position)
                                                 onPlayNext?.invoke(ep)
                                             }
                                         },

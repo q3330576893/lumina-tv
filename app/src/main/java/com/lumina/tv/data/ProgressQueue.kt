@@ -6,7 +6,15 @@ import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
 
-data class PendingProgress(val itemId: String, val positionMs: Long, val at: Long)
+data class PendingProgress(
+    val itemId: String,
+    val positionMs: Long,
+    val at: Long,
+    val eventType: String = "stop",
+    val paused: Boolean = false,
+    val mediaSourceId: String? = null,
+    val playMethod: String = "DirectPlay",
+)
 
 class ProgressQueue(
     context: Context,
@@ -26,7 +34,11 @@ class ProgressQueue(
     @Synchronized
     fun enqueue(progress: PendingProgress) {
         if (progress.itemId.isBlank()) return
-        entries.removeAll { it.itemId == progress.itemId }
+        if (progress.eventType == "stop") {
+            entries.removeAll { it.itemId == progress.itemId }
+        } else {
+            entries.removeAll { it.itemId == progress.itemId && it.eventType == progress.eventType }
+        }
         entries.addLast(progress)
         while (entries.size > MAX_ENTRIES) entries.removeFirst()
         persist()
@@ -42,8 +54,18 @@ class ProgressQueue(
     }
 
     @Synchronized
-    fun removeThrough(itemId: String, positionMs: Long) {
-        if (entries.removeAll { it.itemId == itemId && it.positionMs <= positionMs }) persist()
+    fun removeThrough(itemId: String, positionMs: Long, eventType: String) {
+        val eventTypes = when (eventType) {
+            "progress" -> setOf("progress")
+            "stop" -> setOf("start", "progress", "stop")
+            "start" -> setOf("start")
+            else -> emptySet()
+        }
+        if (entries.removeAll {
+                it.itemId == itemId && it.eventType in eventTypes &&
+                    (eventType == "stop" || it.positionMs <= positionMs)
+            }
+        ) persist()
     }
 
     @Synchronized
@@ -64,17 +86,21 @@ class ProgressQueue(
                         itemId = item.optString("itemId"),
                         positionMs = item.optLong("positionMs"),
                         at = item.optLong("at"),
+                        eventType = item.optString("eventType", "stop").takeIf { it in EVENT_TYPES } ?: "stop",
+                        paused = item.optBoolean("paused", false),
+                        mediaSourceId = item.optString("mediaSourceId").takeIf { it.isNotBlank() },
+                        playMethod = item.optString("playMethod", "DirectPlay"),
                     )
                 }?.takeIf { it.itemId.isNotBlank() }
             }
         }.getOrDefault(emptyList())
 
         restored.sortedBy { it.at }.forEach { progress ->
-            entries.removeAll { it.itemId == progress.itemId }
+            entries.removeAll { it.itemId == progress.itemId && it.eventType == progress.eventType }
             entries.addLast(progress)
         }
         while (entries.size > MAX_ENTRIES) entries.removeFirst()
-        if (restored.size != entries.size) persist()
+        if (restored.size != entries.size || file.exists()) persist()
     }
 
     private fun persist() {
@@ -84,7 +110,11 @@ class ProgressQueue(
                     put(JSONObject()
                         .put("itemId", progress.itemId)
                         .put("positionMs", progress.positionMs)
-                        .put("at", progress.at))
+                        .put("at", progress.at)
+                        .put("eventType", progress.eventType)
+                        .put("paused", progress.paused)
+                        .put("mediaSourceId", progress.mediaSourceId ?: JSONObject.NULL)
+                        .put("playMethod", progress.playMethod))
                 }
             }.toString()
             val temp = File(file.parentFile, "${file.name}.tmp")
@@ -99,6 +129,7 @@ class ProgressQueue(
     companion object {
         const val MAX_ENTRIES = 50
         const val RETRY_BATCH_SIZE = 5
+        private val EVENT_TYPES = setOf("start", "progress", "stop")
 
         private fun serverHash(serverUrl: String): String = MessageDigest.getInstance("SHA-256")
             .digest(EmbyClient.normalize(serverUrl).lowercase().toByteArray(Charsets.UTF_8))

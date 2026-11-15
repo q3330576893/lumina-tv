@@ -199,6 +199,30 @@ class Prefs(context: Context) {
 
     enum class SubtitleMode { OFF, AUTO, TRACK }
 
+    private fun ns(): String {
+        val server = baseUrl.trim().lowercase().ifBlank { "none" }
+        val user = userId.ifBlank { "none" }
+        return Integer.toHexString(server.hashCode()) + "_" + user.replace(Regex("[^A-Za-z0-9._-]"), "_")
+    }
+
+    private fun itemKey(prefix: String, itemId: String) = "${prefix}_${ns()}_$itemId"
+
+    private fun subtitleGlobalKey() = "subtitle_mode_global_${ns()}"
+
+    private fun normalizeSubtitlePreference(stored: String): String = when {
+        stored == "off" || stored == "auto" || stored.startsWith("track:") -> stored
+        stored == "-1" -> "off"
+        else -> "track:$stored"
+    }
+
+    private fun migratedSubtitleValue(key: String, legacyKey: String): String? {
+        sp.getString(key, null)?.let { return it }
+        val legacy = sp.getString(legacyKey, null) ?: return null
+        val value = normalizeSubtitlePreference(legacy)
+        sp.edit().putString(key, value).remove(legacyKey).apply()
+        return value
+    }
+
     fun subtitleModeFor(itemId: String): SubtitleMode = when {
         subtitlePreferenceFor(itemId) == "off" -> SubtitleMode.OFF
         subtitlePreferenceFor(itemId)?.startsWith("track:") == true -> SubtitleMode.TRACK
@@ -206,13 +230,14 @@ class Prefs(context: Context) {
     }
 
     fun subtitlePreferenceFor(itemId: String): String? {
-        val key = "subtitle_track_$itemId"
-        val stored = sp.getString(key, null) ?: return sp.getString("subtitle_mode_global", null)
-        return when {
-            stored == "off" || stored == "auto" || stored.startsWith("track:") -> stored
-            stored == "-1" -> "off".also { sp.edit().putString(key, it).putString("subtitle_mode_global", it).apply() }
-            else -> "track:$stored".also { sp.edit().putString(key, it).putString("subtitle_mode_global", it).apply() }
-        }
+        val key = itemKey("subtitle_track", itemId)
+        val globalKey = subtitleGlobalKey()
+        val stored = migratedSubtitleValue(key, "subtitle_track_$itemId")
+            ?: migratedSubtitleValue(globalKey, "subtitle_mode_global")
+            ?: return null
+        val value = normalizeSubtitlePreference(stored)
+        if (value != stored) sp.edit().putString(key, value).putString(globalKey, value).apply()
+        return value
     }
 
     fun subtitleTrackFor(itemId: String): String? = subtitlePreferenceFor(itemId)
@@ -227,16 +252,24 @@ class Prefs(context: Context) {
             trackKey.startsWith("track:") -> trackKey
             else -> "track:$trackKey"
         }
+        val key = itemKey("subtitle_track", itemId)
         sp.edit()
-            .putString("subtitle_track_$itemId", value)
-            .putString("subtitle_mode_global", value)
+            .putString(key, value)
+            .putString(subtitleGlobalKey(), value)
             .apply()
     }
 
-    fun audioTrackFor(itemId: String): Int? = sp.getInt("audio_track_$itemId", -1).takeIf { it >= 0 }
+    fun audioTrackFor(itemId: String): Int? {
+        val key = itemKey("audio_track", itemId)
+        if (sp.contains(key)) return sp.getInt(key, -1).takeIf { it >= 0 }
+        if (!sp.contains("audio_track_$itemId")) return null
+        val legacy = sp.getInt("audio_track_$itemId", -1)
+        sp.edit().putInt(key, legacy).remove("audio_track_$itemId").apply()
+        return legacy.takeIf { it >= 0 }
+    }
 
     fun rememberAudioTrack(itemId: String, streamIndex: Int) {
-        sp.edit().putInt("audio_track_$itemId", streamIndex).apply()
+        sp.edit().putInt(itemKey("audio_track", itemId), streamIndex).apply()
     }
 
     /** 强制转码（部分异形编码在电视盒上直连会卡顿时使用） */

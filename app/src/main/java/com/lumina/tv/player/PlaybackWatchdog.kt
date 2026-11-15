@@ -53,7 +53,7 @@ class PlaybackWatchdog {
     fun onTick(
         positionMs: Long, bufferedMs: Long, state: Int, playWhenReady: Boolean,
         isSeeking: Boolean, sessionGeneration: Int, durationMs: Long, bytesLoaded: Long, isLoading: Boolean,
-    ) {
+    ): WatchdogReason? {
         val now = SystemClock.elapsedRealtime()
         if (generation != sessionGeneration) {
             generation = sessionGeneration
@@ -65,27 +65,28 @@ class PlaybackWatchdog {
             lastBufferedAt = now
             lastBytes = bytesLoaded
             byteAt = now
-            return
+            return null
         }
         if (!playWhenReady || isSeeking || now - generationAt < 3_000L) {
             updatePositions(now, positionMs, bufferedMs, bytesLoaded)
-            return
+            return null
         }
         if (bytesLoaded != lastBytes) { lastBytes = bytesLoaded; byteAt = now }
         loading = isLoading
         if (positionMs != lastPositionMs) { lastPositionMs = positionMs; lastPositionAt = now }
         if (bufferedMs != lastBufferedMs) { lastBufferedMs = bufferedMs; lastBufferedAt = now }
-        if (now < suppressedUntil || now - loadingAt < 8_000L) return
+        if (now < suppressedUntil || now - loadingAt < 8_000L) return null
         val reason = when {
             durationMs > 0 && durationMs - positionMs in 0..10_000L && now - lastPositionAt >= 60_000L -> WatchdogReason.NO_END
             state == 2 && !loading && now - stateSince >= 4_000L && now - byteAt >= 4_000L -> WatchdogReason.BUFFERING_NO_LOAD
             state == 2 && loading && now - lastBufferedAt >= 4_000L -> WatchdogReason.BUFFERING_NO_PROGRESS
             state == 3 && now - lastPositionAt >= 4_000L -> WatchdogReason.PLAYING_NO_PROGRESS
             else -> null
-        } ?: return
+        } ?: return null
         PageLog.add("watchdog hit=${reason.name} pos=$positionMs buffered=$bufferedMs state=$state gen=$sessionGeneration")
         StabilityMetrics.watchdogHits++
         suppressedUntil = now + 30_000L
+        return reason
     }
 
     fun onLoadingChanged(loading: Boolean) {

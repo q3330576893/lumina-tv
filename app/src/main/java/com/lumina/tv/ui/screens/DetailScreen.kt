@@ -256,6 +256,7 @@ fun DetailScreen(
     id: String,
     onPlay: (MediaItem) -> Unit,
     onPlayWithSource: (MediaItem, String) -> Unit,
+    onPlayFromStart: (MediaItem) -> Unit,
     onOpenDetail: (String) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -314,6 +315,7 @@ fun DetailScreen(
     val similarRowState = rememberLazyListState()
     val detailScrollState = rememberScrollState()
     val playFocus = remember { FocusRequester() }
+    val playFromStartFocus = remember { FocusRequester() }
     val sourceFocus = remember { FocusRequester() }
     var playButtonFocused by remember { mutableStateOf(false) }
     var topRegionFocused by remember { mutableStateOf(false) }
@@ -861,7 +863,9 @@ fun DetailScreen(
                         Spacer(Modifier.height(18.dp))
                         Row(Modifier.focusGroup().focusProperties { up = playFocus }) {
                             FocusSurface(
-                                modifier = Modifier.height(52.dp).width(150.dp),
+                                modifier = Modifier.height(52.dp).width(150.dp).focusProperties {
+                                    if (it0.positionTicks > 0L) right = playFromStartFocus
+                                },
                                 corner = 23.dp,
                                 focusRequester = playFocus,
                                 onFocused = { playButtonFocused = true },
@@ -894,6 +898,38 @@ fun DetailScreen(
                                     Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF06101F), modifier = Modifier.size(22.dp))
                                     Spacer(Modifier.width(6.dp))
                                     Text("播放", color = Color(0xFF06101F), fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            if (it0.positionTicks > 0L) {
+                                Spacer(Modifier.width(10.dp))
+                                FocusSurface(
+                                    modifier = Modifier.height(52.dp).width(132.dp).focusProperties {
+                                        left = playFocus
+                                        up = playFocus
+                                    },
+                                    corner = 23.dp,
+                                    focusRequester = playFromStartFocus,
+                                    onClick = {
+                                        val target = if (it0.type == "Series") {
+                                            episodes.firstOrNull { !it.played && it.positionTicks > 0 }
+                                                ?: episodes.firstOrNull { !it.played }
+                                                ?: episodes.firstOrNull()
+                                        } else it0
+                                        if (target != null) onPlayFromStart(target)
+                                    },
+                                ) { focused ->
+                                    Box(
+                                        Modifier.fillMaxSize()
+                                            .background(if (focused) Color(0x33FFFFFF) else Color(0x1FFFFFFF))
+                                            .border(
+                                                if (focused) 2.dp else 0.dp,
+                                                Color.White,
+                                                RoundedCornerShape(23.dp),
+                                            ),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text("从头播放", color = Color.White, fontSize = 14.sp)
+                                    }
                                 }
                             }
                             if (sources.isNotEmpty()) {

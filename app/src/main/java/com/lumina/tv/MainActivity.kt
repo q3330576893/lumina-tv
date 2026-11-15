@@ -56,7 +56,7 @@ sealed interface Screen {
     data object Login : Screen
     data object Home : Screen
     data class Detail(val id: String, val previousId: String? = null) : Screen
-    data class Play(val item: MediaItem, val sourceId: String? = null) : Screen
+    data class Play(val item: MediaItem, val sourceId: String? = null, val startPositionMs: Long? = null) : Screen
     data class Search(val keyword: String = "") : Screen
     data object Settings : Screen
 }
@@ -334,6 +334,7 @@ private fun AppRoot(
                     id = target.id,
                     onPlay = { item -> navigate(Screen.Play(item), target) },
                     onPlayWithSource = { item, sid -> navigate(Screen.Play(item, sid), target) },
+                    onPlayFromStart = { item -> navigate(Screen.Play(item, startPositionMs = 0L), target) },
                     onOpenDetail = { nextId -> navigate(Screen.Detail(nextId), target) },
                     onBack = { goBack() },
                 )
@@ -343,6 +344,7 @@ private fun AppRoot(
                 PlayerScreen(
                     item = target.item,
                     initialSourceId = target.sourceId,
+                    startPositionMs = target.startPositionMs,
                     onBack = { goBack() },
                     onPlayNext = { next -> replaceCurrent(Screen.Play(next)) },
                 )

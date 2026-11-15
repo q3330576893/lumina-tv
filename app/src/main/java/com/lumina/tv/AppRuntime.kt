@@ -1,6 +1,9 @@
 package com.lumina.tv
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -17,6 +20,7 @@ import java.util.Base64
 
 /** 全局运行时：给 UI 与内置配对服务共享的薄状态层。 */
 object AppRuntime {
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var applicationContext: Context? = null
     var prefs: Prefs? = null
     var client: EmbyClient? = null
