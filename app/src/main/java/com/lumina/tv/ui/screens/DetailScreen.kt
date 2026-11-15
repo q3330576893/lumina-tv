@@ -122,6 +122,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -157,20 +158,58 @@ private suspend fun loadDetailRecommendations(
 ): List<MediaItem> {
     val genres = current.genres.map { it.trim() }.filter(String::isNotBlank).distinctBy { it.lowercase() }
     val genreKey = genres.map { it.lowercase() }.sorted().joinToString("|")
-    val cacheKey = "detail-related:$itemId:$genreKey"
-    LibraryCache.browseOf(cacheKey)?.let { return it }
+    val calendar = java.util.Calendar.getInstance()
+    val dayIndex = "%04d-%03d".format(
+        calendar.get(java.util.Calendar.YEAR),
+        calendar.get(java.util.Calendar.DAY_OF_YEAR),
+    )
+    val cacheKey = "detail-related:$itemId:$genreKey:$dayIndex"
+    LibraryCache.browseOf(cacheKey)?.let { cached ->
+        PageLog.add("detailRelated id=$itemId candidates=${cached.size} excluded=0 top3=${cached.take(3).joinToString(",") { it.id }} cache=hit")
+        return cached
+    }
     val type = if (current.type == "Series") "Series" else "Movie"
     val results = coroutineScope {
-        val byGenre = async {
-            genres.firstOrNull()?.let { genre -> runCatching {
-                client.getItems(types = type, sortBy = "CommunityRating", sortOrder = "Descending", limit = 12, genre = genre, requestTimeoutSeconds = 5)
-            }.getOrDefault(emptyList()) }.orEmpty()
+        val similar = async {
+            runCatching { client.getSimilarItems(itemId, 12) }.getOrDefault(emptyList())
         }
-        val similar = async { runCatching { client.getSimilarItems(itemId, 12) }.getOrDefault(emptyList()) }
-        (byGenre.await() + similar.await())
-            .distinctBy { it.id }
+        val byGenre = genres.map { genre -> async {
+            runCatching {
+                client.getItems(types = type, sortBy = "CommunityRating", sortOrder = "Descending", limit = 12, genre = genre, requestTimeoutSeconds = 5)
+            }.getOrDefault(emptyList())
+        } }.awaitAll().flatten()
+        val rawSimilar = similar.await()
+        val genreRanked = byGenre
             .filter { it.id != itemId && it.type == current.type }
-            .take(12)
+            .distinctBy { it.id }
+            .filter { candidate -> candidate.genres.any { candidateGenre -> genres.any { it.equals(candidateGenre.trim(), ignoreCase = true) } } }
+            .sortedWith(compareByDescending<MediaItem> { candidate ->
+                candidate.genres.count { candidateGenre -> genres.any { it.equals(candidateGenre.trim(), ignoreCase = true) } }
+            }.thenByDescending { it.communityRating ?: it.rating ?: 0.0 })
+        val similarRanked = rawSimilar.filter { it.id != itemId && it.type == current.type }.distinctBy { it.id }
+        val ordered = mutableListOf<MediaItem>()
+        val seen = mutableSetOf<String>()
+        var similarIndex = 0
+        var genreIndex = 0
+        var previousGenre: String? = null
+        var preferSimilar = true
+        while (ordered.size < 12 && (similarIndex < similarRanked.size || genreIndex < genreRanked.size)) {
+            val source = if ((preferSimilar && similarIndex < similarRanked.size) || genreIndex >= genreRanked.size) {
+                similarRanked to similarIndex++
+            } else {
+                genreRanked to genreIndex++
+            }
+            preferSimilar = !preferSimilar
+            val candidate = source.first[source.second]
+            if (!seen.add(candidate.id)) continue
+            val firstGenre = candidate.genres.firstOrNull()?.trim()?.lowercase()
+            if (firstGenre != null && firstGenre == previousGenre) continue
+            ordered += candidate
+            previousGenre = firstGenre
+        }
+        val rawCount = rawSimilar.size + byGenre.size
+        PageLog.add("detailRelated id=$itemId candidates=$rawCount excluded=${(rawCount - ordered.size).coerceAtLeast(0)} top3=${ordered.take(3).joinToString(",") { it.id }}")
+        ordered
     }
     LibraryCache.putBrowse(cacheKey, results)
     return results

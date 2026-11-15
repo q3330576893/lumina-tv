@@ -130,6 +130,7 @@ import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.TmdbClient
+import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.FocusScale
 import com.lumina.tv.ui.components.GlassTone
@@ -604,7 +605,6 @@ fun HomeScreen(
 
     val heroPool = (latest + movies + series + favorites).distinctBy { it.id }
     val heroItems = remember(heroPool) { pickHeroItems(heroPool, latest.map { it.id }.toHashSet(), 6) }
-    LaunchedEffect(heroItems) { heroIndex = 0 }
     val hero = heroItems.getOrNull(heroIndex) ?: resume.firstOrNull()
     val homeLibraries = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
     val firstSectionKey: String? = when {
@@ -1591,13 +1591,14 @@ private fun TopButton(icon: androidx.compose.ui.graphics.vector.ImageVector, lab
 }
 
 /**
- * 轮播选片：打分排序后，用「当天日期」做随机种子从前 20 里抽 6 个。
- * 同一天内保持稳定，隔天自动换一批，不需要联网。
+ * 轮播选片：按小时打乱前 40 个候选，并降低最近展示条目的权重。
  */
+private val recentlyShownHeroIds = mutableListOf<String>()
+
 private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: Int = 6): List<MediaItem> {
-    if (pool.isEmpty()) return emptyList()
-    val calendar = java.util.Calendar.getInstance()
-    val daySeed = (calendar.get(java.util.Calendar.YEAR) * 367L + calendar.get(java.util.Calendar.DAY_OF_YEAR))
+    if (pool.isEmpty() || size <= 0) return emptyList()
+    val seed = System.currentTimeMillis() / 3_600_000L
+    val shownIds = synchronized(recentlyShownHeroIds) { recentlyShownHeroIds.toSet() }
     fun score(item: MediaItem): Double {
         var s = 0.0
         val hasBackdrop = !item.backdropTag.isNullOrBlank()
@@ -1605,6 +1606,7 @@ private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: I
         if (!item.logoTag.isNullOrBlank()) s += 2.0
         if (item.positionTicks > 0 && !item.played) s += 3.0
         if (item.id in recentIds) s += 2.0
+        if (item.id in shownIds) s -= 4.0
         if (item.played) s -= 2.0
         // 60 分钟以内多半是花絮/预告，不该占轮播位
         val minutes = (item.runtimeTicks ?: 0L) / 600_000_000L
@@ -1614,15 +1616,29 @@ private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: I
         return s
     }
     val ranked = pool.sortedByDescending { score(it) }
-    val shuffled = ranked.take(20).shuffled(java.util.Random(daySeed))
+    val shuffled = ranked.take(40).shuffled(java.util.Random(seed))
     // 没有横版剧照的片子裁出来一定难看，优先只放有 backdrop 的
     val withBackdrop = shuffled.filter { !it.backdropTag.isNullOrBlank() }
-    val picked = withBackdrop.take(size)
-    return when {
-        picked.size >= 3 -> picked
-        withBackdrop.isNotEmpty() -> (withBackdrop + shuffled.filterNot { it in withBackdrop }).distinctBy { it.id }.take(size)
-        else -> shuffled.take(size)
+    val candidates = when {
+        withBackdrop.size >= 3 -> withBackdrop
+        withBackdrop.isNotEmpty() -> (withBackdrop + shuffled.filterNot { it in withBackdrop }).distinctBy { it.id }
+        else -> shuffled
     }
+    val picked = mutableListOf<MediaItem>()
+    val remaining = candidates.toMutableList()
+    while (picked.size < size && remaining.isNotEmpty()) {
+        val previousGenre = picked.lastOrNull()?.genres?.firstOrNull()?.trim()?.lowercase()
+        val nextIndex = if (previousGenre == null) 0 else remaining.indexOfFirst {
+            it.genres.firstOrNull()?.trim()?.lowercase() != previousGenre
+        }.takeIf { it >= 0 } ?: 0
+        picked += remaining.removeAt(nextIndex)
+    }
+    synchronized(recentlyShownHeroIds) {
+        recentlyShownHeroIds.addAll(picked.map { it.id })
+        while (recentlyShownHeroIds.size > 12) recentlyShownHeroIds.removeAt(0)
+    }
+    PageLog.add("heroPool candidates=${pool.size} ranked=${candidates.size} excluded=${(pool.size - picked.size).coerceAtLeast(0)} top3=${picked.take(3).joinToString(",") { it.id }}")
+    return picked
 }
 
 private fun calculateHeroHeight(screenHeight: Dp): Dp =
