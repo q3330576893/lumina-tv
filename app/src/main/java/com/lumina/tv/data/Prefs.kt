@@ -93,6 +93,10 @@ class Prefs(context: Context) {
             ?: 512L * 1024L * 1024L
         set(v) = sp.edit().putLong("playback_cache_bytes", v.takeIf { it in PLAYBACK_CACHE_OPTIONS } ?: 512L * 1024L * 1024L).apply()
 
+    var playbackCacheLastTrimAt: Long
+        get() = sp.getLong("playback_cache_last_trim_at", 0L)
+        set(v) = sp.edit().putLong("playback_cache_last_trim_at", v).apply()
+
     var sourceDynamicRange: DynamicRangePref
         get() = runCatching { DynamicRangePref.valueOf(sp.getString("source_dynamic_range", "UNSET") ?: "UNSET") }
             .getOrDefault(DynamicRangePref.UNSET)

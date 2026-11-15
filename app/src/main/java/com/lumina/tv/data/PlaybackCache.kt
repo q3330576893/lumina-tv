@@ -8,11 +8,16 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheKeyFactory
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import com.lumina.tv.AppRuntime
+import com.lumina.tv.diag.PageLog
 import java.io.File
 import java.security.MessageDigest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 object PlaybackCache {
     private const val DEFAULT_LIMIT = 512L * 1024L * 1024L
+    private const val DAY_MS = 24L * 60L * 60L * 1000L
     private val sensitiveParams = setOf("api_key", "apikey", "token", "access_token", "authorization", "auth", "x-emby-token")
     @Volatile private var instance: SimpleCache? = null
     @Volatile private var limitBytes = DEFAULT_LIMIT
@@ -58,6 +63,33 @@ object PlaybackCache {
 
     fun clear(context: Context) {
         runCatching { get(context)?.let { cache -> cache.keys.toList().forEach(cache::removeResource) } }
+    }
+
+    suspend fun autoTrim(context: Context, force: Boolean = false) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (!force && now - (AppRuntime.prefs?.playbackCacheLastTrimAt ?: 0L) < DAY_MS) return@withContext
+        runCatching {
+            val cache = get(context)
+            if (cache != null) {
+                val spans = cache.keys.flatMap { key ->
+                    cache.getCachedSpans(key).mapNotNull { span -> span.file?.let { file -> span to file } }
+                }
+                spans.filter { (_, file) -> now - file.lastModified() >= DAY_MS }
+                    .forEach { (span, _) -> runCatching { cache.removeSpan(span) } }
+
+                val limit = limitBytes
+                if (limit > 0L && cache.cacheSpace > limit * 0.9) {
+                    val oldestFirst = spans.sortedBy { (_, file) -> file.lastModified() }
+                    for ((span, _) in oldestFirst) {
+                        if (cache.cacheSpace <= limit * 0.7) break
+                        runCatching { cache.removeSpan(span) }
+                    }
+                }
+            }
+            AppRuntime.prefs?.playbackCacheLastTrimAt = now
+        }.onFailure { error ->
+            PageLog.add("playbackCache autoTrim failed=${error.message ?: error.javaClass.simpleName}")
+        }
     }
 
     fun mediaKey(server: String, user: String, itemId: String, sourceId: String?): String =

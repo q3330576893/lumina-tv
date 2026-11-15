@@ -138,6 +138,9 @@ import java.net.URLEncoder
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
 private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+private data class RelatedCacheEntry(val items: List<MediaItem>, val storedAt: Long)
+private val detailRelatedCache = java.util.Collections.synchronizedMap(mutableMapOf<String, RelatedCacheEntry>())
+private const val DETAIL_RELATED_TTL_MS = 6 * 60 * 60 * 1000L
 
 @OptIn(ExperimentalFoundationApi::class)
 private object DetailNoBringIntoViewSpec : BringIntoViewSpec {
@@ -163,55 +166,87 @@ private suspend fun loadDetailRecommendations(
         calendar.get(java.util.Calendar.YEAR),
         calendar.get(java.util.Calendar.DAY_OF_YEAR),
     )
-    val cacheKey = "detail-related:$itemId:$genreKey:$dayIndex"
-    LibraryCache.browseOf(cacheKey)?.let { cached ->
-        PageLog.add("detailRelated id=$itemId candidates=${cached.size} excluded=0 top3=${cached.take(3).joinToString(",") { it.id }} cache=hit")
-        return cached
+    val cacheKey = "detail-related:$itemId:$genreKey"
+    detailRelatedCache[cacheKey]?.let { entry ->
+        if (System.currentTimeMillis() - entry.storedAt < DETAIL_RELATED_TTL_MS) {
+            PageLog.add("detailRelated id=$itemId top12=${entry.items.take(12).joinToString(",") { "${it.id}:${it.name}" }} cache=hit")
+            return entry.items
+        }
+        detailRelatedCache.remove(cacheKey)
     }
     val type = if (current.type == "Series") "Series" else "Movie"
     val results = coroutineScope {
         val similar = async {
-            runCatching { client.getSimilarItems(itemId, 12) }.getOrDefault(emptyList())
+            runCatching { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList())
         }
         val byGenre = genres.map { genre -> async {
             runCatching {
-                client.getItems(types = type, sortBy = "CommunityRating", sortOrder = "Descending", limit = 12, genre = genre, requestTimeoutSeconds = 5)
+                client.getItems(types = type, sortBy = "CommunityRating", sortOrder = "Descending", limit = 30, genre = genre, requestTimeoutSeconds = 5)
             }.getOrDefault(emptyList())
         } }.awaitAll().flatten()
         val rawSimilar = similar.await()
-        val genreRanked = byGenre
+        val candidates = (rawSimilar + byGenre)
             .filter { it.id != itemId && it.type == current.type }
             .distinctBy { it.id }
             .filter { candidate -> candidate.genres.any { candidateGenre -> genres.any { it.equals(candidateGenre.trim(), ignoreCase = true) } } }
-            .sortedWith(compareByDescending<MediaItem> { candidate ->
-                candidate.genres.count { candidateGenre -> genres.any { it.equals(candidateGenre.trim(), ignoreCase = true) } }
-            }.thenByDescending { it.communityRating ?: it.rating ?: 0.0 })
-        val similarRanked = rawSimilar.filter { it.id != itemId && it.type == current.type }.distinctBy { it.id }
+        fun overlapCount(values: List<String>, candidateValues: List<String>): Int =
+            candidateValues.count { value -> values.any { it.equals(value.trim(), ignoreCase = true) } }
+        fun score(candidate: MediaItem): Float {
+            val genreOverlap = overlapCount(genres, candidate.genres)
+            val tagOverlap = overlapCount(current.tags, candidate.tags)
+            val rating = (candidate.communityRating ?: candidate.rating ?: 0.0).toFloat()
+            val jitter = ((itemId + candidate.id + dayIndex).hashCode() and 0x3FF) / 1024f * 1.5f
+            val playedPenalty = if (candidate.played) 1f else 0f
+            return genreOverlap * 3f + tagOverlap + (rating / 10f) * 1.5f + jitter - playedPenalty
+        }
+        val ranked = candidates.sortedByDescending(::score)
         val ordered = mutableListOf<MediaItem>()
         val seen = mutableSetOf<String>()
-        var similarIndex = 0
-        var genreIndex = 0
+        val genreCounts = mutableMapOf<String, Int>()
         var previousGenre: String? = null
-        var preferSimilar = true
-        while (ordered.size < 12 && (similarIndex < similarRanked.size || genreIndex < genreRanked.size)) {
-            val source = if ((preferSimilar && similarIndex < similarRanked.size) || genreIndex >= genreRanked.size) {
-                similarRanked to similarIndex++
-            } else {
-                genreRanked to genreIndex++
+        var consecutiveGenreCount = 0
+        while (ordered.size < 12 && seen.size < ranked.size) {
+            val available = ranked.filter { it.id !in seen }.filter { item ->
+                val leadingGenre = item.genres.firstOrNull()?.trim()?.lowercase()
+                leadingGenre != previousGenre || consecutiveGenreCount < 2
             }
-            preferSimilar = !preferSimilar
-            val candidate = source.first[source.second]
-            if (!seen.add(candidate.id)) continue
-            val firstGenre = candidate.genres.firstOrNull()?.trim()?.lowercase()
-            if (firstGenre != null && firstGenre == previousGenre) continue
-            ordered += candidate
+            val chosen = available.sortedWith(
+                compareBy<MediaItem> { item ->
+                    item.genres.map { it.trim().lowercase() }.filter(String::isNotBlank)
+                        .minOfOrNull { genreCounts[it] ?: 0 } ?: 0
+                }.thenByDescending(::score)
+            ).firstOrNull() ?: break
+            seen += chosen.id
+            ordered += chosen
+            chosen.genres.map { it.trim().lowercase() }.distinct().forEach { genreCounts[it] = (genreCounts[it] ?: 0) + 1 }
+            val firstGenre = chosen.genres.firstOrNull()?.trim()?.lowercase()
+            if (firstGenre == previousGenre) consecutiveGenreCount++ else consecutiveGenreCount = 1
             previousGenre = firstGenre
         }
-        val rawCount = rawSimilar.size + byGenre.size
-        PageLog.add("detailRelated id=$itemId candidates=$rawCount excluded=${(rawCount - ordered.size).coerceAtLeast(0)} top3=${ordered.take(3).joinToString(",") { it.id }}")
-        ordered
+        if (ordered.size < 6 && current.year != null) {
+            val nearby = genres.flatMap { genre ->
+                runCatching {
+                    client.getItems(types = type, sortBy = "CommunityRating", sortOrder = "Descending", limit = 30, genre = genre)
+                }.getOrDefault(emptyList())
+            }.distinctBy { it.id }
+            val currentRating = current.communityRating ?: current.rating ?: 0.0
+            nearby.asSequence()
+                .filter { it.id != itemId && it.id !in seen && it.type == current.type }
+                .filter { it.year != null && it.year in (current.year - 3)..(current.year + 3) }
+                .filter { candidate -> overlapCount(genres, candidate.genres) > 0 }
+                .sortedBy { kotlin.math.abs((it.communityRating ?: it.rating ?: 0.0) - currentRating) }
+                .forEach { candidate ->
+                    if (ordered.size < 12) {
+                        ordered += candidate
+                        seen += candidate.id
+                    }
+                }
+        }
+        ordered.take(12)
     }
-    LibraryCache.putBrowse(cacheKey, results)
+    detailRelatedCache[cacheKey] = RelatedCacheEntry(results, System.currentTimeMillis())
+    if (detailRelatedCache.size > 100) detailRelatedCache.keys.firstOrNull()?.let(detailRelatedCache::remove)
+    PageLog.add("detailRelated id=$itemId top12=${results.joinToString(",") { "${it.id}:${it.name}" }}")
     return results
 }
 
@@ -764,22 +799,33 @@ fun DetailScreen(
                             style = androidx.compose.ui.text.TextStyle(shadow = Shadow(Color(0xE6000000), Offset(2f, 3f), 8f)),
                         )
                         Spacer(Modifier.height(8.dp))
-                        Text(
-                            listOfNotNull(
+                        val ownRating = (it0.communityRating ?: it0.rating)?.takeIf { it > 0 }
+                        val infoParts = when (it0.type) {
+                            "Episode" -> listOfNotNull(
+                                if (it0.parentIndexNumber != null && it0.indexNumber != null) "S%02dE%02d".format(it0.parentIndexNumber, it0.indexNumber) else null,
+                                ownRating?.let { r -> "★ %.1f".format(r) },
+                            )
+                            "Series" -> listOfNotNull(
                                 it0.year?.toString(),
-                                it0.subtitle.takeIf { s -> s.isNotBlank() },
-                                it0.genres.take(3).joinToString(" / ").takeIf { s -> s.isNotBlank() },
-                                (it0.communityRating ?: it0.rating)?.let { r -> "★ %.1f".format(r) },
-                                tmdb?.rating?.let { r -> "TMDB ★ %.1f".format(r) },
-                            ).joinToString("   "),
-                            color = TextSub, fontSize = 12.sp,
-                        )
+                                it0.genres.take(3).joinToString(" / ").takeIf { it.isNotBlank() },
+                                ownRating?.let { r -> "★ %.1f".format(r) },
+                                seasons.size.takeIf { it > 0 }?.let { "共 $it 季" },
+                            )
+                            else -> listOfNotNull(
+                                it0.year?.toString(),
+                                it0.genres.take(3).joinToString(" / ").takeIf { it.isNotBlank() },
+                                ownRating?.let { r -> "★ %.1f".format(r) },
+                                if (ownRating == null) tmdb?.rating?.takeIf { it > 0 }?.let { r -> "TMDB ★ %.1f".format(r) } else null,
+                            )
+                        }
+                        if (infoParts.isNotEmpty()) {
+                            Text(infoParts.joinToString("   "), color = TextSub, fontSize = 12.sp)
+                        }
                         mdb?.let { ratings ->
                             val ratingLine = listOfNotNull(
                                 ratings.imdb?.takeIf { it > 0 }?.let { "IMDb %.1f".format(it) },
                                 ratings.tomato?.takeIf { it > 0 }?.let { "番茄 $it%" },
                                 ratings.metacritic?.takeIf { it > 0 }?.let { "MC $it" },
-                                ratings.tmdb?.takeIf { it > 0 }?.let { "TMDB $it" },
                                 ratings.trakt?.takeIf { it > 0 }?.let { "Trakt $it" },
                             ).joinToString(" · ")
                             if (ratingLine.isNotBlank()) Text(ratingLine, color = TextSub, fontSize = 11.sp)

@@ -12,9 +12,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -27,6 +29,7 @@ import com.lumina.tv.ui.theme.ThemeRuntime
 import androidx.compose.material3.Text
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsPlayback(
@@ -37,6 +40,7 @@ fun SettingsPlayback(
 ) {
     val prefs = AppRuntime.prefs
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var speed by remember { mutableStateOf(prefs?.defaultSpeed ?: 1.0f) }
     var autoNext by remember { mutableStateOf(prefs?.autoNextEpisode ?: false) }
     var introSeconds by remember { mutableStateOf(prefs?.globalIntroSeconds ?: 0) }
@@ -45,6 +49,11 @@ fun SettingsPlayback(
     var cacheBytes by remember { mutableStateOf(prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L) }
     var cacheUsed by remember { mutableStateOf(PlaybackCache.spaceBytes(context)) }
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
+
+    LaunchedEffect(context) {
+        PlaybackCache.autoTrim(context)
+        cacheUsed = PlaybackCache.spaceBytes(context)
+    }
 
     val rowKeys = remember {
         listOf(
@@ -97,11 +106,15 @@ fun SettingsPlayback(
                 ChoiceRow("playback:maxStreamingBitrate", "播放码率上限", "限制流媒体最高码率", bitrateOptions, bitrate.toString(), { key ->
                     bitrate = key.toLong(); prefs?.maxStreamingBitrate = bitrate
                 }, requesters.getValue(rowKeys[4]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[5]))
-                ChoiceRow("playback:playbackCacheBytes", "播放缓存", "限制本地播放缓存空间", cacheOptions, cacheBytes.toString(), { key ->
+                ChoiceRow("playback:playbackCacheBytes", "缓存上限", "每天自动清理一次，超过上限会提前淘汰", cacheOptions, cacheBytes.toString(), { key ->
                     cacheBytes = key.toLong(); prefs?.playbackCacheBytes = cacheBytes
-                    PlaybackCache.setLimit(cacheBytes); cacheUsed = PlaybackCache.spaceBytes(context)
+                    PlaybackCache.setLimit(cacheBytes)
+                    scope.launch {
+                        PlaybackCache.autoTrim(context, force = true)
+                        cacheUsed = PlaybackCache.spaceBytes(context)
+                    }
                 }, requesters.getValue(rowKeys[5]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[4]), downRequester = requesters.getValue(rowKeys[6]))
-                ActionRow("playback:clearCache", "清空播放缓存", "已用 ${cacheUsed / (1024L * 1024L)} MB", "清空", {
+                ActionRow("playback:clearCache", "播放缓存", "已用 ${cacheUsed / (1024L * 1024L)} MB / 上限 ${cacheBytes / (1024L * 1024L)} MB · 每天自动清理", "清空", {
                     PlaybackCache.clear(context); cacheUsed = PlaybackCache.spaceBytes(context)
                 }, requesters.getValue(rowKeys[6]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[5]), downRequester = requesters.getValue(rowKeys[7]))
                 ToggleRow("playback:forceTranscode", "强制转码", "电视盒子解码异常或画面卡顿时打开", forceTranscode, {

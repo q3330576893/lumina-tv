@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.content.ComponentCallbacks2
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
 import coil.imageLoader
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -37,8 +38,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.PlaybackCache
 import com.lumina.tv.ui.components.AuroraBackground
 import com.lumina.tv.ui.screens.DetailScreen
 import com.lumina.tv.ui.screens.HomeScreen
@@ -89,6 +93,9 @@ class MainActivity : ComponentActivity() {
         startupCrashNotice = CrashHandler.takeStartupNotice(this)
         AppRuntime.init(this)
         AppRuntime.restore()
+        lifecycleScope.launch(Dispatchers.IO) {
+            PlaybackCache.autoTrim(applicationContext)
+        }
         // 应用个性化主题与玻璃质感
         AppRuntime.prefs?.let {
             com.lumina.tv.ui.theme.ThemeRuntime.applyTheme(it.themeColor)

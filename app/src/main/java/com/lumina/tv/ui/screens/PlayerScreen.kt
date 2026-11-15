@@ -17,6 +17,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -255,6 +256,7 @@ fun PlayerScreen(
     }
     val playerExceptionHandler = remember { CoroutineExceptionHandler { _, error -> android.util.Log.e("LuminaTV", "Player coroutine failed", error) } }
     val scope = rememberCoroutineScope { playerExceptionHandler }
+    LaunchedEffect(Unit) { PlaybackCache.autoTrim(context) }
 
     var controlsVisible by remember { mutableStateOf(true) }
     var lastInteractionAt by remember { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
@@ -2459,41 +2461,52 @@ fun PlayerScreen(
                 } else {
                     if (seasons.isNotEmpty()) {
                         LazyRow(
-                            Modifier.fillMaxWidth().height(40.dp),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            Modifier.fillMaxWidth().height(48.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             rowItemsIndexed(seasons, key = { _, season -> season.id }) { index, season ->
                                 val seasonFocus = seasonFocuses.getOrPut(season.id) { FocusRequester() }
                                 val active = season.id == selectedSeasonId
                                 var seasonFocused by remember(season.id) { mutableStateOf(false) }
-                                FocusSurface(
-                                    modifier = Modifier.padding(horizontal = 12.dp).widthIn(min = 56.dp).height(32.dp)
+                                Box(
+                                    Modifier.height(40.dp)
+                                        .widthIn(min = 64.dp)
+                                        .clip(RoundedCornerShape(8.dp))
                                         .background(
-                                            if (active) Accent else if (seasonFocused) Color(0x55FFFFFF) else Color(0x18FFFFFF),
-                                            RoundedCornerShape(6.dp),
+                                            when {
+                                                active -> Accent
+                                                seasonFocused -> Color(0x33FFFFFF)
+                                                else -> Color(0x14FFFFFF)
+                                            }
+                                        )
+                                        .border(
+                                            if (seasonFocused) 2.dp else 1.dp,
+                                            if (seasonFocused) Color.White else Color(0x22FFFFFF),
+                                            RoundedCornerShape(8.dp),
                                         )
                                         .focusRequester(seasonFocus)
                                         .focusProperties {
                                             left = FocusRequester.Default
                                             right = FocusRequester.Default
                                             up = triggerFocus
-                                        },
-                                    corner = 6.dp,
-                                    scaleTo = 1.08f,
-                                    onFocusChanged = {
-                                        seasonFocused = it
-                                        if (it) quickContentHasFocus = true
-                                    },
-                                    onClick = { selectedSeasonId = season.id },
-                                ) { focused ->
-                                    Box(
-                                        Modifier.fillMaxSize()
-                                            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp)) else Modifier),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text(season.name, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp, maxLines = 1)
-                                    }
+                                        }
+                                        .focusable()
+                                        .onFocusChanged {
+                                            seasonFocused = it.isFocused
+                                            if (it.isFocused) quickContentHasFocus = true
+                                        }
+                                        .clickable { selectedSeasonId = season.id },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        season.name,
+                                        color = if (active) Color(0xFF06101F) else TextMain,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier.padding(horizontal = 16.dp),
+                                    )
                                 }
                             }
                         }
