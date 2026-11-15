@@ -60,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -118,22 +119,35 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 
-/** 可聚焦进度条：左右键 ±15 秒，带焦点高亮。 */
+/** 可聚焦进度条：左右键按设置步长调整位置。 */
 @Composable
-internal fun SeekBar(position: Long, duration: Long, onSeek: (Long) -> Unit) {
+internal fun SeekBar(
+    position: Long,
+    duration: Long,
+    focusRequester: FocusRequester,
+    upFocus: FocusRequester,
+    stepMs: Long,
+    onFocusedChange: (Boolean) -> Unit = {},
+    onSeek: (Long) -> Unit,
+) {
     var focused by remember { mutableStateOf(false) }
     val ratio = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
     Box(
         Modifier
             .fillMaxWidth()
             .height(28.dp)
-            .onFocusChanged { focused = it.isFocused }
-            .focusable()
+            .focusRequester(focusRequester)
+            .focusProperties { up = upFocus }
+            .onFocusChanged {
+                focused = it.isFocused
+                onFocusedChange(it.isFocused)
+            }
+            .focusable(enabled = duration > 0L)
             .onKeyEvent { ev ->
                 if (ev.type == KeyEventType.KeyDown) {
                     when (ev.key) {
-                        Key.DirectionLeft -> { onSeek((position - 15_000).coerceAtLeast(0)); true }
-                        Key.DirectionRight -> { onSeek((position + 15_000).coerceAtMost(duration)); true }
+                        Key.DirectionLeft -> { onSeek((position - stepMs).coerceAtLeast(0L)); true }
+                        Key.DirectionRight -> { onSeek((position + stepMs).coerceAtMost(duration)); true }
                         else -> false
                     }
                 } else false
@@ -145,13 +159,21 @@ internal fun SeekBar(position: Long, duration: Long, onSeek: (Long) -> Unit) {
                 .fillMaxWidth()
                 .height(if (focused) 10.dp else 6.dp)
                 .background(Color(0x33FFFFFF), RoundedCornerShape(5.dp))
-                .then(if (focused) Modifier.border(1.dp, Accent.copy(alpha = 0.8f), RoundedCornerShape(5.dp)) else Modifier)
+                .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(5.dp)) else Modifier)
         ) {
             Box(
                 Modifier
                     .fillMaxWidth(ratio)
                     .height(if (focused) 10.dp else 6.dp)
                     .background(Brush.horizontalGradient(listOf(Accent, Accent2)), RoundedCornerShape(5.dp))
+            )
+        }
+        if (focused) {
+            Text(
+                formatTime(position),
+                color = Color.White,
+                fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.TopEnd),
             )
         }
     }

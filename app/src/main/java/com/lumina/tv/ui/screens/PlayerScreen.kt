@@ -171,7 +171,7 @@ import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
-private fun formatTime(ms: Long): String {
+internal fun formatTime(ms: Long): String {
     if (ms <= 0) return "00:00"
     val total = ms / 1000
     val h = total / 3600
@@ -264,6 +264,7 @@ fun PlayerScreen(
     LaunchedEffect(Unit) { PlaybackCache.autoTrim(context) }
 
     var controlsVisible by remember { mutableStateOf(true) }
+    var controlHasFocus by remember { mutableStateOf(false) }
     var lastInteractionAt by remember { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
     var clockText by remember { mutableStateOf("") }
     var isPlaying by remember { mutableStateOf(true) }
@@ -464,6 +465,7 @@ fun PlayerScreen(
 
     val hideFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    val seekBarFocus = remember { FocusRequester() }
     val speedFocus = remember { FocusRequester() }
     val episodeFocus = remember { FocusRequester() }
     val menuFocus = remember { FocusRequester() }
@@ -1824,11 +1826,11 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, boosting, optionMenu, quickPanel) {
+    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, boosting, optionMenu, quickPanel, controlHasFocus) {
         if (controlsVisible && isPlaying && !optionMenu && quickPanel == QuickPanel.NONE && !boosting) {
             val remaining = (lastInteractionAt + 5_000L - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
             delay(remaining)
-            if (android.os.SystemClock.elapsedRealtime() - lastInteractionAt >= 5_000L) controlsVisible = false
+            if (android.os.SystemClock.elapsedRealtime() - lastInteractionAt >= 5_000L && !controlHasFocus) controlsVisible = false
         }
     }
 
@@ -1838,8 +1840,11 @@ fun PlayerScreen(
         if (!optionMenu && quickPanel == QuickPanel.NONE &&
             android.os.SystemClock.elapsedRealtime() >= restoreMenuFocusUntil
         ) {
-            if (controlsVisible) runCatching { playFocus.requestFocus() }
-            else runCatching { hideFocus.requestFocus() }
+            if (controlsVisible) {
+                if (!controlHasFocus) runCatching { playFocus.requestFocus() }
+            } else {
+                runCatching { hideFocus.requestFocus() }
+            }
         }
     }
 
@@ -1849,16 +1854,16 @@ fun PlayerScreen(
         seasons = runCatching { client?.getSeasons(sid) }.getOrDefault(emptyList()).orEmpty()
         seasonsLoading = false
     }
+    var seasonChangePendingFocus by remember { mutableStateOf(false) }
     LaunchedEffect(quickPanel, selectedSeasonId, item.seriesId) {
         if (quickPanel != QuickPanel.EPISODES) return@LaunchedEffect
         val sid = item.seriesId ?: return@LaunchedEffect
         episodesLoading = true
         quickEpisodes = LibraryCache.episodesOf(sid, selectedSeasonId)
             ?: runCatching { client?.getEpisodes(sid, selectedSeasonId) }.getOrDefault(null).orEmpty()
-        if (quickEpisodes.isEmpty()) quickEpisodes = episodes
         episodesLoading = false
     }
-    LaunchedEffect(quickPanel, seasons, quickEpisodes) {
+    LaunchedEffect(quickPanel, seasons) {
         if (quickPanel == QuickPanel.NONE) return@LaunchedEffect
         quickContentHasFocus = false
         val firstFocus = if (quickPanel == QuickPanel.SPEED) {
@@ -1876,6 +1881,26 @@ fun PlayerScreen(
             if (quickContentHasFocus) return@LaunchedEffect
         }
         runCatching { triggerFocus.requestFocus() }
+    }
+    LaunchedEffect(quickPanel, selectedSeasonId, quickEpisodes, episodesLoading, seasonChangePendingFocus) {
+        if (quickPanel != QuickPanel.EPISODES) {
+            seasonChangePendingFocus = false
+            return@LaunchedEffect
+        }
+        if (!seasonChangePendingFocus || episodesLoading) return@LaunchedEffect
+        val firstEpisode = quickEpisodes.firstOrNull() ?: run {
+            seasonChangePendingFocus = false
+            return@LaunchedEffect
+        }
+        val requester = episodeItemFocuses.getOrPut(firstEpisode.id) { FocusRequester() }
+        repeat(15) {
+            delay(50)
+            if (runCatching { requester.requestFocus(); true }.getOrDefault(false)) {
+                seasonChangePendingFocus = false
+                return@LaunchedEffect
+            }
+        }
+        seasonChangePendingFocus = false
     }
 
     LaunchedEffect(showExitPrompt, exitPromptAt) {
@@ -2453,6 +2478,10 @@ fun PlayerScreen(
                     SeekBar(
                         position = position,
                         duration = duration,
+                        focusRequester = seekBarFocus,
+                        upFocus = playFocus,
+                        stepMs = seekStepMs,
+                        onFocusedChange = { controlHasFocus = it },
                         onSeek = { target ->
                             seekPlayerTo(target)
                             position = target
@@ -2466,11 +2495,21 @@ fun PlayerScreen(
                     }
                 }
 
-                Box(
-                    Modifier.align(Alignment.Center).focusProperties {
+                val centerFocusProps: Modifier = if (duration > 0L) {
+                    Modifier.focusProperties {
+                        right = speedFocus
+                        down = seekBarFocus
+                    }
+                } else {
+                    Modifier.focusProperties {
                         right = speedFocus
                         down = speedFocus
-                    },
+                    }
+                }
+                Box(
+                    Modifier.align(Alignment.Center)
+                        .onFocusChanged { controlHasFocus = it.isFocused }
+                        .then(centerFocusProps),
                 ) {
                     CtrlButton(
                         if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
@@ -2531,19 +2570,19 @@ fun PlayerScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     val hasEpisodeButton = item.seriesId != null
-                    OsdIconButton(Icons.Rounded.FastForward, "倍速播放", speedFocus, playFocus, if (hasEpisodeButton) episodeFocus else menuFocus, playFocus) {
+                    OsdIconButton(Icons.Rounded.FastForward, "倍速播放", speedFocus, playFocus, if (hasEpisodeButton) episodeFocus else menuFocus, playFocus, { controlHasFocus = it }) {
                         if (quickPanel == QuickPanel.SPEED) closeQuickPanel(speedFocus)
                         else quickPanel = QuickPanel.SPEED
                         optionMenu = false
                     }
                     if (hasEpisodeButton) {
-                        OsdIconButton(Icons.Rounded.PlaylistPlay, "选集", episodeFocus, speedFocus, menuFocus, playFocus) {
+                        OsdIconButton(Icons.Rounded.PlaylistPlay, "选集", episodeFocus, speedFocus, menuFocus, playFocus, { controlHasFocus = it }) {
                             if (quickPanel == QuickPanel.EPISODES) closeQuickPanel(episodeFocus)
                             else quickPanel = QuickPanel.EPISODES
                             optionMenu = false
                         }
                     }
-                    OsdIconButton(Icons.Rounded.MoreVert, "更多播放选项", menuFocus, if (hasEpisodeButton) episodeFocus else speedFocus, playFocus, playFocus) {
+                    OsdIconButton(Icons.Rounded.MoreVert, "更多播放选项", menuFocus, if (hasEpisodeButton) episodeFocus else speedFocus, playFocus, playFocus, { controlHasFocus = it }) {
                         quickPanel = QuickPanel.NONE
                         optionMenu = true
                     }
@@ -2641,13 +2680,21 @@ fun PlayerScreen(
                                             left = FocusRequester.Default
                                             right = FocusRequester.Default
                                             up = triggerFocus
+                                            down = if (!episodesLoading && quickEpisodes.isNotEmpty() && season.id == selectedSeasonId) {
+                                                episodeItemFocuses.getOrPut(quickEpisodes.first().id) { FocusRequester() }
+                                            } else FocusRequester.Default
                                         }
                                         .focusable()
                                         .onFocusChanged {
                                             seasonFocused = it.isFocused
                                             if (it.isFocused) quickContentHasFocus = true
                                         }
-                                        .clickable { selectedSeasonId = season.id },
+                                        .clickable {
+                                            if (selectedSeasonId != season.id) {
+                                                seasonChangePendingFocus = true
+                                                selectedSeasonId = season.id
+                                            }
+                                        },
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
@@ -2663,11 +2710,18 @@ fun PlayerScreen(
                         }
                     }
                     Box(Modifier.weight(1f, fill = false)) {
-                        if (episodesLoading) {
+                        if (seasonsLoading || episodesLoading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.align(Alignment.Center).size(20.dp),
                                 color = Accent,
                                 strokeWidth = 2.dp,
+                            )
+                        } else if (quickEpisodes.isEmpty()) {
+                            Text(
+                                "本季暂无集数",
+                                color = TextSub,
+                                fontSize = 12.sp,
+                                modifier = Modifier.align(Alignment.Center),
                             )
                         } else {
                             LazyVerticalGrid(
@@ -2685,8 +2739,10 @@ fun PlayerScreen(
                                             .focusProperties {
                                                 left = FocusRequester.Default
                                                 right = FocusRequester.Default
-                                                up = if (index < 5) triggerFocus else FocusRequester.Default
-                                                down = if (index + 5 >= quickEpisodes.size) triggerFocus else FocusRequester.Default
+                                                up = if (index < 5) {
+                                                    seasonFocuses[selectedSeasonId] ?: FocusRequester.Default
+                                                } else FocusRequester.Default
+                                                down = if (index / 5 == quickEpisodes.lastIndex / 5) triggerFocus else FocusRequester.Default
                                             },
                                         corner = 6.dp,
                                         scaleTo = 1.08f,
@@ -2748,35 +2804,6 @@ fun PlayerScreen(
                 subScale = subScale,
                 audioDecodeMode = audioDecodeMode,
                 audioSupport = audioSupport,
-                infoRows = run {
-                    val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
-                    val audioStream = playbackSource?.audioStreams?.firstOrNull { it.isDefault }
-                        ?: playbackSource?.audioStreams?.firstOrNull()
-                    listOf(
-                        "内核" to if (activeEngine == "mpv") "mpv" else "Media3",
-                        "分辨率" to (currentResolution ?: videoStream?.let { stream ->
-                            if (stream.width != null && stream.height != null) "${stream.width}x${stream.height}" else null
-                        } ?: "-"),
-                        "视频编码" to (videoStream?.codec ?: "-"),
-                        "HDR" to AppRuntime.currentVideoRange,
-                        "码率" to if (estimatedBitrate > 0) "${estimatedBitrate / 1000} kbps" else "-",
-                        "音轨" to listOfNotNull(
-                            audioStream?.codec?.uppercase(),
-                            audioStream?.channels?.let { "${it}ch" },
-                            audioStream?.sampleRate?.let { "${it}Hz" },
-                        ).joinToString(" ").ifBlank { "-" },
-                        "音频输出" to when (audioSupport) {
-                            AudioSupport.PASSTHROUGH -> "直通（设备报告）"
-                            AudioSupport.DECODE_ONLY -> "本地解码"
-                            AudioSupport.UNSUPPORTED -> "可能无法解码"
-                        },
-                        "缓冲" to "$bufferingCount 次 / ${bufferingDurationMs / 1000}s",
-                        "丢帧" to droppedFrames.toString(),
-                        "首帧" to phaseTimes.optLong("loadToFirstFrameMs", 0L).takeIf { it > 0 }
-                            ?.let { "${it}ms" }.orEmpty().ifBlank { "-" },
-                        "片源" to (playbackSource?.displayLabel ?: "-"),
-                    )
-                },
                 seekStepSeconds = seekStepSeconds,
                 subtitleOffsetMs = subtitleOffsetMs,
                 activeEngine = activeEngine,
@@ -2947,6 +2974,7 @@ private fun OsdIconButton(
     left: FocusRequester,
     right: FocusRequester,
     play: FocusRequester,
+    onFocusChanged: (Boolean) -> Unit,
     onClick: () -> Unit,
 ) {
     FocusSurface(
@@ -2958,6 +2986,7 @@ private fun OsdIconButton(
         },
         corner = 6.dp,
         scaleTo = 1.15f,
+        onFocusChanged = onFocusChanged,
         onClick = onClick,
     ) { focused ->
         Box(

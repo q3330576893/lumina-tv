@@ -75,7 +75,6 @@ internal fun OptionMenu(
     subScale: Float,
     audioDecodeMode: String,
     audioSupport: AudioSupport,
-    infoRows: List<Pair<String, String>>,
     seekStepSeconds: Int,
     subtitleOffsetMs: Long,
     activeEngine: String,
@@ -508,22 +507,6 @@ internal fun OptionMenu(
                 }
 
                 Spacer(Modifier.height(16.dp))
-                MenuLabel("播放信息")
-                Column(
-                    Modifier.fillMaxWidth()
-                        .background(Color(0x14000000), RoundedCornerShape(10.dp))
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    infoRows.forEach { (label, value) ->
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(label, color = TextSub, fontSize = 11.sp, modifier = Modifier.width(72.dp))
-                            Text(value, color = TextMain, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(18.dp))
                 MenuChip(
                     label = "关闭", width = 120.dp, active = false,
                     activeColor = Accent, height = 42.dp,
