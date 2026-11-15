@@ -127,6 +127,7 @@ import com.lumina.tv.data.MediaChapter
 import com.lumina.tv.data.PlaybackMarkers
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
+import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.data.chooseSimilar
 import com.lumina.tv.data.toSourceOption
 import com.lumina.tv.ui.components.FocusSurface
@@ -246,6 +247,12 @@ fun PlayerScreen(
     var audioCaps by remember(item.id) { mutableStateOf(runCatching { detect(context) }.getOrDefault(AudioCapabilities(emptyMap()))) }
     var audioSupport by remember(item.id) { mutableStateOf(AudioSupport.DECODE_ONLY) }
     val client = AppRuntime.client
+    var tmdbBackdrop by remember(item.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(item.id) {
+        tmdbBackdrop = runCatching {
+            TmdbClient.lookup(item.type, item.seriesName ?: item.name, item.year)?.backdropUrl
+        }.getOrNull()
+    }
     val playerExceptionHandler = remember { CoroutineExceptionHandler { _, error -> android.util.Log.e("LuminaTV", "Player coroutine failed", error) } }
     val scope = rememberCoroutineScope { playerExceptionHandler }
 
@@ -1793,6 +1800,7 @@ fun PlayerScreen(
                     LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, 1280) }
                 }
                 val bufferingImages = listOfNotNull(
+                    tmdbBackdrop?.let { it to false },
                     itemBackdrop?.let { it to false },
                     seriesBackdrop?.let { it to false },
                     client?.heroStillUrl(item.id, 1)?.let { it to false },
@@ -1801,12 +1809,21 @@ fun PlayerScreen(
                 ).distinctBy { it.first }
                 var bufferingImageIndex by remember(item.id, bufferingImages) { mutableIntStateOf(0) }
                 val bufferingImage = bufferingImages.getOrNull(bufferingImageIndex)
+                var bufferingImageLoaded by remember(item.id, bufferingImage?.first) { mutableStateOf(false) }
+                LaunchedEffect(bufferingImage?.first, bufferingImageLoaded, isBufferingForDisplay) {
+                    if (!isBufferingForDisplay || bufferingImage?.first != tmdbBackdrop || bufferingImageLoaded) return@LaunchedEffect
+                    delay(900)
+                    if (bufferingImageIndex == 0 && !bufferingImageLoaded && bufferingImages.size > 1) {
+                        bufferingImageIndex = 1
+                    }
+                }
                 if (bufferingImage != null) {
                     AsyncImage(
                         model = bufferingImage.first,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         alignment = Alignment.Center,
+                        onSuccess = { bufferingImageLoaded = true },
                         onError = {
                             if (bufferingImageIndex < bufferingImages.lastIndex) bufferingImageIndex += 1
                         },

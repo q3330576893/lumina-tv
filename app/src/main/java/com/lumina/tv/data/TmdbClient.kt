@@ -25,12 +25,13 @@ object TmdbClient {
         val rating: Double?,
         val posterUrl: String?,
         val logoUrl: String? = null,
+        val backdropUrl: String? = null,
     )
 
 
     private val http: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
         .build()
 
     private val cache = LinkedHashMap<String, TmdbInfo?>()
@@ -167,10 +168,12 @@ object TmdbClient {
         val id = first.optInt("id", 0)
         val avg = first.optDouble("vote_average", 0.0)
         val poster = first.optString("poster_path", "")
+        val backdrop = first.optString("backdrop_path", "")
         return TmdbInfo(
             rating = if (avg > 0) avg else null,
             posterUrl = if (poster.isNotBlank()) "https://image.tmdb.org/t/p/w500$poster" else null,
             logoUrl = if (id > 0) fetchLogo(path, id) else null,
+            backdropUrl = if (backdrop.isNotBlank()) "https://image.tmdb.org/t/p/w1280$backdrop" else null,
         )
     }
 

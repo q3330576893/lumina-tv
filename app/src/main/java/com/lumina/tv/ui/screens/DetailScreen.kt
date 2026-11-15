@@ -98,6 +98,7 @@ import com.lumina.tv.R
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.EmbyException
+import com.lumina.tv.data.MdblistClient
 import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.MediaStream
@@ -195,6 +196,7 @@ fun DetailScreen(
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
+    var mdb by remember(id) { mutableStateOf<MdblistClient.Ratings?>(null) }
     var resolvedExternalLinks by remember(id) { mutableStateOf<TmdbClient.ExternalLinks?>(null) }
     var mediaInfoExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
@@ -448,6 +450,19 @@ fun DetailScreen(
                 embyTvdbId = current.providerIds["tvdb"],
             )
         }.getOrNull()
+    }
+
+    LaunchedEffect(id, item?.id, item?.type, item?.providerIds, resolvedExternalLinks) {
+        val current = item ?: return@LaunchedEffect
+        val imdbId = current.providerIds["imdb"]?.takeIf(String::isNotBlank)
+            ?: resolvedExternalLinks?.imdbId?.takeIf(String::isNotBlank)
+        val tmdbId = current.providerIds["tmdb"]?.takeIf(String::isNotBlank)
+            ?: resolvedExternalLinks?.tmdbId?.takeIf(String::isNotBlank)
+        if (imdbId == null && tmdbId == null) {
+            mdb = null
+            return@LaunchedEffect
+        }
+        mdb = runCatching { MdblistClient.ratings(current.type, imdbId, tmdbId) }.getOrNull()
     }
 
     val sourceIdsKey = sources.joinToString(",") { it.id }
@@ -726,6 +741,16 @@ fun DetailScreen(
                             ).joinToString("   "),
                             color = TextSub, fontSize = 12.sp,
                         )
+                        mdb?.let { ratings ->
+                            val ratingLine = listOfNotNull(
+                                ratings.imdb?.takeIf { it > 0 }?.let { "IMDb %.1f".format(it) },
+                                ratings.tomato?.takeIf { it > 0 }?.let { "番茄 $it%" },
+                                ratings.metacritic?.takeIf { it > 0 }?.let { "MC $it" },
+                                ratings.tmdb?.takeIf { it > 0 }?.let { "TMDB $it" },
+                                ratings.trakt?.takeIf { it > 0 }?.let { "Trakt $it" },
+                            ).joinToString(" · ")
+                            if (ratingLine.isNotBlank()) Text(ratingLine, color = TextSub, fontSize = 11.sp)
+                        }
                         val badgeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
                         val topBadges = badgeSource?.let { source ->
                             val video = source.streams.firstOrNull { it.type.equals("Video", true) }

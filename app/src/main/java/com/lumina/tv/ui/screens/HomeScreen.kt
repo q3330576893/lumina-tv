@@ -1654,16 +1654,38 @@ private fun Hero(
     val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
+    var tmdbBackdrops by remember(items) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(items) {
+        val result = mutableMapOf<String, String>()
+        items.chunked(3).forEach { chunk ->
+            val pairs = chunk.map { media ->
+                async {
+                    media.id to runCatching {
+                        TmdbClient.lookup(media.type, media.seriesName ?: media.name, media.year)?.backdropUrl
+                    }.getOrNull()
+                }
+            }.awaitAll()
+            pairs.forEach { (id, url) -> if (!url.isNullOrBlank()) result[id] = url }
+            if (result.isNotEmpty()) tmdbBackdrops = result.toMap()
+        }
+    }
     val resolveHeroImage: (MediaItem?) -> String? = { heroItem ->
-        heroItem?.let { client?.backdropUrl(it, 1280) }
+        heroItem?.let { tmdbBackdrops[it.id] }
+            ?: heroItem?.let { client?.backdropUrl(it, 1280) }
             ?.takeIf { it.isNotBlank() }
             ?: heroItem?.let { client?.imageUrl(it, 720) }
+    }
+    val resolveHeroIsWide: (MediaItem?) -> Boolean = { heroItem ->
+        heroItem != null && (
+            !tmdbBackdrops[heroItem.id].isNullOrBlank() ||
+                !client?.backdropUrl(heroItem, 1280).isNullOrBlank()
+            )
     }
     val zoomStates = remember(items) { mutableMapOf<String, Animatable<Float, AnimationVector1D>>() }
     val zoomJobs = remember(items) { mutableMapOf<String, Job>() }
     val wipeProgress = remember(items) { Animatable(1f) }
     var bottomImage by remember(items, client) { mutableStateOf(resolveHeroImage(item)) }
-    var bottomHasBackdrop by remember(items, client) { mutableStateOf(item.backdropTag != null) }
+    var bottomHasBackdrop by remember(items, client) { mutableStateOf(resolveHeroIsWide(item)) }
     var topImage by remember(items, client) { mutableStateOf<String?>(null) }
     var topHasBackdrop by remember(items, client) { mutableStateOf(false) }
     var topLoaded by remember(items, client) { mutableStateOf(false) }
@@ -1682,7 +1704,7 @@ private fun Hero(
             zoom.animateTo(1f, tween(15_000, easing = LinearEasing))
         }
     }
-    LaunchedEffect(currentIndex, items) {
+    LaunchedEffect(currentIndex, items, tmdbBackdrops) {
         val targetItem = items.getOrNull(currentIndex)
         val targetImage = resolveHeroImage(targetItem)
         if (targetImage == null || targetImage == topImage || (topImage == null && targetImage == bottomImage)) {
@@ -1703,7 +1725,7 @@ private fun Hero(
         isForward = forwardDistance <= backwardDistance
         lastRequestedIndex = currentIndex
         topImage = targetImage
-        topHasBackdrop = targetItem?.backdropTag != null
+        topHasBackdrop = resolveHeroIsWide(targetItem)
         topLoaded = false
         wipeProgress.snapTo(0f)
     }
