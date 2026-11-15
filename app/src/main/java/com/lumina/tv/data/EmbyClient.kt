@@ -669,37 +669,6 @@ class EmbyClient(
             }.getOrDefault(emptyList())
         } } ?: emptyList()
 
-    /** PersonIds is preferred; SearchTerm is a compatibility fallback and is always People-verified. */
-    suspend fun getPersonItems(
-        person: MediaPerson,
-        startIndex: Int = 0,
-        limit: Int = 16,
-    ): List<MediaItem> = withContext(Dispatchers.IO) {
-        fun matches(item: MediaItem): Boolean = item.people.any { candidate ->
-            (person.id != null && candidate.id == person.id) ||
-                candidate.name.equals(person.name, ignoreCase = true)
-        }
-        val fields = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People"
-        val byId = person.id?.let { personId ->
-            runCatching {
-                getItems(
-                    types = "Movie,Series", sortBy = "DateCreated", sortOrder = "Descending",
-                    limit = limit, startIndex = startIndex, personIds = personId,
-                    fields = fields, requestTimeoutSeconds = 5,
-                )
-            }.getOrDefault(emptyList()).filter(::matches)
-        }.orEmpty()
-        if (byId.isNotEmpty()) return@withContext byId
-
-        runCatching {
-            getItems(
-                types = "Movie,Series", sortBy = "DateCreated", sortOrder = "Descending",
-                limit = limit, startIndex = startIndex, searchTerm = person.name,
-                fields = fields, requestTimeoutSeconds = 5,
-            )
-        }.getOrDefault(emptyList()).filter(::matches)
-    }
-
     suspend fun getSeasons(seriesId: String): List<MediaItem> = withContext(Dispatchers.IO) {
         val params = mapOf("UserId" to userId, "Fields" to "Overview,PrimaryImageAspectRatio,UserData")
         val arr = getSync(url("/Shows/$seriesId/Seasons", params)).optJSONArray("Items") ?: JSONArray()

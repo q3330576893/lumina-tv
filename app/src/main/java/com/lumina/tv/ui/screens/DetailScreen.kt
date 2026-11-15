@@ -74,6 +74,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -216,13 +217,6 @@ fun DetailScreen(
     val previewStartTimes = remember(id) { mutableMapOf<String, Long?>() }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var similarLoading by remember { mutableStateOf(false) }
-    var selectedPerson by remember { mutableStateOf<MediaPerson?>(null) }
-    var personItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var personItemsLoading by remember { mutableStateOf(false) }
-    var personItemsNextIndex by remember { mutableIntStateOf(0) }
-    var personItemsHasMore by remember { mutableStateOf(false) }
-    val personFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
-    var personReturnKey by remember { mutableStateOf<String?>(null) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
     var selectedSourceId by remember(id) { mutableStateOf<String?>(null) }
@@ -985,23 +979,7 @@ fun DetailScreen(
                     Spacer(Modifier.height(12.dp))
                     LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
-                            val personKey = person.id ?: "${person.name}-${person.role.orEmpty()}"
-                            val personRequester = personFocusRequesters.getOrPut(personKey) { FocusRequester() }
-                            PersonCard(person = person, imageUrl = client?.personImageUrl(person), focusRequester = personRequester) {
-                                personReturnKey = personKey
-                                selectedPerson = person
-                                personItems = emptyList()
-                                personItemsNextIndex = 0
-                                personItemsHasMore = true
-                                personItemsLoading = true
-                                scope.launch {
-                                    val firstPage = runCatching { client?.getPersonItems(person, 0, 16) }.getOrDefault(emptyList()).orEmpty()
-                                    personItems = firstPage
-                                    personItemsNextIndex = firstPage.size
-                                    personItemsHasMore = firstPage.size == 16
-                                    personItemsLoading = false
-                                }
-                            }
+                            PersonCard(person = person, imageUrl = client?.personImageUrl(person))
                         }
                     }
                 }
@@ -1192,67 +1170,23 @@ fun DetailScreen(
                 onClose = { showSourceMenu = false },
             )
         }
-
-        selectedPerson?.let { person ->
-            val closePersonPanel: () -> Unit = {
-                selectedPerson = null
-                scope.launch {
-                    withFrameNanos { }
-                    personReturnKey?.let { personFocusRequesters[it]?.requestFocus() }
-                }
-                Unit
-            }
-            Dialog(onDismissRequest = closePersonPanel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-                BackHandler(onBack = closePersonPanel)
-                Box(Modifier.fillMaxSize().background(Color(0x66000000)), contentAlignment = Alignment.Center) {
-                    Column(
-                        Modifier.widthIn(max = 650.dp).fillMaxWidth(0.72f).heightIn(max = 520.dp)
-                            .clip(RoundedCornerShape(8.dp)).background(GlassStrong).border(1.dp, GlassLine, RoundedCornerShape(8.dp))
-                            .padding(20.dp),
-                    ) {
-                        Text("${person.name} · 参演作品", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(12.dp))
-                        when {
-                            personItemsLoading && personItems.isEmpty() -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                repeat(3) { Box(Modifier.fillMaxWidth().height(70.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x1AFFFFFF))) }
-                            }
-                            personItems.isEmpty() -> Text("暂无参演作品", color = TextSub, fontSize = 12.sp, modifier = Modifier.padding(vertical = 28.dp))
-                            else -> LazyColumn(Modifier.heightIn(max = 390.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(personItems, key = { it.id }) { credit ->
-                                    FocusSurface(modifier = Modifier.fillMaxWidth().height(68.dp), corner = 6.dp, onClick = { selectedPerson = null; onOpenDetail(credit.id) }) { focused ->
-                                        Row(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent, RoundedCornerShape(6.dp)).padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            AsyncImage(model = client?.imageUrl(credit, 240), contentDescription = credit.name, contentScale = ContentScale.Crop, modifier = Modifier.width(40.dp).height(56.dp).clip(RoundedCornerShape(4.dp)))
-                                            Spacer(Modifier.width(12.dp))
-                                            Text(credit.name, color = if (focused) Accent else TextMain, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                        }
-                                    }
-                                }
-                                if (personItemsHasMore) item {
-                                    FocusSurface(modifier = Modifier.fillMaxWidth().height(42.dp), corner = 6.dp, onClick = {
-                                        if (!personItemsLoading) {
-                                            personItemsLoading = true
-                                            scope.launch {
-                                                val next = runCatching { client?.getPersonItems(person, personItemsNextIndex, 16) }.getOrDefault(emptyList()).orEmpty()
-                                                personItems = (personItems + next).distinctBy { it.id }
-                                                personItemsNextIndex += next.size
-                                                personItemsHasMore = next.size == 16
-                                                personItemsLoading = false
-                                            }
-                                        }
-                                    }) { focused -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (personItemsLoading) "正在加载…" else "加载更多", color = if (focused) Accent else TextSub, fontSize = 12.sp) } }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
 @Composable
-private fun PersonCard(person: MediaPerson, imageUrl: String?, focusRequester: FocusRequester, onClick: () -> Unit) {
-    FocusSurface(modifier = Modifier.width(112.dp).focusRequester(focusRequester), corner = 8.dp, onClick = onClick) { focused ->
+private fun PersonCard(person: MediaPerson, imageUrl: String?) {
+    var focused by remember { mutableStateOf(false) }
+    Column(
+        Modifier.width(112.dp)
+            .graphicsLayer {
+                val scale = if (focused) 1.08f else 1f
+                scaleX = scale
+                scaleY = scale
+            }
+            .onFocusChanged { focused = it.isFocused }
+            .focusable(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
       Box(Modifier.fillMaxWidth().background(if (focused) Color(0x20FFFFFF) else Color.Transparent, RoundedCornerShape(8.dp)).padding(6.dp)) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
