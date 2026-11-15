@@ -2396,8 +2396,13 @@ fun PlayerScreen(
                             rowItemsIndexed(seasons, key = { _, season -> season.id }) { index, season ->
                                 val seasonFocus = seasonFocuses.getOrPut(season.id) { FocusRequester() }
                                 val active = season.id == selectedSeasonId
+                                var seasonFocused by remember(season.id) { mutableStateOf(false) }
                                 FocusSurface(
-                                    modifier = Modifier.widthIn(min = 54.dp).height(32.dp)
+                                    modifier = Modifier.padding(horizontal = 12.dp).widthIn(min = 56.dp).height(32.dp)
+                                        .background(
+                                            if (active) Accent else if (seasonFocused) Color(0x55FFFFFF) else Color(0x18FFFFFF),
+                                            RoundedCornerShape(6.dp),
+                                        )
                                         .focusRequester(seasonFocus)
                                         .focusProperties {
                                             left = FocusRequester.Default
@@ -2406,14 +2411,15 @@ fun PlayerScreen(
                                         },
                                     corner = 6.dp,
                                     scaleTo = 1.08f,
-                                    onFocusChanged = { if (it) quickContentHasFocus = true },
+                                    onFocusChanged = {
+                                        seasonFocused = it
+                                        if (it) quickContentHasFocus = true
+                                    },
                                     onClick = { selectedSeasonId = season.id },
                                 ) { focused ->
                                     Box(
-                                        Modifier.fillMaxSize().background(
-                                            if (active) Accent else if (focused) Color(0x55FFFFFF) else Color(0x18FFFFFF),
-                                            RoundedCornerShape(6.dp),
-                                        ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp)) else Modifier),
+                                        Modifier.fillMaxSize()
+                                            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp)) else Modifier),
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         Text(season.name, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 11.sp, maxLines = 1)
