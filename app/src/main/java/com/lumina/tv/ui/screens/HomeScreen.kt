@@ -21,6 +21,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.delay
@@ -94,14 +95,12 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -162,6 +161,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
@@ -244,6 +245,25 @@ fun HomeScreen(
         }
     }
     val scope = rememberCoroutineScope { homeExceptionHandler }
+    val heroTopLogTimes = remember { mutableMapOf<String, Long>() }
+    fun ensureHeroAtTop(source: String) {
+        scope.launch {
+            recListState.scroll { recListState.scrollToItem(0) }
+            withFrameNanos { }
+            var tries = 0
+            while ((recListState.firstVisibleItemIndex != 0 || recListState.firstVisibleItemScrollOffset != 0) && tries < 3) {
+                recListState.scroll { recListState.scrollToItem(0) }
+                withFrameNanos { }
+                tries++
+            }
+            val now = android.os.SystemClock.elapsedRealtime()
+            val lastLoggedAt = heroTopLogTimes[source]
+            if (lastLoggedAt == null || now - lastLoggedAt >= 300L) {
+                heroTopLogTimes[source] = now
+                PageLog.add("heroTop source=$source tries=$tries index=${recListState.firstVisibleItemIndex} offset=${recListState.firstVisibleItemScrollOffset}")
+            }
+        }
+    }
     fun closeSortMenu() {
         sortMenuOpen = false
         restoreSortFocus = true
@@ -313,7 +333,18 @@ fun HomeScreen(
     var focusedMediaSection by rememberSaveable { mutableStateOf<String?>(null) }
     var focusedLibraryId by rememberSaveable { mutableStateOf<String?>(null) }
     var heroIndex by rememberSaveable { mutableStateOf(0) }
+    var unavailableHeroIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var heroFocusExpected by rememberSaveable { mutableStateOf(false) }
     var lastExitBackAt by remember { mutableStateOf(0L) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && heroFocusExpected) ensureHeroAtTop("resume")
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // A genre is an in-page route: Android/TV Back returns to the genre list, then home.
     BackHandler(enabled = true) {
@@ -330,7 +361,7 @@ fun HomeScreen(
                 gridItems = emptyList()
             }
             recListState.firstVisibleItemIndex > 0 || recListState.firstVisibleItemScrollOffset > 0 -> {
-                scope.launch { recListState.animateScrollToItem(0) }
+                ensureHeroAtTop("back")
             }
             else -> {
                 val now = android.os.SystemClock.elapsedRealtime()
@@ -448,9 +479,10 @@ fun HomeScreen(
 
     LaunchedEffect(resume, favorites, latest, movies, series, viewContents) {
         val c = client ?: return@LaunchedEffect
+        val carouselItemIds = (latest + movies + series + favorites).mapTo(mutableSetOf()) { it.id }
         val preloadItems = (resume.take(8) + favorites.take(8) + latest.take(8) + movies.take(8) + series.take(8) +
             viewContents.values.flatMap { it.take(4) }).distinctBy { it.id }
-        preloadItems.forEach { media ->
+        preloadItems.filterNot { it.id in carouselItemIds }.forEach { media ->
             val url = c.imageUrl(media) ?: return@forEach
             context.imageLoader.enqueue(
                 ImageRequest.Builder(context).data(url).crossfade(false).build()
@@ -599,8 +631,14 @@ fun HomeScreen(
     }
 
     val heroPool = (latest + movies + series + favorites).distinctBy { it.id }
-    val heroItems = remember(heroPool) { pickHeroItems(heroPool, latest.map { it.id }.toHashSet(), 6) }
-    val hero = heroItems.getOrNull(heroIndex) ?: resume.firstOrNull()
+    val heroItems = remember(heroPool, unavailableHeroIds) {
+        pickHeroItems(heroPool.filterNot { it.id in unavailableHeroIds }, latest.map { it.id }.toHashSet(), 6)
+    }
+    val hero = heroItems.getOrNull(heroIndex.coerceAtMost((heroItems.size - 1).coerceAtLeast(0)))
+    LaunchedEffect(heroItems.size) {
+        if (heroItems.isEmpty()) heroIndex = 0
+        else if (heroIndex > heroItems.lastIndex) heroIndex = heroItems.lastIndex
+    }
     val homeLibraries = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
     val firstSectionKey: String? = when {
         resume.isNotEmpty() -> "resume"
@@ -741,24 +779,26 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxSize().background(Ink),
                     ) {
                     item {
-                        val displayedHeroItems = heroItems.ifEmpty { listOfNotNull(hero) }
                         Hero(
-                            items = displayedHeroItems,
+                            items = heroItems,
                             currentIndex = heroIndex,
                             onPrevious = {
-                                if (displayedHeroItems.isNotEmpty()) {
-                                    heroIndex = (heroIndex - 1 + displayedHeroItems.size) % displayedHeroItems.size
+                                if (heroItems.isNotEmpty()) {
+                                    heroIndex = (heroIndex - 1 + heroItems.size) % heroItems.size
                                 }
                             },
                             onNext = {
-                                if (displayedHeroItems.isNotEmpty()) {
-                                    heroIndex = (heroIndex + 1) % displayedHeroItems.size
+                                if (heroItems.isNotEmpty()) {
+                                    heroIndex = (heroIndex + 1) % heroItems.size
                                 }
                             },
                             onPlay = onPlay,
                             onOpenDetail = onOpenDetail,
                             playFocus = heroPlayFocus,
-                            onPlayFocused = { scope.launch { recListState.scrollToItem(0) } },
+                            onPlayFocused = { ensureHeroAtTop("play") },
+                            onDetailFocused = { ensureHeroAtTop("detail") },
+                            onHeroFocusChanged = { heroFocusExpected = it },
+                            onItemUnavailable = { itemId -> unavailableHeroIds = unavailableHeroIds + itemId },
                             hazeState = hazeState,
                         )
                     }
@@ -1626,8 +1666,7 @@ private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: I
     val shownIds = synchronized(recentlyShownHeroIds) { recentlyShownHeroIds.toSet() }
     fun score(item: MediaItem): Double {
         var s = 0.0
-        val hasBackdrop = !item.backdropTag.isNullOrBlank()
-        if (hasBackdrop) s += 3.0
+        if (item.backdropTags.isNotEmpty() || !item.backdropTag.isNullOrBlank()) s += 3.0
         if (!item.logoTag.isNullOrBlank()) s += 2.0
         if (item.positionTicks > 0 && !item.played) s += 3.0
         if (item.id in recentIds) s += 2.0
@@ -1641,14 +1680,7 @@ private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: I
         return s
     }
     val ranked = pool.sortedByDescending { score(it) }
-    val shuffled = ranked.take(40).shuffled(java.util.Random(seed))
-    // 没有横版剧照的片子裁出来一定难看，优先只放有 backdrop 的
-    val withBackdrop = shuffled.filter { !it.backdropTag.isNullOrBlank() }
-    val candidates = when {
-        withBackdrop.size >= 3 -> withBackdrop
-        withBackdrop.isNotEmpty() -> (withBackdrop + shuffled.filterNot { it in withBackdrop }).distinctBy { it.id }
-        else -> shuffled
-    }
+    val candidates = ranked.take(40).shuffled(java.util.Random(seed))
     val picked = mutableListOf<MediaItem>()
     val remaining = candidates.toMutableList()
     while (picked.size < size && remaining.isNotEmpty()) {
@@ -1667,7 +1699,7 @@ private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: I
 }
 
 private fun calculateHeroHeight(screenHeight: Dp): Dp =
-    (screenHeight * 0.70f).coerceAtLeast(360.dp)
+    (screenHeight * 0.75f).coerceAtLeast(400.dp)
 
 @Composable
 private fun Hero(
@@ -1679,12 +1711,19 @@ private fun Hero(
     onOpenDetail: (String) -> Unit,
     playFocus: FocusRequester,
     onPlayFocused: () -> Unit,
+    onDetailFocused: () -> Unit,
+    onHeroFocusChanged: (Boolean) -> Unit,
+    onItemUnavailable: (String) -> Unit,
     hazeState: HazeState,
     onComposed: (Boolean) -> Unit = {},
 ) {
+    val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
     if (item == null) {
-        Box(Modifier.fillMaxWidth().height(180.dp))
+        Box(Modifier.fillMaxWidth().height(heroHeight).background(Ink)) {
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
+            Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = 13.sp)
+        }
         return
     }
     DisposableEffect(Unit) {
@@ -1692,70 +1731,72 @@ private fun Hero(
         onDispose { onComposed(false) }
     }
     val context = LocalContext.current
-    val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
+    var heroHasFocus by remember(items) { mutableStateOf(false) }
     var tmdbBackdrops by remember(items) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var tmdbResolvedIds by remember(items) { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(items) {
-        val waits = listOf(0L, 3_000L, 10_000L, 30_000L)
-        waits.forEachIndexed { round, wait ->
-            if (wait > 0) delay(wait - waits[round - 1])
-            val missing = items.filter { tmdbBackdrops[it.id].isNullOrBlank() }
-            if (missing.isNotEmpty()) {
-                val pairs = missing.map { media ->
-                    async {
-                        media.id to runCatching {
-                            TmdbClient.lookupHero(media.type, media.seriesName ?: media.name, media.year, media.providerIds["OriginalTitle"])?.backdropUrl
-                        }.getOrNull()
-                    }
-                }.awaitAll()
-                val additions = pairs.mapNotNull { (id, url) -> url?.takeIf(String::isNotBlank)?.let { id to it } }.toMap()
-                tmdbBackdrops = tmdbBackdrops + additions
+        val pairs = items.map { media ->
+            async {
+                media.id to runCatching {
+                    TmdbClient.lookupHero(
+                        media.type,
+                        media.seriesName ?: media.name,
+                        media.year,
+                        media.providerIds["OriginalTitle"],
+                    )?.backdropUrl
+                }.getOrNull()
             }
-            PageLog.add("heroBackdrop round=${round + 1} have=${tmdbBackdrops.size}/${items.size}")
-            if (tmdbBackdrops.size >= items.size) return@LaunchedEffect
+        }.awaitAll()
+        tmdbBackdrops = pairs.mapNotNull { (id, url) ->
+            url?.takeIf(String::isNotBlank)?.let { id to it }
+        }.toMap()
+        tmdbResolvedIds = pairs.mapTo(mutableSetOf()) { it.first }
+        PageLog.add("heroBackdrop have=${tmdbBackdrops.size}/${items.size}")
+    }
+
+    fun heroImageCandidates(heroItem: MediaItem?): List<String> {
+        heroItem ?: return emptyList()
+        val embyBackdrops = buildList {
+            val count = ((heroItem.backdropTags.keys.maxOrNull()?.plus(1)) ?: 0)
+                .coerceAtLeast(if (heroItem.backdropTag != null) 1 else 0)
+            repeat(count) { index ->
+                val url = client?.backdropUrl(heroItem, index, 1920)
+                    ?: client?.backdropUrlUntagged(heroItem.id, index, 1920)
+                url?.takeIf(String::isNotBlank)?.let(::add)
+            }
         }
+        return buildList {
+            addAll(embyBackdrops)
+            client?.heroStillUrl(heroItem.id, 1)?.takeIf(String::isNotBlank)?.let(::add)
+            client?.heroStillUrl(heroItem.id, 2)?.takeIf(String::isNotBlank)?.let(::add)
+            tmdbBackdrops[heroItem.id]?.takeIf(String::isNotBlank)?.let(::add)
+        }.distinct()
     }
-    val resolveHeroImage: (MediaItem?) -> String? = { heroItem ->
-        heroItem?.let { tmdbBackdrops[it.id] }
-            ?: heroItem?.let { client?.backdropUrl(it, 1280) ?: client?.backdropUrlUntagged(it.id, 0, 1280) }
-            ?.takeIf { it.isNotBlank() }
-            ?: heroItem?.let { client?.heroStillUrl(it.id, 1) }
-            ?: heroItem?.let { client?.heroStillUrl(it.id, 2) }
-            ?: heroItem?.let { client?.imageUrl(it, 720) }
+    var failedHeroImages by remember(items) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
+    fun resolveHeroImage(heroItem: MediaItem?): String? = heroItem?.let { media ->
+        heroImageCandidates(media).firstOrNull { it !in failedHeroImages[media.id].orEmpty() }
     }
-    fun isLikelyWide(url: String?): Boolean =
-        url != null && (
-            tmdbBackdrops.containsValue(url) ||
-                url.contains("/Images/Backdrop/") ||
-                url.contains("image.tmdb.org")
-            )
-    val zoomStates = remember(items) { mutableMapOf<String, Animatable<Float, AnimationVector1D>>() }
-    val zoomJobs = remember(items) { mutableMapOf<String, Job>() }
+    fun rejectHeroImage(media: MediaItem, image: String) {
+        failedHeroImages = failedHeroImages + (media.id to (failedHeroImages[media.id].orEmpty() + image))
+    }
     val wipeProgress = remember(items) { Animatable(1f) }
     var bottomImage by remember(items, client) { mutableStateOf(resolveHeroImage(item)) }
-    var bottomHasBackdrop by remember(items, client) { mutableStateOf(isLikelyWide(resolveHeroImage(item))) }
     var topImage by remember(items, client) { mutableStateOf<String?>(null) }
-    var topHasBackdrop by remember(items, client) { mutableStateOf(false) }
     var topLoaded by remember(items, client) { mutableStateOf(false) }
     var isForward by remember(items) { mutableStateOf(true) }
     var lastRequestedIndex by remember(items) { mutableStateOf(currentIndex) }
     var transitionGeneration by remember(items) { mutableStateOf(0) }
     var transitionJob by remember(items) { mutableStateOf<Job?>(null) }
 
-    fun zoomFor(image: String): Animatable<Float, AnimationVector1D> =
-        zoomStates.getOrPut(image) { Animatable(0f) }
-
-    LaunchedEffect(items) {
-        bottomImage?.let { image ->
-            val zoom = zoomFor(image)
-            zoom.snapTo(0f)
-            zoom.animateTo(1f, tween(15_000, easing = LinearEasing))
-        }
-    }
-    LaunchedEffect(currentIndex, items, tmdbBackdrops) {
+    LaunchedEffect(currentIndex, items, tmdbBackdrops, failedHeroImages, tmdbResolvedIds) {
         val targetItem = items.getOrNull(currentIndex)
         val targetImage = resolveHeroImage(targetItem)
+        if (targetItem != null && targetImage == null && targetItem.id in tmdbResolvedIds) {
+            onItemUnavailable(targetItem.id)
+            return@LaunchedEffect
+        }
         if (targetImage == null || targetImage == topImage || (topImage == null && targetImage == bottomImage)) {
             lastRequestedIndex = currentIndex
             return@LaunchedEffect
@@ -1766,7 +1807,6 @@ private fun Hero(
         if (topLoaded && wipeProgress.value > 0f) {
             topImage?.let {
                 bottomImage = it
-                bottomHasBackdrop = topHasBackdrop
             }
         }
         val forwardDistance = (currentIndex - lastRequestedIndex + items.size) % items.size
@@ -1774,7 +1814,6 @@ private fun Hero(
         isForward = forwardDistance <= backwardDistance
         lastRequestedIndex = currentIndex
         topImage = targetImage
-        topHasBackdrop = isLikelyWide(targetImage)
         topLoaded = false
         wipeProgress.snapTo(0f)
     }
@@ -1782,18 +1821,11 @@ private fun Hero(
         val image = topImage ?: return@LaunchedEffect
         if (!topLoaded) return@LaunchedEffect
         val generation = transitionGeneration
-        val zoom = zoomFor(image)
-        zoomJobs.remove(image)?.cancel()
-        zoomJobs[image] = transitionScope.launch {
-            zoom.snapTo(0f)
-            zoom.animateTo(1f, tween(15_000, easing = LinearEasing))
-        }
         transitionJob?.cancel()
         transitionJob = transitionScope.launch {
             wipeProgress.animateTo(1f, tween(600, easing = FastOutSlowInEasing))
             if (generation == transitionGeneration && image == topImage) {
                 bottomImage = image
-                bottomHasBackdrop = topHasBackdrop
                 topImage = null
                 topLoaded = false
             }
@@ -1802,7 +1834,6 @@ private fun Hero(
     DisposableEffect(items) {
         onDispose {
             transitionJob?.cancel()
-            zoomJobs.values.forEach { it.cancel() }
         }
     }
     var lastInteractionAt by remember(items) { mutableStateOf(System.currentTimeMillis()) }
@@ -1834,15 +1865,11 @@ private fun Hero(
     LaunchedEffect(currentIndex, items) {
         if (items.size < 2) return@LaunchedEffect
         val next = items[(currentIndex + 1) % items.size]
-        val nextImage = tmdbBackdrops[next.id] ?: AppRuntime.client?.backdropUrl(next, 1280)
-            ?: AppRuntime.client?.backdropUrlUntagged(next.id, 0, 1280)
-            ?: AppRuntime.client?.heroStillUrl(next.id, 1)
-            ?: AppRuntime.client?.heroStillUrl(next.id, 2)
-            ?.takeIf { it.isNotBlank() }
-            ?: AppRuntime.client?.imageUrl(next, 720)
-            ?: return@LaunchedEffect
-        val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
-        context.imageLoader.enqueue(request)
+        val nextImages = heroImageCandidates(next)
+        nextImages.forEach { nextImage ->
+            val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
+            context.imageLoader.enqueue(request)
+        }
     }
     Box(
         Modifier
@@ -1850,39 +1877,47 @@ private fun Hero(
             .fillMaxWidth()
             .height(heroHeight)
             .clip(RoundedCornerShape(bottomEnd = 24.dp))
+            .onPreviewKeyEvent { event ->
+                if (!heroHasFocus || event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionLeft -> { lastInteractionAt = System.currentTimeMillis(); onPrevious(); true }
+                    Key.DirectionRight -> { lastInteractionAt = System.currentTimeMillis(); onNext(); true }
+                    else -> false
+                }
+            }
     ) {
         Box(
             Modifier
                 .fillMaxSize()
                 .background(Ink)
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
-                    when (event.key) {
-                        Key.DirectionLeft -> { lastInteractionAt = System.currentTimeMillis(); onPrevious(); true }
-                        Key.DirectionRight -> { lastInteractionAt = System.currentTimeMillis(); onNext(); true }
-                        else -> false
-                    }
-                }
         ) {
+            if (bottomImage == null && topImage == null) {
+                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
+                Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = 13.sp)
+            }
             bottomImage?.let { image ->
+                val imageOwner = items.firstOrNull { image in heroImageCandidates(it) } ?: item
                 HeroBackdropImage(
                     imageUrl = image,
-                    zoom = zoomFor(image).value,
-                    hasBackdrop = bottomHasBackdrop,
-                    onSuccess = { width, height -> bottomHasBackdrop = width > height * 1.2f },
+                    onSuccess = { width, height ->
+                        if (height <= 0 || width <= height) rejectHeroImage(imageOwner, image)
+                    },
+                    onError = { rejectHeroImage(imageOwner, image) },
                 )
             }
             topImage?.let { image ->
+                val imageOwner = items.firstOrNull { image in heroImageCandidates(it) } ?: item
                 HeroBackdropImage(
                     imageUrl = image,
-                    zoom = zoomFor(image).value,
-                    hasBackdrop = topHasBackdrop,
                     wipeProgress = wipeProgress.value,
                     isForward = isForward,
                     onLoaded = {
                         if (image == topImage) topLoaded = true
                     },
-                    onSuccess = { width, height -> if (image == topImage) topHasBackdrop = width > height * 1.2f },
+                    onSuccess = { width, height ->
+                        if (height <= 0 || width <= height) rejectHeroImage(imageOwner, image)
+                    },
+                    onError = { rejectHeroImage(imageOwner, image) },
                 )
             }
         Box(
@@ -1894,8 +1929,10 @@ private fun Hero(
             )
         )
         Column(
-            Modifier.align(Alignment.BottomStart).padding(start = 40.dp, bottom = 28.dp)
-                .widthIn(max = (LocalConfiguration.current.screenWidthDp * 0.42f).dp)
+            Modifier.align(Alignment.BottomStart).heightIn(max = heroHeight - 96.dp)
+                .padding(start = 40.dp, bottom = 28.dp)
+                .widthIn(max = (LocalConfiguration.current.screenWidthDp * 0.42f).dp),
+            verticalArrangement = Arrangement.Bottom,
         ) {
             Text("为你推荐", color = TextSub, fontSize = 11.sp, letterSpacing = 2.sp)
             Spacer(Modifier.height(8.dp))
@@ -1923,7 +1960,7 @@ private fun Hero(
             ).joinToString("   ")
             if (sub.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
-                Text(sub, color = TextSub, style = TypeScale.body)
+                Text(sub, color = TextSub, style = TypeScale.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             displayItem.overview?.let {
                 Spacer(Modifier.height(8.dp))
@@ -1941,6 +1978,10 @@ private fun Hero(
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
                     onFocused = onPlayFocused,
+                    onFocusChanged = {
+                        heroHasFocus = it
+                        if (it) onHeroFocusChanged(true)
+                    },
                     onClick = { lastInteractionAt = System.currentTimeMillis(); onPlay(displayItem) },
                 ) { focused ->
                     Row(
@@ -1963,6 +2004,11 @@ private fun Hero(
                     modifier = Modifier.height(42.dp).width(108.dp),
                     corner = 21.dp,
                     scaleTo = 1.05f,
+                    onFocused = onDetailFocused,
+                    onFocusChanged = {
+                        heroHasFocus = it
+                        if (it) onHeroFocusChanged(true)
+                    },
                     onClick = { onOpenDetail(displayItem.seriesId ?: displayItem.id) },
                 ) { focused ->
                     Box(
@@ -2002,20 +2048,32 @@ private fun Hero(
 
 @Composable
 private fun HeroThumb(item: MediaItem, client: EmbyClient?, tmdbBackdrop: String?) {
-    val poster = client?.imageUrl(item, 360)
     val candidates = remember(item.id, tmdbBackdrop, item.backdropTag, client) {
-        listOfNotNull(tmdbBackdrop, client?.backdropUrlUntagged(item.id, 0, 640), client?.heroStillUrl(item.id, 1)).distinct()
+        buildList {
+            val backdropCount = ((item.backdropTags.keys.maxOrNull()?.plus(1)) ?: 0)
+                .coerceAtLeast(if (item.backdropTag != null) 1 else 0)
+            repeat(backdropCount) { index ->
+                (client?.backdropUrl(item, index, 640) ?: client?.backdropUrlUntagged(item.id, index, 640))
+                    ?.let(::add)
+            }
+            client?.heroStillUrl(item.id, 1)?.let(::add)
+            client?.heroStillUrl(item.id, 2)?.let(::add)
+            tmdbBackdrop?.let(::add)
+        }.distinct()
     }
     var candidateIndex by remember(item.id, candidates) { mutableIntStateOf(0) }
-    var posterFailed by remember(item.id, poster) { mutableStateOf(false) }
+    var candidateFailed by remember(item.id, candidates) { mutableStateOf(false) }
     Box(Modifier.fillMaxSize().background(InkSoft)) {
-        if (poster != null && !posterFailed) AsyncImage(poster, null, contentScale = ContentScale.Crop, onError = { posterFailed = true }, modifier = Modifier.fillMaxSize())
-        else Icon(Icons.Rounded.Movie, null, tint = TextSub, modifier = Modifier.align(Alignment.Center).size(14.dp))
+        if (candidates.isEmpty() || candidateFailed) Icon(Icons.Rounded.Movie, null, tint = TextSub, modifier = Modifier.align(Alignment.Center).size(14.dp))
         candidates.getOrNull(candidateIndex)?.let { candidate ->
-            var loaded by remember(item.id, candidate) { mutableStateOf(false) }
-            AsyncImage(candidate, null, contentScale = ContentScale.Crop, onSuccess = { loaded = true },
-                onError = { if (candidateIndex < candidates.lastIndex) candidateIndex++ },
-                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = if (loaded) 1f else 0f })
+            AsyncImage(candidate, null, contentScale = ContentScale.Crop,
+                onSuccess = {
+                    if (it.result.drawable.intrinsicHeight <= 0 || it.result.drawable.intrinsicWidth <= it.result.drawable.intrinsicHeight) {
+                        if (candidateIndex < candidates.lastIndex) candidateIndex++ else candidateFailed = true
+                    }
+                },
+                onError = { if (candidateIndex < candidates.lastIndex) candidateIndex++ else candidateFailed = true },
+                modifier = Modifier.fillMaxSize())
         }
     }
 }
@@ -2023,12 +2081,11 @@ private fun HeroThumb(item: MediaItem, client: EmbyClient?, tmdbBackdrop: String
 @Composable
 private fun HeroBackdropImage(
     imageUrl: String,
-    zoom: Float,
-    hasBackdrop: Boolean,
     wipeProgress: Float = 1f,
     isForward: Boolean = true,
     onLoaded: () -> Unit = {},
     onSuccess: (Int, Int) -> Unit = { _, _ -> },
+    onError: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val request = remember(imageUrl) {
@@ -2066,44 +2123,16 @@ private fun HeroBackdropImage(
             model = request,
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            alignment = Alignment.Center,
-            modifier = Modifier
-                .fillMaxSize()
-                .blur(28.dp)
-                .graphicsLayer {
-                    val backgroundScale = 1.12f + zoom * 0.05f
-                    scaleX = backgroundScale
-                    scaleY = backgroundScale
-                    transformOrigin = TransformOrigin(0.5f, 0.32f)
-                },
+            alignment = Alignment.TopCenter,
+            onSuccess = {
+                val width = it.result.drawable.intrinsicWidth
+                val height = it.result.drawable.intrinsicHeight
+                onSuccess(width, height)
+                if (height > 0 && width > height) onLoaded()
+            },
+            onError = { onError() },
+            modifier = Modifier.fillMaxSize(),
         )
-        if (hasBackdrop) {
-            AsyncImage(
-                model = request,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                alignment = Alignment.Center,
-                onSuccess = { onLoaded(); onSuccess(it.result.drawable.intrinsicWidth, it.result.drawable.intrinsicHeight) },
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            val posterShape = RoundedCornerShape(12.dp)
-            AsyncImage(
-                model = request,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                alignment = Alignment.Center,
-                onSuccess = { onLoaded(); onSuccess(it.result.drawable.intrinsicWidth, it.result.drawable.intrinsicHeight) },
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 180.dp)
-                    .width(LocalConfiguration.current.screenWidthDp.dp * 0.24f)
-                    .aspectRatio(2f / 3f)
-                    .shadow(12.dp, posterShape)
-                    .clip(posterShape)
-                    .background(Ink),
-            )
-        }
     }
 }
 

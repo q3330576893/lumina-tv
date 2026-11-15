@@ -19,6 +19,7 @@ data class MediaItem(
     val playedPercentage: Double = 0.0,
     val primaryImageAspectRatio: Double? = null,
     val backdropTag: String? = null,
+    val backdropTags: Map<Int, String> = emptyMap(),
     val logoTag: String? = null,
     val sourceCount: Int = 0,
     val communityRating: Double? = null,

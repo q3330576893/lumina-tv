@@ -75,8 +75,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -2021,73 +2021,62 @@ fun PlayerScreen(
             error == null && playbackStatusNotice == null
         if (isBufferingForDisplay) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
-                val itemBackdrop = client?.backdropUrl(item, 1280)
                 val seriesBackdrop = item.seriesId?.let { sid ->
-                    LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, 1280) }
+                    LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, 1920) }
                 }
-                val bufferingImages = listOfNotNull(
-                    tmdbBackdrop?.let { it to false },
-                    itemBackdrop?.let { it to false },
-                    seriesBackdrop?.let { it to false },
-                    client?.heroStillUrl(item.id, 1)?.let { it to false },
-                    client?.heroStillUrl(item.id, 2)?.let { it to false },
-                    client?.backdropUrlUntagged(item.id, 0, 1280)?.let { it to false },
-                    client?.imageUrl(item, 720)?.let { it to true },
-                    client?.libraryPrimaryImageUrl(item.id)?.let { it to true },
-                ).distinctBy { it.first }
+                val itemBackdropImages = buildList {
+                    val backdropCount = ((item.backdropTags.keys.maxOrNull()?.plus(1)) ?: 0)
+                        .coerceAtLeast(if (item.backdropTag != null) 1 else 0)
+                    repeat(backdropCount) { index ->
+                        (client?.backdropUrl(item, index, 1920)
+                            ?: client?.backdropUrlUntagged(item.id, index, 1920))?.let { add(it to false) }
+                    }
+                }
+                val bufferingImages = buildList {
+                    tmdbBackdrop?.let { add(it to false) }
+                    addAll(itemBackdropImages)
+                    seriesBackdrop?.let { add(it to false) }
+                    client?.heroStillUrl(item.id, 1)?.let { add(it to false) }
+                    client?.heroStillUrl(item.id, 2)?.let { add(it to false) }
+                    client?.backdropUrlUntagged(item.id, 0, 1920)?.let { add(it to false) }
+                    client?.imageUrl(item, 720)?.let { add(it to true) }
+                }.distinctBy { it.first }
                 var bufferingImageIndex by remember(item.id, bufferingImages) { mutableIntStateOf(0) }
                 val bufferingImage = bufferingImages.getOrNull(bufferingImageIndex)
                 var bufferingImageLoaded by remember(item.id, bufferingImage?.first) { mutableStateOf(false) }
-                LaunchedEffect(bufferingImage?.first, bufferingImageLoaded, isBufferingForDisplay) {
-                    if (!isBufferingForDisplay || bufferingImage?.first != tmdbBackdrop || bufferingImageLoaded) return@LaunchedEffect
-                    delay(900)
-                    if (bufferingImageIndex == 0 && !bufferingImageLoaded && bufferingImages.size > 1) {
-                        bufferingImageIndex = 1
+                var bufferingRatio by remember(item.id, bufferingImage?.first) { mutableStateOf<Pair<Int, Int>?>(null) }
+                val ratio = bufferingRatio
+                val isPosterFallback = bufferingImage?.second == true
+                val isWideScreen = ratio?.let { (width, height) ->
+                    height > 0 && kotlin.math.abs(width.toFloat() / height - 16f / 9f) / (16f / 9f) <= 0.08f
+                } == true
+                LaunchedEffect(bufferingImageIndex, bufferingImage, bufferingRatio) {
+                    if (bufferingImage == null) {
+                        PageLog.add("bufferingImg candidates=${bufferingImages.size} picked=-1 ratio=0x0 scale=crop")
+                    } else if (bufferingImageLoaded) {
+                        val (width, height) = bufferingRatio ?: (0 to 0)
+                        PageLog.add("bufferingImg candidates=${bufferingImages.size} picked=$bufferingImageIndex ratio=${width}x$height scale=${if (isWideScreen) "fit" else "crop"}")
                     }
                 }
                 if (bufferingImage != null) {
-                    AsyncImage(
-                        model = bufferingImage.first,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        alignment = Alignment.Center,
-                        onSuccess = { bufferingImageLoaded = true },
-                        onError = {
-                            if (bufferingImageIndex < bufferingImages.lastIndex) bufferingImageIndex += 1
-                        },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .blur(32.dp)
-                            .graphicsLayer {
-                                scaleX = 1.12f
-                                scaleY = 1.12f
-                            },
-                    )
-                    if (bufferingImage.second) {
-                        val posterShape = RoundedCornerShape(12.dp)
+                    if (!isPosterFallback) {
                         AsyncImage(
                             model = bufferingImage.first,
                             contentDescription = null,
-                            contentScale = ContentScale.Fit,
+                            contentScale = if (isWideScreen) ContentScale.Fit else ContentScale.Crop,
                             alignment = Alignment.Center,
-                            modifier = Modifier
-                                .width(minOf(LocalConfiguration.current.screenWidthDp * 0.26f, 320f).dp)
-                                .aspectRatio(2f / 3f)
-                                .shadow(12.dp, posterShape)
-                                .clip(posterShape)
-                                .background(Color.Black),
+                            onSuccess = {
+                                bufferingImageLoaded = true
+                                bufferingRatio = it.result.drawable.intrinsicWidth to it.result.drawable.intrinsicHeight
+                            },
+                            onError = { if (bufferingImageIndex < bufferingImages.lastIndex) bufferingImageIndex++ },
+                            modifier = Modifier.fillMaxSize().then(if (ratio == null) Modifier.alpha(0f) else Modifier),
                         )
                     } else {
-                        AsyncImage(
-                            model = bufferingImage.first,
-                            contentDescription = null,
-                            contentScale = ContentScale.Fit,
-                            alignment = Alignment.Center,
-                            modifier = Modifier.fillMaxSize(),
-                        )
+                        LaunchedEffect(bufferingImageIndex) { bufferingImageIndex = bufferingImages.size }
                     }
-                } else {
+                }
+                if (bufferingImage == null || isPosterFallback) {
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF263142), Color(0xFF10141D)))))
                     Text(item.seriesName ?: item.name, color = TextMain, fontSize = 24.sp, maxLines = 2,
                         modifier = Modifier.align(Alignment.Center).padding(horizontal = 40.dp))

@@ -692,6 +692,14 @@ class EmbyClient(
         val ud = o.optJSONObject("UserData")
         val tags = o.optJSONObject("ImageTags")
         val backdrops = o.optJSONObject("BackdropImageTags")
+        val backdropTags = buildMap {
+            val names = backdrops?.names() ?: JSONArray()
+            val indexedTags = (0 until names.length()).mapNotNull { i ->
+                val index = names.optString(i).toIntOrNull() ?: return@mapNotNull null
+                backdrops?.optString(index.toString())?.ifBlank { null }?.let { index to it }
+            }.sortedBy { it.first }
+            indexedTags.forEach { (index, tag) -> put(index, tag) }
+        }
         val providerIds = buildMap {
             o.optJSONObject("ProviderIds")?.let { ids ->
                 val names = ids.names() ?: JSONArray()
@@ -745,7 +753,8 @@ class EmbyClient(
             name = o.optString("Name"),
             type = o.optString("Type"),
             imageTag = tags?.optString("Primary")?.ifBlank { null },
-            backdropTag = backdrops?.optString("0")?.ifBlank { null },
+            backdropTag = backdropTags[0],
+            backdropTags = backdropTags,
             logoTag = tags?.optString("Logo")?.ifBlank { null },
             // 请求了 Fields=MediaSources 才有值，用来判断"这一集有几个版本"
             sourceCount = o.optJSONArray("MediaSources")?.length() ?: 0,
@@ -811,20 +820,24 @@ class EmbyClient(
     }
 
     fun backdropUrl(item: MediaItem, maxWidth: Int = 1920): String? {
-        val tag = item.backdropTag
+        return backdropUrl(item, 0, maxWidth)
+    }
+
+    fun backdropUrl(item: MediaItem, index: Int, maxWidth: Int): String? {
+        val tag = item.backdropTags[index] ?: item.backdropTag?.takeIf { index == 0 }
         if (tag == null) return null
-        return url("/Items/${item.id}/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
+        return url("/Items/${item.id}/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
     fun backdropUrlUntagged(id: String, index: Int, maxWidth: Int): String {
-        require(index in 0..3)
+        require(index >= 0)
         return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "quality" to "90"))
     }
 
     /** Indexed Hero stills: use the existing authenticated image URL, not an extra metadata request. */
     fun heroStillUrl(id: String, index: Int): String {
         require(index in 1..3)
-        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to "480"))
+        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to "1920", "quality" to "90"))
     }
 
     /** 透明标题图（Emby Logo 图），没有就返回 null 由调用方退回文字标题。 */
