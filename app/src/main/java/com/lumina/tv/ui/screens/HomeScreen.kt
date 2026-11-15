@@ -93,6 +93,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
@@ -1662,7 +1663,9 @@ private fun Hero(
     val zoomJobs = remember(items) { mutableMapOf<String, Job>() }
     val wipeProgress = remember(items) { Animatable(1f) }
     var bottomImage by remember(items, client) { mutableStateOf(resolveHeroImage(item)) }
+    var bottomHasBackdrop by remember(items, client) { mutableStateOf(item.backdropTag != null) }
     var topImage by remember(items, client) { mutableStateOf<String?>(null) }
+    var topHasBackdrop by remember(items, client) { mutableStateOf(false) }
     var topLoaded by remember(items, client) { mutableStateOf(false) }
     var isForward by remember(items) { mutableStateOf(true) }
     var lastRequestedIndex by remember(items) { mutableStateOf(currentIndex) }
@@ -1680,7 +1683,8 @@ private fun Hero(
         }
     }
     LaunchedEffect(currentIndex, items) {
-        val targetImage = resolveHeroImage(items.getOrNull(currentIndex))
+        val targetItem = items.getOrNull(currentIndex)
+        val targetImage = resolveHeroImage(targetItem)
         if (targetImage == null || targetImage == topImage || (topImage == null && targetImage == bottomImage)) {
             lastRequestedIndex = currentIndex
             return@LaunchedEffect
@@ -1689,13 +1693,17 @@ private fun Hero(
         transitionJob?.cancel()
         transitionGeneration += 1
         if (topLoaded && wipeProgress.value > 0f) {
-            topImage?.let { bottomImage = it }
+            topImage?.let {
+                bottomImage = it
+                bottomHasBackdrop = topHasBackdrop
+            }
         }
         val forwardDistance = (currentIndex - lastRequestedIndex + items.size) % items.size
         val backwardDistance = (lastRequestedIndex - currentIndex + items.size) % items.size
         isForward = forwardDistance <= backwardDistance
         lastRequestedIndex = currentIndex
         topImage = targetImage
+        topHasBackdrop = targetItem?.backdropTag != null
         topLoaded = false
         wipeProgress.snapTo(0f)
     }
@@ -1714,6 +1722,7 @@ private fun Hero(
             wipeProgress.animateTo(1f, tween(600, easing = FastOutSlowInEasing))
             if (generation == transitionGeneration && image == topImage) {
                 bottomImage = image
+                bottomHasBackdrop = topHasBackdrop
                 topImage = null
                 topLoaded = false
             }
@@ -1780,12 +1789,14 @@ private fun Hero(
                 HeroBackdropImage(
                     imageUrl = image,
                     zoom = zoomFor(image).value,
+                    hasBackdrop = bottomHasBackdrop,
                 )
             }
             topImage?.let { image ->
                 HeroBackdropImage(
                     imageUrl = image,
                     zoom = zoomFor(image).value,
+                    hasBackdrop = topHasBackdrop,
                     wipeProgress = wipeProgress.value,
                     isForward = isForward,
                     onLoaded = {
@@ -1919,27 +1930,20 @@ private fun Hero(
 private fun HeroBackdropImage(
     imageUrl: String,
     zoom: Float,
+    hasBackdrop: Boolean,
     wipeProgress: Float = 1f,
     isForward: Boolean = true,
     onLoaded: () -> Unit = {},
 ) {
     val context = LocalContext.current
-    AsyncImage(
-        model = remember(imageUrl) {
-            ImageRequest.Builder(context).data(imageUrl).crossfade(false).build()
-        },
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        alignment = Alignment.TopCenter,
-        onSuccess = { onLoaded() },
+    val request = remember(imageUrl) {
+        ImageRequest.Builder(context).data(imageUrl).crossfade(false).build()
+    }
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .graphicsLayer {
-                val z = 1f + zoom * 0.05f
-                scaleX = z
-                scaleY = z
                 translationX = (if (isForward) 1f else -1f) * 18.dp.toPx() * (1f - wipeProgress)
-                transformOrigin = TransformOrigin(0.5f, 0.32f)
                 clip = true
                 compositingStrategy = CompositingStrategy.Offscreen
             }
@@ -1962,7 +1966,49 @@ private fun HeroBackdropImage(
                     )
                 }
             },
-    )
+    ) {
+        AsyncImage(
+            model = request,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            alignment = Alignment.Center,
+            modifier = Modifier
+                .fillMaxSize()
+                .blur(28.dp)
+                .graphicsLayer {
+                    val backgroundScale = 1.12f + zoom * 0.05f
+                    scaleX = backgroundScale
+                    scaleY = backgroundScale
+                    transformOrigin = TransformOrigin(0.5f, 0.32f)
+                },
+        )
+        if (hasBackdrop) {
+            AsyncImage(
+                model = request,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                alignment = Alignment.Center,
+                onSuccess = { onLoaded() },
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            val posterShape = RoundedCornerShape(12.dp)
+            AsyncImage(
+                model = request,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                alignment = Alignment.Center,
+                onSuccess = { onLoaded() },
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .width(LocalConfiguration.current.screenWidthDp.dp * 0.22f)
+                    .aspectRatio(2f / 3f)
+                    .shadow(12.dp, posterShape)
+                    .clip(posterShape)
+                    .background(Ink),
+            )
+        }
+    }
 }
 
 @Composable

@@ -377,35 +377,20 @@ fun PosterCard(
                     )
                 }
             }
-            if (titleOverlay) {
-                Box(
-                    Modifier.align(Alignment.BottomStart).fillMaxWidth().height(42.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))))
-                )
-                Text(
-                    item.name,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = 9.dp),
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            } else {
-                Box(
-                    Modifier.align(Alignment.BottomStart).fillMaxWidth().height(54.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f))))
-                )
-                Text(
-                    item.name,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = 10.dp),
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            Box(
+                Modifier.align(Alignment.BottomStart).fillMaxWidth().height(40.dp)
+                    .background(Color.Black.copy(alpha = 0.55f))
+            )
+            Text(
+                item.name,
+                modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = 9.dp),
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                style = TextStyle(shadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 3f)),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             if (item.positionTicks > 0 && !item.played) {
                 val total = item.runtimeTicks ?: 0L
                 val ratio = if (total > 0) (item.positionTicks.toFloat() / total).coerceIn(0f, 1f) else 0f

@@ -19,6 +19,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -74,6 +75,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -81,6 +84,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -89,6 +93,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -1783,26 +1788,61 @@ fun PlayerScreen(
         if (isBufferingForDisplay) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Box(Modifier.fillMaxSize().background(Color.Black))
-                val bufferingImage = client?.backdropUrl(item, 1280)
-                    ?: client?.imageUrl(item, 720)
-                    ?: item.seriesId?.let { sid -> LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, 1280) } }
+                val itemBackdrop = client?.backdropUrl(item, 1280)
+                val seriesBackdrop = item.seriesId?.let { sid ->
+                    LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, 1280) }
+                }
+                val bufferingImages = listOfNotNull(
+                    itemBackdrop?.let { it to false },
+                    seriesBackdrop?.let { it to false },
+                    client?.heroStillUrl(item.id, 1)?.let { it to false },
+                    client?.heroStillUrl(item.id, 2)?.let { it to false },
+                    client?.imageUrl(item, 720)?.let { it to true },
+                ).distinctBy { it.first }
+                var bufferingImageIndex by remember(item.id, bufferingImages) { mutableIntStateOf(0) }
+                val bufferingImage = bufferingImages.getOrNull(bufferingImageIndex)
                 if (bufferingImage != null) {
                     AsyncImage(
-                        model = bufferingImage,
+                        model = bufferingImage.first,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         alignment = Alignment.Center,
-                        modifier = Modifier.fillMaxSize().blur(32.dp),
+                        onError = {
+                            if (bufferingImageIndex < bufferingImages.lastIndex) bufferingImageIndex += 1
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .blur(32.dp)
+                            .graphicsLayer {
+                                scaleX = 1.12f
+                                scaleY = 1.12f
+                            },
                     )
-                    AsyncImage(
-                        model = bufferingImage,
-                        contentDescription = null,
-                        contentScale = ContentScale.Fit,
-                        alignment = Alignment.Center,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    if (bufferingImage.second) {
+                        val posterShape = RoundedCornerShape(12.dp)
+                        AsyncImage(
+                            model = bufferingImage.first,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            alignment = Alignment.Center,
+                            modifier = Modifier
+                                .width(minOf(LocalConfiguration.current.screenWidthDp * 0.26f, 320f).dp)
+                                .aspectRatio(2f / 3f)
+                                .shadow(12.dp, posterShape)
+                                .clip(posterShape)
+                                .background(Color.Black),
+                        )
+                    } else {
+                        AsyncImage(
+                            model = bufferingImage.first,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            alignment = Alignment.Center,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)))
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Accent, strokeWidth = 2.5.dp, modifier = Modifier.size(36.dp))
                     Spacer(Modifier.height(10.dp))
