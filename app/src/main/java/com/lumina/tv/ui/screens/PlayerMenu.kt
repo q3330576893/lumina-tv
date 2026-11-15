@@ -75,6 +75,8 @@ internal fun OptionMenu(
     subScale: Float,
     audioDecodeMode: String,
     audioSupport: AudioSupport,
+    infoRows: List<Pair<String, String>>,
+    seekStepSeconds: Int,
     subtitleOffsetMs: Long,
     activeEngine: String,
     audioCaps: com.lumina.tv.player.AudioCaps,
@@ -90,6 +92,7 @@ internal fun OptionMenu(
     onSubtitleOffset: (Long) -> Unit,
     onSubScale: (Float) -> Unit,
     onAudioDecodeMode: (String) -> Unit,
+    onSeekStepChanged: (Int) -> Unit,
     onSwitchEngine: () -> Unit,
     onResizeMode: (Int) -> Unit,
     onSwitchSource: (String) -> Unit,
@@ -488,6 +491,36 @@ internal fun OptionMenu(
                         onClick = onRememberIntro,
                     )
                     Text("之后播放本集自动出现跳过按钮", color = TextSub.copy(alpha = 0.7f), fontSize = 10.sp)
+                }
+
+                Spacer(Modifier.height(16.dp))
+                MenuLabel("快进步长")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(5, 10, 15, 30).forEach { seconds ->
+                        MenuChip(
+                            label = "${seconds}s",
+                            width = 64.dp,
+                            active = seekStepSeconds == seconds,
+                            activeColor = Accent,
+                            onClick = { onSeekStepChanged(seconds) },
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+                MenuLabel("播放信息")
+                Column(
+                    Modifier.fillMaxWidth()
+                        .background(Color(0x14000000), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    infoRows.forEach { (label, value) ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(label, color = TextSub, fontSize = 11.sp, modifier = Modifier.width(72.dp))
+                            Text(value, color = TextMain, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(18.dp))

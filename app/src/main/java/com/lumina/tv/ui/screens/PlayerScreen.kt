@@ -271,6 +271,7 @@ fun PlayerScreen(
     var position by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
     var estimatedBitrate by remember { mutableLongStateOf(0L) }
+    var seekStepSeconds by remember { mutableIntStateOf(AppRuntime.prefs?.seekStepSeconds ?: 10) }
     var error by remember { mutableStateOf<String?>(null) }
     var speed by remember { mutableFloatStateOf(AppRuntime.prefs?.defaultSpeed ?: 1.0f) }
     var optionMenu by remember { mutableStateOf(false) }
@@ -373,6 +374,7 @@ fun PlayerScreen(
     var prewarmJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var seekHint by remember { mutableStateOf<String?>(null) }
     var currentResolution by remember { mutableStateOf<String?>(null) }
+    val seekStepMs = seekStepSeconds * 1000L
     var subScale by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitleScale ?: 1.0f) }
     var subtitleColor by remember { mutableIntStateOf(AppRuntime.prefs?.subtitleColor ?: android.graphics.Color.WHITE) }
     var subtitleOutline by remember { mutableStateOf(AppRuntime.prefs?.subtitleOutline ?: true) }
@@ -1347,11 +1349,13 @@ fun PlayerScreen(
                     bufferingStartedAt = 0L
                 }
                 if (state == Player.STATE_READY) {
-                    val actual = exo.currentPosition
-                    val requested = lastRequestedStartMs
-                    val offset = requested - actual
-                    phaseTimes.put("readyPositionMs", actual).put("seekOffsetMs", offset)
-                    PageLog.add("timeline ready gen=$sessionGeneration request=$requested actual=$actual offset=$offset duration=${exo.duration}")
+                    if (!phaseTimes.has("seekOffsetMs")) {
+                        val actual = exo.currentPosition
+                        val requested = lastRequestedStartMs
+                        val offset = requested - actual
+                        phaseTimes.put("readyPositionMs", actual).put("seekOffsetMs", offset)
+                        PageLog.add("timeline ready gen=$sessionGeneration request=$requested actual=$actual offset=$offset duration=${exo.duration}")
+                    }
                     if (readyAt == 0L) readyAt = android.os.SystemClock.elapsedRealtime()
                     val loadToReadyMs = (readyAt - loadStartedAt).coerceAtLeast(0L)
                     phaseTimes.put("loadToReadyMs", loadToReadyMs)
@@ -1657,16 +1661,16 @@ fun PlayerScreen(
         seekHoldJob?.cancel()
         seekHoldDirection = direction
         seekHoldActive = false
-        seekHoldDelta = direction * 10_000L
-        seekBy(direction * 10_000L)
+        seekHoldDelta = direction * seekStepMs
+        seekBy(direction * seekStepMs)
         seekHoldJob = scope.launch {
             delay(600)
             if (seekHoldDirection != direction) return@launch
             seekHoldActive = true
             previewActive = true
             while (seekHoldDirection == direction && android.os.SystemClock.elapsedRealtime() - seekLastKeyAt < 1_500L && kotlin.math.abs(seekHoldDelta) < 120_000L) {
-                seekBy(direction * 10_000L)
-                seekHoldDelta += direction * 10_000L
+                seekBy(direction * seekStepMs)
+                seekHoldDelta += direction * seekStepMs
                 delay(350)
             }
             seekHoldJob = null
@@ -2755,6 +2759,36 @@ fun PlayerScreen(
                 subScale = subScale,
                 audioDecodeMode = audioDecodeMode,
                 audioSupport = audioSupport,
+                infoRows = run {
+                    val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
+                    val audioStream = playbackSource?.audioStreams?.firstOrNull { it.isDefault }
+                        ?: playbackSource?.audioStreams?.firstOrNull()
+                    listOf(
+                        "内核" to if (activeEngine == "mpv") "mpv" else "Media3",
+                        "分辨率" to (currentResolution ?: videoStream?.let { stream ->
+                            if (stream.width != null && stream.height != null) "${stream.width}x${stream.height}" else null
+                        } ?: "-"),
+                        "视频编码" to (videoStream?.codec ?: "-"),
+                        "HDR" to AppRuntime.currentVideoRange,
+                        "码率" to if (estimatedBitrate > 0) "${estimatedBitrate / 1000} kbps" else "-",
+                        "音轨" to listOfNotNull(
+                            audioStream?.codec?.uppercase(),
+                            audioStream?.channels?.let { "${it}ch" },
+                            audioStream?.sampleRate?.let { "${it}Hz" },
+                        ).joinToString(" ").ifBlank { "-" },
+                        "音频输出" to when (audioSupport) {
+                            AudioSupport.PASSTHROUGH -> "直通（设备报告）"
+                            AudioSupport.DECODE_ONLY -> "本地解码"
+                            AudioSupport.UNSUPPORTED -> "可能无法解码"
+                        },
+                        "缓冲" to "$bufferingCount 次 / ${bufferingDurationMs / 1000}s",
+                        "丢帧" to droppedFrames.toString(),
+                        "首帧" to phaseTimes.optLong("loadToFirstFrameMs", 0L).takeIf { it > 0 }
+                            ?.let { "${it}ms" }.orEmpty().ifBlank { "-" },
+                        "片源" to (playbackSource?.displayLabel ?: "-"),
+                    )
+                },
+                seekStepSeconds = seekStepSeconds,
                 subtitleOffsetMs = subtitleOffsetMs,
                 activeEngine = activeEngine,
                 audioCaps = audioCaps,
@@ -2842,6 +2876,10 @@ fun PlayerScreen(
                     engineSwitchTrace.add("audio-decode-mode=$mode")
                     reloadForceTranscode = false
                     requestPlaybackReload(position, sessionGeneration)
+                },
+                onSeekStepChanged = {
+                    seekStepSeconds = it
+                    AppRuntime.prefs?.seekStepSeconds = it
                 },
                 onSwitchEngine = {
                     error = "正在切换播放内核…"
