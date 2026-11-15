@@ -816,6 +816,11 @@ class EmbyClient(
         return url("/Items/${item.id}/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
+    fun backdropUrlUntagged(id: String, index: Int, maxWidth: Int): String {
+        require(index in 0..3)
+        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "quality" to "90"))
+    }
+
     /** Indexed Hero stills: use the existing authenticated image URL, not an extra metadata request. */
     fun heroStillUrl(id: String, index: Int): String {
         require(index in 1..3)

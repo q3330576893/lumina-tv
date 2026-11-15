@@ -380,6 +380,10 @@ fun PlayerScreen(
     var seekHoldActive by remember { mutableStateOf(false) }
     var seekHoldDelta by remember { mutableLongStateOf(0L) }
     var seekHoldJob by remember { mutableStateOf<Job?>(null) }
+    var seekInFlight by remember { mutableStateOf(false) }
+    var pendingSeekTarget by remember { mutableStateOf<Long?>(null) }
+    var seekTimeoutJob by remember { mutableStateOf<Job?>(null) }
+    var seekLastKeyAt by remember { mutableLongStateOf(0L) }
     var chapters by remember { mutableStateOf<List<MediaChapter>>(emptyList()) }
     var playbackMarkers by remember(item.id) { mutableStateOf<PlaybackMarkers?>(null) }
     var chapterPanel by remember { mutableStateOf(false) }
@@ -1497,39 +1501,63 @@ fun PlayerScreen(
 
     fun seekBy(delta: Long) {
         val max = if (duration > 0) duration else Long.MAX_VALUE
-        val current = if (activeEngine == "mpv") mpvBackend?.positionMs() ?: position else exo.currentPosition
+        val current = pendingSeekTarget ?: if (activeEngine == "mpv") mpvBackend?.positionMs() ?: position else exo.currentPosition
         val to = (current + delta).coerceIn(0L, max)
+        val step = kotlin.math.abs(delta) / 1000
+        val targetSeconds = (to / 1000L).coerceAtLeast(0L)
+        val targetTime = "%02d:%02d".format(targetSeconds / 60, targetSeconds % 60)
+        seekHint = if (delta > 0) "+${step}s »  $targetTime" else "« ${step}s  $targetTime"
+        if (seekInFlight) {
+            pendingSeekTarget = to
+            return
+        }
+        seekInFlight = true
         when (activeEngine) {
             "mpv" -> mpvBackend?.seekTo(to)
             else -> exo.seekTo(to)
         }
         position = to
+        seekTimeoutJob?.cancel()
+        seekTimeoutJob = scope.launch {
+            delay(400)
+            seekInFlight = false
+            pendingSeekTarget?.also { pendingSeekTarget = null; seekPlayerTo(it) }
+        }
         if (seekHoldActive && android.os.SystemClock.elapsedRealtime() - lastHoldPreviewAt >= 700L) {
             previewFrame = null
             previewTargetMs = to
             lastHoldPreviewAt = android.os.SystemClock.elapsedRealtime()
         }
-        seekHint = if (delta > 0) "+${delta / 1000}s" else "-${-delta / 1000}s"
     }
 
-    fun beginSeekHold(direction: Int) {
-        if (seekHoldDirection == direction) return
+    fun beginSeekHold(direction: Int, repeatCount: Int) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        seekLastKeyAt = now
+        if (repeatCount > 0) {
+            return
+        }
         seekHoldJob?.cancel()
         seekHoldDirection = direction
         seekHoldActive = false
-        seekHoldDelta = 0L
+        seekHoldDelta = direction * 10_000L
+        seekBy(direction * 10_000L)
         seekHoldJob = scope.launch {
-            delay(500)
+            delay(600)
             if (seekHoldDirection != direction) return@launch
             seekHoldActive = true
             previewActive = true
-            while (seekHoldDirection == direction) {
-                seekBy(direction * 5_000L)
-                seekHoldDelta += direction * 5_000L
-                val seconds = kotlin.math.abs(seekHoldDelta) / 1000
-                seekHint = if (direction > 0) "+${seconds}s" else "-${seconds}s"
-                delay(120)
+            while (seekHoldDirection == direction && android.os.SystemClock.elapsedRealtime() - seekLastKeyAt < 1_500L && kotlin.math.abs(seekHoldDelta) < 120_000L) {
+                seekBy(direction * 10_000L)
+                seekHoldDelta += direction * 10_000L
+                delay(350)
             }
+            seekHoldJob = null
+            previewActive = false
+            previewFrame = null
+            previewTargetMs = null
+            seekHoldDirection = 0
+            seekHoldActive = false
+            seekHoldDelta = 0L
         }
     }
 
@@ -1537,7 +1565,6 @@ fun PlayerScreen(
         if (seekHoldDirection != direction) return
         seekHoldJob?.cancel()
         seekHoldJob = null
-        if (!seekHoldActive) seekBy(direction * 10_000L)
         previewActive = false
         previewFrame = null
         previewTargetMs = null
@@ -1760,7 +1787,9 @@ fun PlayerScreen(
                     showExitPrompt = false
                     exitPromptAt = 0L
                 }
-                if (!controlsVisible) controlsVisible = true
+                if (event.key != Key.DirectionLeft && event.key != Key.DirectionRight && !controlsVisible) {
+                    controlsVisible = true
+                }
             }
             false
         },
@@ -1770,7 +1799,7 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     useController = false
                     player = exo
-                    setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                     keepScreenOn = true
                 }
             },
@@ -1829,7 +1858,7 @@ fun PlayerScreen(
             error == null && playbackStatusNotice == null
         if (isBufferingForDisplay) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Box(Modifier.fillMaxSize().background(Color.Black))
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
                 val itemBackdrop = client?.backdropUrl(item, 1280)
                 val seriesBackdrop = item.seriesId?.let { sid ->
                     LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, 1280) }
@@ -1840,7 +1869,9 @@ fun PlayerScreen(
                     seriesBackdrop?.let { it to false },
                     client?.heroStillUrl(item.id, 1)?.let { it to false },
                     client?.heroStillUrl(item.id, 2)?.let { it to false },
+                    client?.backdropUrlUntagged(item.id, 0, 1280)?.let { it to false },
                     client?.imageUrl(item, 720)?.let { it to true },
+                    client?.libraryPrimaryImageUrl(item.id)?.let { it to true },
                 ).distinctBy { it.first }
                 var bufferingImageIndex by remember(item.id, bufferingImages) { mutableIntStateOf(0) }
                 val bufferingImage = bufferingImages.getOrNull(bufferingImageIndex)
@@ -1893,6 +1924,10 @@ fun PlayerScreen(
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
+                } else {
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF263142), Color(0xFF10141D)))))
+                    Text(item.seriesName ?: item.name, color = TextMain, fontSize = 24.sp, maxLines = 2,
+                        modifier = Modifier.align(Alignment.Center).padding(horizontal = 40.dp))
                 }
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2023,6 +2058,19 @@ fun PlayerScreen(
             }
         }
 
+        if (seekHint != null && !optionMenu) {
+            Text(
+                seekHint.orEmpty(),
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .padding(bottom = 132.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 14.dp, vertical = 7.dp),
+            )
+        }
+
         AnimatedVisibility(
             visible = boosting,
             enter = fadeIn(), exit = fadeOut(),
@@ -2093,7 +2141,7 @@ fun PlayerScreen(
         }
 
         // 隐藏控制栏时的按键捕获层：方向键 seek、OK 呼出控制栏、长按 OK 3 倍速
-        if (!controlsVisible && !optionMenu) {
+        if ((!controlsVisible || seekHoldDirection != 0) && !optionMenu) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -2124,13 +2172,11 @@ fun PlayerScreen(
                                 }
                             }
                             Key.DirectionLeft -> {
-                                if (ev.type == KeyEventType.KeyDown) beginSeekHold(-1) else endSeekHold(-1)
-                                controlsVisible = true
+                                if (ev.type == KeyEventType.KeyDown) beginSeekHold(-1, ev.nativeKeyEvent.repeatCount) else endSeekHold(-1)
                                 true
                             }
                             Key.DirectionRight -> {
-                                if (ev.type == KeyEventType.KeyDown) beginSeekHold(1) else endSeekHold(1)
-                                controlsVisible = true
+                                if (ev.type == KeyEventType.KeyDown) beginSeekHold(1, ev.nativeKeyEvent.repeatCount) else endSeekHold(1)
                                 true
                             }
                             Key.DirectionUp, Key.DirectionDown -> {
@@ -2209,17 +2255,6 @@ fun PlayerScreen(
                         .background(Brush.verticalGradient(listOf(Color(0x00070A12), Color(0xE6070A12))))
                         .padding(horizontal = 36.dp, vertical = 18.dp),
                 ) {
-                    if (seekHint != null) {
-                        Text(
-                            seekHint.orEmpty(),
-                            color = TextMain,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.align(Alignment.CenterHorizontally)
-                                .background(Color(0x99000000), RoundedCornerShape(6.dp))
-                                .padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
-                    }
                     val frame = previewFrame
                     val target = previewTargetMs
                     if (previewActive && frame != null && target != null && duration > 0) {

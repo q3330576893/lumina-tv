@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import com.lumina.tv.diag.NetLog
+import com.lumina.tv.diag.PageLog
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -35,11 +36,11 @@ object TmdbClient {
         .build()
 
     private val cache = LinkedHashMap<String, TmdbInfo?>()
-    private val noHit = HashSet<String>()
+    private val noHit = HashMap<String, Long>()
     private val externalIdsCache = LinkedHashMap<String, ExternalIds?>()
-    private val externalIdsNoHit = HashSet<String>()
+    private val externalIdsNoHit = HashMap<String, Long>()
     private val externalLinksCache = LinkedHashMap<String, ExternalLinks>()
-    private val externalLinksNoHit = HashSet<String>()
+    private val externalLinksNoHit = HashMap<String, Long>()
     @Volatile var lastRequestFailure: String? = null
         private set
     @Volatile private var externalLinkDiagnostic = JSONObject().put("status", "not_attempted").toString()
@@ -58,7 +59,8 @@ object TmdbClient {
         val key = "$type|$title|${year ?: 0}|${embyImdbId.orEmpty()}|${embyTmdbId.orEmpty()}|${embyTvdbId.orEmpty()}"
         synchronized(externalLinksCache) {
             externalLinksCache[key]?.let { return@withContext it }
-            if (key in externalLinksNoHit) return@withContext null
+            if ((externalLinksNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withContext null
+            externalLinksNoHit.remove(key)
         }
 
         val searchResult = if (embyTmdbId.isNullOrBlank()) searchTmdbId(type, title, year) else null
@@ -88,7 +90,7 @@ object TmdbClient {
             .put("tvdbId", result?.tvdbId ?: JSONObject.NULL)
             .toString()
         synchronized(externalLinksCache) {
-            if (result == null) externalLinksNoHit.add(key) else externalLinksCache[key] = result
+            if (result == null) externalLinksNoHit[key] = System.currentTimeMillis() + 300_000L else externalLinksCache[key] = result
             if (externalLinksCache.size > 200) externalLinksCache.clear()
             if (externalLinksNoHit.size > 200) externalLinksNoHit.clear()
         }
@@ -118,7 +120,8 @@ object TmdbClient {
         val key = "$path|$numericId"
         synchronized(externalIdsCache) {
             if (externalIdsCache.containsKey(key)) return@withContext externalIdsCache[key]
-            if (externalIdsNoHit.contains(key)) return@withContext null
+            if ((externalIdsNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withContext null
+            externalIdsNoHit.remove(key)
         }
         val result = getJson(
             "https://api.tmdb.org/3/$path/$numericId/external_ids?api_key=${BuildConfig.TMDB_API_KEY}"
@@ -129,7 +132,7 @@ object TmdbClient {
             )
         }?.takeIf { it.imdbId != null || it.tvdbId != null }
         synchronized(externalIdsCache) {
-            if (result == null) externalIdsNoHit.add(key) else externalIdsCache[key] = result
+            if (result == null) externalIdsNoHit[key] = System.currentTimeMillis() + 300_000L else externalIdsCache[key] = result
             if (externalIdsCache.size > 200) externalIdsCache.clear()
             if (externalIdsNoHit.size > 200) externalIdsNoHit.clear()
         }
@@ -141,14 +144,35 @@ object TmdbClient {
         val key = "$type|$name|${year ?: 0}"
         synchronized(cache) {
             if (cache.containsKey(key)) return@withContext cache[key]
-            if (noHit.contains(key)) return@withContext null
+            if ((noHit[key] ?: 0L) > System.currentTimeMillis()) return@withContext null
+            noHit.remove(key)
         }
         val result = runCatching { request(type, name, year) }.getOrNull()
         synchronized(cache) {
-            if (result == null) noHit.add(key) else cache[key] = result
+            if (result == null) noHit[key] = System.currentTimeMillis() + 60_000L else cache[key] = result
             if (cache.size > 200) cache.clear()
             if (noHit.size > 200) noHit.clear()
         }
+        result
+    }
+
+    suspend fun lookupHero(type: String, name: String, year: Int?, originalTitle: String?): TmdbInfo? = withContext(Dispatchers.IO) {
+        val attempts = buildList {
+            add(name to year)
+            if (year != null) add(name to null)
+            if (!originalTitle.isNullOrBlank() && originalTitle != name) {
+                add(originalTitle to year)
+                if (year != null) add(originalTitle to null)
+            }
+        }.distinct()
+        var result: TmdbInfo? = null
+        for ((query, queryYear) in attempts) {
+            val key = "$type|$query|${queryYear ?: 0}"
+            synchronized(cache) { noHit.remove(key) }
+            result = lookup(type, query, queryYear)
+            if (result?.backdropUrl != null) break
+        }
+        PageLog.add("tmdbHero name=${name.take(48)} hit=${if (result != null) 1 else 0} backdrop=${if (result?.backdropUrl != null) 1 else 0}")
         result
     }
 

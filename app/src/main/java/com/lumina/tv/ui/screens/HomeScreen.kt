@@ -86,6 +86,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -129,6 +130,7 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
@@ -444,13 +446,6 @@ fun HomeScreen(
         libraryCounts = libraryCounts + counts
     }
 
-    LaunchedEffect(loading, initialFocusPending, resume, favorites, latest, movies, series, views) {
-        if (!loading && initialFocusPending && (resume.isNotEmpty() || favorites.isNotEmpty() || latest.isNotEmpty() || movies.isNotEmpty() || series.isNotEmpty() || views.isNotEmpty())) {
-            delay(240)
-            initialFocusPending = false
-        }
-    }
-
     LaunchedEffect(resume, favorites, latest, movies, series, viewContents) {
         val c = client ?: return@LaunchedEffect
         val preloadItems = (resume.take(8) + favorites.take(8) + latest.take(8) + movies.take(8) + series.take(8) +
@@ -632,6 +627,27 @@ fun HomeScreen(
 
     val heroPlayFocus = remember { FocusRequester() }
     val firstContentFocus = remember { FocusRequester() }
+    val firstContentListIndex = remember(resume, homeLibraries, favorites, viewContents, views) {
+        var index = 1 // Hero
+        if (resume.isEmpty() && favorites.isEmpty()) index++ // Empty-state action
+        when {
+            resume.isNotEmpty() -> index
+            homeLibraries.isNotEmpty() -> index
+            favorites.isNotEmpty() -> index
+            else -> {
+                index += if (homeLibraries.isNotEmpty()) 1 else 0
+                if (favorites.isNotEmpty()) index++
+                val firstView = views.firstOrNull { view ->
+                    !(AppRuntime.prefs?.isViewHidden(view.id) ?: false) && viewContents[view.id]?.isNotEmpty() == true
+                }
+                if (firstView == null) -1 else {
+                    val preceding = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
+                        .takeWhile { it.id != firstView.id }
+                    index + preceding.size
+                }
+            }
+        }
+    }
     val hasContentTarget = when (tab) {
         HomeTab.Recommend -> firstSectionKey != null
         HomeTab.Favorites -> gridItems.isNotEmpty()
@@ -655,15 +671,15 @@ fun HomeScreen(
         scope.launch {
             when (tab) {
                 HomeTab.Recommend -> {
-                    val target = topRenderedRow
-                    recListState.scrollToItem(0)
-                    withFrameNanos { }
-                    withFrameNanos { }
-                    if (target != null && target.first == firstSectionKey) {
-                        focusedMediaSection = target.first
-                        focusedMediaId = target.second.first().id
+                    if (firstContentListIndex >= 0) {
+                        recListState.scrollToItem(firstContentListIndex)
+                        repeat(6) {
+                            withFrameNanos { }
+                            if (runCatching { firstContentFocus.requestFocus() }.isSuccess) return@launch
+                            delay(40)
+                        }
                     }
-                    runCatching { firstContentFocus.requestFocus() }
+                    runCatching { heroPlayFocus.requestFocus() }
                 }
                 HomeTab.Favorites -> {
                     gridState.scrollToItem(0)
@@ -679,13 +695,22 @@ fun HomeScreen(
                 else -> Unit
             }
         }
-        return false
+        return true
     }
     val navContentFocus = when (tab) {
         HomeTab.Recommend -> if (hasContentTarget) firstContentFocus else FocusRequester.Default
         HomeTab.Favorites -> if (gridItems.isNotEmpty()) favoritesContentFocus else FocusRequester.Default
         HomeTab.Media -> if (selectedLibraryId == null && views.any { !(AppRuntime.prefs?.isViewHidden(it.id) ?: false) }) mediaLibraryContentFocus else FocusRequester.Default
         else -> FocusRequester.Default
+    }
+
+    LaunchedEffect(loading, initialFocusPending, hero?.id, tab) {
+        if (!loading && initialFocusPending && tab == HomeTab.Recommend) {
+            recListState.scrollToItem(0)
+            withFrameNanos { }
+            runCatching { heroPlayFocus.requestFocus() }
+            initialFocusPending = false
+        }
     }
 
     // 导航在顶部，右键不再劫持（原来的右键跳竖栏逻辑会让影片行无法继续右移）
@@ -733,7 +758,7 @@ fun HomeScreen(
                             onPlay = onPlay,
                             onOpenDetail = onOpenDetail,
                             playFocus = heroPlayFocus,
-                            onPlayFocused = { scope.launch { recListState.animateScrollToItem(0) } },
+                            onPlayFocused = { scope.launch { recListState.scrollToItem(0) } },
                             hazeState = hazeState,
                         )
                     }
@@ -757,7 +782,7 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, titleOverlay = true, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, titleOverlay = true, topPadding = 12.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
@@ -767,7 +792,7 @@ fun HomeScreen(
                             onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
                         )
                     }
-                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, width = 130.dp, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "favorites") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "favorites") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
+                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, width = 130.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "favorites") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "favorites") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
@@ -778,7 +803,7 @@ fun HomeScreen(
                             }
                         } else if (items.isNotEmpty()) {
                             item(key = "home-view-${v.id}") {
-                                RowSection(v.name, items, requestInitialFocus = initialFocusPending && focusedMediaId == null && firstSectionKey == "view-" + v.id, focusItemId = focusedMediaId, sectionKey = "view-" + v.id, focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "view-${v.id}") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "view-" + v.id) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "view-" + v.id }) { onOpenDetail(it.id) }
+                            RowSection(v.name, items, requestInitialFocus = focusedMediaId != null && firstSectionKey == "view-" + v.id, focusItemId = focusedMediaId, sectionKey = "view-" + v.id, focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "view-${v.id}") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "view-" + v.id) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "view-" + v.id }) { onOpenDetail(it.id) }
                             }
                         }
                     }
@@ -1282,7 +1307,7 @@ private fun TopNavBar(
             FocusSurface(
                 modifier = Modifier.fillMaxSize()
                     .then(if (active) Modifier.focusRequester(navFocus) else Modifier)
-                    .focusProperties { down = FocusRequester.Default }
+                    .focusProperties { down = contentFocus }
                     .onPreviewKeyEvent { event ->
                         if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                             onNavigateDown()
@@ -1642,7 +1667,7 @@ private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: I
 }
 
 private fun calculateHeroHeight(screenHeight: Dp): Dp =
-    (screenHeight * 0.60f).coerceAtLeast(300.dp)
+    (screenHeight * 0.70f).coerceAtLeast(360.dp)
 
 @Composable
 private fun Hero(
@@ -1672,36 +1697,44 @@ private fun Hero(
     val client = AppRuntime.client
     var tmdbBackdrops by remember(items) { mutableStateOf<Map<String, String>>(emptyMap()) }
     LaunchedEffect(items) {
-        val result = mutableMapOf<String, String>()
-        items.chunked(3).forEach { chunk ->
-            val pairs = chunk.map { media ->
-                async {
-                    media.id to runCatching {
-                        TmdbClient.lookup(media.type, media.seriesName ?: media.name, media.year)?.backdropUrl
-                    }.getOrNull()
-                }
-            }.awaitAll()
-            pairs.forEach { (id, url) -> if (!url.isNullOrBlank()) result[id] = url }
-            if (result.isNotEmpty()) tmdbBackdrops = result.toMap()
+        val waits = listOf(0L, 3_000L, 10_000L, 30_000L)
+        waits.forEachIndexed { round, wait ->
+            if (wait > 0) delay(wait - waits[round - 1])
+            val missing = items.filter { tmdbBackdrops[it.id].isNullOrBlank() }
+            if (missing.isNotEmpty()) {
+                val pairs = missing.map { media ->
+                    async {
+                        media.id to runCatching {
+                            TmdbClient.lookupHero(media.type, media.seriesName ?: media.name, media.year, media.providerIds["OriginalTitle"])?.backdropUrl
+                        }.getOrNull()
+                    }
+                }.awaitAll()
+                val additions = pairs.mapNotNull { (id, url) -> url?.takeIf(String::isNotBlank)?.let { id to it } }.toMap()
+                tmdbBackdrops = tmdbBackdrops + additions
+            }
+            PageLog.add("heroBackdrop round=${round + 1} have=${tmdbBackdrops.size}/${items.size}")
+            if (tmdbBackdrops.size >= items.size) return@LaunchedEffect
         }
     }
     val resolveHeroImage: (MediaItem?) -> String? = { heroItem ->
         heroItem?.let { tmdbBackdrops[it.id] }
-            ?: heroItem?.let { client?.backdropUrl(it, 1280) }
+            ?: heroItem?.let { client?.backdropUrl(it, 1280) ?: client?.backdropUrlUntagged(it.id, 0, 1280) }
             ?.takeIf { it.isNotBlank() }
+            ?: heroItem?.let { client?.heroStillUrl(it.id, 1) }
+            ?: heroItem?.let { client?.heroStillUrl(it.id, 2) }
             ?: heroItem?.let { client?.imageUrl(it, 720) }
     }
-    val resolveHeroIsWide: (MediaItem?) -> Boolean = { heroItem ->
-        heroItem != null && (
-            !tmdbBackdrops[heroItem.id].isNullOrBlank() ||
-                !client?.backdropUrl(heroItem, 1280).isNullOrBlank()
+    fun isLikelyWide(url: String?): Boolean =
+        url != null && (
+            tmdbBackdrops.containsValue(url) ||
+                url.contains("/Images/Backdrop/") ||
+                url.contains("image.tmdb.org")
             )
-    }
     val zoomStates = remember(items) { mutableMapOf<String, Animatable<Float, AnimationVector1D>>() }
     val zoomJobs = remember(items) { mutableMapOf<String, Job>() }
     val wipeProgress = remember(items) { Animatable(1f) }
     var bottomImage by remember(items, client) { mutableStateOf(resolveHeroImage(item)) }
-    var bottomHasBackdrop by remember(items, client) { mutableStateOf(resolveHeroIsWide(item)) }
+    var bottomHasBackdrop by remember(items, client) { mutableStateOf(isLikelyWide(resolveHeroImage(item))) }
     var topImage by remember(items, client) { mutableStateOf<String?>(null) }
     var topHasBackdrop by remember(items, client) { mutableStateOf(false) }
     var topLoaded by remember(items, client) { mutableStateOf(false) }
@@ -1741,7 +1774,7 @@ private fun Hero(
         isForward = forwardDistance <= backwardDistance
         lastRequestedIndex = currentIndex
         topImage = targetImage
-        topHasBackdrop = resolveHeroIsWide(targetItem)
+        topHasBackdrop = isLikelyWide(targetImage)
         topLoaded = false
         wipeProgress.snapTo(0f)
     }
@@ -1783,20 +1816,28 @@ private fun Hero(
             }
         }
     }
-    // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
-    val embyLogo = remember(item.id, item.logoTag) {
-        AppRuntime.client?.logoUrl(item)?.takeIf { it.isNotBlank() }
+    val displayItem = if (topImage != null && topLoaded && wipeProgress.value >= 0.5f) {
+        items.getOrNull(currentIndex) ?: item
+    } else {
+        items.firstOrNull { resolveHeroImage(it) == bottomImage } ?: item
     }
-    var tmdbInfo by remember(item.id) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
-    LaunchedEffect(item.id) {
-        if (embyLogo != null && (item.communityRating ?: item.rating) != null) return@LaunchedEffect
-        tmdbInfo = TmdbClient.lookup(item.type, item.seriesName ?: item.name, item.year)
+    // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
+    val embyLogo = remember(displayItem.id, displayItem.logoTag) {
+        AppRuntime.client?.logoUrl(displayItem)?.takeIf { it.isNotBlank() }
+    }
+    var tmdbInfo by remember(displayItem.id) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
+    LaunchedEffect(displayItem.id) {
+        if (embyLogo != null && (displayItem.communityRating ?: displayItem.rating) != null) return@LaunchedEffect
+        tmdbInfo = TmdbClient.lookupHero(displayItem.type, displayItem.seriesName ?: displayItem.name, displayItem.year, displayItem.providerIds["OriginalTitle"])
     }
     val titleLogo = embyLogo ?: tmdbInfo?.logoUrl
     LaunchedEffect(currentIndex, items) {
         if (items.size < 2) return@LaunchedEffect
         val next = items[(currentIndex + 1) % items.size]
-        val nextImage = AppRuntime.client?.backdropUrl(next, 1280)
+        val nextImage = tmdbBackdrops[next.id] ?: AppRuntime.client?.backdropUrl(next, 1280)
+            ?: AppRuntime.client?.backdropUrlUntagged(next.id, 0, 1280)
+            ?: AppRuntime.client?.heroStillUrl(next.id, 1)
+            ?: AppRuntime.client?.heroStillUrl(next.id, 2)
             ?.takeIf { it.isNotBlank() }
             ?: AppRuntime.client?.imageUrl(next, 720)
             ?: return@LaunchedEffect
@@ -1828,6 +1869,7 @@ private fun Hero(
                     imageUrl = image,
                     zoom = zoomFor(image).value,
                     hasBackdrop = bottomHasBackdrop,
+                    onSuccess = { width, height -> bottomHasBackdrop = width > height * 1.2f },
                 )
             }
             topImage?.let { image ->
@@ -1840,6 +1882,7 @@ private fun Hero(
                     onLoaded = {
                         if (image == topImage) topLoaded = true
                     },
+                    onSuccess = { width, height -> if (image == topImage) topHasBackdrop = width > height * 1.2f },
                 )
             }
         Box(
@@ -1851,37 +1894,38 @@ private fun Hero(
             )
         )
         Column(
-            Modifier.align(Alignment.BottomStart).padding(start = 40.dp, bottom = 28.dp).widthIn(max = 520.dp)
+            Modifier.align(Alignment.BottomStart).padding(start = 40.dp, bottom = 28.dp)
+                .widthIn(max = (LocalConfiguration.current.screenWidthDp * 0.42f).dp)
         ) {
             Text("为你推荐", color = TextSub, fontSize = 11.sp, letterSpacing = 2.sp)
             Spacer(Modifier.height(8.dp))
             if (!titleLogo.isNullOrBlank()) {
                 AsyncImage(
                     model = ImageRequest.Builder(context).data(titleLogo).crossfade(true).build(),
-                    contentDescription = item.seriesName ?: item.name,
+                    contentDescription = displayItem.seriesName ?: displayItem.name,
                     contentScale = ContentScale.Fit,
                     alignment = Alignment.BottomStart,
                     modifier = Modifier.heightIn(max = 66.dp).widthIn(max = 430.dp),
                 )
             } else {
                 Text(
-                    item.seriesName ?: item.name,
+                    displayItem.seriesName ?: displayItem.name,
                     color = TextMain, style = TypeScale.display,
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
                 )
             }
-            val hasOwnRating = (item.rating ?: item.communityRating) != null
+            val hasOwnRating = (displayItem.rating ?: displayItem.communityRating) != null
             val ratingText = if (!hasOwnRating) tmdbInfo?.rating?.let { "TMDB ★ %.1f".format(it) } else null
             val sub = listOfNotNull(
-                item.subtitle.takeIf { it.isNotBlank() },
-                item.genres.take(2).joinToString(" / ").takeIf { it.isNotBlank() },
+                displayItem.subtitle.takeIf { it.isNotBlank() },
+                displayItem.genres.take(2).joinToString(" / ").takeIf { it.isNotBlank() },
                 ratingText,
             ).joinToString("   ")
             if (sub.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
                 Text(sub, color = TextSub, style = TypeScale.body)
             }
-            item.overview?.let {
+            displayItem.overview?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     it, color = Color(0xFFC9D5E8), fontSize = 12.sp, lineHeight = 19.sp,
@@ -1897,7 +1941,7 @@ private fun Hero(
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
                     onFocused = onPlayFocused,
-                    onClick = { lastInteractionAt = System.currentTimeMillis(); onPlay(item) },
+                    onClick = { lastInteractionAt = System.currentTimeMillis(); onPlay(displayItem) },
                 ) { focused ->
                     Row(
                         Modifier.fillMaxSize().background(
@@ -1909,7 +1953,7 @@ private fun Hero(
                         Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF0B1018), modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            if (item.positionTicks > 0) "继续播放" else "立即播放",
+                            if (displayItem.positionTicks > 0) "继续播放" else "立即播放",
                             color = Color(0xFF0B1018), fontSize = 16.sp, fontWeight = FontWeight.Bold,
                         )
                     }
@@ -1919,7 +1963,7 @@ private fun Hero(
                     modifier = Modifier.height(42.dp).width(108.dp),
                     corner = 21.dp,
                     scaleTo = 1.05f,
-                    onClick = { onOpenDetail(item.seriesId ?: item.id) },
+                    onClick = { onOpenDetail(displayItem.seriesId ?: displayItem.id) },
                 ) { focused ->
                     Box(
                         Modifier.fillMaxSize().background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF)),
@@ -1935,20 +1979,12 @@ private fun Hero(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items.take(3).forEachIndexed { slot, _ ->
                         val thumbnailItem = items[(currentIndex + slot) % items.size]
-                        val thumbnailImage = resolveHeroImage(thumbnailItem)
                         Box(
                             Modifier.size(width = 112.dp, height = 63.dp)
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(InkSoft)
                         ) {
-                            if (!thumbnailImage.isNullOrBlank()) {
-                                AsyncImage(
-                                    model = ImageRequest.Builder(context).data(thumbnailImage).crossfade(true).build(),
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                            }
+                            HeroThumb(thumbnailItem, client, tmdbBackdrops[thumbnailItem.id])
                             Box(
                                 Modifier.fillMaxSize().border(
                                     if (slot == 0) 2.dp else 1.dp,
@@ -1965,6 +2001,26 @@ private fun Hero(
 }
 
 @Composable
+private fun HeroThumb(item: MediaItem, client: EmbyClient?, tmdbBackdrop: String?) {
+    val poster = client?.imageUrl(item, 360)
+    val candidates = remember(item.id, tmdbBackdrop, item.backdropTag, client) {
+        listOfNotNull(tmdbBackdrop, client?.backdropUrlUntagged(item.id, 0, 640), client?.heroStillUrl(item.id, 1)).distinct()
+    }
+    var candidateIndex by remember(item.id, candidates) { mutableIntStateOf(0) }
+    var posterFailed by remember(item.id, poster) { mutableStateOf(false) }
+    Box(Modifier.fillMaxSize().background(InkSoft)) {
+        if (poster != null && !posterFailed) AsyncImage(poster, null, contentScale = ContentScale.Crop, onError = { posterFailed = true }, modifier = Modifier.fillMaxSize())
+        else Icon(Icons.Rounded.Movie, null, tint = TextSub, modifier = Modifier.align(Alignment.Center).size(14.dp))
+        candidates.getOrNull(candidateIndex)?.let { candidate ->
+            var loaded by remember(item.id, candidate) { mutableStateOf(false) }
+            AsyncImage(candidate, null, contentScale = ContentScale.Crop, onSuccess = { loaded = true },
+                onError = { if (candidateIndex < candidates.lastIndex) candidateIndex++ },
+                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = if (loaded) 1f else 0f })
+        }
+    }
+}
+
+@Composable
 private fun HeroBackdropImage(
     imageUrl: String,
     zoom: Float,
@@ -1972,6 +2028,7 @@ private fun HeroBackdropImage(
     wipeProgress: Float = 1f,
     isForward: Boolean = true,
     onLoaded: () -> Unit = {},
+    onSuccess: (Int, Int) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val request = remember(imageUrl) {
@@ -2026,7 +2083,7 @@ private fun HeroBackdropImage(
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 alignment = Alignment.Center,
-                onSuccess = { onLoaded() },
+                onSuccess = { onLoaded(); onSuccess(it.result.drawable.intrinsicWidth, it.result.drawable.intrinsicHeight) },
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
@@ -2036,10 +2093,11 @@ private fun HeroBackdropImage(
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 alignment = Alignment.Center,
-                onSuccess = { onLoaded() },
+                onSuccess = { onLoaded(); onSuccess(it.result.drawable.intrinsicWidth, it.result.drawable.intrinsicHeight) },
                 modifier = Modifier
-                    .align(Alignment.Center)
-                    .width(LocalConfiguration.current.screenWidthDp.dp * 0.22f)
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 180.dp)
+                    .width(LocalConfiguration.current.screenWidthDp.dp * 0.24f)
                     .aspectRatio(2f / 3f)
                     .shadow(12.dp, posterShape)
                     .clip(posterShape)
@@ -2055,6 +2113,7 @@ private fun RowSection(
     items: List<MediaItem>,
     width: Dp = 170.dp,
     aspectRatio: Float = 1.5f,
+    topPadding: Dp = Space.section,
     titleOverlay: Boolean = false,
     requestInitialFocus: Boolean = false,
     focusItemId: String? = null,
@@ -2066,7 +2125,7 @@ private fun RowSection(
     onClick: (MediaItem) -> Unit,
 ) {
     val client = AppRuntime.client
-    Column(Modifier.padding(top = Space.section)) {
+    Column(Modifier.padding(top = topPadding)) {
         if (titleOverlay) {
             Text(title, Modifier.padding(start = 40.dp, bottom = 10.dp), color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Medium)
         } else SectionTitle(title, Modifier.padding(start = 40.dp, bottom = 10.dp))
