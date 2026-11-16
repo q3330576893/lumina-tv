@@ -12,7 +12,8 @@ object NetLog {
     private val records = ArrayDeque<NetRecord>()
     @Synchronized fun add(at: Long, method: String, url: String, ms: Long, code: Int?, error: String?) {
         val path = runCatching { URI(url).rawPath }.getOrNull().orEmpty().ifBlank { "/" }
-        records.addLast(NetRecord(at, method, path, ms, code, error?.take(120)))
+        records.addLast(NetRecord(at, LogRedactor.redact(method), LogRedactor.redact(path), ms, code,
+            error?.let(LogRedactor::redact)?.take(120)))
         while (records.size > 30) records.removeFirst()
     }
     @Synchronized fun tail(): String = JSONArray().apply {
@@ -23,7 +24,7 @@ object NetLog {
 object PageLog {
     private val records = ArrayDeque<PageRecord>()
     @Synchronized fun add(name: String) {
-        records.addLast(PageRecord(System.currentTimeMillis(), name.take(300)))
+        records.addLast(PageRecord(System.currentTimeMillis(), LogRedactor.redact(name).take(300)))
         while (records.size > 20) records.removeFirst()
     }
     @Synchronized fun tail(): String = records.joinToString("\n") { "${it.at}\t${it.name}" }

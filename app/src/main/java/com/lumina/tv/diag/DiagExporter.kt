@@ -9,6 +9,7 @@ import com.lumina.tv.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -121,13 +122,62 @@ object DiagExporter {
     }
 
     fun sanitize(text: String): String {
-        val keyValue = Regex("(?i)(\\\"?(?:api_key|x-emby-token|authorization|password|passwd|pw|token)\\\"?\\s*[:=]\\s*)(?:\\\"[^\\\"]*\\\"|[^,}\\s&]+)")
-        val query = Regex("(?i)(api_key|x-emby-token|authorization|password|passwd|pw|token)=([^&\\s]+)")
-        val header = Regex("(?im)(\\b(?:api_key|x-emby-token|authorization|password|passwd|pw|token)\\b\\s*:\\s*)[^\\r\\n]+")
-        val sanitized = text.replace(keyValue, "$1***").replace(query, "$1=***").replace(header, "$1***")
+        val sanitized = LogRedactor.redact(text)
         return if (sanitized.startsWith("[基础]") || sanitized.startsWith("[鍩虹]")) {
             sanitized.replace(Regex("(?m)^视频动态范围:.*(?:\\r?\\n)?"), "") +
                 "\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}\n"
         } else sanitized
+    }
+}
+
+/** One redaction policy for both log ingestion and diagnostic export. No Android dependencies. */
+object LogRedactor {
+    private const val SECRET_KEYS =
+        "api_key|apikey|x-emby-token|x-emby-authorization|x-mediabrowser-token|access_token|authorization|password|passwd|pw|token"
+    private val encodedKeys = SECRET_KEYS.replace("-", "(?:-|%2d)").replace("_", "(?:_|%5f)")
+    private const val QUOTED_VALUE = """"(?:\\.|[^"\\])*+"|'(?:\\.|[^'\\])*+'"""
+    private val keyValue = Regex(
+        """(?i)((?<![\w-])["']?(?:$SECRET_KEYS)["']?\s*[:=]\s*)($QUOTED_VALUE|(?:(?:Bearer|Basic)[ \t]+)?[^,}\s&"'<>]+)"""
+    )
+    private val query = Regex("""(?i)((?:$SECRET_KEYS)=)([^&\s#"'<>\\]+)""")
+    private val encodedQuery = Regex(
+        """(?i)((?:$encodedKeys)%3d)(%22[^\r\n]*?%22|%27[^\r\n]*?%27|[^&\s#"'<>\\]+?(?=%26|%23|%22|%27|%0[ad]|[&\s#"'<>\\]|$))"""
+    )
+    // Unquoted headers can contain schemes, spaces and commas. Quoted JSON keys use keyValue.
+    private val header = Regex(
+        """(?im)(?<![\w"'%-])((?:$SECRET_KEYS)\b[ \t]*:[ \t]*)[^\r\n]+"""
+    )
+    private val baseUrl = Regex(
+        """(?i)((?<![\w-])["']?(?:baseUrl|base_url)["']?\s*[:=]\s*)($QUOTED_VALUE|[^,}\s]+)"""
+    )
+    private val urlUserInfo = Regex("""(?i)(https?://)[^\s/?#<>"']*@""")
+
+    fun redact(s: String): String {
+        // Also applies to nested baseUrl fields in meta.json and last-session.json.
+        val hostsOnly = s.replace(baseUrl) { match ->
+            val value = match.groupValues[2]
+            if (value == "null") return@replace match.value
+            val quote = value.first().takeIf { it == '"' || it == '\'' }
+            val raw = if (quote != null) value.substring(1, value.length - 1) else value
+            val host = runCatching {
+                val url = raw.replace("\\/", "/")
+                URI(if ("://" in url || url.startsWith("//")) url else "//$url").host
+            }.getOrNull()?.takeIf { it.isNotBlank() } ?: "***"
+            match.groupValues[1] + if (quote != null) "$quote$host$quote" else host
+        }
+        return hostsOnly
+            .replace(urlUserInfo, "$1***@")
+            .replace(header, "$1***")
+            .replace(keyValue) { it.groupValues[1] + mask(it.groupValues[2]) }
+            .replace(query, "$1***")
+            .replace(encodedQuery) { it.groupValues[1] + mask(it.groupValues[2]) }
+    }
+
+    private fun mask(value: String): String = when {
+        value.startsWith('"') -> "\"***\""
+        value.startsWith('\'') -> "'***'"
+        value.startsWith("%22", ignoreCase = true) -> "%22***%22"
+        value.startsWith("%27", ignoreCase = true) -> "%27***%27"
+        else -> "***"
     }
 }

@@ -1,6 +1,8 @@
 package com.lumina.tv.data
 
 import android.content.Context
+import android.content.SharedPreferences
+import com.lumina.tv.diag.PageLog
 import java.util.UUID
 
 data class SavedServer(
@@ -24,6 +26,25 @@ class Prefs(context: Context) {
             }
             edit.remove("end_skip_seconds").apply()
         }
+        migrateLegacySecrets()
+    }
+
+    private fun getSecret(key: String, default: String = ""): String =
+        SecureStore.get(key) ?: sp.getString(key, default) ?: default
+
+    private fun putSecret(key: String, value: String) {
+        if (SecureStore.put(key, value)) {
+            sp.edit().remove(key).apply()
+        } else {
+            // Keystore failure: keep a plaintext fallback for availability, discard stale ciphertext,
+            // and retry encryption on the next startup (including the saved_servers token copies).
+            sp.edit().putString(key, value).remove(SecureStore.PREFIX + key)
+                .putBoolean("secrets_migrated_v1", false).apply()
+        }
+    }
+
+    private fun migrateLegacySecrets() {
+        migrateLegacySecrets(sp, SecureStore::get, SecureStore::put)
     }
 
     var declareDtsDirectPlay: Boolean
@@ -31,24 +52,24 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putBoolean("declare_dts_direct_play", v).apply()
 
     var baseUrl: String
-        get() = sp.getString("base_url", "") ?: ""
-        set(v) = sp.edit().putString("base_url", v).apply()
+        get() = getSecret("base_url")
+        set(v) = putSecret("base_url", v)
 
     var token: String
-        get() = sp.getString("token", "") ?: ""
-        set(v) = sp.edit().putString("token", v).apply()
+        get() = getSecret("token")
+        set(v) = putSecret("token", v)
 
     var userId: String
-        get() = sp.getString("user_id", "") ?: ""
-        set(v) = sp.edit().putString("user_id", v).apply()
+        get() = getSecret("user_id")
+        set(v) = putSecret("user_id", v)
 
     var userName: String
-        get() = sp.getString("user_name", "") ?: ""
-        set(v) = sp.edit().putString("user_name", v).apply()
+        get() = getSecret("user_name")
+        set(v) = putSecret("user_name", v)
 
     var serverName: String
-        get() = sp.getString("server_name", "Emby") ?: "Emby"
-        set(v) = sp.edit().putString("server_name", v).apply()
+        get() = getSecret("server_name", "Emby")
+        set(v) = putSecret("server_name", v)
 
     var serverNote: String?
         get() = sp.getString("server_note", null)
@@ -134,8 +155,8 @@ class Prefs(context: Context) {
 
 
     var savedServersJson: String
-        get() = sp.getString("saved_servers", "[]") ?: "[]"
-        set(v) = sp.edit().putString("saved_servers", v).apply()
+        get() = getSecret("saved_servers", "[]")
+        set(v) = putSecret("saved_servers", v)
 
     fun savedServerList(): List<SavedServer> = runCatching {
         val array = org.json.JSONArray(savedServersJson)
@@ -516,10 +537,42 @@ class Prefs(context: Context) {
     }
 
     fun clearSession() {
-        sp.edit().remove("base_url").remove("token").remove("user_id").remove("user_name").apply()
+        val edit = sp.edit()
+        for (key in listOf("base_url", "token", "user_id", "user_name")) {
+            edit.remove(key).remove(SecureStore.PREFIX + key)
+        }
+        edit.apply()
     }
 
     fun hasSession(): Boolean = baseUrl.isNotBlank() && token.isNotBlank() && userId.isNotBlank()
+}
+
+/** Callbacks let JVM checks exercise failure/retry without requiring a device Keystore. */
+internal fun migrateLegacySecrets(
+    sp: SharedPreferences,
+    readEncrypted: (String) -> String?,
+    writeEncrypted: (String, String) -> Boolean,
+) {
+    runCatching {
+        if (sp.getBoolean("secrets_migrated_v1", false)) return@runCatching
+        val keys = listOf("base_url", "token", "user_id", "user_name", "server_name", "saved_servers")
+        val edit = sp.edit()
+        for (key in keys) {
+            val legacy = sp.getString(key, null) ?: continue
+            if (sp.getString(SecureStore.PREFIX + key, null) == null) {
+                check(writeEncrypted(key, legacy))
+            } else {
+                // A previous attempt may have persisted only some encrypted values.
+                // Never delete a legacy value unless the existing ciphertext decrypts to it.
+                check(readEncrypted(key) == legacy)
+            }
+            edit.remove(key)
+        }
+        // Delay all plaintext removal and the marker until every value is safely encrypted.
+        edit.putBoolean("secrets_migrated_v1", true).apply()
+    }.onFailure {
+        runCatching { PageLog.add("secureStore op=migrate failed=${it.javaClass.simpleName}") }
+    }
 }
 
 val STREAMING_BITRATE_OPTIONS = setOf(20_000_000L, 40_000_000L, 80_000_000L, 120_000_000L)

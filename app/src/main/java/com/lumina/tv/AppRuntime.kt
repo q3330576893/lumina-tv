@@ -10,6 +10,7 @@ import androidx.compose.runtime.setValue
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.Prefs
 import com.lumina.tv.data.ProgressQueue
+import com.lumina.tv.data.SecureStore
 import com.lumina.tv.data.Session
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.pair.PairingServer
@@ -85,7 +86,10 @@ object AppRuntime {
 
     fun init(context: Context) {
         applicationContext = context.applicationContext
-        if (prefs == null) prefs = Prefs(context.applicationContext)
+        if (prefs == null) {
+            SecureStore.init(context.applicationContext)
+            prefs = Prefs(context.applicationContext)
+        }
     }
 
     fun restore(): Session? {
