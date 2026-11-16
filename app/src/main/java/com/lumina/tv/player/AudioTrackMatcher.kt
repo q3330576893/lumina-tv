@@ -6,9 +6,15 @@ import com.lumina.tv.data.MediaStream
 
 data class AudioTrackCandidate(val group: TrackGroup, val index: Int, val format: Format)
 
-fun bestAudioTrack(stream: MediaStream, candidates: List<AudioTrackCandidate>): AudioTrackCandidate? {
+fun bestAudioTrack(
+    stream: MediaStream,
+    candidates: List<AudioTrackCandidate>,
+    preferredLanguage: String?,
+): AudioTrackCandidate? {
     candidates.firstOrNull { it.format.id?.toIntOrNull() == stream.index }?.let { return it }
 
+    val streamLanguage = normalizeLanguage(stream.language)
+    val preferred = normalizeLanguage(preferredLanguage)
     val embysCommentary = listOfNotNull(stream.title, stream.displayTitle)
         .any { it.contains("commentary", true) || it.contains("评论", true) || it.contains("解说", true) }
     return candidates.map { candidate ->
@@ -17,7 +23,9 @@ fun bestAudioTrack(stream: MediaStream, candidates: List<AudioTrackCandidate>): 
         val label = format.label.orEmpty()
         val candidateCommentary = label.contains("commentary", true) || label.contains("评论") || label.contains("解说")
         var score = 0
-        if (!stream.language.isNullOrBlank() && format.language.equals(stream.language, true)) score += 8
+        val candidateLanguage = normalizeLanguage(format.language)
+        if (streamLanguage != null && candidateLanguage == streamLanguage) score += 8
+        if (preferred != null && candidateLanguage == preferred) score += 10
         if (!stream.codec.isNullOrBlank() && codec.contains(stream.codec, true)) score += 8
         if (stream.channels != null && stream.channels == format.channelCount) {
             score += 6

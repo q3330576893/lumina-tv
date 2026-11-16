@@ -223,7 +223,10 @@ class MpvPlayerController(
         if (released) return
         preferredSubtitleIndex = embyStreamIndex
         subtitleDisabled = false
-        if (fileLoaded) applyPreferredSubtitleTrack()
+        if (fileLoaded) {
+            loadPendingSubtitles()
+            applyPreferredSubtitleTrack()
+        }
     }
 
     fun disableSubtitle() {
@@ -238,8 +241,16 @@ class MpvPlayerController(
         if (released) return
         preferredSubtitleIndex = null
         subtitleDisabled = false
+        if (fileLoaded) loadPendingSubtitles()
         runCatching { mpv?.setPropertyString("sid", "auto") }
             .onFailure { appendMpvLog("${timestamp()} mpv subtitle auto failed: ${it.message}") }
+    }
+
+    private fun loadPendingSubtitles() {
+        if (subtitleDisabled) return
+        val subtitles = pendingSubtitles
+        pendingSubtitles = emptyList()
+        subtitles.forEach { mpv?.command(arrayOf("sub-add", it, "auto")) }
     }
 
     fun currentSubtitleEmbyIndex(): Int? {
@@ -634,8 +645,7 @@ class MpvPlayerController(
                 persistSessionState()
                 handler.removeCallbacks(heartbeat)
                 handler.postDelayed(heartbeat, SESSION_HEARTBEAT_MS)
-                pendingSubtitles.forEach { mpv?.command(arrayOf("sub-add", it, "auto")) }
-                pendingSubtitles = emptyList()
+                loadPendingSubtitles()
                 logTrackMapping("audio", audioStreams, "audio")
                 logTrackMapping("subtitle", subtitleStreams, "sub")
                 if (subtitleDisabled) disableSubtitle()

@@ -34,8 +34,9 @@ fun SettingsSubtitles(
     var subtitleOutline by remember { mutableStateOf(prefs?.subtitleOutline ?: true) }
     var subtitlePosition by remember { mutableStateOf(prefs?.subtitlePosition ?: 0.08f) }
     var subtitleBg by remember { mutableStateOf(prefs?.subtitleBg ?: false) }
+    var preferredSubtitleLanguage by remember { mutableStateOf(prefs?.preferredSubtitleLanguage.orEmpty()) }
 
-    val rowKeys = remember { listOf("subtitles:subtitleScale", "subtitles:subtitleColor", "subtitles:subtitleOutline", "subtitles:subtitlePosition", "subtitles:subtitleBg") }
+    val rowKeys = remember { listOf("subtitles:subtitleScale", "subtitles:subtitleColor", "subtitles:subtitleOutline", "subtitles:subtitlePosition", "subtitles:subtitleBg", "subtitles:preferredSubtitleLanguage") }
     val requesters = remember {
         rowKeys.mapIndexed { index, key -> key to if (index == 0) firstFocusRequester else FocusRequester() }.toMap()
     }
@@ -52,6 +53,10 @@ fun SettingsSubtitles(
     }
     val positionOptions = remember {
         listOf(0.04f to "低", 0.08f to "标准", 0.15f to "高").map { SettingChoiceOption(it.first.toString(), it.second) }
+    }
+    val languageOptions = remember {
+        listOf("" to "跟随片源", "zh" to "中文", "en" to "英文", "ja" to "日文", "ko" to "韩文", "off" to "关闭")
+            .map { SettingChoiceOption(it.first, it.second) }
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
 
@@ -78,7 +83,10 @@ fun SettingsSubtitles(
                 }, requesters.getValue(rowKeys[3]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[2]), downRequester = requesters.getValue(rowKeys[4]))
                 ToggleRow("subtitles:subtitleBg", "字幕背景底色", "亮背景下更易读，默认关闭", subtitleBg, {
                     subtitleBg = it; prefs?.subtitleBg = it
-                }, requesters.getValue(rowKeys[4]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[4]), showDivider = false)
+                }, requesters.getValue(rowKeys[4]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[5]))
+                ChoiceRow("subtitles:preferredSubtitleLanguage", "首选字幕语言", "新影片默认语言；按片手动选择优先", languageOptions, preferredSubtitleLanguage, { key ->
+                    preferredSubtitleLanguage = key; prefs?.preferredSubtitleLanguage = key
+                }, requesters.getValue(rowKeys[5]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[4]), downRequester = requesters.getValue(rowKeys[5]), showDivider = false)
             }
         }
     }

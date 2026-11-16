@@ -155,6 +155,9 @@ import com.lumina.tv.player.AudioRouteMonitor
 import com.lumina.tv.player.AudioSupport
 import com.lumina.tv.player.AudioTrackCandidate
 import com.lumina.tv.player.bestAudioTrack
+import com.lumina.tv.player.normalizeLanguage
+import com.lumina.tv.player.preferredAudioStream
+import com.lumina.tv.player.resolveSubtitlePreference
 import com.lumina.tv.player.sourceHint
 import com.lumina.tv.player.detect
 import com.lumina.tv.diag.PageLog
@@ -402,6 +405,8 @@ fun PlayerScreen(
     var previewDisabled by remember(item.id) { mutableStateOf(false) }
     var lastHoldPreviewAt by remember(item.id) { mutableLongStateOf(0L) }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
+    var audioSelectionApplied by remember(item.id) { mutableStateOf(false) }
+    var selectedAudioStreamIndex by remember(item.id) { mutableStateOf(AppRuntime.prefs?.audioTrackFor(item.id)) }
 
     fun reportStopInAppScope(positionMs: Long) {
         val stopClient = client ?: return
@@ -419,16 +424,22 @@ fun PlayerScreen(
     fun prewarmNext(next: MediaItem) {
         prewarmJob?.cancel()
         prewarmJob = scope.launch {
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            var ok = false
+            PageLog.add("prewarm start nextId=${next.id} engine=$activeEngine")
             try {
                 client?.prewarmPlayback(
                     next,
                     audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id),
                     strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy(),
                 )
+                ok = client != null
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
-            } catch (failure: Exception) {
-                PageLog.add("prewarm failed next=${next.id} err=${failure.message ?: failure.javaClass.simpleName}")
+            } catch (_: Exception) {
+                // The completion log records failure without exception text, URLs or credentials.
+            } finally {
+                PageLog.add("prewarm done nextId=${next.id} ok=$ok ms=${android.os.SystemClock.elapsedRealtime() - startedAt}")
             }
         }
     }
@@ -532,7 +543,11 @@ fun PlayerScreen(
                 setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
                 playWhenReady = true
                 trackSelectionParameters = trackSelectionParameters.buildUpon()
-                    .setPreferredTextLanguages("zh", "chi", "zho")
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, resolveSubtitlePreference(
+                        AppRuntime.prefs?.subtitlePreferenceFor(item.id),
+                        AppRuntime.prefs?.preferredSubtitleLanguage,
+                        emptyList(),
+                    ) == "off")
                     .build()
             }
     }
@@ -698,6 +713,7 @@ fun PlayerScreen(
                 val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy)
                     ?.copy(startPositionMs = resumePosition)
                     else null
+                if (badHttpFallbackStage != 0) PageLog.add("prewarm miss nextId=${item.id} reason=fallback_request")
                 val resolvedTarget = cachedTarget ?: c.resolvePlayback(
                         item, forceTranscode, sourceId, resumePosition, audioStreamIndex,
                         forceDirect = forceDirectNext,
@@ -833,8 +849,10 @@ fun PlayerScreen(
                                 android.net.Uri.parse(c.subtitleUrl(item.id, srcId, idx, "vtt"))
                             )
                                 .setMimeType(androidx.media3.common.MimeTypes.TEXT_VTT)
+                                .setId(st.index.toString())
                                 .setLabel(st.displayTitle ?: st.language ?: "字幕$idx")
                                 .setLanguage(st.language)
+                                .setSelectionFlags(if (st.isDefault) C.SELECTION_FLAG_DEFAULT else 0)
                                 .build()
                         }.getOrNull()
                     }
@@ -855,9 +873,11 @@ fun PlayerScreen(
                         }
                         mpvState = state
                         if (state.subtitleNotice != null) {
-                            AppRuntime.prefs?.rememberSubtitleTrack(item.id, "auto")
+                            if (AppRuntime.prefs?.subtitlePreferenceFor(item.id)?.startsWith("track:") == true) {
+                                AppRuntime.prefs?.rememberSubtitleTrack(item.id, "auto")
+                                playbackStatusNotice = state.subtitleNotice
+                            }
                             subtitlePreference = "auto"
-                            playbackStatusNotice = state.subtitleNotice
                         }
                         position = state.positionMs
                         if (state.durationMs > 0L) duration = state.durationMs
@@ -908,11 +928,22 @@ fun PlayerScreen(
                     val subtitleSp = when { subScale >= 2.3f -> 38.4f; subScale >= 1.9f -> 32f; subScale >= 1.5f -> 25.6f; subScale >= 1.2f -> 20.8f; else -> 16f }
                     backend.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
                     backend.setSubtitleStyle(subtitleColor, subtitleOutline, subtitlePosition, subtitleBg)
-                    backend.setAudioTrack(audioStreamIndex ?: -1)
-                    when (AppRuntime.prefs?.subtitleModeFor(item.id)) {
-                        com.lumina.tv.data.Prefs.SubtitleMode.OFF -> backend.disableSubtitle()
-                        com.lumina.tv.data.Prefs.SubtitleMode.TRACK -> AppRuntime.prefs?.subtitleTrackFor(item.id)
-                            ?.removePrefix("emby:")?.toIntOrNull()?.let { backend.setSubtitleTrack(it) }
+                    val preferredAudio = preferredAudioStream(audioStreamIndex, AppRuntime.prefs?.preferredAudioLanguage, mpvAudioStreams)
+                    selectedAudioStreamIndex = audioStreamIndex ?: preferredAudio?.index
+                    backend.setAudioTrack(selectedAudioStreamIndex ?: -1)
+                    val resolvedSubtitle = resolveSubtitlePreference(
+                        AppRuntime.prefs?.subtitlePreferenceFor(item.id),
+                        AppRuntime.prefs?.preferredSubtitleLanguage,
+                        mpvSubtitleStreams,
+                    )
+                    subtitlePreference = resolvedSubtitle
+                    when {
+                        resolvedSubtitle == "off" -> backend.disableSubtitle()
+                        resolvedSubtitle.startsWith("track:") -> {
+                            val index = resolvedSubtitle.removePrefix("track:").removePrefix("emby:").toIntOrNull()
+                            if (index != null && mpvSubtitleStreams.any { it.index == index }) backend.setSubtitleTrack(index)
+                            else backend.enableSubtitleAuto()
+                        }
                         else -> backend.enableSubtitleAuto()
                     }
                     pendingResumePositionMs = -1L
@@ -959,6 +990,18 @@ fun PlayerScreen(
                     backend.load(target.url, target.startPositionMs, externalSubtitles, target.headers)
                     pendingResumePositionMs = -1L
                 } else {
+                    subtitleSelectionApplied = false
+                    audioSelectionApplied = false
+                    selectedAudioStreamIndex = AppRuntime.prefs?.audioTrackFor(item.id)
+                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, resolveSubtitlePreference(
+                            AppRuntime.prefs?.subtitlePreferenceFor(item.id),
+                            AppRuntime.prefs?.preferredSubtitleLanguage,
+                            target.source?.subtitleStreams.orEmpty(),
+                        ) == "off")
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                        .build()
                     exo.setMediaSource(merged)
                     exo.prepare()
                     if (resumePosition > 0L) exo.seekTo(resumePosition)
@@ -1406,7 +1449,7 @@ fun PlayerScreen(
                         val direct = candidates.firstOrNull { (group, index) -> group.getTrackFormat(index).id?.toIntOrNull() == stream.index }
                         val fallback = direct ?: candidates.firstOrNull { (group, index) ->
                             val format = group.getTrackFormat(index)
-                            (!stream.language.isNullOrBlank() && format.language.equals(stream.language, true)) ||
+                            (normalizeLanguage(stream.language)?.let { it == normalizeLanguage(format.language) } == true) ||
                                 (!stream.title.isNullOrBlank() && format.label?.contains(stream.title, true) == true)
                         }
                         "${stream.index}->${fallback?.let { it.first.mediaTrackGroup.id + ":" + it.second } ?: "?"}${if (direct != null) "(id)" else if (fallback != null) "(fallback)" else "(unmapped)"}"
@@ -1415,11 +1458,31 @@ fun PlayerScreen(
                     AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index))
                 }
                 val audioMapping = embyAudio.take(8).joinToString { stream ->
-                    val match = bestAudioTrack(stream, audioCandidates)
+                    val match = bestAudioTrack(stream, audioCandidates, preferredLanguage = AppRuntime.prefs?.preferredAudioLanguage)
                     "${stream.index}->${match?.let { it.group.id + ":" + it.index } ?: "?"}${if (match?.format?.id?.toIntOrNull() == stream.index) "(id)" else if (match != null) "(fallback)" else "(unmapped)"}"
                 }
                 PageLog.add("Media3 audio mapping count=${embyAudio.size}/${mediaAudio.size} $audioMapping")
                 PageLog.add("Media3 subtitle mapping count=${embySubs.size}/${mediaSubs.size} ${mappingSummary(embySubs, mediaSubs)}")
+                if (!audioSelectionApplied && audioCandidates.isNotEmpty()) {
+                    val rememberedAudio = AppRuntime.prefs?.audioTrackFor(item.id)
+                    val preferredLanguage = AppRuntime.prefs?.preferredAudioLanguage
+                    val stream = preferredAudioStream(rememberedAudio, preferredLanguage, embyAudio)
+                    val language = normalizeLanguage(preferredLanguage)
+                    // A remembered manual choice must also win when the decoder has no exact Emby ID.
+                    val selected = stream?.let { bestAudioTrack(it, audioCandidates,
+                        preferredLanguage = preferredLanguage.takeIf { rememberedAudio == null }) }
+                        ?: audioCandidates.firstOrNull {
+                            rememberedAudio == null && language != null && normalizeLanguage(it.format.language) == language
+                        }
+                    audioSelectionApplied = true
+                    if (selected != null) {
+                        selectedAudioStreamIndex = stream?.index ?: selected.format.id?.toIntOrNull()
+                        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                            .addOverride(TrackSelectionOverride(selected.group, selected.index))
+                            .build()
+                    }
+                }
                 val hasAudioTrack = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
                 if (!hasAudioTrack && playbackSource?.audioStreams?.isNotEmpty() == true && !noAudioRetryTried) {
                     scope.launch {
@@ -1447,11 +1510,13 @@ fun PlayerScreen(
                     }
                 }
                 if (subtitleSelectionApplied) return
+                val rememberedPreference = AppRuntime.prefs?.subtitlePreferenceFor(item.id)
+                val preferredLanguage = AppRuntime.prefs?.preferredSubtitleLanguage
+                // 按片记忆 > 全局偏好 > auto（两种内核共用同一个解析函数）。
+                val resolvedSubtitle = resolveSubtitlePreference(rememberedPreference, preferredLanguage, embySubs)
+                subtitlePreference = resolvedSubtitle
                 val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
-                if (textGroups.isEmpty()) return
-                val mode = AppRuntime.prefs?.subtitleModeFor(item.id) ?: com.lumina.tv.data.Prefs.SubtitleMode.AUTO
-                val remembered = AppRuntime.prefs?.subtitleTrackFor(item.id)
-                if (mode == com.lumina.tv.data.Prefs.SubtitleMode.OFF) {
+                if (resolvedSubtitle == "off") {
                     subtitleSelectionApplied = true
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
@@ -1459,22 +1524,42 @@ fun PlayerScreen(
                         .build()
                     return
                 }
+                if (textGroups.isEmpty()) return
                 val all = textGroups.flatMap { group ->
                     (0 until group.length).map { index -> Triple(group, index, group.getTrackFormat(index)) }
                 }
-                val selected = remembered?.takeIf { mode == com.lumina.tv.data.Prefs.SubtitleMode.TRACK }?.let { key ->
-                    all.firstOrNull { (group, index, _) -> group.mediaTrackGroup.id + ":" + index == key }
-                        ?: key.substringBefore(':').toIntOrNull()?.let { streamIndex ->
-                            all.firstOrNull { (_, index, format) -> format.id?.toIntOrNull() == streamIndex || index == streamIndex }
-                        }
+                fun findSubtitle(key: String): Triple<Tracks.Group, Int, androidx.media3.common.Format>? {
+                    all.firstOrNull { (group, index, _) -> group.mediaTrackGroup.id + ":" + index == key }?.let { return it }
+                    val streamIndex = key.removePrefix("emby:").substringBefore(':').toIntOrNull() ?: return null
+                    all.firstOrNull { (_, _, format) -> format.id?.toIntOrNull() == streamIndex }?.let { return it }
+                    val stream = embySubs.firstOrNull { it.index == streamIndex }
+                    if (stream != null) {
+                        val language = normalizeLanguage(stream.language)
+                        all.firstOrNull { (_, _, format) ->
+                            val candidateLanguage = normalizeLanguage(format.language)
+                            listOfNotNull(stream.displayTitle, stream.title).any { it.isNotBlank() && it.equals(format.label, true) } &&
+                                (language == null || candidateLanguage == null || candidateLanguage == "und" || candidateLanguage == language)
+                        }?.let { return it }
+                        all.firstOrNull { (_, _, format) -> language != null && normalizeLanguage(format.language) == language }
+                            ?.let { return it }
+                    }
+                    // Retain the old local-index fallback only for legacy keys, never for Emby indices.
+                    return if (key.startsWith("emby:")) null else all.firstOrNull { (_, index, _) -> index == streamIndex }
                 }
-                if (mode == com.lumina.tv.data.Prefs.SubtitleMode.TRACK && selected == null) {
+                val preferred = normalizeLanguage(preferredLanguage)
+                val requested = resolvedSubtitle.takeIf { it.startsWith("track:") }?.removePrefix("track:")?.let(::findSubtitle)
+                    ?: all.firstOrNull { (_, _, format) ->
+                        rememberedPreference == null && preferred != null && normalizeLanguage(format.language) == preferred
+                    }
+                if (rememberedPreference?.startsWith("track:") == true && requested == null) {
                     AppRuntime.prefs?.rememberSubtitleTrack(item.id, "auto")
-                    subtitlePreference = "auto"
                     playbackStatusNotice = "记住的字幕轨不存在，已恢复自动选择"
                 }
+                // No language match (or a lost remembered track) falls back to the source's default.
+                val selected = requested ?: embySubs.firstOrNull { it.isDefault }?.let { findSubtitle("emby:${it.index}") }
+                subtitlePreference = requested?.let { (group, index, _) -> "track:${group.mediaTrackGroup.id}:$index" } ?: "auto"
                 subtitleSelectionApplied = true
-                if (mode == com.lumina.tv.data.Prefs.SubtitleMode.TRACK && selected != null) {
+                if (selected != null) {
                     val (group, index, _) = selected
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
@@ -2817,8 +2902,10 @@ fun PlayerScreen(
                 audioStreams = playbackSource?.audioStreams
                     ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
                     ?: mediaSources.firstOrNull()?.audioStreams.orEmpty(),
-                selectedAudioStreamIndex = AppRuntime.prefs?.audioTrackFor(item.id),
+                selectedAudioStreamIndex = selectedAudioStreamIndex,
                 onAudioStreamSelected = { streamIndex, override ->
+                    audioSelectionApplied = true
+                    selectedAudioStreamIndex = streamIndex
                     manualAudioStreamSelection = true
                     AppRuntime.prefs?.rememberAudioTrack(item.id, streamIndex)
                     if (activeEngine == "mpv") {
@@ -2834,6 +2921,7 @@ fun PlayerScreen(
                     }
                 },
                 onSubtitleSelected = { key ->
+                    subtitleSelectionApplied = true
                     val stored = when {
                         key == null -> "off"
                         key == "auto" -> "auto"

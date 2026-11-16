@@ -28,6 +28,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.lumina.tv.diag.NetLog
+import com.lumina.tv.diag.PageLog
 
 class EmbyException(message: String, val httpStatus: Int? = null) : Exception(message)
 
@@ -102,6 +103,16 @@ class EmbyClient(
     private var trickplayBytes = 0L
     private val unavailableTrickplay = ConcurrentHashMap.newKeySet<String>()
     private val playbackTargetCache = ConcurrentHashMap<String, Pair<Long, PlaybackTarget>>()
+    // Diagnostic state lives with the client so it survives the next-episode screen replacement.
+    private class PrewarmAttempt(
+        val itemId: String,
+        val sourceId: String?,
+        val strategy: SourceStrategy,
+        val requestKey: String,
+    ) {
+        @Volatile var state: String = "in_progress"
+    }
+    @Volatile private var lastPrewarmAttempt: PrewarmAttempt? = null
     private val chapterCache = ConcurrentHashMap<String, List<MediaChapter>>()
     private val trickplayFrames = object : LinkedHashMap<Pair<String, Int>, ByteArray>(24, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, Int>, ByteArray>?): Boolean = size > 24
@@ -570,14 +581,44 @@ class EmbyClient(
         "$itemId|$forceTranscode|${sourceId.orEmpty()}|${audioStreamIndex ?: ""}|$forceDirect|$maxStreamingBitrate|$strategy"
 
     fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long = 120_000_000L, strategy: SourceStrategy = SourceStrategy()): PlaybackTarget? {
-        val cached = playbackTargetCache.remove(playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate, strategy)) ?: return null
-        return cached.second.takeIf { System.currentTimeMillis() - cached.first < 120_000L }
+        val key = playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate, strategy)
+        val cached = playbackTargetCache.remove(key)
+        val target = cached?.second?.takeIf { System.currentTimeMillis() - cached.first < 120_000L }
+        if (target != null) {
+            PageLog.add("prewarm hit nextId=$itemId")
+        } else {
+            val attempt = lastPrewarmAttempt?.takeIf { it.itemId == itemId }
+            val reason = when {
+                attempt == null -> "not_started"
+                sourceId != attempt.sourceId || strategy != attempt.strategy -> "source_changed"
+                attempt.state == "in_progress" -> "in_progress"
+                attempt.state == "failed" -> "failed"
+                attempt.state == "cancelled" -> "cancelled"
+                cached != null -> "expired"
+                key != attempt.requestKey -> "request_changed"
+                else -> "consumed_or_unavailable"
+            }
+            PageLog.add("prewarm miss nextId=$itemId reason=$reason")
+        }
+        return target
     }
 
     suspend fun prewarmPlayback(item: MediaItem, sourceId: String? = null, audioStreamIndex: Int? = null,
                                 strategy: SourceStrategy = SourceStrategy()) {
-        resolvePlayback(item, mediaSourceId = sourceId, startPositionMs = item.positionTicks / 10_000L,
-            audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true, strategy = strategy)
+        val attempt = PrewarmAttempt(item.id, sourceId, strategy,
+            playbackTargetKey(item.id, false, sourceId, audioStreamIndex, false, 120_000_000L, strategy))
+        lastPrewarmAttempt = attempt
+        try {
+            resolvePlayback(item, mediaSourceId = sourceId, startPositionMs = item.positionTicks / 10_000L,
+                audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true, strategy = strategy)
+            attempt.state = "done"
+        } catch (cancelled: CancellationException) {
+            attempt.state = "cancelled"
+            throw cancelled
+        } catch (failure: Exception) {
+            attempt.state = "failed"
+            throw failure
+        }
     }
 
     /** Returns a JPEG frame from Emby's optional BIF file; failures are intentionally silent. */

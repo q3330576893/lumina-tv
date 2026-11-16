@@ -49,6 +49,7 @@ fun SettingsPlayback(
     var cacheBytes by remember { mutableStateOf(prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L) }
     var cacheUsed by remember { mutableStateOf(PlaybackCache.spaceBytes(context)) }
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
+    var preferredAudioLanguage by remember { mutableStateOf(prefs?.preferredAudioLanguage.orEmpty()) }
 
     LaunchedEffect(context) {
         PlaybackCache.autoTrim(context)
@@ -59,7 +60,7 @@ fun SettingsPlayback(
         listOf(
             "playback:defaultSpeed", "playback:autoNextEpisode", "playback:globalIntroSeconds",
             "playback:endCreditsSkipSeconds", "playback:maxStreamingBitrate", "playback:playbackCacheBytes",
-            "playback:clearCache", "playback:forceTranscode",
+            "playback:clearCache", "playback:forceTranscode", "playback:preferredAudioLanguage",
         )
     }
     val requesters = remember {
@@ -71,6 +72,10 @@ fun SettingsPlayback(
     val introOptions = remember { listOf(0 to "关", 60 to "60秒", 90 to "90秒", 120 to "120秒").map { SettingChoiceOption(it.first.toString(), it.second) } }
     val endOptions = remember { listOf(0 to "关闭", 30 to "30 秒", 60 to "60 秒").map { SettingChoiceOption(it.first.toString(), it.second) } }
     val bitrateOptions = remember { listOf(20_000_000L to "20 Mbps", 40_000_000L to "40 Mbps", 80_000_000L to "80 Mbps", 120_000_000L to "120 Mbps").map { SettingChoiceOption(it.first.toString(), it.second) } }
+    val languageOptions = remember {
+        listOf("" to "跟随片源", "zh" to "中文", "en" to "英文", "ja" to "日文", "ko" to "韩文")
+            .map { SettingChoiceOption(it.first, it.second) }
+    }
     val cacheOptions = remember {
         PLAYBACK_CACHE_OPTIONS.sorted().map { value ->
             val label = when (value) {
@@ -119,7 +124,10 @@ fun SettingsPlayback(
                 }, requesters.getValue(rowKeys[6]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[5]), downRequester = requesters.getValue(rowKeys[7]))
                 ToggleRow("playback:forceTranscode", "强制转码", "电视盒子解码异常或画面卡顿时打开", forceTranscode, {
                     forceTranscode = it; prefs?.forceTranscode = it
-                }, requesters.getValue(rowKeys[7]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[6]), downRequester = requesters.getValue(rowKeys[7]), showDivider = false)
+                }, requesters.getValue(rowKeys[7]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[6]), downRequester = requesters.getValue(rowKeys[8]))
+                ChoiceRow("playback:preferredAudioLanguage", "首选音轨语言", "新影片默认语言；按片手动选择优先", languageOptions, preferredAudioLanguage, { key ->
+                    preferredAudioLanguage = key; prefs?.preferredAudioLanguage = key
+                }, requesters.getValue(rowKeys[8]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[7]), downRequester = requesters.getValue(rowKeys[8]), showDivider = false)
             }
         }
         item { Spacer(Modifier.height(1.dp)) }

@@ -336,7 +336,8 @@ internal fun OptionMenu(
                                 AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index))
                             }
                         }.toList()
-                        val decodedTrack = bestAudioTrack(stream, candidates)
+                        // This maps an explicit menu choice; global language bias is only for automatic selection.
+                        val decodedTrack = bestAudioTrack(stream, candidates, preferredLanguage = null)
                         MenuChip(
                             label = label, width = 148.dp,
                             active = selectedAudioStreamIndex == stream.index ||

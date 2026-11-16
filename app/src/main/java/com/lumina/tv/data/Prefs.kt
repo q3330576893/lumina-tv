@@ -224,6 +224,15 @@ class Prefs(context: Context) {
 
     enum class SubtitleMode { OFF, AUTO, TRACK }
 
+    /** 空字符串跟随片源；这些语言偏好不是凭据，使用普通 SharedPreferences。 */
+    var preferredSubtitleLanguage: String
+        get() = sp.getString("preferred_subtitle_language", "") ?: ""
+        set(v) = sp.edit().putString("preferred_subtitle_language", v.takeIf { it in setOf("", "zh", "en", "ja", "ko", "off") } ?: "").apply()
+
+    var preferredAudioLanguage: String
+        get() = sp.getString("preferred_audio_language", "") ?: ""
+        set(v) = sp.edit().putString("preferred_audio_language", v.takeIf { it in setOf("", "zh", "en", "ja", "ko") } ?: "").apply()
+
     private fun ns(): String {
         val server = baseUrl.trim().lowercase().ifBlank { "none" }
         val user = userId.ifBlank { "none" }
@@ -231,8 +240,6 @@ class Prefs(context: Context) {
     }
 
     private fun itemKey(prefix: String, itemId: String) = "${prefix}_${ns()}_$itemId"
-
-    private fun subtitleGlobalKey() = "subtitle_mode_global_${ns()}"
 
     private fun normalizeSubtitlePreference(stored: String): String = when {
         stored == "off" || stored == "auto" || stored.startsWith("track:") -> stored
@@ -256,12 +263,11 @@ class Prefs(context: Context) {
 
     fun subtitlePreferenceFor(itemId: String): String? {
         val key = itemKey("subtitle_track", itemId)
-        val globalKey = subtitleGlobalKey()
+        // 只读该片的手动记忆；旧的跨片字幕轨/关闭状态不能遮住全局语言偏好。
         val stored = migratedSubtitleValue(key, "subtitle_track_$itemId")
-            ?: migratedSubtitleValue(globalKey, "subtitle_mode_global")
             ?: return null
         val value = normalizeSubtitlePreference(stored)
-        if (value != stored) sp.edit().putString(key, value).putString(globalKey, value).apply()
+        if (value != stored) sp.edit().putString(key, value).apply()
         return value
     }
 
@@ -280,7 +286,6 @@ class Prefs(context: Context) {
         val key = itemKey("subtitle_track", itemId)
         sp.edit()
             .putString(key, value)
-            .putString(subtitleGlobalKey(), value)
             .apply()
     }
 
