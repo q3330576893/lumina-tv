@@ -163,6 +163,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.withPermit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
@@ -193,6 +194,8 @@ fun HomeScreen(
 ) {
     val client = AppRuntime.client
     val context = LocalContext.current
+    val prefetchSemaphore = remember { kotlinx.coroutines.sync.Semaphore(3) }
+    val countSemaphore = remember { kotlinx.coroutines.sync.Semaphore(4) }
     val hazeState = remember { HazeState() }
     LaunchedEffect(context) {
         ThemeRuntime.updateDeviceBlurSupported(
@@ -455,18 +458,21 @@ fun HomeScreen(
     LaunchedEffect(views, client, reloadToken) {
         val c = client ?: return@LaunchedEffect
         val visibleViews = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
+        val startedAt = android.os.SystemClock.elapsedRealtime()
         val prefetchedViews = supervisorScope {
             visibleViews.map { view ->
                 async {
                     val cacheKey = "library:${view.id}:date:Descending"
                     val viewItems = try {
-                        LibraryCache.browseOf(cacheKey) ?: c.getItems(
-                            parentId = view.id,
-                            types = collectionTypeToItemTypes(view.type),
-                            sortBy = "DateCreated",
-                            sortOrder = "Descending",
-                            limit = 50,
-                        ).also { LibraryCache.putBrowse(cacheKey, it) }
+                        LibraryCache.browseOf(cacheKey) ?: prefetchSemaphore.withPermit {
+                            c.getItems(
+                                parentId = view.id,
+                                types = collectionTypeToItemTypes(view.type),
+                                sortBy = "DateCreated",
+                                sortOrder = "Descending",
+                                limit = 50,
+                            ).also { LibraryCache.putBrowse(cacheKey, it) }
+                        }
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -480,13 +486,20 @@ fun HomeScreen(
                 }
             }.awaitAll()
         }
+        val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+        val loadedCount = prefetchedViews.count { it.second.isNotEmpty() }
+        PageLog.add("prefetch views=${views.size} limit=3 ms=${elapsed} loaded=${loadedCount}/${views.size}")
         viewContents = viewContents + prefetchedViews.associate { it.first.id to it.second }
     }
 
     LaunchedEffect(views, client, reloadToken) {
         val c = client ?: return@LaunchedEffect
         val counts = coroutineScope {
-            views.map { view -> async { view.id to runCatching { c.getLibraryItemCount(view.id) }.getOrNull() } }.awaitAll()
+            views.map { view ->
+                async {
+                    view.id to runCatching { countSemaphore.withPermit { c.getLibraryItemCount(view.id) } }.getOrNull()
+                }
+            }.awaitAll()
         }
         libraryCounts = libraryCounts + counts
     }
