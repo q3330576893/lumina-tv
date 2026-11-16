@@ -105,6 +105,8 @@ import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.bucketOf
+import com.lumina.tv.data.Confidence
+import com.lumina.tv.data.RegionBucket
 import com.lumina.tv.player.AudioCapabilities
 import com.lumina.tv.player.AudioCaps
 import com.lumina.tv.player.detect
@@ -130,6 +132,7 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -145,9 +148,10 @@ import java.net.URLEncoder
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
 private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-private data class RelatedCacheEntry(val items: List<MediaItem>, val storedAt: Long, val dayIndex: String)
+private data class RelatedCacheEntry(val items: List<MediaItem>, val storedAt: Long, val dayIndex: String, val empty: Boolean)
 private val detailRelatedCache = java.util.Collections.synchronizedMap(mutableMapOf<String, RelatedCacheEntry>())
 private const val DETAIL_RELATED_TTL_MS = 6 * 60 * 60 * 1000L
+private const val DETAIL_RELATED_EMPTY_TTL_MS = 30 * 60 * 1000L
 
 @OptIn(ExperimentalFoundationApi::class)
 private object DetailNoBringIntoViewSpec : BringIntoViewSpec {
@@ -174,16 +178,19 @@ private suspend fun loadDetailRecommendations(
         calendar.get(java.util.Calendar.DAY_OF_YEAR),
     )
     val type = current.type.takeIf { it == "Movie" || it == "Series" } ?: return emptyList()
-    val region = bucketOf(current).first
-    val cacheKey = "$itemId|$type|$region|$genreKey"
+    val (currentBucket, currentConfidence) = bucketOf(current)
+    val cacheKey = "$itemId|$type|$currentBucket|$genreKey"
     detailRelatedCache[cacheKey]?.let { entry ->
-        if (entry.dayIndex == dayIndex && System.currentTimeMillis() - entry.storedAt < DETAIL_RELATED_TTL_MS) {
+        val ttl = if (entry.empty) DETAIL_RELATED_EMPTY_TTL_MS else DETAIL_RELATED_TTL_MS
+        if ((entry.empty || entry.dayIndex == dayIndex) && System.currentTimeMillis() - entry.storedAt < ttl) {
             PageLog.add("detailRelated id=$itemId top12=${entry.items.take(12).joinToString(",") { "${it.id}:${it.name}" }} cache=hit")
             return entry.items
         }
         detailRelatedCache.remove(cacheKey)
     }
-    val results = withTimeoutOrNull(5_000L) {
+    var requestFailed = false
+    val result = try {
+        withTimeoutOrNull(5_000L) {
         coroutineScope {
             val similar = async { runCatching { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList()) }
             val genreCandidates = mutableListOf<MediaItem>()
@@ -219,7 +226,13 @@ private suspend fun loadDetailRecommendations(
                 val sameSecondaryGenre = secondaryGenres.any { genre ->
                     candidateGenres.any { it.equals(genre, ignoreCase = true) }
                 }
-                val sameRegion = bucketOf(candidate).first == region && region != com.lumina.tv.data.RegionBucket.UNKNOWN
+                val (candidateBucket, candidateConfidence) = bucketOf(candidate)
+                val sameRegion =
+                    currentBucket == candidateBucket &&
+                    currentBucket != RegionBucket.UNKNOWN &&
+                    currentBucket != RegionBucket.OTHER &&
+                    currentConfidence == Confidence.HIGH &&
+                    candidateConfidence == Confidence.HIGH
                 val rating = ((candidate.communityRating ?: candidate.rating ?: 0.0) / 10.0).coerceIn(0.0, 1.0)
                 val watchedPenalty = if (candidate.positionTicks > 0 || candidate.played) 4.0 else 0.0
                 return (if (sameRegion) 3.0 else 0.0) +
@@ -232,8 +245,29 @@ private suspend fun loadDetailRecommendations(
                     .thenBy { it.id.hashCode() xor daySeed }
             ).take(12)
         }
-    }.orEmpty()
-    detailRelatedCache[cacheKey] = RelatedCacheEntry(results, System.currentTimeMillis(), dayIndex)
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        requestFailed = true
+        null
+    }
+    val results = if (result == null) {
+        val fallback = runCatching { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList())
+            .asSequence()
+            .filterNot { it.id == itemId }
+            .filterNot { current.seriesId != null && it.seriesId == current.seriesId }
+            .sortedByDescending { it.communityRating ?: it.rating ?: 0.0 }
+            .take(12)
+            .toList()
+        if (requestFailed) {
+            PageLog.add("detailRelated id=$itemId failed=true fallback=similar count=${fallback.size}")
+        } else {
+            PageLog.add("detailRelated id=$itemId timeout=true fallback=similar count=${fallback.size}")
+        }
+        return fallback
+    } else result
+    detailRelatedCache[cacheKey] = RelatedCacheEntry(results, System.currentTimeMillis(), dayIndex, results.isEmpty())
     if (detailRelatedCache.size > 100) detailRelatedCache.keys.firstOrNull()?.let(detailRelatedCache::remove)
     PageLog.add("detailRelated id=$itemId top12=${results.joinToString(",") { "${it.id}:${it.name}" }}")
     return results

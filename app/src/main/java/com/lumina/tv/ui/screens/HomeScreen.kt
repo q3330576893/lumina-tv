@@ -205,10 +205,12 @@ fun HomeScreen(
     var offline by remember { mutableStateOf(false) }
     var resumeItems by remember { mutableStateOf(LibraryCache.home?.resume ?: emptyList()) }
     var resumeFilterVersion by remember { mutableIntStateOf(0) }
+    // SharedPreferences filtering runs only when these remember keys change.
     val resume = remember(resumeItems, resumeFilterVersion) {
         AppRuntime.prefs?.visibleResumeItems(resumeItems) ?: resumeItems
     }
     var pendingResumeRemoval by remember { mutableStateOf<MediaItem?>(null) }
+    val removeFocus = remember { FocusRequester() }
     var latest by remember { mutableStateOf(LibraryCache.home?.latest ?: emptyList()) }
     var movies by remember { mutableStateOf(LibraryCache.home?.movies ?: emptyList()) }
     var series by remember { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
@@ -337,12 +339,17 @@ fun HomeScreen(
     var viewContents by remember { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
     var initialFocusPending by rememberSaveable { mutableStateOf(true) }
     var focusedMediaId by rememberSaveable { mutableStateOf<String?>(null) }
+    var resumeRowFocused by remember { mutableStateOf(false) }
     var focusedMediaSection by rememberSaveable { mutableStateOf<String?>(null) }
     var focusedLibraryId by rememberSaveable { mutableStateOf<String?>(null) }
     var heroIndex by rememberSaveable { mutableStateOf(0) }
     var unavailableHeroIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var heroFocusExpected by rememberSaveable { mutableStateOf(false) }
     var lastExitBackAt by remember { mutableStateOf(0L) }
+
+    LaunchedEffect(resume.isEmpty()) {
+        if (resume.isEmpty()) resumeRowFocused = false
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -761,8 +768,11 @@ fun HomeScreen(
     // 导航在顶部，右键不再劫持（原来的右键跳竖栏逻辑会让影片行无法继续右移）
     Box(Modifier.fillMaxSize().background(Ink).onPreviewKeyEvent { event ->
         if (event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
-            val inResume = focusedMediaId != null && resume.any { it.id == focusedMediaId }
-            if (inResume) false else runCatching { navFocus.requestFocus() }.isSuccess
+            val inResume = resumeRowFocused || (focusedMediaId != null && resume.any { it.id == focusedMediaId })
+            if (inResume) false else {
+                runCatching { navFocus.requestFocus() }
+                true
+            }
         } else false
     }) {
         when {
@@ -830,7 +840,7 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, titleOverlay = true, topPadding = 12.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }, onItemMenu = { pendingResumeRemoval = it }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, titleOverlay = true, topPadding = 12.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }, onRowFocusChanged = { resumeRowFocused = it }, onItemMenu = { pendingResumeRemoval = it }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
@@ -1080,6 +1090,12 @@ fun HomeScreen(
                 onNavigateDown = ::navigateToFirstContent,
                 hazeState = hazeState,
             )
+        LaunchedEffect(pendingResumeRemoval?.id) {
+            if (pendingResumeRemoval != null) {
+                withFrameNanos { }
+                runCatching { removeFocus.requestFocus() }
+            }
+        }
         pendingResumeRemoval?.let { item ->
             AlertDialog(
                 onDismissRequest = { pendingResumeRemoval = null },
@@ -1091,19 +1107,22 @@ fun HomeScreen(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        val oldIndex = resume.indexOfFirst { it.id == item.id }
-                        AppRuntime.prefs?.hideResumeItem(item)
-                        val nextFocus = resume.getOrNull(oldIndex + 1) ?: resume.getOrNull(oldIndex - 1)
-                        focusedMediaId = nextFocus?.id
-                        focusedMediaSection = nextFocus?.let { "resume" }
-                        pendingResumeRemoval = null
-                        resumeFilterVersion++
-                        scope.launch {
-                            withFrameNanos { }
-                            if (nextFocus == null) runCatching { heroPlayFocus.requestFocus() }
+                    TextButton(
+                        modifier = Modifier.focusRequester(removeFocus),
+                        onClick = {
+                            val oldIndex = resume.indexOfFirst { it.id == item.id }
+                            AppRuntime.prefs?.hideResumeItem(item)
+                            val nextFocus = resume.getOrNull(oldIndex + 1) ?: resume.getOrNull(oldIndex - 1)
+                            focusedMediaId = nextFocus?.id
+                            focusedMediaSection = nextFocus?.let { "resume" }
+                            pendingResumeRemoval = null
+                            resumeFilterVersion++
+                            scope.launch {
+                                withFrameNanos { }
+                                if (nextFocus == null) runCatching { heroPlayFocus.requestFocus() }
+                            }
                         }
-                    }) { Text("移除") }
+                    ) { Text("移除") }
                 },
                 dismissButton = { TextButton(onClick = { pendingResumeRemoval = null }) { Text("取消") } },
             )
@@ -2187,6 +2206,7 @@ private fun RowSection(
     upFocus: FocusRequester? = null,
     firstItemFocus: FocusRequester? = null,
     onItemFocused: ((String) -> Unit)? = null,
+    onRowFocusChanged: ((Boolean) -> Unit)? = null,
     onItemMenu: ((MediaItem) -> Unit)? = null,
     onClick: (MediaItem) -> Unit,
 ) {
@@ -2196,7 +2216,9 @@ private fun RowSection(
             Text(title, Modifier.padding(start = 40.dp, bottom = 10.dp), color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Medium)
         } else SectionTitle(title, Modifier.padding(start = 40.dp, bottom = 10.dp))
         LazyRow(
-            modifier = Modifier.focusGroup(),
+            modifier = Modifier
+                .focusGroup()
+                .then(if (onRowFocusChanged != null) Modifier.onFocusChanged { onRowFocusChanged(it.hasFocus) } else Modifier),
             contentPadding = PaddingValues(start = 40.dp, end = 40.dp),
             horizontalArrangement = Arrangement.spacedBy(Space.m),
         ) {
