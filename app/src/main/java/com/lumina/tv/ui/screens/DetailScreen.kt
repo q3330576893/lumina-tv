@@ -104,6 +104,7 @@ import com.lumina.tv.data.MdblistClient
 import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.MediaStream
+import com.lumina.tv.data.bucketOf
 import com.lumina.tv.player.AudioCapabilities
 import com.lumina.tv.player.AudioCaps
 import com.lumina.tv.player.detect
@@ -129,6 +130,7 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lumina.tv.ui.components.GlassPanel
@@ -143,7 +145,7 @@ import java.net.URLEncoder
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
 private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-private data class RelatedCacheEntry(val items: List<MediaItem>, val storedAt: Long)
+private data class RelatedCacheEntry(val items: List<MediaItem>, val storedAt: Long, val dayIndex: String)
 private val detailRelatedCache = java.util.Collections.synchronizedMap(mutableMapOf<String, RelatedCacheEntry>())
 private const val DETAIL_RELATED_TTL_MS = 6 * 60 * 60 * 1000L
 
@@ -171,85 +173,67 @@ private suspend fun loadDetailRecommendations(
         calendar.get(java.util.Calendar.YEAR),
         calendar.get(java.util.Calendar.DAY_OF_YEAR),
     )
-    val cacheKey = "detail-related:$itemId:$genreKey"
+    val type = current.type.takeIf { it == "Movie" || it == "Series" } ?: return emptyList()
+    val region = bucketOf(current).first
+    val cacheKey = "$itemId|$type|$region|$genreKey"
     detailRelatedCache[cacheKey]?.let { entry ->
-        if (System.currentTimeMillis() - entry.storedAt < DETAIL_RELATED_TTL_MS) {
+        if (entry.dayIndex == dayIndex && System.currentTimeMillis() - entry.storedAt < DETAIL_RELATED_TTL_MS) {
             PageLog.add("detailRelated id=$itemId top12=${entry.items.take(12).joinToString(",") { "${it.id}:${it.name}" }} cache=hit")
             return entry.items
         }
         detailRelatedCache.remove(cacheKey)
     }
-    val type = if (current.type == "Series") "Series" else "Movie"
-    val results = coroutineScope {
-        val similar = async {
-            runCatching { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList())
-        }
-        val byGenre = genres.map { genre -> async {
-            runCatching {
-                client.getItems(types = type, sortBy = "CommunityRating", sortOrder = "Descending", limit = 30, genre = genre, requestTimeoutSeconds = 5)
-            }.getOrDefault(emptyList())
-        } }.awaitAll().flatten()
-        val rawSimilar = similar.await()
-        val candidates = (rawSimilar + byGenre)
-            .filter { it.id != itemId && it.type == current.type }
-            .distinctBy { it.id }
-            .filter { candidate -> candidate.genres.any { candidateGenre -> genres.any { it.equals(candidateGenre.trim(), ignoreCase = true) } } }
-        fun overlapCount(values: List<String>, candidateValues: List<String>): Int =
-            candidateValues.count { value -> values.any { it.equals(value.trim(), ignoreCase = true) } }
-        fun score(candidate: MediaItem): Float {
-            val genreOverlap = overlapCount(genres, candidate.genres)
-            val tagOverlap = overlapCount(current.tags, candidate.tags)
-            val rating = (candidate.communityRating ?: candidate.rating ?: 0.0).toFloat()
-            val jitter = ((itemId + candidate.id + dayIndex).hashCode() and 0x3FF) / 1024f * 1.5f
-            val playedPenalty = if (candidate.played) 1f else 0f
-            return genreOverlap * 3f + tagOverlap + (rating / 10f) * 1.5f + jitter - playedPenalty
-        }
-        val ranked = candidates.sortedByDescending(::score)
-        val ordered = mutableListOf<MediaItem>()
-        val seen = mutableSetOf<String>()
-        val genreCounts = mutableMapOf<String, Int>()
-        var previousGenre: String? = null
-        var consecutiveGenreCount = 0
-        while (ordered.size < 12 && seen.size < ranked.size) {
-            val available = ranked.filter { it.id !in seen }.filter { item ->
-                val leadingGenre = item.genres.firstOrNull()?.trim()?.lowercase()
-                leadingGenre != previousGenre || consecutiveGenreCount < 2
-            }
-            val chosen = available.sortedWith(
-                compareBy<MediaItem> { item ->
-                    item.genres.map { it.trim().lowercase() }.filter(String::isNotBlank)
-                        .minOfOrNull { genreCounts[it] ?: 0 } ?: 0
-                }.thenByDescending(::score)
-            ).firstOrNull() ?: break
-            seen += chosen.id
-            ordered += chosen
-            chosen.genres.map { it.trim().lowercase() }.distinct().forEach { genreCounts[it] = (genreCounts[it] ?: 0) + 1 }
-            val firstGenre = chosen.genres.firstOrNull()?.trim()?.lowercase()
-            if (firstGenre == previousGenre) consecutiveGenreCount++ else consecutiveGenreCount = 1
-            previousGenre = firstGenre
-        }
-        if (ordered.size < 6 && current.year != null) {
-            val nearby = genres.flatMap { genre ->
-                runCatching {
-                    client.getItems(types = type, sortBy = "CommunityRating", sortOrder = "Descending", limit = 30, genre = genre)
-                }.getOrDefault(emptyList())
-            }.distinctBy { it.id }
-            val currentRating = current.communityRating ?: current.rating ?: 0.0
-            nearby.asSequence()
-                .filter { it.id != itemId && it.id !in seen && it.type == current.type }
-                .filter { it.year != null && it.year in (current.year - 3)..(current.year + 3) }
-                .filter { candidate -> overlapCount(genres, candidate.genres) > 0 }
-                .sortedBy { kotlin.math.abs((it.communityRating ?: it.rating ?: 0.0) - currentRating) }
-                .forEach { candidate ->
-                    if (ordered.size < 12) {
-                        ordered += candidate
-                        seen += candidate.id
-                    }
+    val results = withTimeoutOrNull(5_000L) {
+        coroutineScope {
+            val similar = async { runCatching { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList()) }
+            val genreCandidates = mutableListOf<MediaItem>()
+            val mainGenre = genres.firstOrNull()
+            if (mainGenre != null) {
+                for (page in 0..2) {
+                    val pageItems = runCatching {
+                        client.getItems(
+                            types = type, sortBy = "Random", limit = 60, startIndex = page * 60,
+                            genre = mainGenre, requestTimeoutSeconds = 5,
+                        )
+                    }.getOrDefault(emptyList())
+                    genreCandidates += pageItems
+                    if (pageItems.size < 60) break
                 }
+            }
+            val queryItems = genreCandidates.distinctBy { it.id }
+            val queriedIds = queryItems.mapTo(mutableSetOf()) { it.id }
+            val supplements = similar.await().filterNot { it.id in queriedIds }
+            val pool = (queryItems + supplements).asSequence()
+                .filter { it.id != itemId && it.type == type }
+                .filterNot { current.seriesId != null && it.seriesId == current.seriesId }
+                .distinctBy { it.id }
+                .toList()
+
+            fun score(candidate: MediaItem): Double {
+                val currentGenres = current.genres.map { it.trim() }
+                val candidateGenres = candidate.genres.map { it.trim() }
+                val sameMainGenre = currentGenres.firstOrNull()?.let { main ->
+                    candidateGenres.any { it.equals(main, ignoreCase = true) }
+                } == true
+                val secondaryGenres = currentGenres.drop(1).take(2)
+                val sameSecondaryGenre = secondaryGenres.any { genre ->
+                    candidateGenres.any { it.equals(genre, ignoreCase = true) }
+                }
+                val sameRegion = bucketOf(candidate).first == region && region != com.lumina.tv.data.RegionBucket.UNKNOWN
+                val rating = ((candidate.communityRating ?: candidate.rating ?: 0.0) / 10.0).coerceIn(0.0, 1.0)
+                val watchedPenalty = if (candidate.positionTicks > 0 || candidate.played) 4.0 else 0.0
+                return (if (sameRegion) 3.0 else 0.0) +
+                    (if (sameMainGenre) 1.0 else 0.0) +
+                    (if (sameSecondaryGenre) 0.5 else 0.0) + rating - watchedPenalty
+            }
+            val daySeed = dayIndex.hashCode()
+            pool.sortedWith(
+                compareByDescending<MediaItem> { score(it) }
+                    .thenBy { it.id.hashCode() xor daySeed }
+            ).take(12)
         }
-        ordered.take(12)
-    }
-    detailRelatedCache[cacheKey] = RelatedCacheEntry(results, System.currentTimeMillis())
+    }.orEmpty()
+    detailRelatedCache[cacheKey] = RelatedCacheEntry(results, System.currentTimeMillis(), dayIndex)
     if (detailRelatedCache.size > 100) detailRelatedCache.keys.firstOrNull()?.let(detailRelatedCache::remove)
     PageLog.add("detailRelated id=$itemId top12=${results.joinToString(",") { "${it.id}:${it.name}" }}")
     return results

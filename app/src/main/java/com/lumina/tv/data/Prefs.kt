@@ -461,6 +461,52 @@ class Prefs(context: Context) {
         hiddenViewIds = cur
     }
 
+    var hiddenResumeIds: Map<String, Long>
+        get() = runCatching {
+            val json = org.json.JSONObject(sp.getString("hidden_resume_ids", "{}") ?: "{}")
+            buildMap { json.keys().forEach { id -> put(id, json.optLong(id, 0L)) } }
+        }.getOrDefault(emptyMap())
+        set(value) {
+            val json = org.json.JSONObject()
+            value.forEach { (id, timestamp) -> json.put(id, timestamp) }
+            sp.edit().putString("hidden_resume_ids", json.toString()).apply()
+        }
+
+    private var hiddenResumePositions: Map<String, Long>
+        get() = runCatching {
+            val json = org.json.JSONObject(sp.getString("hidden_resume_positions", "{}") ?: "{}")
+            buildMap { json.keys().forEach { id -> put(id, json.optLong(id, 0L)) } }
+        }.getOrDefault(emptyMap())
+        set(value) {
+            val json = org.json.JSONObject()
+            value.forEach { (id, position) -> json.put(id, position) }
+            sp.edit().putString("hidden_resume_positions", json.toString()).apply()
+        }
+
+    fun hideResumeItem(item: MediaItem, hiddenAt: Long = System.currentTimeMillis()) {
+        hiddenResumeIds = hiddenResumeIds + (item.id to hiddenAt)
+        hiddenResumePositions = hiddenResumePositions + (item.id to item.positionTicks)
+    }
+
+    fun visibleResumeItems(items: List<MediaItem>): List<MediaItem> {
+        val hidden = hiddenResumeIds.toMutableMap()
+        val positions = hiddenResumePositions.toMutableMap()
+        val visible = items.filter { item ->
+            val hiddenAt = hidden[item.id] ?: return@filter true
+            val savedPosition = positions[item.id]
+            val playedAgain = (item.lastPlayedDate?.let { it > hiddenAt } == true) ||
+                (savedPosition != null && item.positionTicks != savedPosition)
+            if (playedAgain) {
+                hidden.remove(item.id)
+                positions.remove(item.id)
+                true
+            } else false
+        }
+        if (hidden != hiddenResumeIds) hiddenResumeIds = hidden
+        if (positions != hiddenResumePositions) hiddenResumePositions = positions
+        return visible
+    }
+
     fun saveSession(s: Session) {
         baseUrl = s.baseUrl
         token = s.token

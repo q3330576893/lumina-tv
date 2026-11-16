@@ -368,7 +368,7 @@ class EmbyClient(
         genre: String? = null,
         personIds: String? = null,
         filters: String? = null,
-        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
+        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProductionLocations,OriginalLanguage",
         requestTimeoutSeconds: Int? = null,
     ): List<MediaItem> = withContext(Dispatchers.IO) {
         val params = mutableMapOf(
@@ -419,7 +419,7 @@ class EmbyClient(
         val params = mapOf(
             "Limit" to limit.toString(),
             "MediaTypes" to "Video",
-            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,ProductionYear",
+            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,ProductionYear,ProductionLocations,OriginalLanguage,LastPlayedDate",
             "EnableImageTypes" to "Primary,Thumb,Backdrop,Logo",
         )
         val arr = getSync(url("/Users/$userId/Items/Resume", params)).optJSONArray("Items") ?: JSONArray()
@@ -427,7 +427,7 @@ class EmbyClient(
     }
 
     suspend fun getLatest(parentId: String?, limit: Int = 20): List<MediaItem> = withTimeoutOrNull(6_000L) { withContext(Dispatchers.IO) {
-        val fields = "Overview,PrimaryImageAspectRatio,UserData,ProductionYear"
+        val fields = "Overview,PrimaryImageAspectRatio,UserData,ProductionYear,ProductionLocations,OriginalLanguage"
         suspend fun query(path: String, params: Map<String, String?>): List<MediaItem>? = runCatching {
             val response = getSync(url(path, params))
             val arr = response.optJSONArray("Items") ?: run {
@@ -449,14 +449,14 @@ class EmbyClient(
     suspend fun getItem(id: String): MediaItem? = withContext(Dispatchers.IO) {
         try {
             val params = mapOf("UserId" to userId,
-                "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds")
+                "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds,ProductionLocations,OriginalLanguage")
             parseItem(getSync(url("/Users/$userId/Items/$id", params)))
         } catch (_: Exception) { null }
     }
 
     suspend fun getItemForDetail(id: String): MediaItem = withContext(Dispatchers.IO) {
         val params = mapOf("UserId" to userId,
-            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds")
+            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds,ProductionLocations,OriginalLanguage")
         parseItem(getSync(url("/Users/$userId/Items/$id", params), timeoutSeconds = 4))
     }
 
@@ -662,7 +662,7 @@ class EmbyClient(
         withTimeoutOrNull(4_000L) { withContext(Dispatchers.IO) {
             runCatching {
             val params = mapOf("UserId" to userId, "Limit" to limit.toString(),
-                "Fields" to "Overview,PrimaryImageAspectRatio,Genres,ProductionYear,UserData",
+                "Fields" to "Overview,PrimaryImageAspectRatio,Genres,ProductionYear,UserData,ProductionLocations,OriginalLanguage",
                 "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo")
             val arr = getSync(url("/Items/$itemId/Similar", params)).optJSONArray("Items") ?: JSONArray()
             parseItems(arr).filterNot { it.id == itemId }.take(limit)
@@ -794,6 +794,13 @@ class EmbyClient(
                 }
             } ?: emptyList(),
             providerIds = providerIds,
+            productionLocations = o.optJSONArray("ProductionLocations")?.let { locations ->
+                (0 until locations.length()).mapNotNull { i -> locations.optString(i).trim().takeIf(String::isNotBlank) }
+            } ?: emptyList(),
+            originalLanguage = o.optString("OriginalLanguage").trim().ifBlank { null },
+            lastPlayedDate = ud?.optString("LastPlayedDate")?.let { raw ->
+                runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+            },
         )
     }
 

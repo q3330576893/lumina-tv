@@ -42,6 +42,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -293,6 +298,7 @@ fun PosterCard(
     focusRequester: FocusRequester? = null,
     upFocus: FocusRequester? = null,
     onFocused: (() -> Unit)? = null,
+    onMenuKey: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -322,6 +328,14 @@ fun PosterCard(
                 shadowElevation = if (focused) posterSpec.elevation else 0f
                 shape = ShapeScale.card
                 clip = false
+            }
+            .onPreviewKeyEvent { event ->
+                if (onMenuKey != null && event.type == KeyEventType.KeyDown && event.key == Key.Menu &&
+                    event.nativeKeyEvent.repeatCount == 0
+                ) {
+                    onMenuKey()
+                    true
+                } else false
             }
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
     ) {
