@@ -71,7 +71,7 @@ object DiagExporter {
     }
 
     fun appLogTail(): String = runCatching {
-        val process: Process = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-t", "800", "--pid=${android.os.Process.myPid()}"))
+        val process: Process = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-v", "epoch", "-t", "800", "--pid=${android.os.Process.myPid()}"))
         val lines: List<String> = process.inputStream.bufferedReader(Charsets.UTF_8).useLines { it.toList() }
         process.waitFor()
         lines.takeLast(800).joinToString("\n")
@@ -90,6 +90,8 @@ object DiagExporter {
             "errors.json" to payload.errorsJson,
             "mpv.log" to payload.mpvLog,
             "app.log" to payload.appLog,
+            "mpv-audio.jsonl" to File(context.filesDir, "mpv-audio.jsonl").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty(),
+            "mpv-audio-system.log" to File(context.filesDir, "mpv-audio-system.log").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty(),
             "ui.txt" to (payload.uiText + "\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}"),
             "net.json" to NetLog.tail(),
             "pages.txt" to PageLog.tail(),
@@ -109,6 +111,7 @@ object DiagExporter {
                 val limit = when (name) {
                     "app.log", "app-prev.log" -> 120 * 1024
                     "mpv.log" -> 512 * 1024
+                    "mpv-audio.jsonl", "mpv-audio-system.log" -> 384 * 1024
                     else -> 120 * 1024
                 }
                 val sanitized = sanitize(original).take(limit)

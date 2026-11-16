@@ -3,6 +3,8 @@ package com.lumina.tv.player
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import java.util.concurrent.atomic.AtomicLong
 import android.util.Log
 import android.view.Surface
 import com.lumina.tv.data.MediaStream
@@ -16,8 +18,69 @@ import org.json.JSONArray
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
 class MpvPlayerController(
     context: Context,
-    private val onState: (State) -> Unit,
-) : MPVLib.EventObserver {
+    private val generation: Int,
+    private val onSoftwareRetry: (MpvPlayerController, LoadIdentity, () -> Boolean, () -> Unit) -> Unit,
+    private val onState: (MpvPlayerController, LoadIdentity, State) -> Unit,
+) {
+    data class LoadIdentity(val generation: Int, val physicalId: Long, val software: Boolean)
+    enum class FailureKind { INITIALIZATION, SURFACE, HTTP, DECODING, FIRST_FRAME_TIMEOUT, LOAD }
+    sealed interface InitializationResult {
+        data object Ready : InitializationResult
+        data class Failed(val reason: String, val identity: LoadIdentity? = null) : InitializationResult
+    }
+
+    // Each observer closes over this object, never a mutable generation field.
+    private inner class NativeLoad(val identity: LoadIdentity, val engine: MPVLib) {
+        @Volatile var started = false
+        var failureKind: FailureKind? = null
+        var retryPending = false
+        var terminal = false
+        var ended = false
+        var audioReconfigurationPending = false
+        var stableSamplePending = false
+        var sampledAid: Int? = null
+        val observer = object : MPVLib.EventObserver {
+            override fun eventProperty(property: String) = Unit
+            override fun eventProperty(property: String, value: String) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
+            override fun eventProperty(property: String, value: Long) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
+            override fun eventProperty(property: String, value: Double) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
+            override fun eventProperty(property: String, value: Boolean) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
+            override fun event(eventId: Int) = enqueue(this@NativeLoad) { handleEvent(this@NativeLoad, eventId) }
+        }
+        val logObserver = object : MPVLib.LogObserver {
+            override fun logMessage(prefix: String, level: Int, text: String) {
+                val at = timestamp()
+                enqueue(this@NativeLoad, requireStarted = false) {
+                    appendMpvLog("$at load=${identity.physicalId} $prefix/$level $text")
+                    // Preserve a useful cause when END_FILE cannot expose its reason in this API.
+                    if (Regex("(?i)HTTP[^\n]*(?:4[0-9]{2}|5[0-9]{2})|server returned|connection refused|failed to resolve").containsMatchIn(text)) {
+                        failureKind = FailureKind.HTTP
+                    } else if (Regex("(?i)failed to (?:decode|open.*decoder)|error while decoding|decoder initialization failed").containsMatchIn(text)) {
+                        failureKind = FailureKind.DECODING
+                    }
+                }
+            }
+        }
+    }
+
+    private val appContext = context.applicationContext
+    private val loadGate = LoadEventGate<NativeLoad>()
+    private val activeLoad: NativeLoad? get() = loadGate.current
+    private val mpv: MPVLib? get() = activeLoad?.engine
+
+    private fun isActive(load: NativeLoad): Boolean = !released && loadGate.accepts(load)
+    private fun checkMainThread() = check(Looper.myLooper() == Looper.getMainLooper())
+
+    private fun enqueue(load: NativeLoad, requireStarted: Boolean = true, block: () -> Unit) {
+        if (!isActive(load) || (requireStarted && !load.started)) return
+        postForLoad(load, 0L, block)
+    }
+
+    private fun postForLoad(load: NativeLoad, delayMs: Long, block: () -> Unit) {
+        if (!isActive(load)) return
+        handler.postAtTime({ if (isActive(load) && !load.terminal) block() }, load, SystemClock.uptimeMillis() + delayMs)
+    }
+
     private data class MpvTrack(
         val id: Int,
         val ffIndex: Int?,
@@ -38,6 +101,7 @@ class MpvPlayerController(
         val audioSilentCodec: String? = null,
         val cacheSpeedBytesPerSecond: Long = 0L,
         val subtitleNotice: String? = null,
+        val failureKind: FailureKind? = null,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -49,20 +113,8 @@ class MpvPlayerController(
     private val previousCrashFile = File(context.applicationContext.filesDir, "mpv-previous-abnormal.txt")
     private val diagnosticLines = ArrayDeque<String>()
     private val observedProperties = linkedMapOf<String, String>()
-    private val heartbeat = object : Runnable {
-        override fun run() {
-            if (released || pendingUrl == null) return
-            persistSessionState()
-            handler.postDelayed(this, SESSION_HEARTBEAT_MS)
-        }
-    }
+    private val audioDiagnostics = MpvAudioDiagnostics(context)
     private var softwareRetryCount = 0
-    private val logObserver = object : MPVLib.LogObserver {
-        override fun logMessage(prefix: String, level: Int, text: String) {
-            appendMpvLog("${timestamp()} $prefix/$level $text")
-        }
-    }
-    private var mpv: MPVLib? = null
     var unavailableReason: String? = null
         private set
     private var positionMs = 0L
@@ -70,7 +122,7 @@ class MpvPlayerController(
     private var ready = false
     private var playing = false
     private var softwareRetryUsed = false
-    private var released = false
+    @Volatile private var released = false
     private var pendingUrl: String? = null
     private var pendingPositionMs = 0L
     private var attachedSurface: Surface? = null
@@ -78,7 +130,6 @@ class MpvPlayerController(
     private var lastSurfaceHeight = -1
     private var fileLoaded = false
     private var buffering = false
-    private val loadTimeout = Runnable { onLoadTimeout() }
     private var audioStreams: List<MediaStream> = emptyList()
     private var preferredAudioIndex: Int? = null
     private var subtitleStreams: List<MediaStream> = emptyList()
@@ -87,74 +138,103 @@ class MpvPlayerController(
     private var subtitleMappingNotice: String? = null
     private var audioSilentCodec: String? = null
     private var cacheSpeedBytesPerSecond = 0L
-    private val audioOutputCheck = Runnable { checkAudioOutput() }
 
-    init {
-        Log.i(TAG, "${timestamp()} MPVLib.create starting")
-        val created = runCatching { MPVLib.create(context.applicationContext) }
-        if (created.isFailure || created.getOrNull() == null) {
-            unavailableReason = created.exceptionOrNull()?.message ?: "libmpv 初始化失败或当前设备 ABI 不受支持"
-            Log.e(TAG, "mpv initialization failed: $unavailableReason", created.exceptionOrNull())
-            emit(error = "该设备不支持 mpv 内核：$unavailableReason")
-        } else {
-            mpv = created.getOrNull()
-            val engine = checkNotNull(mpv)
-            runCatching {
-                listOf(
-                    "config" to "no",
-                    "load-scripts" to "no",
-                    "ytdl" to "no",
-                    "load-auto-profiles" to "no",
-                    "terminal" to "no",
-                    "msg-level" to "all=info",
-                    "vo" to "gpu",
-                    "gpu-context" to "android",
-                    "tone-mapping" to "bt.2446a",
-                    "hdr-compute-peak" to "yes",
-                    "target-peak" to "auto",
-                    "hwdec" to "mediacodec",
-                    "hwdec-codecs" to "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1",
-                    "cache" to "yes",
-                    "keep-open" to "no",
-                    "tls-verify" to "no",
-                    "sub-scale" to "1.0",
-                ).forEach { (key, value) -> engine.setOptionString(key, value) }
-                Log.i(TAG, "${timestamp()} MPVLib.init starting (create -> init; Surface attached later)")
-                engine.init()
-                engine.addObserver(this)
-                engine.addLogObserver(logObserver)
-                engine.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
-                engine.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
-                engine.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
-                engine.observeProperty("cache-speed", MPVLib.MpvFormat.MPV_FORMAT_INT64)
-                engine.observeProperty("video-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
-                engine.observeProperty("audio-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
-                engine.observeProperty("audio-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
-                engine.observeProperty("track-list", MPVLib.MpvFormat.MPV_FORMAT_NODE)
-                engine.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
-                engine.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
-                listOf("hwdec-current", "current-vo", "video-params/pixelformat")
-                    .forEach { engine.observeProperty(it, MPVLib.MpvFormat.MPV_FORMAT_STRING) }
-                listOf("video-params/w", "video-params/h")
-                    .forEach { engine.observeProperty(it, MPVLib.MpvFormat.MPV_FORMAT_INT64) }
-                engine.observeProperty("vo-drop-frame-count", MPVLib.MpvFormat.MPV_FORMAT_INT64)
-                recordPreviousAbnormalSession()
-            }.onFailure { failure ->
-                unavailableReason = failure.message ?: "libmpv 初始化失败"
-                Log.e(TAG, "mpv initialization failed: $unavailableReason", failure)
-                runCatching { engine.destroy() }
-                mpv = null
-                emit(error = "该设备不支持 mpv 内核：$unavailableReason")
-            }.onSuccess { Log.i(TAG, "${timestamp()} MPVLib.init succeeded") }
+    // Constructor is side-effect free. The caller installs ownership before initialization.
+    fun initialize(): InitializationResult {
+        checkMainThread()
+        if (released) return InitializationResult.Failed("控制器已释放")
+        if (activeLoad != null) return InitializationResult.Ready
+        recordPreviousAbnormalSession()
+        clearSessionLog()
+        return createNativeLoad(software = false)
+    }
+
+    private fun createNativeLoad(software: Boolean): InitializationResult {
+        checkMainThread()
+        val identity = LoadIdentity(generation, physicalIds.incrementAndGet(), software)
+        var created: NativeLoad? = null
+        return try {
+            val engine = MPVLib.create(appContext) ?: error("libmpv 初始化失败或当前设备 ABI 不受支持")
+            val load = NativeLoad(identity, engine)
+            created = load
+            loadGate.activate(load)
+            audioDiagnostics.beginLoad(load.identity)
+            listOf(
+                "config" to "no",
+                "load-scripts" to "no",
+                "ytdl" to "no",
+                "load-auto-profiles" to "no",
+                "terminal" to "no",
+                "msg-level" to "all=info",
+                "vo" to "gpu",
+                "gpu-context" to "android",
+                "tone-mapping" to "bt.2446a",
+                "hdr-compute-peak" to "yes",
+                "target-peak" to "auto",
+                "hwdec" to if (software) "no" else "mediacodec",
+                "hwdec-codecs" to "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1",
+                "cache" to "yes",
+                "keep-open" to "no",
+                "tls-verify" to "no",
+                "sub-scale" to "1.0",
+            ).forEach { (key, value) -> engine.setOptionString(key, value) }
+            engine.init()
+            engine.addObserver(load.observer)
+            engine.addLogObserver(load.logObserver)
+            engine.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+            engine.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+            engine.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+            engine.observeProperty("cache-speed", MPVLib.MpvFormat.MPV_FORMAT_INT64)
+            engine.observeProperty("video-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
+            engine.observeProperty("audio-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
+            engine.observeProperty("audio-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
+            engine.observeProperty("track-list", MPVLib.MpvFormat.MPV_FORMAT_NODE)
+            engine.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+            engine.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+            listOf("hwdec-current", "current-vo", "video-params/pixelformat")
+                .forEach { engine.observeProperty(it, MPVLib.MpvFormat.MPV_FORMAT_STRING) }
+            listOf("video-params/w", "video-params/h")
+                .forEach { engine.observeProperty(it, MPVLib.MpvFormat.MPV_FORMAT_INT64) }
+            engine.observeProperty("vo-drop-frame-count", MPVLib.MpvFormat.MPV_FORMAT_INT64)
+            appendMpvLog("${timestamp()} load=${load.identity} initialized")
+            InitializationResult.Ready
+        } catch (failure: Throwable) {
+            unavailableReason = failure.message ?: "libmpv 初始化失败"
+            created?.let { destroyNativeLoad(it) }
+            Log.e(TAG, "mpv initialization failed: $unavailableReason", failure)
+            InitializationResult.Failed(checkNotNull(unavailableReason), identity)
         }
     }
 
+    private fun destroyNativeLoad(load: NativeLoad) {
+        checkMainThread()
+        loadGate.retire(load)
+        handler.removeCallbacksAndMessages(load)
+        runCatching { load.engine.removeObserver(load.observer) }
+        runCatching { load.engine.removeLogObserver(load.logObserver) }
+        runCatching { load.engine.detachSurface() }
+        // Observers only enqueue work; never destroy from the native event thread.
+        runCatching { load.engine.destroy() }
+    }
+
+    private val subtitleOptions = linkedMapOf<String, String>()
+    private var subtitleDelayMs = 0L
+    private var playbackSpeed = 1f
+    private var requestHeaders: Map<String, String> = emptyMap()
+    private var subtitleUrls: List<String> = emptyList()
+
     fun attachSurface(surface: Surface, width: Int = 0, height: Int = 0) {
+        checkMainThread()
         if (!released && surface.isValid) {
             val resolvedWidth = width.takeIf { it > 0 } ?: fallbackSurfaceWidth
             val resolvedHeight = height.takeIf { it > 0 } ?: fallbackSurfaceHeight
             Log.i(TAG, "${timestamp()} MPVLib.attachSurface (init already completed)")
-            mpv?.attachSurface(surface)
+            if (attachedSurface !== surface) {
+                runCatching { mpv?.attachSurface(surface) }.onFailure { failure ->
+                    activeLoad?.let { emit(it, error = "播放画面绑定失败：${failure.message}", failureKind = FailureKind.SURFACE) }
+                    return
+                }
+            }
             if (attachedSurface !== surface || resolvedWidth != lastSurfaceWidth || resolvedHeight != lastSurfaceHeight) {
                 Log.i(TAG, "${timestamp()} attached surface ${resolvedWidth}x$resolvedHeight, vo=gpu")
                 runCatching { mpv?.setPropertyString("android-surface-size", "${resolvedWidth}x${resolvedHeight}") }
@@ -172,16 +252,18 @@ class MpvPlayerController(
     }
 
     fun detachSurface() {
+        checkMainThread()
         if (!released) {
             Log.i(TAG, "${timestamp()} MPVLib.detachSurface")
-            mpv?.detachSurface()
+            runCatching { mpv?.detachSurface() }
             if (attachedSurface != null) Log.d(TAG, "surface detached")
             attachedSurface = null
         }
     }
 
     fun setSubtitleFontSize(sizePx: Int) {
-        if (!released) runCatching { mpv?.setOptionString("sub-font-size", sizePx.coerceIn(16, 120).toString()) }
+        subtitleOptions["sub-font-size"] = sizePx.coerceIn(16, 120).toString()
+        if (!released) runCatching { mpv?.setOptionString("sub-font-size", subtitleOptions.getValue("sub-font-size")) }
     }
 
     fun setSubtitleStyle(color: Int, outline: Boolean, position: Float, background: Boolean) {
@@ -194,12 +276,14 @@ class MpvPlayerController(
             "sub-back-color" to if (background) "#80000000" else "#00000000",
         )
         options.forEach { (key, value) ->
+            subtitleOptions[key] = value
             runCatching { mpv?.setOptionString(key, value) }
                 .onFailure { appendMpvLog("${timestamp()} mpv subtitle style unsupported: $key (${it.message})") }
         }
     }
 
     fun setSubtitleOffset(offsetMs: Long) {
+        subtitleDelayMs = offsetMs
         if (!released) runCatching { mpv?.setPropertyDouble("sub-delay", offsetMs / 1000.0) }
     }
 
@@ -216,6 +300,7 @@ class MpvPlayerController(
     fun setAudioTrack(index: Int) {
         if (released) return
         preferredAudioIndex = index.takeIf { it >= 0 }
+        audioSilentCodec = null
         if (fileLoaded && preferredAudioIndex != null) applyPreferredAudioTrack()
     }
 
@@ -262,51 +347,61 @@ class MpvPlayerController(
         mpv?.getPropertyString("sid")?.equals("no", true) == true
     }.getOrDefault(false)
 
+    /** One external load per controller; software retry creates its own native load below. */
     fun load(url: String, startPositionMs: Long, subtitleUrls: List<String> = emptyList(), headers: Map<String, String> = emptyMap()) {
-        if (released || mpv == null) return
-        clearSessionLog()
-        audioSilentCodec = null
-        handler.removeCallbacks(audioOutputCheck)
+        checkMainThread()
+        val load = activeLoad?.takeIf(::isActive) ?: return
+        check(pendingUrl == null) { "A new external load requires a new controller" }
         pendingUrl = url
-        subtitleMappingNotice = null
         pendingPositionMs = startPositionMs.coerceAtLeast(0L)
+        this.subtitleUrls = subtitleUrls.toList()
+        requestHeaders = headers.toMap()
+        startPhysicalLoad(load)
+    }
+
+    private fun startPhysicalLoad(load: NativeLoad) {
+        if (!isActive(load)) return
+        audioSilentCodec = null
+        subtitleMappingNotice = null
         ready = false
         fileLoaded = false
         positionMs = pendingPositionMs
-        softwareRetryUsed = false
-        softwareRetryCount = 0
-        mpv?.setOptionString("hwdec", "mediacodec")
-        appendMpvLog("${timestamp()} mpv hwdec reset -> mediacodec reason=new-load")
-        persistSessionState()
-        handler.removeCallbacks(heartbeat)
-        handler.postDelayed(heartbeat, SESSION_HEARTBEAT_MS)
-        val headerFields = headers.entries.mapNotNull { (key, value) ->
-            if (',' in key || ',' in value) {
-                Log.w(TAG, "Skipping HTTP header containing comma: $key")
-                null
-            } else {
-                "$key: $value"
-            }
+        durationMs = 0L
+        cacheSpeedBytesPerSecond = 0L
+        observedProperties.clear()
+        pendingSubtitles = subtitleUrls
+        val headerFields = requestHeaders.entries.mapNotNull { (key, value) ->
+            if (',' in key || ',' in value) null else "$key: $value"
         }
-        if (headerFields.isNotEmpty()) {
-            runCatching { mpv?.setOptionString("http-header-fields", headerFields.joinToString(",")) }
-            appendMpvLog("${timestamp()} mpv request headers configured names=${headers.keys.joinToString(",")}")
-        } else {
-            runCatching { mpv?.setOptionString("http-header-fields", "") }
-            appendMpvLog("${timestamp()} mpv request headers configured names=none")
-        }
-        Log.i(TAG, "${timestamp()} MPVLib.load (create -> init -> attachSurface -> load)")
-        runCatching { mpv?.command(loadCommand(url, pendingPositionMs)) }.onFailure {
-            emit(error = "mpv 加载失败：${it.message ?: "未知错误"}")
+        runCatching {
+            load.engine.setOptionString("http-header-fields", headerFields.joinToString(","))
+            subtitleOptions.forEach { (key, value) -> load.engine.setOptionString(key, value) }
+            load.engine.setPropertyDouble("sub-delay", subtitleDelayMs / 1000.0)
+            load.engine.setPropertyDouble("speed", playbackSpeed.toDouble())
+            load.started = true
+            load.engine.command(loadCommand(checkNotNull(pendingUrl), pendingPositionMs))
+            playing = true
+            buffering = true
+            load.engine.setPropertyBoolean("pause", false)
+        }.onFailure {
+            emit(load, buffering = false, error = "mpv 加载失败：${it.message ?: "未知错误"}", failureKind = FailureKind.LOAD)
             return
         }
-        playing = true
-        mpv?.setPropertyBoolean("pause", false)
-        handler.removeCallbacks(loadTimeout)
-        handler.postDelayed(loadTimeout, SOFTWARE_RETRY_TIMEOUT_MS)
-        pendingSubtitles = subtitleUrls
-        buffering = true
-        emit(buffering = true)
+        scheduleLoadTimeout(load)
+        scheduleHeartbeat(load)
+        emit(load, buffering = true)
+    }
+
+    private fun scheduleLoadTimeout(load: NativeLoad) {
+        postForLoad(load, SOFTWARE_RETRY_TIMEOUT_MS) { onLoadTimeout(load) }
+    }
+
+    private fun scheduleHeartbeat(load: NativeLoad) {
+        postForLoad(load, SESSION_HEARTBEAT_MS) {
+            persistSessionState()
+            if (ready && playing && !buffering) checkAudioOutput(load, "stable-playing", assessSilence = true)
+            scheduleHeartbeat(load)
+        }
     }
 
     private var pendingSubtitles: List<String> = emptyList()
@@ -316,27 +411,32 @@ class MpvPlayerController(
     )
 
     fun play() {
-        if (released || mpv == null) return
+        checkMainThread()
+        val load = activeLoad?.takeIf(::isActive) ?: return
         playing = true
         mpv?.setPropertyBoolean("pause", false)
-        emit()
+        emit(load)
     }
 
     fun pause() {
-        if (released || mpv == null) return
+        checkMainThread()
+        val load = activeLoad?.takeIf(::isActive) ?: return
         playing = false
         mpv?.setPropertyBoolean("pause", true)
-        emit()
+        emit(load)
     }
 
     fun seekTo(ms: Long) {
-        if (released || mpv == null) return
+        checkMainThread()
+        val load = activeLoad?.takeIf(::isActive) ?: return
+        load.ended = false
         positionMs = ms.coerceAtLeast(0L)
         mpv?.command(arrayOf("seek", (positionMs / 1000.0).toString(), "absolute+exact"))
-        emit()
+        emit(load)
     }
 
     fun setSpeed(speed: Float) {
+        playbackSpeed = speed
         if (!released) mpv?.setPropertyDouble("speed", speed.toDouble())
     }
 
@@ -355,11 +455,22 @@ class MpvPlayerController(
     }
     fun softwareRetryCount(): Int = softwareRetryCount
     fun diagnosticProperties(): Map<String, String> {
-        val properties = synchronized(observedProperties) { observedProperties.toMutableMap() }
-        listOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device", "track-list")
+        checkMainThread()
+        val properties = observedProperties.toMutableMap()
+        val engine = activeLoad?.takeIf(::isActive)?.engine ?: return properties
+        listOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device", "track-list",
+            "audio-codec-name", "audio-decoder", "af", "af-metadata")
             .forEach { key ->
-                runCatching { mpv?.getPropertyString(key) }.getOrNull()?.let { properties[key] = it }
+                // Preserve missing-property semantics used by A1's absent-output check.
+                runCatching { engine.getPropertyString(key) }.getOrNull()?.let { properties[key] = it }
             }
+        listOf("time-pos", "audio-pts", "audio-bitrate", "packet-audio-bitrate", "audio-buffer",
+            "volume", "ao-volume", "audio-delay", "speed").forEach { key ->
+            properties[key] = runCatching { engine.getPropertyDouble(key) }.getOrNull()?.toString() ?: "unavailable"
+        }
+        listOf("mute", "ao-mute", "pause", "paused-for-cache").forEach { key ->
+            properties[key] = runCatching { engine.getPropertyBoolean(key) }.getOrNull()?.toString() ?: "unavailable"
+        }
         return properties
     }
 
@@ -371,10 +482,19 @@ class MpvPlayerController(
             return
         }
         appendMpvLog("${timestamp()} mpv audio map: embyIndex=$embyIndex -> aid=$id")
-        mpv?.setPropertyInt("aid", id)
+        if (mpv?.getPropertyString("aid") != id.toString()) {
+            mpv?.setPropertyInt("aid", id)
+        }
+        activeLoad?.let { load ->
+            if (load.sampledAid != id) {
+                load.sampledAid = id
+                postForLoad(load, 200L) { checkAudioOutput(load, "track-selected") }
+            }
+        }
     }
 
     private fun applyPreferredSubtitleTrack() {
+        val load = activeLoad?.takeIf(::isActive) ?: return
         if (subtitleDisabled) return
         val embyIndex = preferredSubtitleIndex ?: return
         val id = findMpvId("sub", embyIndex, subtitleStreams)
@@ -384,7 +504,7 @@ class MpvPlayerController(
             preferredSubtitleIndex = null
             subtitleDisabled = false
             runCatching { mpv?.setPropertyString("sid", "auto") }
-            emit()
+            emit(load)
             return
         }
         appendMpvLog("${timestamp()} mpv subtitle map: embyIndex=$embyIndex -> sid=$id")
@@ -460,22 +580,22 @@ class MpvPlayerController(
         }
     }.getOrDefault(emptyList())
 
-    private fun checkAudioOutput() {
-        if (released || !ready) return
+    private fun checkAudioOutput(load: NativeLoad, point: String, assessSilence: Boolean = false) {
+        if (!isActive(load)) return
         val properties = diagnosticProperties()
+        audioDiagnostics.sample(load.identity, point, positionMs, properties)
+        PageLog.add("mpvAudio sample=$point load=${load.identity.physicalId} pos=$positionMs aid=${properties["aid"]} ao=${properties["current-ao"]} volume=${properties["volume"]} mute=${properties["mute"]}")
+        if (!assessSilence || !ready) return
         val params = properties["audio-params"].orEmpty()
         val ao = properties["current-ao"].orEmpty()
-        val abnormalAo = ao.isBlank() || ao.equals("null", true) || ao.equals("unknown", true) || ao.equals("no", true)
-        if (params.isBlank() || params.equals("null", true) || params.equals("{}") || abnormalAo) {
+        // Retain A1's missing-output check. System AudioTrackImpl '[zero]' is not an AO name.
+        val abnormalAo = ao.isBlank() || ao.lowercase() in setOf("null", "unknown", "no")
+        if (params.isBlank() || params == "null" || params == "{}" || abnormalAo) {
             val codec = audioStreams.firstOrNull { it.index == preferredAudioIndex }?.codec
                 ?: audioStreams.firstOrNull { it.isDefault }?.codec
                 ?: audioStreams.firstOrNull()?.codec ?: "unknown"
-            val aid = properties["aid"] ?: preferredAudioIndex?.toString() ?: "auto"
-            val message = "mpv audio silent: aid=$aid ao=${ao.ifBlank { "empty" }} codec=$codec"
-            appendMpvLog("${timestamp()} $message")
-            PageLog.add(message)
             audioSilentCodec = codec
-            emit()
+            emit(load)
         }
     }
 
@@ -520,6 +640,9 @@ class MpvPlayerController(
         val state = JSONObject()
             .put("active", true)
             .put("at", timestamp())
+            .put("pid", android.os.Process.myPid())
+            .put("generation", activeLoad?.identity?.generation)
+            .put("physicalLoadId", activeLoad?.identity?.physicalId)
             .put("hwdec", synchronized(observedProperties) { observedProperties["hwdec-current"] } ?: "pending")
             .put("vo", synchronized(observedProperties) { observedProperties["current-vo"] } ?: "pending")
             .put("video", JSONObject()
@@ -537,47 +660,79 @@ class MpvPlayerController(
     }
 
     fun release(reason: String = "unspecified") {
+        checkMainThread()
         if (released) return
         released = true
-        handler.removeCallbacks(loadTimeout)
-        handler.removeCallbacks(heartbeat)
-        runCatching { sessionStateFile.writeText(JSONObject().put("active", false).put("endedAt", timestamp()).toString(), Charsets.UTF_8) }
-        mpv?.let { engine ->
-            Log.i(TAG, "${timestamp()} MPVLib.destroy (release reason=$reason fileLoaded=$fileLoaded)")
-            runCatching { engine.removeObserver(this) }
-            runCatching { engine.removeLogObserver(logObserver) }
-            if (attachedSurface != null) runCatching { engine.detachSurface() }
-            attachedSurface = null
-            runCatching { engine.destroy() }
-        }
+        handler.removeCallbacksAndMessages(null)
+        audioDiagnostics.close()
+        activeLoad?.let { destroyNativeLoad(it) }
+        loadGate.close()
+        attachedSurface = null
+        runCatching { sessionStateFile.writeText(JSONObject().put("active", false).put("endedAt", timestamp()).put("reason", reason).toString(), Charsets.UTF_8) }
     }
 
-    private fun onLoadTimeout() {
-        if (released || ready || mpv == null) return
-        val url = pendingUrl ?: return
-        handler.removeCallbacks(loadTimeout)
+    private fun onLoadTimeout(load: NativeLoad) {
+        if (!isActive(load) || ready) return
+        if (load.failureKind == FailureKind.HTTP) {
+            emit(load, buffering = false, error = "mpv HTTP 请求失败", failureKind = FailureKind.HTTP)
+            return
+        }
+        if (load.retryPending) return
         if (!softwareRetryUsed) {
-            softwareRetryUsed = true
-            softwareRetryCount++
-            mpv?.setOptionString("hwdec", "no")
-            appendMpvLog("${timestamp()} mpv hwdec fallback -> no reason=first-frame-timeout")
-            mpv?.command(loadCommand(url, pendingPositionMs))
-            mpv?.setPropertyBoolean("pause", false)
-            Log.w(TAG, "mpv startup retrying with software decode")
-            handler.postDelayed(loadTimeout, SOFTWARE_RETRY_TIMEOUT_MS)
-            emit(buffering = true)
+            load.retryPending = true
+            val stillNeeded = { isActive(load) && !ready && !load.terminal }
+            onSoftwareRetry(this, load.identity, stillNeeded) {
+                if (stillNeeded()) retryInSoftware(load)
+            }
         } else {
-            Log.e(TAG, "${timestamp()} mpv did not produce first frame within ${LOAD_TIMEOUT_MS}ms")
-            emit(buffering = false, error = "mpv 未能出画（12s 无首帧）")
+            val kind = load.failureKind ?: FailureKind.FIRST_FRAME_TIMEOUT
+            val message = if (kind == FailureKind.DECODING) "mpv 硬解和软解均失败" else "mpv 未能出画（硬解和软解均无首帧）"
+            emit(load, buffering = false, error = message, failureKind = kind)
         }
     }
 
-    override fun eventProperty(property: String) = Unit
-    override fun eventProperty(property: String, value: String) {
+    private fun retryInSoftware(load: NativeLoad) {
+        checkMainThread()
+        if (!isActive(load)) return
+        softwareRetryUsed = true
+        softwareRetryCount++
+        val surface = attachedSurface
+        val width = lastSurfaceWidth
+        val height = lastSurfaceHeight
+        destroyNativeLoad(load)
+        attachedSurface = null
+        fileLoaded = false
+        ready = false
+        val result = createNativeLoad(software = true)
+        if (result is InitializationResult.Failed) {
+            // Explicit initialization outcome of a live controller, not a native event.
+            if (!released && activeLoad == null) {
+                onState(this, checkNotNull(result.identity), State(error = result.reason, failureKind = FailureKind.INITIALIZATION))
+            }
+            return
+        }
+        val retry = checkNotNull(activeLoad)
+        if (surface?.isValid != true) {
+            emit(retry, buffering = false, error = "播放画面未就绪（Surface 未创建）", failureKind = FailureKind.SURFACE)
+            return
+        }
+        attachSurface(surface, width, height)
+        appendMpvLog("${timestamp()} load=${retry.identity} hwdec fallback -> no")
+        startPhysicalLoad(retry)
+    }
+
+    private fun handleProperty(load: NativeLoad, property: String, value: String) {
         if (property in MPV_DIAGNOSTIC_PROPERTIES) {
             synchronized(observedProperties) { observedProperties[property] = value }
             appendMpvLog("${timestamp()} property $property=$value")
             persistSessionState()
+        }
+        if (property in setOf("audio-params", "audio-out-params", "current-ao") && !load.audioReconfigurationPending) {
+            load.audioReconfigurationPending = true
+            postForLoad(load, 200L) {
+                load.audioReconfigurationPending = false
+                checkAudioOutput(load, "audio-reconfigured")
+            }
         }
         when (property) {
             "track-list" -> {
@@ -590,17 +745,19 @@ class MpvPlayerController(
             }
             "end-file" -> Log.w(TAG, "${timestamp()} END_FILE reason: $value")
             "video-out-params" -> {
+                if (!fileLoaded || value.isBlank() || value == "{}" || value == "null") return
                 ready = true
-                handler.removeCallbacks(loadTimeout)
+                buffering = false
+                scheduleStableAudioSample(load)
                 Log.i(TAG, "${timestamp()} received video-out-params")
-                emit(buffering = false, ready = true)
+                emit(load, buffering = false, ready = true)
             }
         }
     }
-    override fun eventProperty(property: String, value: Long) {
+    private fun handleProperty(load: NativeLoad, property: String, value: Long) {
         if (property == "cache-speed") {
             cacheSpeedBytesPerSecond = value.coerceAtLeast(0L)
-            emit()
+            emit(load)
         }
         if (property == "video-params/w" || property == "video-params/h") {
             synchronized(observedProperties) { observedProperties[property] = value.toString() }
@@ -608,78 +765,97 @@ class MpvPlayerController(
             persistSessionState()
         }
     }
-    override fun eventProperty(property: String, value: Double) {
+    private fun handleProperty(load: NativeLoad, property: String, value: Double) {
         when (property) {
             "time-pos" -> positionMs = (value * 1000.0).toLong().coerceAtLeast(0L)
             "duration" -> durationMs = (value * 1000.0).toLong().coerceAtLeast(0L)
         }
-        emit()
+        emit(load)
     }
 
-    override fun eventProperty(property: String, value: Boolean) {
+    private fun handleProperty(load: NativeLoad, property: String, value: Boolean) {
         when (property) {
             "paused-for-cache" -> {
                 buffering = value
-                emit(buffering = value)
+                emit(load, buffering = value)
             }
-            "eof-reached" -> if (value) {
-                playing = false
-                emit(ended = true)
+            "eof-reached" -> {
+                load.ended = value
+                if (value) {
+                    playing = false
+                    emit(load, ended = true)
+                }
             }
             "pause" -> {
                 playing = !value
                 if (!value) buffering = false
-                emit()
+                emit(load)
             }
         }
     }
 
-    override fun event(eventId: Int) {
+    private fun handleEvent(load: NativeLoad, eventId: Int) {
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
                 fileLoaded = true
                 buffering = false
                 Log.i(TAG, "${timestamp()} received FILE_LOADED")
-                appendMpvLog("${timestamp()} file-loaded properties=${JSONObject(diagnosticProperties())}")
+                checkAudioOutput(load, "file-loaded")
                 applyPreferredAudioTrack()
                 persistSessionState()
-                handler.removeCallbacks(heartbeat)
-                handler.postDelayed(heartbeat, SESSION_HEARTBEAT_MS)
                 loadPendingSubtitles()
                 logTrackMapping("audio", audioStreams, "audio")
                 logTrackMapping("subtitle", subtitleStreams, "sub")
                 if (subtitleDisabled) disableSubtitle()
                 else if (preferredSubtitleIndex != null) applyPreferredSubtitleTrack()
-                emit(buffering = false)
+                emit(load, buffering = false)
             }
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
                 val firstReady = !ready
                 ready = true
-                handler.removeCallbacks(loadTimeout)
                 if (firstReady) Log.i(TAG, "${timestamp()} received PLAYBACK_RESTART (first frame ready)")
-                handler.removeCallbacks(audioOutputCheck)
-                handler.postDelayed(audioOutputCheck, AUDIO_OUTPUT_CHECK_DELAY_MS)
-                emit(buffering = false, ready = true)
+                buffering = false
+                scheduleStableAudioSample(load)
+                emit(load, buffering = false, ready = true)
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
                 Log.w(TAG, "${timestamp()} END_FILE received (reason unavailable from observer API)")
-                if (!ready) onLoadTimeout()
+                if (!ready) onLoadTimeout(load)
+                else postForLoad(load, 100L) {
+                    if (!load.ended && load.engine.getPropertyBoolean("eof-reached") != true) {
+                        emit(load, buffering = false, error = "mpv 播放中断", failureKind = load.failureKind ?: FailureKind.DECODING)
+                    }
+                }
             }
         }
     }
 
+    private fun scheduleStableAudioSample(load: NativeLoad) {
+        if (load.stableSamplePending) return
+        load.stableSamplePending = true
+        postForLoad(load, AUDIO_OUTPUT_CHECK_DELAY_MS) {
+            load.stableSamplePending = false
+            if (playing && !buffering) checkAudioOutput(load, "stable-playing", assessSilence = true)
+        }
+    }
+
     private fun emit(
+        load: NativeLoad,
         buffering: Boolean = this.buffering,
         ready: Boolean = this.ready,
-        ended: Boolean = false,
+        ended: Boolean = load.ended,
         error: String? = null,
+        failureKind: FailureKind? = null,
     ) {
-        onState(State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec, cacheSpeedBytesPerSecond, subtitleMappingNotice))
+        checkMainThread()
+        if (!isActive(load) || load.terminal) return
+        if (error != null) load.terminal = true
+        onState(this, load.identity, State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec, cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind))
     }
 
     private companion object {
+        val physicalIds = AtomicLong()
         const val TAG = "MpvPlayerController"
-        const val LOAD_TIMEOUT_MS = 12_000L
         const val SOFTWARE_RETRY_TIMEOUT_MS = 6_000L
         const val MAX_DIAGNOSTIC_LINES = 2_000
         const val MAX_SESSION_LOG_BYTES = 512 * 1024

@@ -65,7 +65,6 @@ fun SettingsBackend(
     var matchDisplayFrameRate by remember { mutableStateOf(prefs?.matchDisplayFrameRate ?: false) }
     var declareDtsDirectPlay by remember { mutableStateOf(prefs?.declareDtsDirectPlay ?: false) }
     var bootLaunch by remember { mutableStateOf(prefs?.bootLaunch ?: false) }
-    var mpvBroken by remember { mutableStateOf(prefs?.mpvBroken ?: false) }
     var sourceDynamicRange by remember { mutableStateOf(prefs?.sourceDynamicRange ?: DynamicRangePref.UNSET) }
     var sourceBitrate by remember { mutableStateOf(prefs?.sourceBitratePreference ?: NumericPref.UNSET) }
     var sourceReleaseGroups by remember { mutableStateOf(prefs?.sourceReleaseGroups.orEmpty()) }
@@ -74,14 +73,13 @@ fun SettingsBackend(
 
     val rowKeys = buildList {
         add("compat:playerEngine")
-        if (mpvBroken) add("compat:resetMpv")
         add("compat:decoderPreference")
         add("compat:matchDisplayFrameRate")
         add("compat:declareDtsDirectPlay")
         add("compat:bootLaunch")
         add("compat:sourcePreferences")
     }
-    val requesters = remember(mpvBroken, firstFocusRequester) {
+    val requesters = remember(firstFocusRequester) {
         rowKeys.mapIndexed { index, key -> key to if (index == 0) firstFocusRequester else FocusRequester() }.toMap()
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
@@ -95,28 +93,17 @@ fun SettingsBackend(
                 val engineOptions = listOf(
                     SettingChoiceOption("auto", "自动"),
                     SettingChoiceOption("media3", "Media3"),
-                    SettingChoiceOption("mpv", if (mpvBroken) "mpv（已禁用）" else "mpv"),
+                    SettingChoiceOption("mpv", "mpv"),
                 )
                 ChoiceRow("compat:playerEngine", "播放内核", "自动：Media3 → mpv", engineOptions, playerEngine, { key ->
-                    if (key != "mpv" || !mpvBroken) {
-                        playerEngine = key
-                        prefs?.playerEngine = key
-                    }
+                    playerEngine = key
+                    prefs?.playerEngine = key
                 }, requesters.getValue("compat:playerEngine"), railRequester, onFocused,
-                    downRequester = requesters.getValue(if (mpvBroken) "compat:resetMpv" else "compat:decoderPreference"))
-                if (mpvBroken) {
-                    ActionRow("compat:resetMpv", "重置 mpv 状态", "清除 mpv 不可用标记", "重置", {
-                        requesters.getValue("compat:playerEngine").requestFocus()
-                        prefs?.mpvBroken = false
-                        prefs?.mpvUnavailableReason = ""
-                        mpvBroken = false
-                    }, requesters.getValue("compat:resetMpv"), railRequester, onFocused,
-                        upRequester = requesters.getValue("compat:playerEngine"), downRequester = requesters.getValue("compat:decoderPreference"))
-                }
+                    downRequester = requesters.getValue("compat:decoderPreference"))
                 ChoiceRow("compat:decoderPreference", "解码器优先级", "选择硬件或软件解码优先级", listOf(
                     SettingChoiceOption("auto", "自动"), SettingChoiceOption("hardware", "硬解优先"), SettingChoiceOption("software", "软解优先"),
                 ), decoderPreference, { key -> decoderPreference = key; prefs?.decoderPreference = key }, requesters.getValue("compat:decoderPreference"), railRequester, onFocused,
-                    upRequester = requesters.getValue(if (mpvBroken) "compat:resetMpv" else "compat:playerEngine"), downRequester = requesters.getValue("compat:matchDisplayFrameRate"))
+                    upRequester = requesters.getValue("compat:playerEngine"), downRequester = requesters.getValue("compat:matchDisplayFrameRate"))
                 ToggleRow("compat:matchDisplayFrameRate", "匹配显示帧率", "默认关闭；仅在 API 30 及以上尝试无缝切换", matchDisplayFrameRate, {
                     matchDisplayFrameRate = it; prefs?.matchDisplayFrameRate = it
                 }, requesters.getValue("compat:matchDisplayFrameRate"), railRequester, onFocused,

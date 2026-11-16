@@ -68,14 +68,7 @@ internal fun buildPlayerDiagPayload(
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
             .put("active", activeEngine)
             .put("mpvAvailable", mpvBackend?.unavailableReason == null && mpvBackend != null)
-            .put("mpvUnavailableReason", mpvBackend?.unavailableReason ?: AppRuntime.prefs?.mpvUnavailableReason.orEmpty().ifBlank { JSONObject.NULL })
-            .put("mpvBrokenFlag", AppRuntime.prefs?.mpvBroken ?: false)
-            .put("mpvUnavailableCause", when {
-                mpvBackend?.unavailableReason != null -> "initialization-failed"
-                AppRuntime.prefs?.mpvUnavailableReason?.isNotBlank() == true -> "initialization-failed"
-                AppRuntime.prefs?.mpvBroken == true -> "mpvBroken-persisted-flag"
-                else -> JSONObject.NULL
-            })
+            .put("mpvUnavailableReason", mpvBackend?.unavailableReason ?: JSONObject.NULL)
             .put("mpvProperties", JSONObject(mpvBackend?.diagnosticProperties().orEmpty()))
             .put("kernels", JSONArray().put("media3").put("mpv")))
         .put("media", JSONObject()
@@ -202,7 +195,7 @@ internal fun buildPlayerDiagPayload(
             appendLine("error=${error ?: "none"}")
             appendLine("status=${playbackStatusNotice ?: "none"}")
             appendLine("mpvError=${mpvState.error ?: "none"}")
-            appendLine("mpvUnavailableReason=${mpvBackend?.unavailableReason ?: AppRuntime.prefs?.mpvUnavailableReason?.ifBlank { "none" } ?: "none"} mpvBroken=${AppRuntime.prefs?.mpvBroken ?: false}")
+            appendLine("mpvUnavailableReason=${mpvBackend?.unavailableReason ?: "none"}")
         },
     )
 }
