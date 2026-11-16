@@ -23,7 +23,7 @@ import java.util.Base64
 object AppRuntime {
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var applicationContext: Context? = null
-    var prefs: Prefs? = null
+    @Volatile var prefs: Prefs? = null
     var client: EmbyClient? = null
     var session: Session? = null
 
@@ -84,6 +84,7 @@ object AppRuntime {
             java.security.MessageDigest.isEqual(expected.toByteArray(Charsets.UTF_8), token.toByteArray(Charsets.UTF_8))
     }
 
+    @Synchronized
     fun init(context: Context) {
         applicationContext = context.applicationContext
         if (prefs == null) {

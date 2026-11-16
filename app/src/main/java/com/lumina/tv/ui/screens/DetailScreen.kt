@@ -56,6 +56,7 @@ import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -132,6 +133,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -285,7 +287,7 @@ fun DetailScreen(
     var loadFailed by remember(id) { mutableStateOf(false) }
     var itemNotFound by remember(id) { mutableStateOf(false) }
     var detailRetry by remember(id) { mutableStateOf(0) }
-    var item by remember { mutableStateOf<MediaItem?>(null) }
+    var item by remember(id, client) { mutableStateOf<MediaItem?>(null) }
     var seasons by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
@@ -293,8 +295,8 @@ fun DetailScreen(
     var mdb by remember(id) { mutableStateOf<MdblistClient.Ratings?>(null) }
     var resolvedExternalLinks by remember(id) { mutableStateOf<TmdbClient.ExternalLinks?>(null) }
     var mediaInfoExpanded by rememberSaveable(id) { mutableStateOf(false) }
-    var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
-    var sourcesLoading by remember { mutableStateOf(false) }
+    var sources by remember(id, client) { mutableStateOf<List<MediaSource>>(emptyList()) }
+    var sourcesLoading by remember(id, client) { mutableStateOf(true) }
     var detailPreviewUrl by remember(id) { mutableStateOf<String?>(null) }
     var detailPreviewHeaders by remember(id) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var detailPreviewKey by remember(id) { mutableStateOf("") }
@@ -314,11 +316,16 @@ fun DetailScreen(
     var similarLoading by remember { mutableStateOf(false) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
-    var selectedSourceId by remember(id) { mutableStateOf<String?>(null) }
+    var requestedSourceId by remember(id, client) { mutableStateOf(AppRuntime.prefs?.lastSourceFor(id)) }
+    val selectedSourceId = requestedSourceId?.takeIf { selected -> sources.any { it.id == selected } }
+    val selectedSourceLabel = sources.firstOrNull { it.id == selectedSourceId }?.displayLabel ?: "自动选择"
+    fun selectSource(sourceId: String?) {
+        requestedSourceId = sourceId?.takeIf { selected -> sources.any { it.id == selected } }
+        AppRuntime.prefs?.rememberSource(id, requestedSourceId)
+    }
     LaunchedEffect(id, sources, sourcesLoading) {
-        if (!sourcesLoading && selectedSourceId == null) {
-            val remembered = AppRuntime.prefs?.lastSourceFor(id)
-            if (remembered != null && sources.any { it.id == remembered }) selectedSourceId = remembered
+        if (!sourcesLoading && requestedSourceId != null && selectedSourceId == null) {
+            selectSource(null)
         }
     }
     var showSettingsPicker by remember { mutableStateOf(false) }
@@ -334,8 +341,37 @@ fun DetailScreen(
     var episodeSources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
     var episodeSourcesLoading by remember { mutableStateOf(false) }
     var showEpisodeSourceMenu by remember { mutableStateOf(false) }
-    var isFav by remember { mutableStateOf(false) }
-    var isPlayed by remember { mutableStateOf(false) }
+    val favoriteAction = remember(id, client) { UserFlagMutation() }
+    val playedAction = remember(id, client) { UserFlagMutation() }
+    val isFav = favoriteAction.value
+    val isPlayed = playedAction.value
+    val pageActive = remember(id, client) { java.util.concurrent.atomic.AtomicBoolean(true) }
+    androidx.compose.runtime.DisposableEffect(pageActive) {
+        onDispose { pageActive.set(false) }
+    }
+    fun toggleUserFlag(action: UserFlagMutation, favorite: Boolean) {
+        val c = client ?: return
+        action.toggle(
+            // Finish the accepted server write and invalidate caches even after leaving this page.
+            scope = kotlinx.coroutines.CoroutineScope(AppRuntime.appScope.coroutineContext + Dispatchers.Main.immediate),
+            request = { target -> if (favorite) c.setFavorite(id, target) else c.setPlayed(id, target) },
+            onSuccess = { actual ->
+                if (AppRuntime.client === c) {
+                    LibraryCache.invalidateUserData(context.applicationContext, c.baseUrl, c.userId, id,
+                        favorite = actual.takeIf { favorite }, played = actual.takeUnless { favorite })
+                    if (pageActive.get()) item = item?.let {
+                        if (favorite) it.copy(isFavorite = actual) else it.copy(played = actual)
+                    }
+                }
+            },
+            onFailure = { failure ->
+                PageLog.add("userData update failed item=$id field=${if (favorite) "favorite" else "played"} error=${failure.javaClass.simpleName}")
+                if (pageActive.get() && AppRuntime.client === c) {
+                    android.widget.Toast.makeText(context, "${if (favorite) "收藏" else "已看状态"}更新失败，请重试", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+    }
     var focusedRelatedId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     val castRowState = rememberLazyListState()
     val similarRowState = rememberLazyListState()
@@ -376,6 +412,7 @@ fun DetailScreen(
     }
 
     LaunchedEffect(id, detailRetry) {
+        val cacheRevision = LibraryCache.userDataRevision
         synchronized(failedDetailBackgroundKeys) {
             val now = System.currentTimeMillis()
             failedDetailBackgroundKeys.entries.removeAll { now - it.value >= DETAIL_PREVIEW_FAILURE_TTL_MS }
@@ -397,20 +434,24 @@ fun DetailScreen(
             seasons = cached.seasons
             episodes = cached.episodes
             sources = cached.sources
-            isFav = cached.item?.isFavorite ?: false
-            isPlayed = cached.item?.played ?: false
+            favoriteAction.syncFromServer(cached.item?.isFavorite ?: false)
+            playedAction.syncFromServer(cached.item?.played ?: false)
             selectedSeason = cached.seasons.firstOrNull()
             loading = false
-            sourcesLoading = cached.sources.isEmpty()
+            sourcesLoading = true
             val startedAt = System.currentTimeMillis()
             PageLog.add("detailLoad id=$id stage=cache-main ms=0")
             val freshItemJob = scope.launch {
                 val freshItem = runCatching { c.getItem(id) }.getOrNull()
-                if (freshItem != null) item = freshItem
+                if (freshItem != null) {
+                    item = freshItem
+                    favoriteAction.syncFromServer(freshItem.isFavorite)
+                    playedAction.syncFromServer(freshItem.played)
+                }
                 PageLog.add("detailLoad id=$id stage=main-refresh ms=${System.currentTimeMillis() - startedAt}")
             }
             val sourceJob = scope.launch {
-                sources = if (cached.sources.isEmpty()) runCatching { c.getMediaSources(id) }.getOrDefault(emptyList()) else cached.sources
+                sources = runCatching { c.getMediaSources(id) }.getOrDefault(cached.sources)
                 sourcesLoading = false
                 PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - startedAt}")
             }
@@ -422,7 +463,7 @@ fun DetailScreen(
             }
             scope.launch {
                 joinAll(freshItemJob, sourceJob, recommendationJob)
-                LibraryCache.putDetail(id, cached.copy(item = item ?: cached.item, sources = sources, at = System.currentTimeMillis()))
+                LibraryCache.putDetail(id, cached.copy(item = item ?: cached.item, sources = sources, at = System.currentTimeMillis()), cacheRevision)
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - startedAt}")
             }
             return@LaunchedEffect
@@ -474,6 +515,10 @@ fun DetailScreen(
         }
         val it0 = main
         item = it0
+        if (it0 != null) {
+            favoriteAction.syncFromServer(it0.isFavorite)
+            playedAction.syncFromServer(it0.played)
+        }
         loading = false
         loadFailed = false
         sourcesLoading = true
@@ -483,10 +528,6 @@ fun DetailScreen(
             tmdb = runCatching { TmdbClient.lookup(it0.type, it0.seriesName ?: it0.name, it0.year) }.getOrNull()
         }
         if (it0 != null) {
-            isFav = it0.isFavorite
-            isPlayed = it0.played
-        }
-        if (it0 != null) {
             val seasonJob = scope.launch {
                 val loadedSeasons = if (it0.type == "Series") runCatching { c.getSeasons(id) }.getOrDefault(emptyList()) else emptyList()
                 seasons = loadedSeasons
@@ -494,7 +535,7 @@ fun DetailScreen(
                 val loadedEpisodes = if (first != null) {
                     LibraryCache.episodesOf(id, first.id) ?: runCatching { c.getEpisodes(id, first.id) }.getOrDefault(emptyList())
                 } else emptyList()
-                if (first != null) LibraryCache.putEpisodes(id, first.id, loadedEpisodes)
+                if (first != null) LibraryCache.putEpisodes(id, first.id, loadedEpisodes, cacheRevision)
                 episodes = loadedEpisodes
                 selectedSeason = first
                 PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
@@ -512,13 +553,14 @@ fun DetailScreen(
             }
             scope.launch {
                 joinAll(seasonJob, sourceJob, recommendationJob)
-                LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()))
+                LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()), cacheRevision)
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - loadStartedAt}")
             }
         }
     }
 
     LaunchedEffect(selectedSeason) {
+        val cacheRevision = LibraryCache.userDataRevision
         val c = client ?: return@LaunchedEffect
         val it0 = item ?: return@LaunchedEffect
         if (it0.type == "Series" && selectedSeason != null) {
@@ -528,7 +570,7 @@ fun DetailScreen(
                 return@LaunchedEffect
             }
             val list = runCatching { c.getEpisodes(it0.id, sid) }.getOrDefault(emptyList())
-            LibraryCache.putEpisodes(it0.id, sid, list)
+            LibraryCache.putEpisodes(it0.id, sid, list, cacheRevision)
             episodes = list
         }
     }
@@ -980,7 +1022,7 @@ fun DetailScreen(
                                         Icon(Icons.Rounded.Layers, null, tint = TextMain, modifier = Modifier.size(18.dp))
                                         Spacer(Modifier.width(6.dp))
                                         Text(
-                                            "版本 · ${sources.firstOrNull()?.displayLabel ?: "默认源"}",
+                                            "版本 · $selectedSourceLabel",
                                             color = TextMain,
                                             fontSize = 13.sp,
                                             maxLines = 1,
@@ -994,15 +1036,7 @@ fun DetailScreen(
                             FocusSurface(
                                 modifier = Modifier.size(46.dp),
                                 corner = 23.dp,
-                                onClick = {
-                                    isFav = !isFav
-                                    LibraryCache.invalidateHome()
-                                    LibraryCache.invalidateDetail(it0.id)
-                                    scope.launch {
-                                        val saved = runCatching { client?.setFavorite(it0.id, isFav) }.getOrNull()
-                                        if (saved == false) isFav = !isFav
-                                    }
-                                },
+                                onClick = { toggleUserFlag(favoriteAction, favorite = true) },
                             ) { focused ->
                                 Box(
                                     Modifier.fillMaxSize().background(
@@ -1010,7 +1044,8 @@ fun DetailScreen(
                                     ),
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    Icon(
+                                    if (favoriteAction.pending) CircularProgressIndicator(Modifier.size(20.dp), color = TextMain, strokeWidth = 2.dp)
+                                    else Icon(
                                         if (isFav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                                         contentDescription = "收藏",
                                         tint = if (isFav) Color(0xFF06101F) else TextMain,
@@ -1023,15 +1058,7 @@ fun DetailScreen(
                             FocusSurface(
                                 modifier = Modifier.size(46.dp),
                                 corner = 23.dp,
-                                onClick = {
-                                    isPlayed = !isPlayed
-                                    LibraryCache.invalidateHome()
-                                    LibraryCache.invalidateDetail(it0.id)
-                                    scope.launch {
-                                        val saved = runCatching { client?.setPlayed(it0.id, isPlayed) }.getOrNull()
-                                        if (saved == false) isPlayed = !isPlayed
-                                    }
-                                },
+                                onClick = { toggleUserFlag(playedAction, favorite = false) },
                             ) { focused ->
                                 Box(
                                     Modifier.fillMaxSize().background(
@@ -1039,7 +1066,8 @@ fun DetailScreen(
                                     ),
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    Icon(
+                                    if (playedAction.pending) CircularProgressIndicator(Modifier.size(20.dp), color = TextMain, strokeWidth = 2.dp)
+                                    else Icon(
                                         Icons.Rounded.CheckCircle,
                                         contentDescription = "已看",
                                         tint = if (isPlayed) Color(0xFF06101F) else TextMain,
@@ -1253,14 +1281,9 @@ fun DetailScreen(
             TrackSheet(onDismiss = { showTrackSheet = false }) {
                 GlassPanel(Modifier.fillMaxWidth(), corner = 12.dp) {
                     Column(Modifier.padding(6.dp)) {
-                        SettingRow("版本", activeSource?.displayLabel ?: "默认", enabled = sources.size > 1) {
-                            if (sources.size > 1) {
-                                pickerTitle = "选择版本"
-                                pickerOptions = sources.map { it.id to it.displayLabel }
-                                pickerCurrentKey = activeSource?.id
-                                pickerAction = { key -> selectedSourceId = key }
-                                showSettingsPicker = true
-                            }
+                        SettingRow("版本", selectedSourceLabel, enabled = sources.isNotEmpty()) {
+                            showTrackSheet = false
+                            showSourceMenu = true
                         }
                         val audioTracks = activeSource?.streams.orEmpty().filter { it.type == "Audio" }
                         SettingRow("音频", audioTracks.firstOrNull { it.index == selectedAudioIndex }?.let(::audioLabel)
@@ -1298,14 +1321,14 @@ fun DetailScreen(
             SourceMenu(
                 sources = episodeSources,
                 sourcesLoading = episodeSourcesLoading,
-                currentSourceId = episodeSources.firstOrNull()?.id,
+                currentSourceId = AppRuntime.prefs?.lastSourceFor(ep.id)?.takeIf { selected -> episodeSources.any { it.id == selected } },
                 engine = AppRuntime.prefs?.playerEngine ?: "media3",
                 audioCaps = sourceAudioCaps,
                 title = "选择版本 · ${ep.name}",
                 onPick = { sid ->
                     showEpisodeSourceMenu = false
-                    AppRuntime.prefs?.rememberSource(ep.id, sid)
-                    onPlayWithSource(ep, sid)
+                    AppRuntime.prefs?.rememberSource(ep.id, sid.takeIf { it.isNotBlank() })
+                    if (sid.isBlank()) onPlay(ep) else onPlayWithSource(ep, sid)
                 },
                 onClose = { showEpisodeSourceMenu = false },
             )
@@ -1316,12 +1339,11 @@ fun DetailScreen(
             SourceMenu(
                 sources = sources,
                 sourcesLoading = sourcesLoading,
-                currentSourceId = selectedSourceId ?: sources.firstOrNull()?.id,
+                currentSourceId = selectedSourceId,
                 engine = AppRuntime.prefs?.playerEngine ?: "media3",
                 audioCaps = sourceAudioCaps,
                 onPick = { sid ->
-                    selectedSourceId = sid
-                    AppRuntime.prefs?.rememberSource(id, sid)
+                    selectSource(sid)
                     showSourceMenu = false
                 },
                 onClose = { showSourceMenu = false },
@@ -1384,7 +1406,7 @@ private fun SourceMenu(
             val hint = sourceHint(source, engine, audioCaps)
             source.id to (source.displayLabel + (hint.label?.let { "  ·  $it" } ?: ""))
         }
-    PickerDialog(title, options, currentSourceId, onPick, onClose, loading = sourcesLoading)
+    PickerDialog(title, listOf("" to "自动选择") + options, currentSourceId.orEmpty(), onPick, onClose, loading = sourcesLoading)
 }
 
 @Composable

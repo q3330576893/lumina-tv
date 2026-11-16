@@ -21,6 +21,19 @@ object PlaybackCache {
     private val sensitiveParams = setOf("api_key", "apikey", "token", "access_token", "authorization", "auth", "x-emby-token")
     @Volatile private var instance: SimpleCache? = null
     @Volatile private var limitBytes = DEFAULT_LIMIT
+    private var configured = false
+
+    /** Only applies prefs; does not create SimpleCache. Safe before every entry point. */
+    @Synchronized
+    fun initialize(context: Context) {
+        AppRuntime.init(context)
+        val savedLimit = requireNotNull(AppRuntime.prefs).playbackCacheBytes
+        setLimit(savedLimit)
+        if (!configured) {
+            configured = true
+            PageLog.add("playbackCache initialized bytes=$savedLimit enabled=${savedLimit > 0L}")
+        }
+    }
 
     fun setLimit(bytes: Long) {
         val normalized = bytes.coerceAtLeast(0L)
@@ -35,9 +48,9 @@ object PlaybackCache {
     fun enabled(): Boolean = limitBytes > 0L
 
     fun get(context: Context): SimpleCache? {
-        if (!enabled()) return null
-        instance?.let { return it }
         synchronized(this) {
+            initialize(context)
+            if (!enabled()) return null
             instance?.let { return it }
             return runCatching {
                 SimpleCache(
@@ -66,6 +79,8 @@ object PlaybackCache {
     }
 
     suspend fun autoTrim(context: Context, force: Boolean = false) = withContext(Dispatchers.IO) {
+        initialize(context)
+        if (!enabled()) return@withContext
         val now = System.currentTimeMillis()
         if (!force && now - (AppRuntime.prefs?.playbackCacheLastTrimAt ?: 0L) < DAY_MS) return@withContext
         runCatching {

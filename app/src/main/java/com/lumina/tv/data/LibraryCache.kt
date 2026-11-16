@@ -1,6 +1,9 @@
 package com.lumina.tv.data
 
 import android.content.Context
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -12,6 +15,9 @@ import java.io.File
  * 命中缓存立即渲染，过期后在后台静默刷新。
  */
 object LibraryCache {
+
+    var userDataRevision by mutableLongStateOf(0L)
+        private set
 
     data class HomeData(
         val resume: List<MediaItem>,
@@ -48,41 +54,47 @@ object LibraryCache {
         File(context.filesDir, "home_cache_${baseUrl.hashCode()}_$userId.json")
 
     suspend fun readHome(context: Context, baseUrl: String, userId: String): HomeData? = withContext(Dispatchers.IO) {
-        runCatching {
-            val json = JSONObject(homeFile(context, baseUrl, userId).readText())
-            val savedAt = json.optLong("savedAt", 0L)
-            if (savedAt <= 0L) return@runCatching null
-            val cacheAt = if (System.currentTimeMillis() - savedAt > DISK_HOME_TTL) 0L else savedAt
-            HomeData(
-                resume = json.readItems("resume"), latest = json.readItems("latest"),
-                movies = json.readItems("movies"), series = json.readItems("series"),
-                favorites = json.readItems("favorites"), genres = emptyList(),
-                views = json.readViews(), at = cacheAt,
-            )
-        }.getOrNull()?.also { putHome(it) }
+        synchronized(this@LibraryCache) {
+            runCatching {
+                val json = JSONObject(homeFile(context, baseUrl, userId).readText())
+                val savedAt = json.optLong("savedAt", 0L)
+                if (savedAt <= 0L) return@runCatching null
+                val cacheAt = if (System.currentTimeMillis() - savedAt > DISK_HOME_TTL) 0L else savedAt
+                HomeData(
+                    resume = json.readItems("resume"), latest = json.readItems("latest"),
+                    movies = json.readItems("movies"), series = json.readItems("series"),
+                    favorites = json.readItems("favorites"), genres = emptyList(),
+                    views = json.readViews(), at = cacheAt,
+                )
+            }.getOrNull()?.also { putHome(it) }
+        }
     }
 
-    suspend fun writeHome(context: Context, baseUrl: String, userId: String, data: HomeData) = withContext(Dispatchers.IO) {
-        val file = homeFile(context, baseUrl, userId)
-        synchronized(homeWriteTimes) {
-            val now = System.currentTimeMillis()
-            if (now - (homeWriteTimes[file.name] ?: 0L) < HOME_WRITE_INTERVAL) return@withContext
-            homeWriteTimes[file.name] = now
-        }
-        runCatching {
-            val json = JSONObject().put("savedAt", data.at)
-            listOf("resume" to data.resume, "latest" to data.latest, "movies" to data.movies,
-                "series" to data.series, "favorites" to data.favorites).forEach { (key, items) ->
-                json.put(key, JSONArray().also { array -> items.forEach { array.put(it.toJson()) } })
+    suspend fun writeHome(context: Context, baseUrl: String, userId: String, data: HomeData,
+        revision: Long = userDataRevision) = withContext(Dispatchers.IO) {
+        synchronized(this@LibraryCache) {
+            if (revision != userDataRevision) return@withContext
+            val file = homeFile(context, baseUrl, userId)
+            synchronized(homeWriteTimes) {
+                val now = System.currentTimeMillis()
+                if (now - (homeWriteTimes[file.name] ?: 0L) < HOME_WRITE_INTERVAL) return@withContext
+                homeWriteTimes[file.name] = now
             }
-            json.put("views", JSONArray().also { array -> data.views.forEach { view ->
-                array.put(JSONObject().put("id", view.id).put("name", view.name).put("type", view.type).putNullable("imageTag", view.imageTag))
-            } })
-            val temp = File(file.parentFile, "${file.name}.tmp")
-            temp.writeText(json.toString())
-            if (!temp.renameTo(file)) {
-                temp.copyTo(file, overwrite = true)
-                temp.delete()
+            runCatching {
+                val json = JSONObject().put("savedAt", data.at)
+                listOf("resume" to data.resume, "latest" to data.latest, "movies" to data.movies,
+                    "series" to data.series, "favorites" to data.favorites).forEach { (key, items) ->
+                    json.put(key, JSONArray().also { array -> items.forEach { array.put(it.toJson()) } })
+                }
+                json.put("views", JSONArray().also { array -> data.views.forEach { view ->
+                    array.put(JSONObject().put("id", view.id).put("name", view.name).put("type", view.type).putNullable("imageTag", view.imageTag))
+                } })
+                val temp = File(file.parentFile, "${file.name}.tmp")
+                temp.writeText(json.toString())
+                if (!temp.renameTo(file)) {
+                    temp.copyTo(file, overwrite = true)
+                    temp.delete()
+                }
             }
         }
     }
@@ -160,8 +172,8 @@ object LibraryCache {
         }?.takeIf { it.id.isNotBlank() } }
     }
 
-    fun putHome(data: HomeData) {
-        synchronized(this) { home = data }
+    fun putHome(data: HomeData, revision: Long = userDataRevision) {
+        synchronized(this) { if (revision == userDataRevision) home = data }
     }
 
     fun detail(id: String, ttl: Long = DETAIL_TTL): DetailData? {
@@ -171,8 +183,9 @@ object LibraryCache {
 
     fun detailStale(id: String): DetailData? = synchronized(this) { details[id] }
 
-    fun putDetail(id: String, data: DetailData) {
+    fun putDetail(id: String, data: DetailData, revision: Long = userDataRevision) {
         synchronized(this) {
+            if (revision != userDataRevision) return
             details[id] = data
             if (details.size > 12) {
                 val firstKey = details.keys.firstOrNull()
@@ -184,8 +197,9 @@ object LibraryCache {
     fun episodesOf(seriesId: String, seasonId: String?): List<MediaItem>? =
         synchronized(this) { seasonEpisodes["$seriesId|${seasonId ?: ""}"] }
 
-    fun putEpisodes(seriesId: String, seasonId: String?, list: List<MediaItem>) {
+    fun putEpisodes(seriesId: String, seasonId: String?, list: List<MediaItem>, revision: Long = userDataRevision) {
         synchronized(this) {
+            if (revision != userDataRevision) return
             seasonEpisodes["$seriesId|${seasonId ?: ""}"] = list
             if (seasonEpisodes.size > 24) {
                 seasonEpisodes.keys.firstOrNull()?.let { seasonEpisodes.remove(it) }
@@ -194,26 +208,54 @@ object LibraryCache {
     }
 
     // ---- 浏览页（电影/剧集/收藏/类型）短期缓存 ----
-    private data class BrowseEntry(val items: List<MediaItem>, val at: Long, val ttlMs: Long)
+    private data class BrowseEntry(val items: List<MediaItem>, val at: Long, val ttlMs: Long, val fixedSample: Boolean)
     private val browse = LinkedHashMap<String, BrowseEntry>()
 
     fun browseOf(key: String, ttl: Long = 3 * 60_000L): List<MediaItem>? {
         val e = synchronized(this) { browse[key] } ?: return null
-        return if (System.currentTimeMillis() - e.at < minOf(ttl, e.ttlMs)) e.items else null
+        return if (e.fixedSample || System.currentTimeMillis() - e.at < minOf(ttl, e.ttlMs)) e.items else null
     }
 
-    fun putBrowse(key: String, list: List<MediaItem>) {
+    fun putBrowse(key: String, list: List<MediaItem>, revision: Long = userDataRevision, fixedSample: Boolean = false) {
         // 空结果只缓存 30 秒，避免一次超时导致长时间显示“无内容”
         val ttlMs = if (list.isEmpty()) 30_000L else 3 * 60_000L
         synchronized(this) {
-            browse[key] = BrowseEntry(list, System.currentTimeMillis(), ttlMs)
-            if (browse.size > 40) browse.keys.firstOrNull()?.let { browse.remove(it) }
+            if (revision != userDataRevision) return
+            if (fixedSample) browse.entries.removeAll { it.key != key && it.value.fixedSample }
+            browse[key] = BrowseEntry(list, System.currentTimeMillis(), ttlMs, fixedSample)
+            if (browse.size > 40) browse.entries.firstOrNull { !it.value.fixedSample }?.key?.let { browse.remove(it) }
         }
+    }
+
+    fun removeBrowse(key: String) {
+        synchronized(this) { browse.remove(key) }
     }
 
     /** 收藏/已看变更后让缓存失效，避免返回首页看到旧状态。 */
     fun invalidateHome() {
         synchronized(this) { home = null }
+    }
+
+    /** Called after a confirmed mutation, including when its detail page has already closed. */
+    fun invalidateUserData(context: Context, baseUrl: String, userId: String, itemId: String,
+        favorite: Boolean? = null, played: Boolean? = null) {
+        synchronized(this) {
+            removeHomeDisk(context, baseUrl, userId)
+            homeWriteTimes.remove(homeFile(context, baseUrl, userId).name)
+            home = null
+            details.clear()
+            seasonEpisodes.clear()
+            // Preserve the membership/order of an active random sample while updating its flags.
+            val samples = browse.filterValues { it.fixedSample }.mapValues { (_, entry) ->
+                entry.copy(items = entry.items.map { item ->
+                    if (item.id == itemId) item.copy(isFavorite = favorite ?: item.isFavorite, played = played ?: item.played)
+                    else item
+                })
+            }
+            browse.clear()
+            browse.putAll(samples)
+            userDataRevision++
+        }
     }
 
     // ---- 媒体库网格滚动位置：index / 像素偏移 / 当时已加载条目数 ----
@@ -236,6 +278,7 @@ object LibraryCache {
 
     fun clear() {
         synchronized(this) {
+            userDataRevision++
             home = null
             details.clear()
             seasonEpisodes.clear()

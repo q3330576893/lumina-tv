@@ -1,16 +1,6 @@
-// gradle --offline -I app/src/test/java/com/lumina/tv/samples.init.gradle -PsamplesJsonJar=<existing org.json jar> :app:samples
-// Reuse a local JSON implementation for the DV and S5 checks; no dependencies or downloads.
+// Compatibility entry point. Tasks and the pinned JVM JSON runtime now live in app/build.gradle.kts.
+// gradle --offline :app:verifyOffline
 gradle.projectsEvaluated {
     def app = gradle.rootProject.project(':app')
-    app.tasks.register('samples', JavaExec) {
-        def tests = app.tasks.named('compileDebugUnitTestKotlin')
-        dependsOn tests
-        def jsonJar = app.findProperty('samplesJsonJar')
-        if (!jsonJar || !app.file(jsonJar).isFile()) {
-            throw new GradleException('Pass -PsamplesJsonJar=<path to an existing org.json jar> for the JVM samples.')
-        }
-        classpath = app.files(jsonJar, tests.get().destinationDirectory,
-            app.tasks.named('compileDebugKotlin').get().destinationDirectory, tests.get().libraries)
-        mainClass = 'com.lumina.tv.SamplesMain'
-    }
+    app.tasks.named('verifyOffline')
 }

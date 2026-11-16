@@ -1503,40 +1503,51 @@ data class PlaybackTarget(
 
     // ---------------- 收藏 / 已看 ----------------
 
-    suspend fun setFavorite(itemId: String, favorite: Boolean): Boolean = withContext(Dispatchers.IO) {
-        runCatching {
-            val resp = if (favorite) {
-                postSync(url("/Users/$userId/FavoriteItems/$itemId", emptyMap()), "{}")
-            } else {
-                val req = Request.Builder().url(url("/Users/$userId/FavoriteItems/$itemId", emptyMap()))
-                    .header("X-Emby-Authorization", authHeader())
-                    .delete()
-                    .build()
-                http.newCall(req).execute().use { r ->
-                    if (!r.isSuccessful) throw EmbyException("HTTP ${r.code}")
-                    JSONObject(r.body?.string().orEmpty().ifBlank { "{}" })
-                }
-            }
-            resp.optJSONObject("UserData")?.optBoolean("IsFavorite", favorite) ?: favorite
-        }.getOrDefault(favorite)
-    }
+    private val userDataMutationMutex = Mutex()
 
-    suspend fun setPlayed(itemId: String, played: Boolean): Boolean = withContext(Dispatchers.IO) {
-        runCatching {
-            val resp = if (played) {
-                postSync(url("/Users/$userId/PlayedItems/$itemId", emptyMap()), "{}")
-            } else {
-                val req = Request.Builder().url(url("/Users/$userId/PlayedItems/$itemId", emptyMap()))
-                    .header("X-Emby-Authorization", authHeader())
-                    .delete()
-                    .build()
-                http.newCall(req).execute().use { r ->
-                    if (!r.isSuccessful) throw EmbyException("HTTP ${r.code}")
-                    JSONObject(r.body?.string().orEmpty().ifBlank { "{}" })
+    suspend fun setFavorite(itemId: String, favorite: Boolean): Result<Boolean> =
+        setUserDataFlag(itemId, "FavoriteItems", "IsFavorite", favorite)
+
+    suspend fun setPlayed(itemId: String, played: Boolean): Result<Boolean> =
+        setUserDataFlag(itemId, "PlayedItems", "Played", played)
+
+    private suspend fun setUserDataFlag(itemId: String, endpoint: String, field: String, target: Boolean): Result<Boolean> =
+        userDataMutationMutex.withLock {
+            withContext(Dispatchers.IO) {
+                try {
+                    val resp = if (target) {
+                        postSync(url("/Users/$userId/$endpoint/$itemId"), "{}")
+                    } else {
+                        val req = Request.Builder().url(url("/Users/$userId/$endpoint/$itemId"))
+                            .header("X-Emby-Authorization", authHeader())
+                            .delete()
+                            .build()
+                        http.newCall(req).execute().use { r ->
+                            if (!r.isSuccessful) throw EmbyException("HTTP ${r.code}", r.code)
+                            JSONObject(r.body?.string().orEmpty().ifBlank { "{}" })
+                        }
+                    }
+                    // Emby versions return either UserItemDataDto at the root or a wrapped UserData.
+                    // Empty 2xx responses require a read-back; never invent the requested state.
+                    val actual = userDataFlag(resp, field)
+                        ?: userDataFlag(getSync(url("/Users/$userId/Items/$itemId")), field)
+                        ?: throw EmbyException("响应缺少 $field，无法确认状态")
+                    Result.success(actual)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    Result.failure(failure)
                 }
             }
-            resp.optJSONObject("UserData")?.optBoolean("Played", played) ?: played
-        }.getOrDefault(played)
+        }
+
+    private fun userDataFlag(json: JSONObject, field: String): Boolean? {
+        fun read(data: JSONObject): Boolean? = when (val value = data.opt(field)) {
+            is Boolean -> value
+            is String -> value.toBooleanStrictOrNull()
+            else -> null
+        }
+        return json.optJSONObject("UserData")?.let(::read) ?: read(json)
     }
 
     // ---------------- 进度上报 ----------------

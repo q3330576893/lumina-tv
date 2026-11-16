@@ -92,6 +92,7 @@ class MainActivity : ComponentActivity() {
         CrashHandler.install(this)
         startupCrashNotice = CrashHandler.takeStartupNotice(this)
         AppRuntime.init(this)
+        PlaybackCache.initialize(applicationContext)
         AppRuntime.restore()
         lifecycleScope.launch(Dispatchers.IO) {
             PlaybackCache.autoTrim(applicationContext)

@@ -125,14 +125,18 @@ compileSdk 36 / targetSdk 35 / minSdk 26
 
 **纯函数断言**
 
-`SamplesMain` 依次运行 DV 解析、播放错误分类、地区分桶、语言归一化、地区边界、推荐地区加分及 S1 / S2 / S5 断言，使用 `fun main()` + `check()`，不依赖 JUnit。
-DV 与 S5 样例需要本机已有的 `org.json` JAR（Android SDK 中的 JSON 桩不提供实际实现）。在仓库根目录执行：
+`SamplesMain` 依次运行原有 9 组 samples 及 A1 可靠性断言，每组打印 START / PASS，异常直接让 Gradle 失败，使用 `fun main()` + `check()`，不依赖 JUnit。
+JVM JSON 运行库固定为 `org.json:json:20240303`，通过独立的 `samplesJson` 配置解析，不进入 APK。在仓库根目录执行：
 
 ```bash
-gradle --offline -I app/src/test/java/com/lumina/tv/samples.init.gradle -PsamplesJsonJar=/path/to/existing/json.jar :app:samples
+gradle :app:verifyOffline
+# SDK 和依赖首次缓存后可完全离线重跑：
+gradle --offline :app:verifyOffline
 ```
 
-脚本只使用现有编译依赖和显式指定的本地 JAR，不新增 Gradle 依赖、不下载文件。
+不需要 `local.properties`、签名库或服务端密钥；SDK 可通过 `ANDROID_HOME` 指定。A1 只连接本机回环 HTTP 服务。
+统一任务还运行 `p1Checks`：收藏/已看真实 HTTP 响应、异步回滚与条目隔离、排序键与随机固定样本缓存。
+`check` / `assemble*` / `bundle*` 依赖验证成功；PR 仅运行验证、不发布产物，构建发布 job 依赖 `verify`。
 
 **配置**
 

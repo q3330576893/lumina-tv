@@ -304,9 +304,9 @@ class Prefs(context: Context) {
 
     fun lastSourceFor(itemId: String): String? = sp.getString(itemKey("last_source", itemId), null)
 
-    fun rememberSource(itemId: String, sourceId: String) {
-        if (itemId.isBlank() || sourceId.isBlank()) return
-        sp.edit().putString(itemKey("last_source", itemId), sourceId).apply()
+    fun rememberSource(itemId: String, sourceId: String?) {
+        if (itemId.isBlank()) return
+        sp.edit().putString(itemKey("last_source", itemId), sourceId?.takeIf { it.isNotBlank() }).apply()
     }
 
     /** 强制转码（部分异形编码在电视盒上直连会卡顿时使用） */

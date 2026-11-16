@@ -163,6 +163,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.withPermit
@@ -195,6 +196,7 @@ fun HomeScreen(
     onLogout: () -> Unit,
 ) {
     val client = AppRuntime.client
+    val userDataRevision = LibraryCache.userDataRevision
     val context = LocalContext.current
     val prefetchSemaphore = remember { kotlinx.coroutines.sync.Semaphore(3) }
     val countSemaphore = remember { kotlinx.coroutines.sync.Semaphore(4) }
@@ -208,7 +210,7 @@ fun HomeScreen(
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
     var error by remember { mutableStateOf<String?>(null) }
     var offline by remember { mutableStateOf(false) }
-    var resumeItems by remember { mutableStateOf(LibraryCache.home?.resume ?: emptyList()) }
+    var resumeItems by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.resume ?: emptyList()) }
     var resumeFilterVersion by remember { mutableIntStateOf(0) }
     // SharedPreferences filtering runs only when these remember keys change.
     val resume = remember(resumeItems, resumeFilterVersion) {
@@ -216,10 +218,10 @@ fun HomeScreen(
     }
     var pendingResumeRemoval by remember { mutableStateOf<MediaItem?>(null) }
     val removeFocus = remember { FocusRequester() }
-    var latest by remember { mutableStateOf(LibraryCache.home?.latest ?: emptyList()) }
-    var movies by remember { mutableStateOf(LibraryCache.home?.movies ?: emptyList()) }
-    var series by remember { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
-    var favorites by remember { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
+    var latest by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.latest ?: emptyList()) }
+    var movies by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.movies ?: emptyList()) }
+    var series by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
+    var favorites by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
     var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
     var libraryCounts by remember { mutableStateOf<Map<String, Int?>>(emptyMap()) }
     var libraryRecentBackdropUrls by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
@@ -235,24 +237,24 @@ fun HomeScreen(
     val sortItemRequesters = remember { SORT_LABELS.keys.associateWith { FocusRequester() } }
     var libraryServerMenuOpen by remember { mutableStateOf(false) }
     var reloadToken by remember { mutableStateOf(0) }
-    var gridItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var libraryTotalCount by remember { mutableStateOf<Int?>(null) }
-    var gridLoading by remember { mutableStateOf(false) }
-    var gridRefreshing by remember { mutableStateOf(false) }
-    var gridAppending by remember { mutableStateOf(false) }
-    var gridNextIndex by remember { mutableStateOf(0) }
-    var gridHasMore by remember { mutableStateOf(true) }
     val recListState = rememberLazyListState()
     val gridStates = remember { mutableMapOf<String, LazyGridState>() }
     val gridStateKey = when {
-        tab == HomeTab.Media -> "library:${selectedLibraryId ?: "list"}"
+        tab == HomeTab.Media -> libraryBrowseKey(selectedLibraryId ?: "list", librarySort, librarySortOrder)
         else -> "tab:${tab.name}"
     }
+    var gridItems by remember(gridStateKey, userDataRevision) { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var libraryTotalCount by remember(gridStateKey, userDataRevision) { mutableStateOf<Int?>(null) }
+    var gridLoading by remember(gridStateKey, userDataRevision) { mutableStateOf(true) }
+    var gridRefreshing by remember(gridStateKey, userDataRevision) { mutableStateOf(false) }
+    var gridAppending by remember(gridStateKey, userDataRevision) { mutableStateOf(false) }
+    var gridNextIndex by remember(gridStateKey, userDataRevision) { mutableStateOf(0) }
+    var gridHasMore by remember(gridStateKey, userDataRevision) { mutableStateOf(false) }
     val gridState = remember(gridStateKey) {
         gridStates.getOrPut(gridStateKey) { LazyGridState() }
     }
     // 待恢复的滚动位置：null 表示没有待恢复目标（此时才允许把位置写回缓存）
-    var pendingGridRestore by remember(gridStateKey) { mutableStateOf(LibraryCache.gridPosition(gridStateKey)) }
+    var pendingGridRestore by remember(gridStateKey, userDataRevision) { mutableStateOf(LibraryCache.gridPosition(gridStateKey)) }
     val homeExceptionHandler = remember {
         CoroutineExceptionHandler { _, throwable ->
             Log.e("HomeScreen", "Unhandled home coroutine failure", throwable)
@@ -290,7 +292,7 @@ fun HomeScreen(
         }
     }
     // 保存位置：只有"恢复完成"之后才写回，避免刚进页面时的 (0,0) 把记忆冲掉
-    LaunchedEffect(gridStateKey, gridState, pendingGridRestore) {
+    LaunchedEffect(gridStateKey, gridState, pendingGridRestore, userDataRevision) {
         if (pendingGridRestore != null) return@LaunchedEffect
         snapshotFlow {
             Triple(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset, gridItems.size)
@@ -300,21 +302,27 @@ fun HomeScreen(
     }
 
     // 恢复位置：必须等条目到齐（含上次已加载的分页数量）再滚，否则会被列表钳到 0
-    LaunchedEffect(gridStateKey, gridState, pendingGridRestore, gridItems.size) {
+    LaunchedEffect(gridStateKey, gridState, pendingGridRestore, userDataRevision, selectedLibrary) {
         val target = pendingGridRestore ?: return@LaunchedEffect
         val (wantIndex, wantOffset, wantLoaded) = target
-        if (gridItems.isEmpty()) return@LaunchedEffect
+        snapshotFlow { gridLoading }.first { !it }
+        if (gridItems.isEmpty()) {
+            pendingGridRestore = null
+            return@LaunchedEffect
+        }
         // 电影/剧集/收藏是一次性全量拉取，没有分页，直接进入滚动恢复
-        if (selectedLibrary != null && gridItems.size < wantLoaded && gridHasMore && !gridAppending) {
+        while (selectedLibrary != null && librarySort != "random" && gridItems.size < wantLoaded && gridHasMore) {
             val lib = selectedLibrary
-            if (lib != null && client != null) {
+            if (client != null) {
                 val (sb, so) = sortParams(librarySort, librarySortOrder)
                 gridAppending = true
                 try {
+                    PageLog.add("libraryQuery path=restore SortBy=$sb SortOrder=$so start=$gridNextIndex limit=50")
                     val page = client.getItems(
                         parentId = lib.id, types = collectionTypeToItemTypes(lib.type),
                         sortBy = sb, sortOrder = so, limit = 50, startIndex = gridNextIndex,
                     )
+                    currentCoroutineContext().ensureActive()
                     if (page.isNotEmpty()) {
                         gridItems = (gridItems + page).distinctBy { it.id }
                         gridNextIndex += page.size
@@ -322,13 +330,14 @@ fun HomeScreen(
                     } else {
                         gridHasMore = false
                     }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
                 } catch (_: Exception) {
                     gridHasMore = false
                 } finally {
                     gridAppending = false
                 }
-            }
-            return@LaunchedEffect
+            } else break
         }
         // 列表布局完成后再滚，必要时重试几帧（数据刚到的那一帧 LazyGrid 还没测量）
         var attempt = 0
@@ -341,7 +350,7 @@ fun HomeScreen(
         pendingGridRestore = null
     }
     // 各媒体库视图的横向内容（id → items）
-    var viewContents by remember { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
+    var viewContents by remember(userDataRevision) { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
     var initialFocusPending by rememberSaveable { mutableStateOf(true) }
     var focusedMediaId by rememberSaveable { mutableStateOf<String?>(null) }
     var resumeRowFocused by remember { mutableStateOf(false) }
@@ -394,7 +403,7 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(reloadToken, client) {
+    LaunchedEffect(reloadToken, client, userDataRevision) {
         AppRuntime.screenLabel = "首页"
         val c = client
         if (c == null) {
@@ -429,6 +438,8 @@ fun HomeScreen(
                 } }
 
                 val results = listOf(rA.await(), mA.await(), sA.await(), fA.await(), vA.await(), lA.await())
+                currentCoroutineContext().ensureActive()
+                if (userDataRevision != LibraryCache.userDataRevision) return@coroutineScope
                 val failed = results.count { it.isFailure }
                 offline = failed > 0
                 if (failed == results.size && cached == null) {
@@ -445,10 +456,12 @@ fun HomeScreen(
                         resume = r, latest = l, movies = m, series = s,
                         favorites = f, genres = emptyList(), views = v, at = System.currentTimeMillis(),
                     )
-                    LibraryCache.putHome(updated)
-                    session?.let { LibraryCache.writeHome(context, it.baseUrl, it.userId, updated) }
+                    LibraryCache.putHome(updated, userDataRevision)
+                    session?.let { LibraryCache.writeHome(context, it.baseUrl, it.userId, updated, userDataRevision) }
                 }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (cached == null) error = e.message else offline = true
         } finally {
@@ -457,14 +470,14 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(views, client, reloadToken) {
+    LaunchedEffect(views, client, reloadToken, userDataRevision) {
         val c = client ?: return@LaunchedEffect
         val visibleViews = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
         val startedAt = android.os.SystemClock.elapsedRealtime()
         val prefetchedViews = supervisorScope {
             visibleViews.map { view ->
                 async {
-                    val cacheKey = "library:${view.id}:date:Descending"
+                    val cacheKey = libraryBrowseKey(view.id, "date", "Descending")
                     val viewItems = try {
                         LibraryCache.browseOf(cacheKey) ?: prefetchSemaphore.withPermit {
                             c.getItems(
@@ -473,7 +486,7 @@ fun HomeScreen(
                                 sortBy = "DateCreated",
                                 sortOrder = "Descending",
                                 limit = 50,
-                            ).also { LibraryCache.putBrowse(cacheKey, it) }
+                            ).also { LibraryCache.putBrowse(cacheKey, it, userDataRevision) }
                         }
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
@@ -520,31 +533,39 @@ fun HomeScreen(
     }
 
     // 切换标签：Movies/Series 直接复用首页已加载的数据，不再额外请求
-    LaunchedEffect(tab, selectedLibrary, librarySort, librarySortOrder) {
+    LaunchedEffect(tab, selectedLibrary, gridStateKey, userDataRevision) {
         val requestTab = tab
         val requestLibrary = selectedLibrary
         val requestSort = librarySort
         val requestOrder = librarySortOrder
-        gridLoading = false
+        gridLoading = true
         libraryError = null
         if (requestTab == HomeTab.Media && requestLibrary != null) {
             gridNextIndex = 0
-            gridHasMore = true
+            gridHasMore = false
         }
-        if (requestTab == HomeTab.Recommend || (requestTab == HomeTab.Media && requestLibrary == null)) return@LaunchedEffect
-        val c = client ?: return@LaunchedEffect
+        if (requestTab == HomeTab.Recommend || (requestTab == HomeTab.Media && selectedLibraryId == null)) {
+            gridLoading = false
+            return@LaunchedEffect
+        }
+        // A saved library id can precede the views response. Keep restoration waiting for its first page.
+        if (requestTab == HomeTab.Media && requestLibrary == null) return@LaunchedEffect
+        val c = client ?: run { gridLoading = false; return@LaunchedEffect }
         if (requestTab == HomeTab.Movies && movies.isNotEmpty()) {
             gridItems = movies
+            gridLoading = false
             gridRefreshing = false
             return@LaunchedEffect
         }
         if (requestTab == HomeTab.Series && series.isNotEmpty()) {
             gridItems = series
+            gridLoading = false
             gridRefreshing = false
             return@LaunchedEffect
         }
         if (requestTab == HomeTab.Favorites && favorites.isNotEmpty()) {
             gridItems = favorites
+            gridLoading = false
             gridRefreshing = false
             return@LaunchedEffect
         }
@@ -552,7 +573,7 @@ fun HomeScreen(
             HomeTab.Movies -> "movies"
             HomeTab.Series -> "series"
             HomeTab.Favorites -> "favorites"
-            HomeTab.Media -> "library:${requestLibrary?.id.orEmpty()}:$requestSort:$requestOrder"
+            HomeTab.Media -> libraryBrowseKey(requestLibrary?.id.orEmpty(), requestSort, requestOrder)
             else -> return@LaunchedEffect
         }
         LibraryCache.browseOf(key)?.let {
@@ -560,8 +581,9 @@ fun HomeScreen(
             if (requestTab == HomeTab.Media) {
                 libraryTotalCount = requestLibrary?.let { libraryCounts[it.id] }
                 gridNextIndex = it.size
-                gridHasMore = it.size == 50
+                gridHasMore = requestSort != "random" && it.size == 50
             }
+            gridLoading = false
             gridRefreshing = false
             return@LaunchedEffect
         }
@@ -574,13 +596,8 @@ fun HomeScreen(
                     HomeTab.Series -> c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
                     HomeTab.Favorites -> c.getFavorites(120)
                     HomeTab.Media -> requestLibrary?.let {
-                        val (sb, so) = when (requestSort) {
-                            "name" -> "SortName" to librarySortOrder
-                            "rating" -> "CommunityRating" to librarySortOrder
-                            "year" -> "ProductionYear" to librarySortOrder
-                            "plays" -> "PlayCount" to librarySortOrder
-                            else -> "DateCreated" to librarySortOrder
-                        }
+                        val (sb, so) = sortParams(requestSort, requestOrder)
+                        PageLog.add("libraryQuery path=initial SortBy=$sb SortOrder=$so start=0 limit=50")
                         c.getItems(parentId = it.id, types = collectionTypeToItemTypes(it.type),
                             sortBy = sb, sortOrder = so, limit = 50, startIndex = 0)
                     }.orEmpty()
@@ -588,15 +605,16 @@ fun HomeScreen(
                 }
             }
             currentCoroutineContext().ensureActive()
+            if (userDataRevision != LibraryCache.userDataRevision) return@LaunchedEffect
             if (tab != requestTab || selectedLibrary != requestLibrary || librarySort != requestSort || librarySortOrder != requestOrder) return@LaunchedEffect
             result.onSuccess { list ->
+                LibraryCache.putBrowse(key, list, userDataRevision, fixedSample = requestTab == HomeTab.Media && requestSort == "random")
                 if (requestTab == HomeTab.Media) {
                     gridItems = list
                     libraryTotalCount = AppRuntime.client?.lastTotalRecordCount
                     gridNextIndex = list.size
-                    gridHasMore = list.size == 50
+                    gridHasMore = requestSort != "random" && list.size == 50
                 } else {
-                    LibraryCache.putBrowse(key, list)
                     gridItems = list
                 }
             }.onFailure { failure ->
@@ -611,34 +629,32 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(selectedLibrary, librarySort, librarySortOrder) {
-        if (selectedLibrary == null) return@LaunchedEffect
+    LaunchedEffect(selectedLibrary, gridStateKey, userDataRevision) {
+        if (selectedLibrary == null || librarySort == "random") return@LaunchedEffect
         val activeSort = librarySort
         val activeOrder = librarySortOrder
         snapshotFlow {
             val info = gridState.layoutInfo
-            info.visibleItemsInfo.lastOrNull()?.index ?: -1
-        }.collect { lastVisible ->
-            if (lastVisible >= gridItems.lastIndex - 8 && gridHasMore && !gridLoading && !gridAppending) {
+            Triple(info.visibleItemsInfo.lastOrNull()?.index ?: -1, gridItems.size, gridLoading || pendingGridRestore != null)
+        }.collect { (lastVisible, _, waiting) ->
+            if (!waiting && lastVisible >= gridItems.lastIndex - 8 && gridHasMore && !gridLoading && !gridAppending) {
                 val c = client ?: return@collect
                 val library = selectedLibrary ?: return@collect
-                val (sortBy, _) = when (activeSort) {
-                    "name" -> "SortName" to activeOrder
-                    "rating" -> "CommunityRating" to activeOrder
-                    "year" -> "ProductionYear" to activeOrder
-                    "plays" -> "PlayCount" to activeOrder
-                    else -> "DateCreated" to activeOrder
-                }
+                val (sortBy, sortOrder) = sortParams(activeSort, activeOrder)
                 gridAppending = true
                 try {
+                    PageLog.add("libraryQuery path=append SortBy=$sortBy SortOrder=$sortOrder start=$gridNextIndex limit=50")
                     val page = c.getItems(parentId = library.id, types = collectionTypeToItemTypes(library.type),
-                        sortBy = sortBy, sortOrder = activeOrder,
+                        sortBy = sortBy, sortOrder = sortOrder,
                         limit = 50, startIndex = gridNextIndex)
+                    currentCoroutineContext().ensureActive()
                     if (selectedLibrary == library && librarySort == activeSort && librarySortOrder == activeOrder) {
                         gridItems = (gridItems + page).distinctBy { it.id }
                         gridNextIndex += page.size
                         gridHasMore = page.size == 50
                     }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
                 } catch (_: Exception) {
                     gridHasMore = false
                 } finally {
@@ -649,12 +665,12 @@ fun HomeScreen(
     }
 
     // 媒体库视图内容：启动后即在后台预热拉取各视图最近内容，无需等切换Tab
-    LaunchedEffect(views, reloadToken) {
+    LaunchedEffect(views, reloadToken, userDataRevision) {
         val missing = views.filter { v ->
             !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) && viewContents[v.id] == null
         }
         val cached = missing.mapNotNull { view ->
-            LibraryCache.browseOf("library:${view.id}:date:Descending")?.let { view.id to it }
+            LibraryCache.browseOf(libraryBrowseKey(view.id, "date", "Descending"))?.let { view.id to it }
         }.toMap()
         if (cached.isNotEmpty()) viewContents = viewContents + cached
     }
@@ -862,7 +878,7 @@ fun HomeScreen(
                             contents = viewContents,
                             counts = libraryCounts,
                             firstItemFocus = if (firstSectionKey == "library-${homeLibraries.first().id}") firstContentFocus else null,
-                            onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
+                            onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition(libraryBrowseKey(it.id, librarySort, librarySortOrder)) },
                         )
                     }
                     if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, width = 130.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "favorites") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "favorites") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
@@ -888,7 +904,7 @@ fun HomeScreen(
                     contents = viewContents,
                     focusedLibraryId = focusedLibraryId,
                     onLibraryFocused = { focusedLibraryId = it },
-                    onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition("library:${it.id}") },
+                    onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition(libraryBrowseKey(it.id, librarySort, librarySortOrder)) },
                     firstItemFocus = mediaLibraryContentFocus,
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
@@ -911,7 +927,8 @@ fun HomeScreen(
                                 color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Medium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
-                            Text(libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextMain.copy(alpha = 0.6f), fontSize = 11.sp)
+                            Text(if (librarySort == "random") "随机固定样本 · ${gridItems.size}/最多 50 部（非全库）"
+                                else libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextMain.copy(alpha = 0.6f), fontSize = 11.sp)
                         }
                         Spacer(Modifier.weight(1f))
                         Box {
@@ -967,12 +984,13 @@ fun HomeScreen(
                                                         interactionSource = remember { MutableInteractionSource() },
                                                         indication = null,
                                                     ) {
+                                                        if (librarySort == key) { closeSortMenu(); return@clickable }
+                                                        if (librarySort == "random") LibraryCache.removeBrowse(gridStateKey)
+                                                        val nextKey = libraryBrowseKey(selectedLibraryId.orEmpty(), key, librarySortOrder)
+                                                        LibraryCache.clearGridPosition(nextKey)
+                                                        gridStates.remove(nextKey)
                                                         librarySort = key
-                                                        gridRefreshing = gridItems.isNotEmpty()
                                                         AppRuntime.prefs?.librarySort = key
-                                                        // 换排序等于换内容顺序，旧位置作废
-                                                        LibraryCache.clearGridPosition(gridStateKey)
-                                                        scope.launch { runCatching { gridState.scrollToItem(0) } }
                                                         closeSortMenu()
                                                     }
                                                     .background(if (itemFocused) Color(0x26FFFFFF) else if (selected) Accent.copy(alpha = 0.20f) else Color.Transparent, RoundedCornerShape(10.dp))
@@ -985,7 +1003,7 @@ fun HomeScreen(
                                             }
                                         }
                                         Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).height(1.dp).background(Color(0x26FFFFFF)))
-                                        listOf("Descending" to "降序 ↓", "Ascending" to "升序 ↑").forEach { (order, label) ->
+                                        if (librarySort != "random") listOf("Descending" to "降序 ↓", "Ascending" to "升序 ↑").forEach { (order, label) ->
                                             val selected = librarySortOrder == order
                                             var orderFocused by remember(order) { mutableStateOf(false) }
                                             Row(
@@ -998,11 +1016,12 @@ fun HomeScreen(
                                                         interactionSource = remember { MutableInteractionSource() },
                                                         indication = null,
                                                     ) {
+                                                        if (librarySortOrder == order) { closeSortMenu(); return@clickable }
+                                                        val nextKey = libraryBrowseKey(selectedLibraryId.orEmpty(), librarySort, order)
+                                                        LibraryCache.clearGridPosition(nextKey)
+                                                        gridStates.remove(nextKey)
                                                         librarySortOrder = order
-                                                        gridRefreshing = gridItems.isNotEmpty()
                                                         AppRuntime.prefs?.librarySortOrder = order
-                                                        LibraryCache.clearGridPosition(gridStateKey)
-                                                        scope.launch { runCatching { gridState.scrollToItem(0) } }
                                                         closeSortMenu()
                                                     }
                                                     .background(if (orderFocused) Color(0x26FFFFFF) else if (selected) Accent.copy(alpha = 0.20f) else Color.Transparent, RoundedCornerShape(10.dp))
@@ -1478,7 +1497,7 @@ private fun TopNavBar(
 }
 
 /** 内部排序键 → Emby SortBy/SortOrder，多处复用避免各写一份。 */
-private fun sortParams(sort: String, order: String): Pair<String, String> = when (sort) {
+internal fun sortParams(sort: String, order: String): Pair<String, String> = when (sort) {
     "name" -> "SortName" to order
     "rating" -> "CommunityRating" to order
     "year" -> "ProductionYear" to order
@@ -1488,6 +1507,11 @@ private fun sortParams(sort: String, order: String): Pair<String, String> = when
     else -> "DateCreated" to order
 }
 
+internal fun libraryBrowseKey(libraryId: String, sort: String, order: String): String {
+    val (sortBy, sortOrder) = sortParams(sort, order)
+    return "library:$libraryId:$sortBy:$sortOrder"
+}
+
 private val SORT_LABELS = linkedMapOf(
     "date" to "最新添加",
     "name" to "名称",
@@ -1495,7 +1519,7 @@ private val SORT_LABELS = linkedMapOf(
     "year" to "年份",
     "plays" to "播放次数",
     "runtime" to "时长",
-    "random" to "随机",
+    "random" to "随机样本（最多50部）",
 )
 
 @Composable

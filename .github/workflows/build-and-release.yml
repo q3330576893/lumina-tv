@@ -1,16 +1,18 @@
 name: Build and publish Lumina TV
 
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  verify:
+    name: Offline logic checks (samples + A1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,7 +22,29 @@ jobs:
           java-version: "17"
       - uses: android-actions/setup-android@v4
       - name: Install Android SDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+      - name: Install Gradle 8.11.1
+        run: |
+          curl -fsSL https://services.gradle.org/distributions/gradle-8.11.1-bin.zip -o "$RUNNER_TEMP/gradle.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-8.11.1/bin" >> "$GITHUB_PATH"
+      - name: Compile and run all assertions (no artifacts)
+        run: gradle --no-daemon --stacktrace :app:compileDebugKotlin :app:compileDebugUnitTestKotlin :app:verifyOffline
+  build:
+    needs: verify
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v4
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
       - name: Install Gradle 8.11.1
         run: |
           curl -fsSL https://services.gradle.org/distributions/gradle-8.11.1-bin.zip -o "$RUNNER_TEMP/gradle.zip"

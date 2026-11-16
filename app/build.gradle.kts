@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     id("com.android.application")
@@ -19,8 +20,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 132
-        versionName = "1.22.91"
+        versionCode = 133
+        versionName = "1.22.92"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
         buildConfigField("String", "MDBLIST_API_KEY", "\"${localProps.getProperty("MDBLIST_API_KEY", "")}\"")
@@ -94,3 +95,37 @@ dependencies {
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("com.github.promeg:tinypinyin:2.0.3")
 }
+
+// JVM-only JSON runtime; never included in the Android app or its dependency graph.
+val samplesJson = configurations.create("samplesJson") {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+dependencies.add(samplesJson.name, "org.json:json:20240303")
+
+val samples = tasks.register<JavaExec>("samples") {
+    group = "verification"
+    description = "Run all sample suites and A1 reliability assertions (no credentials required)."
+    val tests = tasks.named<KotlinCompile>("compileDebugUnitTestKotlin")
+    val main = tasks.named<KotlinCompile>("compileDebugKotlin")
+    dependsOn(tests, main)
+    // Real JSON must precede the Android stub classes on the JVM classpath.
+    classpath = files(samplesJson, tests.flatMap { it.destinationDirectory },
+        main.flatMap { it.destinationDirectory }, tests.map { it.libraries })
+    mainClass.set("com.lumina.tv.SamplesMain")
+}
+val p1Checks = tasks.register<JavaExec>("p1Checks") {
+    group = "verification"
+    description = "Check user-data mutations and library browse regressions."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.P1RegressionChecks")
+}
+val verifyOffline = tasks.register("verifyOffline") {
+    group = "verification"
+    description = "Mandatory offline logic gate: samples, A1 and P1 assertions."
+    dependsOn(samples, p1Checks)
+}
+tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
+    .configureEach { dependsOn(verifyOffline) }
