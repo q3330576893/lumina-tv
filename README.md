@@ -3,7 +3,7 @@
 面向客厅大屏的 Emby 客户端。基于 Kotlin 与 Jetpack Compose 构建，遥控器优先操作，
 以播放可靠性与界面一致性为核心设计目标。
 
-**当前版本** v1.22.81（versionCode 122）· Android 8.0+（minSdk 26）
+**当前版本** v1.22.89（versionCode 130）· Android 8.0+（minSdk 26）
 
 ---
 
@@ -27,6 +27,7 @@ Lumina TV 是原生 Android TV 应用，通过 Emby Server 访问个人媒体库
 | 能力 | 说明 |
 | --- | --- |
 | 双内核与看门狗 | Media3 / mpv 协作；卡住时有界恢复，先保留位置重载，再换源，最多 3 次 |
+| `rebuildRetry`（重建播放器重试） | 播放失败时重建播放器并重试；不提供 FFmpeg 解码能力 |
 | 自动降级 | 直连 → 转码 → 切换片源 → 全部尝试后回落 mpv，各环节自动衔接 |
 | 内核保持 | 手动指定或已因解码失败回落后，内核选择保持不变，避免反复切换 |
 | Dolby Vision P7 | 识别 Profile 7 双层封装后直接交由 mpv 解码，跳过无效尝试 |
@@ -43,8 +44,8 @@ Lumina TV 是原生 Android TV 应用，通过 Emby Server 访问个人媒体库
 ### 浏览
 
 - **首页轮播**：标题优先使用透明 Logo（Emby → TMDB → 文字），评分同样优先取 Emby 数据
-- **轮播背景**：优先使用 TMDB 横版 backdrop，缺失时回退 Emby 横图 / 海报；右下 3 张缩略图跟随当前条目
-- **相关推荐**：按类型重合、评分与每片扰动排序，缓存 6 小时
+- **轮播背景**：依次尝试 Emby 自身横图、无标签 `Backdrop/0`、父级横图、TMDB 与海报兜底；右下 3 张缩略图跟随当前条目
+- **相关推荐**：同剧种候选按高置信度同地区、类型重合、评分及已看降权排序，同分按日稳定排序；正常结果缓存 6 小时，空结果 30 分钟，超时使用 Similar 兜底且不缓存
 - **智能选片**：综合横版剧照、Logo、观看进度、入库时间与评分加权排序，按日期取种子抽取，
   同日内结果稳定
 - **媒体库**：分类卡片采用封面拼贴，展示条目总数
@@ -122,6 +123,17 @@ compileSdk 36 / targetSdk 35 / minSdk 26
 ./gradlew :app:assembleRelease
 ```
 
+**纯函数断言**
+
+`SamplesMain` 依次运行 DV 解析、播放错误分类、地区分桶、语言归一化、地区边界、推荐地区加分及 S1 / S2 / S5 断言，使用 `fun main()` + `check()`，不依赖 JUnit。
+DV 与 S5 样例需要本机已有的 `org.json` JAR（Android SDK 中的 JSON 桩不提供实际实现）。在仓库根目录执行：
+
+```bash
+gradle --offline -I app/src/test/java/com/lumina/tv/samples.init.gradle -PsamplesJsonJar=/path/to/existing/json.jar :app:samples
+```
+
+脚本只使用现有编译依赖和显式指定的本地 JAR，不新增 Gradle 依赖、不下载文件。
+
 **配置**
 
 签名信息与第三方密钥从 `local.properties` 读取，该文件不纳入版本控制。
@@ -161,8 +173,8 @@ app/src/main/java/com/lumina/tv/
 ## 已知限制
 
 - **系统模糊**：仅在 Android 12（API 31）及以上生效，低版本使用等效的半透明层叠方案
-- **FFmpeg 扩展**：Media3 的 FFmpeg 解码扩展未由官方发布，无法通过标准仓库获取，
-  因此 Media3 无法识别的封装交由 mpv 处理
+- **`rebuildRetry`（重建播放器重试）**：仅重建 Media3 播放器并重试，不提供 FFmpeg 解码能力；
+  Media3 无法识别的封装仍依赖 mpv 或服务端转码
 - **转码流时间线**：seek 坐标仍需直放、remux、转码三种样片验证；当前只记录诊断，不做坐标修正
 - **音频直通状态**：以设备报告为准，UI 标注「设备报告」，不代表功放一定点亮
 - **容器支持**：AVI、RMVB、ISO 原盘与 BDMV 目录缺少 Media3 解封装器，

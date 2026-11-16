@@ -105,8 +105,7 @@ import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.bucketOf
-import com.lumina.tv.data.Confidence
-import com.lumina.tv.data.RegionBucket
+import com.lumina.tv.data.sameRegionBonus
 import com.lumina.tv.player.AudioCapabilities
 import com.lumina.tv.player.AudioCaps
 import com.lumina.tv.player.detect
@@ -178,7 +177,8 @@ private suspend fun loadDetailRecommendations(
         calendar.get(java.util.Calendar.DAY_OF_YEAR),
     )
     val type = current.type.takeIf { it == "Movie" || it == "Series" } ?: return emptyList()
-    val (currentBucket, currentConfidence) = bucketOf(current)
+    val currentRegion = bucketOf(current)
+    val currentBucket = currentRegion.first
     val cacheKey = "$itemId|$type|$currentBucket|$genreKey"
     detailRelatedCache[cacheKey]?.let { entry ->
         val ttl = if (entry.empty) DETAIL_RELATED_EMPTY_TTL_MS else DETAIL_RELATED_TTL_MS
@@ -226,16 +226,9 @@ private suspend fun loadDetailRecommendations(
                 val sameSecondaryGenre = secondaryGenres.any { genre ->
                     candidateGenres.any { it.equals(genre, ignoreCase = true) }
                 }
-                val (candidateBucket, candidateConfidence) = bucketOf(candidate)
-                val sameRegion =
-                    currentBucket == candidateBucket &&
-                    currentBucket != RegionBucket.UNKNOWN &&
-                    currentBucket != RegionBucket.OTHER &&
-                    currentConfidence == Confidence.HIGH &&
-                    candidateConfidence == Confidence.HIGH
                 val rating = ((candidate.communityRating ?: candidate.rating ?: 0.0) / 10.0).coerceIn(0.0, 1.0)
                 val watchedPenalty = if (candidate.positionTicks > 0 || candidate.played) 4.0 else 0.0
-                return (if (sameRegion) 3.0 else 0.0) +
+                return sameRegionBonus(currentRegion, bucketOf(candidate)) +
                     (if (sameMainGenre) 1.0 else 0.0) +
                     (if (sameSecondaryGenre) 0.5 else 0.0) + rating - watchedPenalty
             }

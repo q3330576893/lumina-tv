@@ -3,6 +3,19 @@ package com.lumina.tv.data
 enum class RegionBucket { CN_MAINLAND, HK, TW, KR, JP, WEST, OTHER, UNKNOWN }
 enum class Confidence { HIGH, LOW, UNKNOWN }
 
+/** Recommendation bonus for a candidate that shares a reliable region with the current item. */
+fun sameRegionBonus(
+    current: Pair<RegionBucket, Confidence>,
+    candidate: Pair<RegionBucket, Confidence>,
+): Double {
+    val (currentBucket, currentConfidence) = current
+    val (candidateBucket, candidateConfidence) = candidate
+    if (currentBucket != candidateBucket) return 0.0
+    if (currentBucket == RegionBucket.OTHER || currentBucket == RegionBucket.UNKNOWN) return 0.0
+    if (currentConfidence != Confidence.HIGH || candidateConfidence != Confidence.HIGH) return 0.0
+    return 3.0
+}
+
 fun bucketOf(item: MediaItem): Pair<RegionBucket, Confidence> {
     val locations = item.productionLocations.map { it.trim().lowercase() }.filter(String::isNotBlank)
     fun matches(location: String, phrase: String): Boolean = when (phrase) {

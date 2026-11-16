@@ -1,16 +1,14 @@
 package com.lumina.tv.player
 
 import androidx.media3.common.PlaybackException
-import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.HttpDataSource
-import android.net.Uri
-import java.io.IOException
+import android.os.Bundle
 import javax.net.ssl.SSLHandshakeException
 
 /** Call from a local test harness to run playback error classification assertions. */
 fun runPlaybackErrorClassificationAssertions() {
     fun classify(code: Int, cause: Throwable? = null) = classifyPlaybackError(
-        PlaybackException("sample", cause, code)
+        // A fixed timestamp keeps this fixture independent of Android's native SystemClock.
+        object : PlaybackException("sample", cause, code, Bundle.EMPTY, 0L) {}
     )
 
     fun assertCategory(code: Int, expected: PlaybackErrorCategory, cause: Throwable? = null) {
