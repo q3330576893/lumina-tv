@@ -1,5 +1,7 @@
 package com.lumina.tv
 
+import com.lumina.tv.data.PlaybackStartIntent
+
 import android.media.AudioManager
 import android.os.Bundle
 import android.content.ComponentCallbacks2
@@ -56,7 +58,7 @@ sealed interface Screen {
     data object Login : Screen
     data object Home : Screen
     data class Detail(val id: String, val previousId: String? = null) : Screen
-    data class Play(val item: MediaItem, val sourceId: String? = null, val startPositionMs: Long? = null) : Screen
+    data class Play(val item: MediaItem, val sourceId: String? = null, val startIntent: PlaybackStartIntent = PlaybackStartIntent.Resume) : Screen
     data class Search(val keyword: String = "") : Screen
     data object Settings : Screen
 }
@@ -335,7 +337,7 @@ private fun AppRoot(
                     id = target.id,
                     onPlay = { item -> navigate(Screen.Play(item), target) },
                     onPlayWithSource = { item, sid -> navigate(Screen.Play(item, sid), target) },
-                    onPlayFromStart = { item -> navigate(Screen.Play(item, startPositionMs = 0L), target) },
+                    onPlayFromStart = { item, sid -> navigate(Screen.Play(item, sid, PlaybackStartIntent.FromStart), target) },
                     onOpenDetail = { nextId -> navigate(Screen.Detail(nextId), target) },
                     onBack = { goBack() },
                 )
@@ -345,7 +347,7 @@ private fun AppRoot(
                 PlayerScreen(
                     item = target.item,
                     initialSourceId = target.sourceId,
-                    startPositionMs = target.startPositionMs,
+                    startIntent = target.startIntent,
                     onBack = { goBack() },
                     onPlayNext = { next -> replaceCurrent(Screen.Play(next)) },
                 )

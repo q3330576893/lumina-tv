@@ -8,6 +8,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import com.lumina.tv.data.MediaChapter
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -74,16 +76,9 @@ class EmbyClient(
             try {
                 val response = chain.proceed(request)
                 NetLog.add(started, request.method, request.url.toString(), System.currentTimeMillis() - started, response.code, if (response.isSuccessful) null else "HTTP")
-                if (!response.isSuccessful) {
-                    val body = response.peekBody(200).string()
-                    lastApiFailure = "HTTP ${response.code}: ${safeErrorBody(body)}"
-                } else {
-                    requestProgressFlush()
-                }
                 response
             } catch (e: IOException) {
                 NetLog.add(started, request.method, request.url.toString(), System.currentTimeMillis() - started, null, e.javaClass.simpleName)
-                lastApiFailure = "Request failed: ${e.message?.replace(Regex("[\\r\\n]+"), " ")?.take(120) ?: e.javaClass.simpleName}"
                 throw e
             }
         }
@@ -103,13 +98,13 @@ class EmbyClient(
     private val trickplayFiles = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
     private var trickplayBytes = 0L
     private val unavailableTrickplay = ConcurrentHashMap.newKeySet<String>()
-    private val playbackTargetCache = ConcurrentHashMap<String, Pair<Long, PlaybackTarget>>()
+    private val playbackTargetCache = ConcurrentHashMap<PlaybackRequestKey, Pair<Long, PlaybackTarget>>()
     // Diagnostic state lives with the client so it survives the next-episode screen replacement.
     private class PrewarmAttempt(
         val itemId: String,
         val sourceId: String?,
         val strategy: SourceStrategy,
-        val requestKey: String,
+        val requestKey: PlaybackRequestKey,
     ) {
         @Volatile var state: String = "in_progress"
     }
@@ -161,7 +156,7 @@ class EmbyClient(
 
     private fun retryAfterMillis(value: String?, serverDate: String?): Long? {
         val raw = value?.trim()?.takeIf(String::isNotEmpty) ?: return null
-        val delay = raw.toLongOrNull()?.let { it.coerceAtMost(60L).coerceAtLeast(0L) * 1_000L } ?: runCatching {
+        val delay = raw.toLongOrNull()?.let { it.coerceAtMost(60L).coerceAtLeast(0L) * 1_000L } ?: catchingRequest {
             val retryAt = ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli()
             val now = serverDate?.let { ZonedDateTime.parse(it, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli() }
                 ?: System.currentTimeMillis()
@@ -170,82 +165,50 @@ class EmbyClient(
         return delay.coerceAtMost(60_000L)
     }
 
-    private fun getSync(url: String, withToken: Boolean = true, timeoutSeconds: Int? = null): JSONObject {
-        val req = Request.Builder().url(url).header("X-Emby-Authorization", authHeader(withToken)).build()
+    private suspend fun getJson(target: String, withToken: Boolean = true, timeoutSeconds: Int? = null): JSONObject =
+        withRequestBudget((timeoutSeconds?.toLong() ?: 20L) * 1_000L) {
+            val request = Request.Builder().url(target).header("X-Emby-Authorization", authHeader(withToken)).build()
+            requestJson(request, retryIo = timeoutSeconds != null, retryRateLimit = true)
+        }
+
+    private suspend fun postJson(target: String, body: String?): JSONObject = withRequestBudget {
+        val request = Request.Builder().url(target).header("X-Emby-Authorization", authHeader())
+            .post((body ?: "{}").toRequestBody(jsonType)).build()
+        requestJson(request, retryIo = false, retryRateLimit = target.contains("/PlaybackInfo", true))
+    }
+
+    private suspend fun requestJson(request: Request, retryIo: Boolean, retryRateLimit: Boolean): JSONObject {
         var attempts = 0
         var rateLimitRetries = 0
         while (true) {
+            currentCoroutineContext().ensureActive()
             try {
-                val response = http.newCall(req).apply { timeoutSeconds?.let { timeout().timeout(it.toLong(), TimeUnit.SECONDS) } }.execute()
-                if (response.code == 429 && rateLimitRetries == 0) {
-                    val delayMs = retryAfterMillis(response.header("Retry-After"), response.header("Date"))
-                    if (delayMs != null) {
-                        rateLimitRetries++
-                        response.close()
-                        Thread.sleep(delayMs)
-                        continue
+                var retryDelay: Long? = null
+                val result = http.readCancellable(request) { response ->
+                    if (response.code == 429 && retryRateLimit && rateLimitRetries == 0) {
+                        retryDelay = retryAfterMillis(response.header("Retry-After"), response.header("Date"))
                     }
-                }
-                response.use { resp ->
-                    val body = resp.body?.string().orEmpty()
-                    if (!resp.isSuccessful) {
-                        val failure = "HTTP ${resp.code}: ${safeErrorBody(body)}"
-                        lastApiFailure = failure
-                        throw EmbyException(failure, resp.code)
-                    }
-                    return try {
+                    if (retryDelay != null) null else {
+                        val body = response.body?.string().orEmpty()
+                        if (!response.isSuccessful) throw EmbyException("HTTP ${response.code}: ${safeErrorBody(body)}", response.code)
                         parseJsonObject(body)
-                    } catch (_: EmbyException) {
-                        val failure = "HTTP ${resp.code} non-json: ${body.replace(Regex("[\\r\\n]+"), " ").take(120)}"
-                        lastApiFailure = failure
-                        throw EmbyException(failure)
                     }
                 }
-            } catch (e: IOException) {
+                currentCoroutineContext().ensureActive()
+                if (result != null) return result
+                rateLimitRetries++
+                delay(requireNotNull(retryDelay))
+            } catch (failure: IOException) {
+                currentCoroutineContext().ensureActive()
                 attempts++
-                val timedOut = e is InterruptedIOException || e.message.orEmpty().contains("timeout", true)
-                if (timeoutSeconds == null || !timedOut || attempts >= SEARCH_REQUEST_ATTEMPTS) throw e
-            }
-        }
-    }
-
-    private fun postSync(url: String, body: String?): JSONObject {
-        val req = Request.Builder().url(url)
-            .header("X-Emby-Authorization", authHeader())
-            .post((body ?: "{}").toRequestBody(jsonType))
-            .build()
-        var rateLimitRetries = 0
-        while (true) {
-            val response = http.newCall(req).execute()
-            if (response.code == 429 && url.contains("/PlaybackInfo", true) && rateLimitRetries == 0) {
-                val delayMs = retryAfterMillis(response.header("Retry-After"), response.header("Date"))
-                if (delayMs != null) {
-                    rateLimitRetries++
-                    response.close()
-                    Thread.sleep(delayMs)
-                    continue
-                }
-            }
-            response.use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                val failure = "HTTP ${resp.code}: ${safeErrorBody(text)}"
-                lastApiFailure = failure
-                throw EmbyException(failure, resp.code)
-            }
-            return try {
-                parseJsonObject(text)
-            } catch (_: EmbyException) {
-                val failure = "HTTP ${resp.code} non-json: ${text.replace(Regex("[\\r\\n]+"), " ").take(120)}"
-                lastApiFailure = failure
-                throw EmbyException(failure)
-            }
+                if (!retryIo || attempts >= SEARCH_REQUEST_ATTEMPTS) throw failure
+                delay(150L)
             }
         }
     }
 
     private fun parseJsonObject(body: String): JSONObject =
-        if (body.isBlank()) JSONObject() else runCatching { JSONObject(body) }
+        if (body.isBlank()) JSONObject() else catchingRequest { JSONObject(body) }
             .getOrElse { throw EmbyException("服务器返回了无效数据") }
 
     /** 避免服务端错误正文意外回显访问令牌或认证字段。 */
@@ -255,11 +218,11 @@ class EmbyClient(
 
     // ---------------- 认证 ----------------
 
-    suspend fun login(server: String, user: String, pass: String): Session = withContext(Dispatchers.IO) {
+    suspend fun login(server: String, user: String, pass: String): Session = withMetadataContext {
         baseUrl = normalize(server)
         token = ""
         val body = JSONObject().put("Username", user).put("Pw", pass).toString()
-        val resp = postSync(url("/Users/AuthenticateByName", emptyMap()), body)
+        val resp = postJson(url("/Users/AuthenticateByName", emptyMap()), body)
         val u = resp.optJSONObject("User")
             ?: throw EmbyException("服务器返回格式异常，请确认地址是 Emby 服务")
         token = resp.optString("AccessToken")
@@ -274,15 +237,15 @@ class EmbyClient(
         )
     }
 
-    private fun getServerNameSafe(): String = try {
-        val info = getSync(url("/System/Info/Public", emptyMap()), withToken = false)
+    private suspend fun getServerNameSafe(): String = try {
+        val info = getJson(url("/System/Info/Public", emptyMap()), withToken = false)
         info.optString("ServerName", "Emby")
-    } catch (_: Exception) { "Emby" }
+    } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { "Emby" }
 
     // ---------------- 内容 ----------------
 
-    suspend fun getViews(): List<LibraryView> = withContext(Dispatchers.IO) {
-        val arr = getSync(url("/Users/$userId/Views")).optJSONArray("Items") ?: JSONArray()
+    suspend fun getViews(): List<LibraryView> = withMetadataContext {
+        val arr = getJson(url("/Users/$userId/Views")).optJSONArray("Items") ?: JSONArray()
         (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             LibraryView(
@@ -294,16 +257,16 @@ class EmbyClient(
         }.filter { it.id.isNotBlank() }
     }
 
-    suspend fun getLibraryItemCount(parentId: String): Int? = withContext(Dispatchers.IO) {
-        val response = runCatching { getSync(url("/Items", mapOf(
+    suspend fun getLibraryItemCount(parentId: String): Int? = withMetadataContext {
+        val response = catchingRequest { getJson(url("/Items", mapOf(
             "ParentId" to parentId,
             "Recursive" to "true",
             "Limit" to "1",
             "EnableTotalRecordCount" to "true",
         ))) }.getOrNull()
-        response?.optInt("TotalRecordCount", -1)?.takeIf { it >= 0 }?.let { return@withContext it }
-        runCatching {
-            val counts = getSync(url("/Items/Counts", mapOf("ParentId" to parentId, "Recursive" to "true")))
+        response?.optInt("TotalRecordCount", -1)?.takeIf { it >= 0 }?.let { return@withMetadataContext it }
+        catchingRequest {
+            val counts = getJson(url("/Items/Counts", mapOf("ParentId" to parentId, "Recursive" to "true")))
             val total = counts.optInt("TotalRecordCount", -1)
             if (total >= 0) total else {
                 val keys = listOf("MovieCount", "SeriesCount", "EpisodeCount", "AlbumCount", "ArtistCount", "SongCount", "ItemCount")
@@ -312,14 +275,14 @@ class EmbyClient(
         }.getOrNull()
     }
 
-    suspend fun getFavorites(limit: Int = 24): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun getFavorites(limit: Int = 24): List<MediaItem> = withMetadataContext {
         getItems(types = "Movie,Series,Episode", sortBy = "DateCreated", sortOrder = "Descending", limit = limit, filters = "IsFavorite")
     }
 
     /** 全部类型（题材）名称。多级兜底：/Genres → /Items/Filters → 本地汇总。 */
-    suspend fun getGenres(): List<String> = withContext(Dispatchers.IO) {
+    suspend fun getGenres(): List<String> = withMetadataContext {
         // 1) 标准 /Genres
-        val direct = runCatching {
+        val direct = catchingRequest {
             val params = mapOf(
                 "UserId" to userId,
                 "Recursive" to "true",
@@ -327,25 +290,25 @@ class EmbyClient(
                 "SortBy" to "SortName",
                 "SortOrder" to "Ascending",
             )
-            val arr = getSync(url("/Genres", params)).optJSONArray("Items") ?: JSONArray()
+            val arr = getJson(url("/Genres", params)).optJSONArray("Items") ?: JSONArray()
             (0 until arr.length()).mapNotNull { i ->
                 arr.optJSONObject(i)?.optString("Name")?.ifBlank { null }
             }
         }.getOrDefault(emptyList())
-        if (direct.isNotEmpty()) return@withContext direct
+        if (direct.isNotEmpty()) return@withMetadataContext direct
 
         // 2) Emby 常用 /Items/Filters（返回字符串数组）
-        val viaFilters = runCatching {
-            val j = getSync(
+        val viaFilters = catchingRequest {
+            val j = getJson(
                 url("/Items/Filters", mapOf("UserId" to userId, "IncludeItemTypes" to "Movie,Series"))
             )
             val arr = j.optJSONArray("Genres") ?: JSONArray()
             (0 until arr.length()).mapNotNull { arr.optString(it).ifBlank { null } }
         }.getOrDefault(emptyList())
-        if (viaFilters.isNotEmpty()) return@withContext viaFilters
+        if (viaFilters.isNotEmpty()) return@withMetadataContext viaFilters
 
         // 3) 从库里直接汇总（最慢但最兼容）
-        runCatching {
+        catchingRequest {
             val set = LinkedHashSet<String>()
             listOf("Movie", "Series").forEach { t ->
                 getItems(types = t, sortBy = "DateCreated", sortOrder = "Descending", limit = 300)
@@ -357,23 +320,23 @@ class EmbyClient(
 
     /** 按类型取影片（网格浏览用）。 */
     suspend fun getByGenre(genre: String, limit: Int = 120, startIndex: Int = 0): List<MediaItem> =
-        withContext(Dispatchers.IO) {
+        withMetadataContext {
             val wanted = genre.trim()
-            if (wanted.isBlank()) return@withContext emptyList()
+            if (wanted.isBlank()) return@withMetadataContext emptyList()
             fun matches(items: List<MediaItem>) = items.filter { item ->
                 item.genres.any { it.trim().equals(wanted, ignoreCase = true) }
             }
             // Emby servers usually honor Genres=, but some compatible servers ignore it.
             // Verify locally so every chip represents a real, distinct genre result.
-            val remote = runCatching {
+            val remote = catchingRequest {
                 getItems(types = "Movie,Series", sortBy = "DateCreated", sortOrder = "Descending",
                     limit = limit, startIndex = startIndex, genre = wanted)
             }.getOrDefault(emptyList())
             val exact = matches(remote)
-            if (exact.isNotEmpty()) return@withContext exact.take(limit)
+            if (exact.isNotEmpty()) return@withMetadataContext exact.take(limit)
 
             // Compatibility fallback for servers that ignored/partially implemented Genres.
-            val broad = runCatching {
+            val broad = catchingRequest {
                 getItems(types = "Movie,Series", sortBy = "DateCreated", sortOrder = "Descending",
                     limit = maxOf(400, limit * 4), startIndex = 0)
             }.getOrDefault(emptyList())
@@ -393,7 +356,7 @@ class EmbyClient(
         filters: String? = null,
         fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProductionLocations,OriginalLanguage",
         requestTimeoutSeconds: Int? = null,
-    ): List<MediaItem> = withContext(Dispatchers.IO) {
+    ): List<MediaItem> = withMetadataContext((requestTimeoutSeconds?.toLong() ?: 20L) * 1_000L) {
         val params = mutableMapOf(
             "Recursive" to "true",
             "Limit" to limit.toString(),
@@ -410,7 +373,7 @@ class EmbyClient(
         if (genre != null) params["Genres"] = genre
         if (personIds != null) params["PersonIds"] = personIds
         if (filters != null) params["Filters"] = filters
-        val response = getSync(url("/Users/$userId/Items", params), timeoutSeconds = requestTimeoutSeconds)
+        val response = getJson(url("/Users/$userId/Items", params), timeoutSeconds = requestTimeoutSeconds)
         lastTotalRecordCount = response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
         val arr = response.optJSONArray("Items") ?: JSONArray()
         parseItems(arr)
@@ -423,7 +386,7 @@ class EmbyClient(
         sortOrder: String = "Ascending",
         pageSize: Int = 200,
         maxItems: Int = 10000,
-    ): List<MediaItem> = withContext(Dispatchers.IO) {
+    ): List<MediaItem> = withMetadataContext {
         val output = ArrayList<MediaItem>()
         val ids = HashSet<String>()
         val size = pageSize.coerceIn(1, 500)
@@ -438,58 +401,58 @@ class EmbyClient(
         output.take(maxItems)
     }
 
-    suspend fun getResume(limit: Int = 20): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun getResume(limit: Int = 20): List<MediaItem> = withMetadataContext {
         val params = mapOf(
             "Limit" to limit.toString(),
             "MediaTypes" to "Video",
             "Fields" to "Overview,PrimaryImageAspectRatio,UserData,ProductionYear,ProductionLocations,OriginalLanguage,LastPlayedDate",
             "EnableImageTypes" to "Primary,Thumb,Backdrop,Logo",
         )
-        val arr = getSync(url("/Users/$userId/Items/Resume", params)).optJSONArray("Items") ?: JSONArray()
+        val arr = getJson(url("/Users/$userId/Items/Resume", params)).optJSONArray("Items") ?: JSONArray()
         parseItems(arr)
     }
 
-    suspend fun getLatest(parentId: String?, limit: Int = 20): List<MediaItem> = withTimeoutOrNull(6_000L) { withContext(Dispatchers.IO) {
+    suspend fun getLatest(parentId: String?, limit: Int = 20): List<MediaItem> = withTimeoutOrNull(6_000L) { withMetadataContext(6_000L) {
         val fields = "Overview,PrimaryImageAspectRatio,UserData,ProductionYear,ProductionLocations,OriginalLanguage"
-        suspend fun query(path: String, params: Map<String, String?>): List<MediaItem>? = runCatching {
-            val response = getSync(url(path, params))
+        suspend fun query(path: String, params: Map<String, String?>): List<MediaItem>? = catchingRequest {
+            val response = getJson(url(path, params))
             val arr = response.optJSONArray("Items") ?: run {
                 lastApiFailure = "HTTP 200 invalid response: missing Items"
-                return@runCatching null
+                return@catchingRequest null
             }
             parseItems(arr)
         }.getOrNull()
         val minimal = mapOf<String, String?>("Limit" to limit.toString())
-        query("/Users/$userId/Items/Latest", minimal)?.let { return@withContext it }
+        query("/Users/$userId/Items/Latest", minimal)?.let { return@withMetadataContext it }
         val withFields = mutableMapOf<String, String?>("Limit" to limit.toString(), "Fields" to fields)
         if (parentId != null) withFields["ParentId"] = parentId
-        query("/Users/$userId/Items/Latest", withFields)?.let { return@withContext it }
+        query("/Users/$userId/Items/Latest", withFields)?.let { return@withMetadataContext it }
         val fallback = mutableMapOf<String, String?>("Recursive" to "true", "SortBy" to "DateCreated", "SortOrder" to "Descending", "IncludeItemTypes" to "Movie,Series", "Limit" to limit.toString(), "Fields" to fields)
         if (parentId != null) fallback["ParentId"] = parentId
         query("/Items", fallback) ?: emptyList()
     } } ?: emptyList()
 
-    suspend fun getItem(id: String): MediaItem? = withContext(Dispatchers.IO) {
+    suspend fun getItem(id: String): MediaItem? = withMetadataContext {
         try {
             val params = mapOf("UserId" to userId,
                 "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds,ProductionLocations,OriginalLanguage")
-            parseItem(getSync(url("/Users/$userId/Items/$id", params)))
-        } catch (_: Exception) { null }
+            parseItem(getJson(url("/Users/$userId/Items/$id", params)))
+        } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { null }
     }
 
-    suspend fun getItemForDetail(id: String): MediaItem = withContext(Dispatchers.IO) {
+    suspend fun getItemForDetail(id: String): MediaItem = withMetadataContext(4_000L) {
         val params = mapOf("UserId" to userId,
             "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,People,MediaSources,ProviderIds,ProductionLocations,OriginalLanguage")
-        parseItem(getSync(url("/Users/$userId/Items/$id", params), timeoutSeconds = 4))
+        parseItem(getJson(url("/Users/$userId/Items/$id", params), timeoutSeconds = 4))
     }
 
-    suspend fun getLocalTrailers(itemId: String): List<MediaItem> = withContext(Dispatchers.IO) {
-        runCatching {
+    suspend fun getLocalTrailers(itemId: String): List<MediaItem> = withMetadataContext {
+        catchingRequest {
             val request = Request.Builder()
                 .url(url("/Items/$itemId/LocalTrailers"))
                 .header("X-Emby-Authorization", authHeader())
                 .build()
-            http.newCall(request).execute().use { response ->
+            http.readCancellable(request) { response ->
                 if (!response.isSuccessful) throw EmbyException("HTTP ${response.code}")
                 val trailers = JSONArray(response.body?.string().orEmpty())
                 (0 until trailers.length()).mapNotNull { index ->
@@ -500,21 +463,21 @@ class EmbyClient(
     }
 
     /** 换列表接口按 Ids 再取一次 People：部分服务器在单条目接口不回传 People（剧集尤甚）。 */
-    suspend fun getItemPeople(itemId: String): List<MediaPerson> = withContext(Dispatchers.IO) {
-        runCatching {
+    suspend fun getItemPeople(itemId: String): List<MediaPerson> = withMetadataContext {
+        catchingRequest {
             val params = mapOf(
                 "UserId" to userId,
                 "Ids" to itemId,
                 "Fields" to "People",
                 "Limit" to "1",
             )
-            val arr = getSync(url("/Users/$userId/Items", params)).optJSONArray("Items") ?: JSONArray()
+            val arr = getJson(url("/Users/$userId/Items", params)).optJSONArray("Items") ?: JSONArray()
             parseItems(arr).firstOrNull()?.people.orEmpty()
         }.getOrDefault(emptyList())
     }
 
-    suspend fun getChapters(itemId: String): List<MediaChapter> = withContext(Dispatchers.IO) {
-        chapterCache[itemId]?.let { return@withContext it }
+    suspend fun getChapters(itemId: String): List<MediaChapter> = withMetadataContext {
+        chapterCache[itemId]?.let { return@withMetadataContext it }
         fun parseChapters(chapters: JSONArray): List<MediaChapter> =
             (0 until chapters.length()).mapNotNull { i ->
                 val chapter = chapters.optJSONObject(i) ?: return@mapNotNull null
@@ -531,33 +494,33 @@ class EmbyClient(
                 )
             }.sortedBy { it.startMs }
 
-        val independent = runCatching {
+        val independent = catchingRequest {
             val request = Request.Builder()
                 .url(url("/Items/$itemId/Chapters"))
                 .header("X-Emby-Authorization", authHeader())
                 .build()
-            val body = http.newCall(request).execute().use { response ->
+            val body = http.readCancellable(request) { response ->
                 if (!response.isSuccessful) throw EmbyException("HTTP ${response.code}")
                 response.body?.string().orEmpty()
             }
-            val chapters = runCatching { JSONArray(body) }.getOrElse {
+            val chapters = catchingRequest { JSONArray(body) }.getOrElse {
                 JSONObject(body).optJSONArray("Items") ?: JSONObject(body).optJSONArray("Chapters") ?: JSONArray()
             }
             parseChapters(chapters)
         }.getOrDefault(emptyList())
-        (independent + runCatching {
-            val response = getSync(url("/Users/$userId/Items/$itemId", mapOf(
+        (independent + catchingRequest {
+            val response = getJson(url("/Users/$userId/Items/$itemId", mapOf(
                 "Fields" to "Chapters",
             )))
             parseChapters(response.optJSONArray("Chapters") ?: JSONArray())
         }.getOrDefault(emptyList()))
             .distinctBy { it.name to it.startMs }.sortedBy { it.startMs }
-            .also { chapterCache[itemId] = it }
+            .also { currentCoroutineContext().ensureActive(); chapterCache[itemId] = it }
     }
 
-    suspend fun getPlaybackMarkers(itemId: String): PlaybackMarkers = withContext(Dispatchers.IO) {
-        runCatching {
-            val response = getSync(url("/Users/$userId/Items/$itemId", mapOf(
+    suspend fun getPlaybackMarkers(itemId: String): PlaybackMarkers = withMetadataContext {
+        catchingRequest {
+            val response = getJson(url("/Users/$userId/Items/$itemId", mapOf(
                 "Fields" to "IntroStartPositionTicks,IntroEndPositionTicks,CreditsPositionTicks",
             )))
             fun marker(field: String): Long? = response.optLong(field, -1L)
@@ -570,30 +533,38 @@ class EmbyClient(
         }.getOrDefault(PlaybackMarkers())
     }
 
-    suspend fun getNextEpisode(item: MediaItem): MediaItem? {
-        val seriesId = item.seriesId ?: return null
-        val current = item.seasonId?.let { runCatching { getEpisodes(seriesId, it) }.getOrDefault(emptyList()) }.orEmpty()
+    suspend fun getNextEpisode(item: MediaItem): MediaItem? = withMetadataContext {
+        val seriesId = item.seriesId ?: return@withMetadataContext null
+        val current = item.seasonId?.let { catchingRequest { getEpisodes(seriesId, it) }.getOrDefault(emptyList()) }.orEmpty()
         val orderedCurrent = current.sortedWith(compareBy<MediaItem> { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
         val currentIndex = orderedCurrent.indexOfFirst { it.id == item.id }
-        if (currentIndex >= 0) orderedCurrent.getOrNull(currentIndex + 1)?.let { return it }
+        if (currentIndex >= 0) orderedCurrent.getOrNull(currentIndex + 1)?.let { return@withMetadataContext it }
 
-        val seasons = runCatching { getSeasons(seriesId) }.getOrDefault(emptyList())
+        val seasons = catchingRequest { getSeasons(seriesId) }.getOrDefault(emptyList())
             .sortedWith(compareBy<MediaItem> { it.indexNumber ?: it.parentIndexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
         val seasonIndex = seasons.indexOfFirst { it.id == item.seasonId }
-        if (seasonIndex < 0) return null
+        if (seasonIndex < 0) return@withMetadataContext null
         for (season in seasons.drop(seasonIndex + 1)) {
-            val seasonEpisodes = runCatching { getEpisodes(seriesId, season.id) }.getOrDefault(emptyList())
+            val seasonEpisodes = catchingRequest { getEpisodes(seriesId, season.id) }.getOrDefault(emptyList())
                 .sortedWith(compareBy<MediaItem> { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
-            seasonEpisodes.firstOrNull()?.let { return it }
+            seasonEpisodes.firstOrNull()?.let { return@withMetadataContext it }
         }
-        return null
+        return@withMetadataContext null
     }
 
-    private fun playbackTargetKey(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long, strategy: SourceStrategy) =
-        "$itemId|$forceTranscode|${sourceId.orEmpty()}|${audioStreamIndex ?: ""}|$forceDirect|$maxStreamingBitrate|$strategy"
+    private fun playbackTargetKey(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?,
+                                  forceDirect: Boolean, maxStreamingBitrate: Long, strategy: SourceStrategy,
+                                  startIntent: PlaybackStartIntent, requestedPositionMs: Long,
+                                  manualAudioSelection: Boolean = false, removeSubtitleParams: Boolean = false,
+                                  preferDirectStreamUrl: Boolean = false) = PlaybackRequestKey(itemId, forceTranscode,
+        sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate, strategy, startIntent, requestedPositionMs,
+        manualAudioSelection, removeSubtitleParams, preferDirectStreamUrl)
 
-    fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?, forceDirect: Boolean, maxStreamingBitrate: Long = 120_000_000L, strategy: SourceStrategy = SourceStrategy()): PlaybackTarget? {
-        val key = playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate, strategy)
+    fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?,
+                             forceDirect: Boolean, maxStreamingBitrate: Long = 120_000_000L, strategy: SourceStrategy = SourceStrategy(),
+                             startIntent: PlaybackStartIntent, requestedPositionMs: Long, manualAudioSelection: Boolean = false): PlaybackTarget? {
+        val key = playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate,
+            strategy, startIntent, requestedPositionMs, manualAudioSelection)
         val cached = playbackTargetCache.remove(key)
         val target = cached?.second?.takeIf { System.currentTimeMillis() - cached.first < 120_000L }
         if (target != null) {
@@ -618,10 +589,11 @@ class EmbyClient(
     suspend fun prewarmPlayback(item: MediaItem, sourceId: String? = null, audioStreamIndex: Int? = null,
                                 strategy: SourceStrategy = SourceStrategy()) {
         val attempt = PrewarmAttempt(item.id, sourceId, strategy,
-            playbackTargetKey(item.id, false, sourceId, audioStreamIndex, false, 120_000_000L, strategy))
+            playbackTargetKey(item.id, false, sourceId, audioStreamIndex, false, 120_000_000L, strategy,
+                PlaybackStartIntent.Resume, item.positionTicks / 10_000L))
         lastPrewarmAttempt = attempt
         try {
-            resolvePlayback(item, mediaSourceId = sourceId, startPositionMs = item.positionTicks / 10_000L,
+            resolvePlayback(item, mediaSourceId = sourceId, startIntent = PlaybackStartIntent.Resume,
                 audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true, strategy = strategy)
             attempt.state = "done"
         } catch (cancelled: CancellationException) {
@@ -634,16 +606,16 @@ class EmbyClient(
     }
 
     /** Returns a JPEG frame from Emby's optional BIF file; failures are intentionally silent. */
-    suspend fun getTrickplayFrame(itemId: String, positionMs: Long): ByteArray? = withContext(Dispatchers.IO) {
+    suspend fun getTrickplayFrame(itemId: String, positionMs: Long): ByteArray? = withMetadataContext {
         try {
-            if (synchronized(trickplayFiles) { itemId in unavailableTrickplay }) return@withContext null
+            if (synchronized(trickplayFiles) { itemId in unavailableTrickplay }) return@withMetadataContext null
             val file = trickplayMutex.withLock {
                 synchronized(trickplayFiles) { trickplayFiles[itemId] } ?: if (synchronized(trickplayFiles) { itemId in unavailableTrickplay }) null else run {
                     val request = Request.Builder()
                         .url(url("/Videos/$itemId/index.bif"))
                         .header("X-Emby-Authorization", authHeader())
                         .build()
-                    val bytes = http.newCall(request).execute().use { response ->
+                    val bytes = http.readCancellable(request) { response ->
                         if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
                         val body = response.body ?: throw IOException("Empty BIF")
                         if (body.contentLength() > MAX_TRICKPLAY_FILE_BYTES) throw IOException("BIF too large")
@@ -669,6 +641,7 @@ class EmbyClient(
                     if (count <= 0 || count > MAX_TRICKPLAY_FRAMES || interval <= 0 || 64L + (count + 1L) * 8L > bytes.size) {
                         throw IOException("Invalid BIF index")
                     }
+                    currentCoroutineContext().ensureActive()
                     synchronized(trickplayFiles) {
                         while (trickplayBytes + bytes.size > MAX_TRICKPLAY_BYTES) {
                             val eldest = trickplayFiles.entries.iterator().let { if (it.hasNext()) it.next() else null } ?: break
@@ -681,17 +654,18 @@ class EmbyClient(
                     }
                     bytes
                 }
-            } ?: return@withContext null
+            } ?: return@withMetadataContext null
             val interval = readLeInt(file, 16)
             val frameIndex = (positionMs.coerceAtLeast(0L) / interval).toInt()
                 .coerceAtMost(readLeInt(file, 12) - 1)
-            synchronized(trickplayFrames) { trickplayFrames[itemId to frameIndex]?.let { return@withContext it } }
+            synchronized(trickplayFrames) { trickplayFrames[itemId to frameIndex]?.let { return@withMetadataContext it } }
             val entryOffset = 64 + frameIndex * 8
             val start = readLeInt(file, entryOffset + 4)
             val end = if (frameIndex == readLeInt(file, 12) - 1) file.size else readLeInt(file, entryOffset + 12)
-            if (start < 0 || end <= start || end > file.size) return@withContext null
+            if (start < 0 || end <= start || end > file.size) return@withMetadataContext null
             val jpeg = file.copyOfRange(start, end)
-            if (jpeg.size < 4 || jpeg[0] != 0xFF.toByte() || jpeg[1] != 0xD8.toByte()) return@withContext null
+            if (jpeg.size < 4 || jpeg[0] != 0xFF.toByte() || jpeg[1] != 0xD8.toByte()) return@withMetadataContext null
+            currentCoroutineContext().ensureActive()
             synchronized(trickplayFrames) { trickplayFrames[itemId to frameIndex] = jpeg }
             jpeg
         } catch (cancelled: CancellationException) {
@@ -712,29 +686,29 @@ class EmbyClient(
 
     /** Emby returns cast/crew in People when requested through Fields=People. */
     suspend fun getSimilarItems(itemId: String, limit: Int = 12): List<MediaItem> =
-        withTimeoutOrNull(4_000L) { withContext(Dispatchers.IO) {
-            runCatching {
+        withTimeoutOrNull(4_000L) { withMetadataContext(4_000L) {
+            catchingRequest {
             val params = mapOf("UserId" to userId, "Limit" to limit.toString(),
                 "Fields" to "Overview,PrimaryImageAspectRatio,Genres,ProductionYear,UserData,ProductionLocations,OriginalLanguage",
                 "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo")
-            val arr = getSync(url("/Items/$itemId/Similar", params)).optJSONArray("Items") ?: JSONArray()
+            val arr = getJson(url("/Items/$itemId/Similar", params)).optJSONArray("Items") ?: JSONArray()
             parseItems(arr).filterNot { it.id == itemId }.take(limit)
             }.getOrDefault(emptyList())
         } } ?: emptyList()
 
-    suspend fun getSeasons(seriesId: String): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun getSeasons(seriesId: String): List<MediaItem> = withMetadataContext {
         val params = mapOf("UserId" to userId, "Fields" to "Overview,PrimaryImageAspectRatio,UserData")
-        val arr = getSync(url("/Shows/$seriesId/Seasons", params)).optJSONArray("Items") ?: JSONArray()
+        val arr = getJson(url("/Shows/$seriesId/Seasons", params)).optJSONArray("Items") ?: JSONArray()
         parseItems(arr)
     }
 
-    suspend fun getEpisodes(seriesId: String, seasonId: String?): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun getEpisodes(seriesId: String, seasonId: String?): List<MediaItem> = withMetadataContext {
         val params = mutableMapOf(
             "UserId" to userId,
             "Fields" to "Overview,PrimaryImageAspectRatio,UserData,MediaSources",
         )
         if (seasonId != null) params["SeasonId"] = seasonId
-        val arr = getSync(url("/Shows/$seriesId/Episodes", params)).optJSONArray("Items") ?: JSONArray()
+        val arr = getJson(url("/Shows/$seriesId/Episodes", params)).optJSONArray("Items") ?: JSONArray()
         parseItems(arr)
     }
 
@@ -874,7 +848,7 @@ class EmbyClient(
             } ?: emptyList(),
             originalLanguage = o.optString("OriginalLanguage").trim().ifBlank { null },
             lastPlayedDate = ud?.optString("LastPlayedDate")?.let { raw ->
-                runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+                catchingRequest { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
             },
         )
     }
@@ -940,13 +914,13 @@ class EmbyClient(
         mode: String = "auto",
         fromStage: String = "hls",
     ): DetailPreviewResolution =
-        withContext(Dispatchers.IO) {
+        withMetadataContext {
             if (mode == "off") {
-                return@withContext DetailPreviewResolution(null, null, listOf("disabled"))
+                return@withMetadataContext DetailPreviewResolution(null, null, listOf("disabled"))
             }
             val startAt = listOf("hls", "direct", "static", "done").indexOf(fromStage).takeIf { it >= 0 } ?: 0
             val failures = mutableListOf<String>()
-            val source = runCatching { getMediaSources(itemId).firstOrNull { it.id == mediaSourceId } }.getOrNull()
+            val source = catchingRequest { getMediaSources(itemId).firstOrNull { it.id == mediaSourceId } }.getOrNull()
             val hls = url("/Videos/$itemId/master.m3u8", mapOf(
                 "MediaSourceId" to mediaSourceId,
                 "DeviceId" to deviceId,
@@ -963,11 +937,11 @@ class EmbyClient(
             ))
             if (startAt <= 0) {
                 val hlsResult = probeDetailPreview("hls", hls)
-                if (hlsResult.valid) return@withContext DetailPreviewResolution(hls, "hls", failures)
+                if (hlsResult.valid) return@withMetadataContext DetailPreviewResolution(hls, "hls", failures)
                 failures += "hls:${hlsResult.verdict}"
             }
             if (mode == "720p" || startAt >= 3) {
-                return@withContext DetailPreviewResolution(null, null, failures)
+                return@withMetadataContext DetailPreviewResolution(null, null, failures)
             }
 
             val direct = absUrl(source?.directStreamUrl)
@@ -978,7 +952,7 @@ class EmbyClient(
                 } else {
                     val headers = source?.requiredHttpHeaders.orEmpty()
                     val directResult = probeDetailPreview("direct", direct, headers)
-                    if (directResult.valid) return@withContext DetailPreviewResolution(direct, "direct", failures, headers)
+                    if (directResult.valid) return@withMetadataContext DetailPreviewResolution(direct, "direct", failures, headers)
                     failures += "direct:${directResult.verdict}"
                 }
             }
@@ -986,7 +960,7 @@ class EmbyClient(
             if (startAt <= 2 && mode == "auto") {
                 val staticUrl = url("/Videos/$itemId/stream", mapOf("static" to "true", "MediaSourceId" to mediaSourceId))
                 val staticResult = probeDetailPreview("static", staticUrl)
-                if (staticResult.valid) return@withContext DetailPreviewResolution(staticUrl, "static", failures)
+                if (staticResult.valid) return@withMetadataContext DetailPreviewResolution(staticUrl, "static", failures)
                 failures += "static:${staticResult.verdict}"
             }
             DetailPreviewResolution(null, null, failures)
@@ -994,12 +968,12 @@ class EmbyClient(
 
     private data class DetailPreviewProbe(val valid: Boolean, val verdict: String)
 
-    private fun probeDetailPreview(stage: String, target: String, requiredHttpHeaders: Map<String, String> = emptyMap()): DetailPreviewProbe = try {
+    private suspend fun probeDetailPreview(stage: String, target: String, requiredHttpHeaders: Map<String, String> = emptyMap()): DetailPreviewProbe = try {
         val request = Request.Builder().url(target).header("Range", "bytes=0-511").apply {
             previewHeaders(target, requiredHttpHeaders).forEach { (name, value) -> header(name, value) }
         }.get().build()
         // The network interceptor rechecks scheme/host/port on EVERY redirect.
-        previewHttpClient.newCall(request).apply { timeout().timeout(7, TimeUnit.SECONDS) }.execute().use { response ->
+        previewHttpClient.readCancellable(request) { response ->
             PageLog.add("detailPreviewAuth stage=$stage sameOrigin=${isSameOrigin(baseUrl, response.request.url.toString())} credential=${response.request.header("X-Emby-Authorization") != null}")
             val contentType = response.header("Content-Type").orEmpty().substringBefore(';').trim().lowercase().ifBlank { "none" }
             val prefix = response.body?.source()?.let { source ->
@@ -1010,7 +984,7 @@ class EmbyClient(
                 }
                 buffer.readByteArray().toString(Charsets.ISO_8859_1).removePrefix("\uFEFF").trimStart()
             }.orEmpty()
-            val isHls = runCatching { Uri.parse(target).path.orEmpty().endsWith(".m3u8", true) }.getOrDefault(false)
+            val isHls = catchingRequest { Uri.parse(target).path.orEmpty().endsWith(".m3u8", true) }.getOrDefault(false)
             val verdict = when {
                 !response.isSuccessful -> "http-${response.code}"
                 isHls && !prefix.contains("#EXTM3U", true) -> "not-m3u8"
@@ -1020,6 +994,8 @@ class EmbyClient(
             logDetailPreview(stage, response.code.toString(), contentType, verdict, target)
             DetailPreviewProbe(verdict == "ok", verdict)
         }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (e: Exception) {
         if (e is kotlinx.coroutines.CancellationException) throw e
         logDetailPreview(stage, "0", "none", "error-${e.javaClass.simpleName}", target)
@@ -1027,7 +1003,7 @@ class EmbyClient(
     }
 
     private fun logDetailPreview(stage: String, status: String, contentType: String, verdict: String, target: String?) {
-        val host = runCatching { Uri.parse(target).host.orEmpty() }.getOrDefault("")
+        val host = catchingRequest { Uri.parse(target).host.orEmpty() }.getOrDefault("")
         val safeHost = if (host.isBlank()) "none" else "hash-${host.hashCode().toUInt().toString(16)}"
         com.lumina.tv.diag.PageLog.add("detailPreview stage=$stage status=$status contentType=$contentType verdict=$verdict host=$safeHost")
     }
@@ -1074,16 +1050,33 @@ class EmbyClient(
 
     // ---------------- 播放 ----------------
 
-data class PlaybackTarget(
+    data class PlaybackTarget(
         val url: String,
-        val direct: Boolean,
-        val source: MediaSource?,
+        val mode: PlaybackMode,
+        val source: MediaSource,
+        /** Content position, never a player-relative timestamp. */
         val startPositionMs: Long,
+        val playSessionId: String?,
+        val audioStreamIndex: Int?,
+        val streamStartOffsetMs: Long?,
+        val timelineOrigin: TimelineOrigin,
         val headers: Map<String, String> = emptyMap(),
         val durationMs: Long? = null,
-    val playMethod: String = "DirectPlay",
-    val negotiationDiagnostics: JSONObject = JSONObject(),
-    )
+        val negotiationDiagnostics: JSONObject = JSONObject(),
+    ) {
+        val direct: Boolean get() = mode == PlaybackMode.DirectPlay
+        val playMethod: String get() = mode.name
+        // UNKNOWN deliberately returns null: StartTimeTicks does not prove a timestamp origin.
+        fun playerToContentPositionMs(playerMs: Long): Long? = when (timelineOrigin) {
+            TimelineOrigin.CONTENT -> playerMs.coerceAtLeast(0L)
+            TimelineOrigin.UNKNOWN -> null
+        }
+        fun contentToPlayerPositionMs(contentMs: Long): Long? = when (timelineOrigin) {
+            TimelineOrigin.CONTENT -> contentMs.coerceAtLeast(0L)
+            TimelineOrigin.UNKNOWN -> null
+        }
+        val playerStartPositionMs: Long? get() = contentToPlayerPositionMs(startPositionMs)
+    }
 
     /** 解析单个 MediaSource JSON 为模型（含大小与分辨率）。 */
     internal fun parseMediaSource(o: JSONObject): MediaSource {
@@ -1132,7 +1125,7 @@ data class PlaybackTarget(
         return MediaSource(
             id = o.optString("Id"),
             name = o.optString("Name", "源").ifBlank { "源" },
-            container = o.optString("Container").ifBlank { null },
+            container = normalizeContainer(o.optString("Container")),
             supportsDirectPlay = o.optBoolean("SupportsDirectPlay", true),
             supportsDirectStream = o.optBoolean("SupportsDirectStream", true),
             streams = streams,
@@ -1148,8 +1141,8 @@ data class PlaybackTarget(
     }
 
     /** 拉取全部可选源（选源菜单用）。 */
-    suspend fun getMediaSources(itemId: String): List<MediaSource> = withContext(Dispatchers.IO) {
-        runCatching {
+    suspend fun getMediaSources(itemId: String): List<MediaSource> = withMetadataContext {
+        catchingRequest {
             fun playbackInfoBody(includeDeviceProfile: Boolean) = JSONObject()
                 .put("UserId", userId)
                 .put("IsPlayback", false)
@@ -1162,11 +1155,11 @@ data class PlaybackTarget(
                 }
             }
             val playbackUrl = url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId))
-            val initial = parseSources(postSync(playbackUrl, playbackInfoBody(false).toString()))
+            val initial = parseSources(postJson(playbackUrl, playbackInfoBody(false).toString()))
             if (initial.any { source -> source.streams.any { it.type == "Video" } }) initial
             else {
-                val retried = runCatching {
-                    parseSources(postSync(playbackUrl, playbackInfoBody(true).toString()))
+                val retried = catchingRequest {
+                    parseSources(postJson(playbackUrl, playbackInfoBody(true).toString()))
                 }.getOrDefault(emptyList())
                 retried.ifEmpty { initial }
             }
@@ -1174,11 +1167,11 @@ data class PlaybackTarget(
     }
 
     /** 读取纯文本响应：.strm 内容是文本，不能按 JSON 解析 */
-    private fun getTextSync(target: String): String? = runCatching {
+    private suspend fun getText(target: String): String? = catchingRequest {
         val req = Request.Builder().url(target)
             .header("X-Emby-Authorization", authHeader())
             .build()
-        http.newCall(req).execute().use { resp ->
+        http.readCancellable(req) { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw EmbyException("HTTP ${resp.code}")
             text
@@ -1234,7 +1227,7 @@ data class PlaybackTarget(
         item: MediaItem,
         forceTranscode: Boolean = false,
         mediaSourceId: String? = null,
-        startPositionMs: Long = item.positionTicks / 10_000,
+        startIntent: PlaybackStartIntent = PlaybackStartIntent.Resume,
         audioStreamIndex: Int? = null,
         forceDirect: Boolean = false,
         removeSubtitleParams: Boolean = false,
@@ -1245,7 +1238,8 @@ data class PlaybackTarget(
         cacheResult: Boolean = false,
         strategy: SourceStrategy = SourceStrategy(),
     ): PlaybackTarget =
-        withContext(Dispatchers.IO) {
+        withMetadataContext {
+            val startPositionMs = startIntent.positionMs(item.positionTicks / 10_000L)
             val infoBody = JSONObject()
                 .put("UserId", userId)
                 .put("StartTimeTicks", startPositionMs.coerceAtLeast(0L) * 10_000)
@@ -1258,18 +1252,20 @@ data class PlaybackTarget(
                         put(flag.key, flag.value)
                     }
                 }
+            if (forceTranscode) {
+                infoBody.put("EnableDirectPlay", false).put("EnableDirectStream", false)
+                    .put("AllowVideoStreamCopy", false).put("AllowAudioStreamCopy", false)
+            }
             if (audioStreamIndex != null) infoBody.put("AudioStreamIndex", audioStreamIndex)
             if (mediaSourceId != null) infoBody.put("MediaSourceId", mediaSourceId)
             val playbackInfoParams = mapOf("UserId" to userId)
             val info = try {
-                postSync(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
+                postJson(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
                     .also { if (recordDiagnostics) lastPlaybackInfoJson = it.toString() }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                if (cacheResult) throw failure
-                if (recordDiagnostics) lastPlaybackInfoJson = JSONObject().put("reason", failure.message ?: "PlaybackInfo request failed").toString()
-                JSONObject()
+                throw failure
             }
             val sources = info.optJSONArray("MediaSources")
             val sourceOptions = (0 until (sources?.length() ?: 0)).mapNotNull { index ->
@@ -1281,7 +1277,7 @@ data class PlaybackTarget(
                 val codec = video?.optString("Codec")?.ifBlank { null }
                 SourceOption(
                     id = option.optString("Id"), name = option.optString("Name", "源").ifBlank { "源" }, index = index,
-                    container = option.optString("Container").ifBlank { null }, videoCodec = codec,
+                    container = normalizeContainer(option.optString("Container")), videoCodec = codec,
                     videoHeight = video?.optInt("Height")?.takeIf { it > 0 },
                     bitrate = option.optInt("Bitrate").takeIf { it > 0 },
                     frameRate = (video?.optDouble("RealFrameRate", 0.0)?.takeIf { it > 0 }
@@ -1291,14 +1287,15 @@ data class PlaybackTarget(
                     hdrType = range?.takeIf { it.isNotBlank() },
                 )
             }
-            if (cacheResult && sourceOptions.isEmpty()) throw IOException("PlaybackInfo returned no sources")
+            if (sourceOptions.isEmpty()) throw EmbyException("PlaybackInfo returned no usable sources")
             val selectedOption = when {
                 mediaSourceId != null -> sourceOptions.firstOrNull { it.id == mediaSourceId }
                 strategy.isDefault -> sourceOptions.firstOrNull()
                 else -> sourceOptions.takeIf { it.isNotEmpty() }?.let { chooseSource(it, strategy) }
             }
             val first = when {
-                mediaSourceId != null -> selectedOption?.let { sources?.optJSONObject(it.index) } ?: sources?.optJSONObject(0)
+                mediaSourceId != null -> selectedOption?.let { sources?.optJSONObject(it.index) }
+                    ?: throw EmbyException("Requested media source is no longer available: $mediaSourceId")
                 strategy.isDefault -> sources?.optJSONObject(0)
                 else -> selectedOption?.let { sources?.optJSONObject(it.index) }
             }
@@ -1317,78 +1314,53 @@ data class PlaybackTarget(
                 ?: info.optJSONObject("Item")?.optJSONObject("UserData")?.optLong("PlaybackPositionTicks", -1L)
                 ?: first?.optJSONObject("UserData")?.optLong("PlaybackPositionTicks", -1L)
                 ?: -1L
-            val resolvedStartPositionMs = if (responsePositionTicks >= 0L) responsePositionTicks / 10_000L
-                else startPositionMs.coerceAtLeast(0L)
-            val msId = first?.optString("Id")?.ifBlank { null } ?: item.id
-            val source = if (first != null) parseMediaSource(first) else MediaSource(
-                id = msId, name = "源", container = null,
-                supportsDirectPlay = true, supportsDirectStream = true, streams = emptyList(),
-            )
-            val videoStream = source.streams.firstOrNull { it.type == "Video" }
-            val videoCodec = videoStream?.codec.orEmpty().lowercase()
-            val sourceContainer = source.container.orEmpty().lowercase()
-            val videoNeedsTranscode = videoCodec.isNotBlank() && videoCodec !in setOf("h264", "avc", "hevc", "h265")
-            val containerNeedsTranscode = sourceContainer.isNotBlank() &&
-                sourceContainer !in setOf("mkv", "mp4", "m4v", "ts", "mov")
-            val needTranscode = forceTranscode || videoNeedsTranscode ||
-                containerNeedsTranscode || !source.supportsDirectPlay
-            val directUrl = url(
-                "/Videos/${item.id}/stream",
-                mapOf("static" to "true", "MediaSourceId" to msId, "DeviceId" to deviceId,
-                    "AudioStreamIndex" to audioStreamIndex?.toString())
-            )
-            val hlsUrl = url(
-                "/Videos/${item.id}/master.m3u8",
-                mapOf(
-                    "MediaSourceId" to msId,
-                    "DeviceId" to deviceId,
-                    "VideoCodec" to "h264",
-                    "AudioCodec" to "aac",
-                    "MaxAudioChannels" to "2",
-                    "SegmentContainer" to "ts",
-                    "MinSegments" to "1",
-                    "BreakOnNonKeyFrames" to "true",
-                    "AudioStreamIndex" to audioStreamIndex?.toString(),
-                    "StartTimeTicks" to (startPositionMs.coerceAtLeast(0L) * 10_000L).takeIf { it > 0L }?.toString(),
-                    "PlaySessionId" to info.optString("PlaySessionId").ifBlank { null },
-                )
-            )
-            // forceDirect：服务端转码流坏了（HLS 解析失败）时的兜底，直接拉原文件
-            val useDirect = forceDirect || !needTranscode
-            val transcodingUrl = absUrl(first?.optString("TranscodingUrl"))
-                ?.let { serverUrl ->
-                    val withAudio = if (manualAudioStreamSelection) addPlaybackQuery(serverUrl, audioStreamIndex) else serverUrl
-                    val withPosition = addStartTimeIfMissing(withAudio, startPositionMs)
-                    if (removeSubtitleParams) removeSubtitleQuery(withPosition) else withPosition
+            val resolvedStartPositionMs = startIntent.positionMs(item.positionTicks / 10_000L,
+                responsePositionTicks.takeIf { it >= 0L }?.div(10_000L))
+            val msId = first?.optString("Id")?.takeIf { it.isNotBlank() }
+                ?: throw EmbyException("PlaybackInfo source is missing its identity")
+            val source = parseMediaSource(requireNotNull(first))
+            val selectedAudioIndex = audioStreamIndex?.also { requested ->
+                if (source.audioStreams.none { it.index == requested }) throw EmbyException("Requested audio track is no longer available")
+            } ?: first.optInt("DefaultAudioStreamIndex", -1).takeIf { index -> source.audioStreams.any { it.index == index } }
+                ?: source.audioStreams.firstOrNull { it.isDefault }?.index ?: source.audioStreams.firstOrNull()?.index
+            val playSessionId = info.optString("PlaySessionId").takeIf { it.isNotBlank() }
+            val directUrl = url("/Videos/${item.id}/stream", mapOf(
+                "static" to "true", "MediaSourceId" to msId, "DeviceId" to deviceId,
+                "PlaySessionId" to playSessionId,
+            ))
+            val transcodingUrl = usablePlaybackUrl(first.optString("TranscodingUrl"))
+            val serverDirectUrl = usablePlaybackUrl(first.optString("DirectStreamUrl"))
+            val isStrmItem = isStrmSource(first)
+            val strmText = if (isStrmItem && serverDirectUrl == null && !forceTranscode) {
+                getText(url("/Items/${item.id}/Download", mapOf("UserId" to userId)))
+            } else null
+            val directLinkUrl = serverDirectUrl ?: extractStrmUrl(strmText)?.let(::usablePlaybackUrl)
+            // One selected route owns URL, mode and timeline together. No synthetic HLS fallback.
+            val route = when {
+                forceTranscode -> {
+                    if (transcodingUrl == null || first.optString("PlayMethod").equals("DirectStream", true)) {
+                        throw EmbyException("Forced transcoding is unavailable for the selected source")
+                    }
+                    Triple(transcodingUrl, PlaybackMode.Transcode, TimelineOrigin.UNKNOWN)
                 }
-            val serverDirectUrl = absUrl(first?.optString("DirectStreamUrl"))?.let {
-                val withAudio = if (manualAudioStreamSelection) addPlaybackQuery(it, audioStreamIndex) else it
-                addStartTimeIfMissing(withAudio, startPositionMs)
+                isStrmItem -> Triple(directLinkUrl ?: throw EmbyException("STRM has no usable HTTP URL"),
+                    PlaybackMode.DirectPlay, TimelineOrigin.UNKNOWN)
+                forceDirect -> Triple(directUrl, PlaybackMode.DirectPlay, TimelineOrigin.CONTENT)
+                preferDirectStreamUrl && serverDirectUrl != null && source.supportsDirectStream ->
+                    Triple(serverDirectUrl, PlaybackMode.DirectStream, TimelineOrigin.UNKNOWN)
+                source.supportsDirectPlay -> Triple(directUrl, PlaybackMode.DirectPlay, TimelineOrigin.CONTENT)
+                source.supportsDirectStream && serverDirectUrl != null ->
+                    Triple(serverDirectUrl, PlaybackMode.DirectStream, TimelineOrigin.UNKNOWN)
+                transcodingUrl != null -> Triple(transcodingUrl,
+                    if (first.optString("PlayMethod").equals("DirectStream", true)) PlaybackMode.DirectStream else PlaybackMode.Transcode,
+                    TimelineOrigin.UNKNOWN)
+                else -> throw EmbyException("The selected source has no usable negotiated playback route")
             }
-            // --- STRM 处理 ---
-            // 只在确实是 STRM 条目时读一次文本，URL 与请求头都从这里出，避免重复请求。
-            val strmText: String? =
-                if (first != null && isStrmSource(first)) {
-                    getTextSync(url("/Items/${item.id}/Download", mapOf("UserId" to userId)))
-                } else null
-            val isStrmItem = first != null && isStrmSource(first)
-            val directLinkUrl: String? = when {
-                // Emby 已经在 MediaSources 里给了绝对直链
-                absUrl(source.directStreamUrl) != null -> absUrl(source.directStreamUrl)
-                // 否则从 .strm 文本取第一条有效地址
-                strmText != null -> extractStrmUrl(strmText)
-                else -> null
+            if (isStrmItem && !forceTranscode && resolvedStartPositionMs > 0L) {
+                throw EmbyException("This external source has an unverified timeline; resume is unavailable")
             }
-            // HEAD being rejected does not prove GET playback will fail. This server returns DirectStreamUrl for ordinary items too, so probing blocks every source before engine selection.
-            // 是 STRM 条目却拿不到地址：直接报错，不要退化成转码流导致无限缓冲
-            if (isStrmItem && directLinkUrl == null) {
-                throw EmbyException("该 STRM 条目没有可用地址（文件为空或内容不是 http 链接）")
-            }
-            val finalUrl = if (isStrmItem && directLinkUrl != null && !forceTranscode) directLinkUrl
-                else if (forceDirect) directUrl
-                else if (preferDirectStreamUrl && serverDirectUrl != null) serverDirectUrl
-                else if (!needTranscode && serverDirectUrl != null) serverDirectUrl
-                else transcodingUrl ?: serverDirectUrl ?: if (useDirect) directUrl else hlsUrl
+            val finalUrl = if (route.third == TimelineOrigin.CONTENT || isStrmItem && !forceTranscode) route.first
+                else negotiatedUrl(route.first, resolvedStartPositionMs, selectedAudioIndex, playSessionId, removeSubtitleParams)
             val finalPath = android.net.Uri.parse(finalUrl).path.orEmpty()
             android.util.Log.d("EmbyClient", "playback: isStrmItem=$isStrmItem hasDirectLink=${directLinkUrl != null} final=$finalPath")
             // 请求头：#EXTVLCOPT / #EXTHTTP 既可能来自 MediaSources.AdditionalOptions，也可能在 .strm 文本里
@@ -1411,16 +1383,16 @@ data class PlaybackTarget(
             }
             PlaybackTarget(
                 url = finalUrl,
-                // STRM 直链本身就是直连播放，不参与转码判定
-                direct = if (isStrmItem && directLinkUrl != null && !forceTranscode) true else useDirect,
+                mode = route.second,
                 source = source,
                 startPositionMs = resolvedStartPositionMs,
-                headers = headers,
-                playMethod = when {
-                    first?.optString("PlayMethod").equals("Transcode", true) || first?.optString("PlayMethod").equals("Transcoding", true) -> "Transcode"
-                    transcodingUrl != null && finalUrl == transcodingUrl -> "Transcode"
-                    else -> "DirectPlay"
-                },
+                playSessionId = playSessionId,
+                audioStreamIndex = selectedAudioIndex,
+                // No server/sample evidence for remux/transcode/STRM timestamp offsets yet.
+                streamStartOffsetMs = if (route.third == TimelineOrigin.CONTENT) 0L else null,
+                timelineOrigin = route.third,
+                headers = previewHeaders(finalUrl, headers).toMap(),
+                durationMs = first.optLong("RunTimeTicks", item.runtimeTicks ?: 0L).takeIf { it > 0L }?.div(10_000L),
                 negotiationDiagnostics = JSONObject()
                     .put("request", JSONObject().apply {
                         // 如实记录：这 5 个布尔当前没发给服务器，就记 null，不假装 true
@@ -1437,10 +1409,14 @@ data class PlaybackTarget(
                             first?.optString("TranscodingUrl").orEmpty().contains(".m3u8", true) -> "hls"
                             else -> "static"
                         }).put("transcodeReasons", first?.optJSONArray("TranscodeReasons") ?: JSONArray()))
-                    .put("selectedAudioIndex", audioStreamIndex ?: JSONObject.NULL)
+                    .put("selectedAudioIndex", selectedAudioIndex ?: JSONObject.NULL)
+                    .put("mode", route.second.name).put("timelineOrigin", route.third.name)
+                    .put("streamStartOffsetMs", if (route.third == TimelineOrigin.CONTENT) 0L else JSONObject.NULL)
                     .put("selectedSubtitleIndex", JSONObject.NULL),
             ).also { target ->
-                if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect, maxStreamingBitrate, strategy)] =
+                currentCoroutineContext().ensureActive()
+                if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect, maxStreamingBitrate,
+                        strategy, startIntent, startPositionMs, manualAudioStreamSelection, removeSubtitleParams, preferDirectStreamUrl)] =
                     System.currentTimeMillis() to target
             }
         }
@@ -1462,40 +1438,23 @@ data class PlaybackTarget(
             .put(JSONObject().put("Container", "ts").put("Type", "Audio").put("AudioCodec", "aac")
                 .put("Protocol", "hls").put("MaxAudioChannels", "2")))
 
-    private fun addPlaybackQuery(url: String, audioStreamIndex: Int?): String {
-        val uri = Uri.parse(url)
-        if (!uri.isHierarchical) return url
+    private fun usablePlaybackUrl(raw: String?): String? = catchingRequest { absUrl(raw)?.takeIf { value ->
+        val uri = java.net.URI(value)
+        uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
+    } }.getOrNull()
+
+    private fun negotiatedUrl(target: String, contentStartMs: Long, audioIndex: Int?, sessionId: String?, removeSubtitles: Boolean): String {
+        val uri = Uri.parse(target)
         val builder = uri.buildUpon().clearQuery()
-        val names = uri.queryParameterNames
-        names.filterNot { it.equals("AudioStreamIndex", true) }.forEach { name ->
-            uri.getQueryParameters(name).forEach { value -> builder.appendQueryParameter(name, value) }
+        val replaced = setOf("starttimeticks", "audiostreamindex", "playsessionid") +
+            if (removeSubtitles) setOf("subtitlestreamindex", "subtitlemethod") else emptySet()
+        uri.queryParameterNames.filterNot { it.lowercase() in replaced }.forEach { key ->
+            uri.getQueryParameters(key).forEach { builder.appendQueryParameter(key, it) }
         }
-        if ("DeviceId" !in names) builder.appendQueryParameter("DeviceId", deviceId)
-        if ("api_key" !in names && token.isNotEmpty()) builder.appendQueryParameter("api_key", token)
-        if (audioStreamIndex != null) builder.appendQueryParameter("AudioStreamIndex", audioStreamIndex.toString())
+        builder.appendQueryParameter("StartTimeTicks", (contentStartMs * 10_000L).toString())
+        audioIndex?.let { builder.appendQueryParameter("AudioStreamIndex", it.toString()) }
+        sessionId?.let { builder.appendQueryParameter("PlaySessionId", it) }
         return builder.build().toString()
-    }
-
-    private fun removeSubtitleQuery(url: String): String {
-        val uri = Uri.parse(url)
-        if (!uri.isHierarchical) return url
-        val builder = uri.buildUpon().clearQuery()
-        uri.queryParameterNames
-            .filterNot { it.equals("SubtitleStreamIndex", true) || it.equals("SubtitleMethod", true) }
-            .forEach { name ->
-                uri.getQueryParameters(name).forEach { value ->
-                    builder.appendQueryParameter(name, value)
-                }
-            }
-        return builder.build().toString()
-    }
-
-    private fun addStartTimeIfMissing(url: String, startPositionMs: Long): String {
-        val uri = Uri.parse(url)
-        if (!uri.isHierarchical || startPositionMs <= 0L || uri.queryParameterNames.any { it.equals("StartTimeTicks", true) }) return url
-        return uri.buildUpon()
-            .appendQueryParameter("StartTimeTicks", (startPositionMs * 10_000L).toString())
-            .build().toString()
     }
 
     fun subtitleUrl(itemId: String, mediaSourceId: String, index: Int, format: String = "srt"): String =
@@ -1513,16 +1472,16 @@ data class PlaybackTarget(
 
     private suspend fun setUserDataFlag(itemId: String, endpoint: String, field: String, target: Boolean): Result<Boolean> =
         userDataMutationMutex.withLock {
-            withContext(Dispatchers.IO) {
+            withMetadataContext {
                 try {
                     val resp = if (target) {
-                        postSync(url("/Users/$userId/$endpoint/$itemId"), "{}")
+                        postJson(url("/Users/$userId/$endpoint/$itemId"), "{}")
                     } else {
                         val req = Request.Builder().url(url("/Users/$userId/$endpoint/$itemId"))
                             .header("X-Emby-Authorization", authHeader())
                             .delete()
                             .build()
-                        http.newCall(req).execute().use { r ->
+                        http.readCancellable(req) { r ->
                             if (!r.isSuccessful) throw EmbyException("HTTP ${r.code}", r.code)
                             JSONObject(r.body?.string().orEmpty().ifBlank { "{}" })
                         }
@@ -1530,7 +1489,7 @@ data class PlaybackTarget(
                     // Emby versions return either UserItemDataDto at the root or a wrapped UserData.
                     // Empty 2xx responses require a read-back; never invent the requested state.
                     val actual = userDataFlag(resp, field)
-                        ?: userDataFlag(getSync(url("/Users/$userId/Items/$itemId")), field)
+                        ?: userDataFlag(getJson(url("/Users/$userId/Items/$itemId")), field)
                         ?: throw EmbyException("响应缺少 $field，无法确认状态")
                     Result.success(actual)
                 } catch (cancelled: CancellationException) {
@@ -1552,7 +1511,7 @@ data class PlaybackTarget(
 
     // ---------------- 进度上报 ----------------
 
-    suspend fun reportStart(itemId: String, positionMs: Long, mediaSourceId: String?, playMethod: String) = withContext(Dispatchers.IO) {
+    suspend fun reportStart(itemId: String, positionMs: Long, mediaSourceId: String?, playMethod: String) = withMetadataContext {
         if (sendStart(itemId, positionMs, mediaSourceId, playMethod)) {
             progressQueue?.removeThrough(itemId, positionMs, "start")
         } else {
@@ -1560,7 +1519,7 @@ data class PlaybackTarget(
         }
     }
 
-    suspend fun reportProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String) = withContext(Dispatchers.IO) {
+    suspend fun reportProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String) = withMetadataContext {
         if (sendProgress(itemId, positionMs, paused, mediaSourceId, playMethod)) {
             progressQueue?.removeThrough(itemId, positionMs, "progress")
         } else {
@@ -1568,7 +1527,7 @@ data class PlaybackTarget(
         }
     }
 
-    suspend fun reportStop(itemId: String, positionMs: Long) = withContext(Dispatchers.IO) {
+    suspend fun reportStop(itemId: String, positionMs: Long) = withMetadataContext {
         if (sendStop(itemId, positionMs)) {
             progressQueue?.removeThrough(itemId, positionMs, "stop")
         } else {
@@ -1576,8 +1535,8 @@ data class PlaybackTarget(
         }
     }
 
-    private suspend fun sendStart(itemId: String, positionMs: Long, mediaSourceId: String?, playMethod: String): Boolean = runCatching {
-        postSync(url("/Sessions/Playing", emptyMap()), JSONObject()
+    private suspend fun sendStart(itemId: String, positionMs: Long, mediaSourceId: String?, playMethod: String): Boolean = catchingRequest {
+        postJson(url("/Sessions/Playing", emptyMap()), JSONObject()
             .put("ItemId", itemId)
             .put("PositionTicks", positionMs * 10_000)
             .put("CanSeek", true)
@@ -1587,8 +1546,8 @@ data class PlaybackTarget(
             .toString())
     }.onFailure { lastApiFailure = "reportStart: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }.isSuccess
 
-    private suspend fun sendProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String): Boolean = runCatching {
-        postSync(url("/Sessions/Playing/Progress", emptyMap()), JSONObject()
+    private suspend fun sendProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String): Boolean = catchingRequest {
+        postJson(url("/Sessions/Playing/Progress", emptyMap()), JSONObject()
             .put("ItemId", itemId)
             .put("PositionTicks", positionMs * 10_000)
             .put("IsPaused", paused)
@@ -1598,8 +1557,8 @@ data class PlaybackTarget(
             .toString())
     }.onFailure { lastApiFailure = "reportProgress: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }.isSuccess
 
-    private suspend fun sendStop(itemId: String, positionMs: Long): Boolean = runCatching {
-        postSync(url("/Sessions/Playing/Stopped", emptyMap()), JSONObject()
+    private suspend fun sendStop(itemId: String, positionMs: Long): Boolean = catchingRequest {
+        postJson(url("/Sessions/Playing/Stopped", emptyMap()), JSONObject()
             .put("ItemId", itemId)
             .put("PositionTicks", positionMs * 10_000)
             .toString())
@@ -1648,7 +1607,7 @@ data class PlaybackTarget(
         progressScope.cancel()
     }
 
-    suspend fun clearWatchHistory(): Int = withContext(Dispatchers.IO) {
+    suspend fun clearWatchHistory(): Int = withMetadataContext {
         var cleared = 0
         while (cleared < 100_000) {
             val page = getItems(
@@ -1666,18 +1625,16 @@ data class PlaybackTarget(
                     .header("X-Emby-Authorization", authHeader())
                     .delete()
                     .build()
-                http.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) cleared++
-                }
+                if (http.readCancellable(request) { it.isSuccessful }) cleared++
             }
             if (page.size < 100) break
         }
         cleared
     }
 
-    suspend fun testConnection(server: String): String = withContext(Dispatchers.IO) {
+    suspend fun testConnection(server: String): String = withMetadataContext {
         baseUrl = normalize(server)
-        val info = getSync(url("/System/Info/Public"), withToken = false)
+        val info = getJson(url("/System/Info/Public"), withToken = false)
         info.optString("ServerName", "Emby")
     }
 

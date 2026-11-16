@@ -2,6 +2,8 @@
 
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.data.catchingRequest
+
 import android.util.Log
 import android.app.Activity
 import android.app.ActivityManager
@@ -427,12 +429,12 @@ fun HomeScreen(
         offline = false
         try {
             coroutineScope {
-                val rA = async { runCatching { c.getResume(20) } }
-                val mA = async { runCatching { c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 24) } }
-                val sA = async { runCatching { c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 24) } }
-                val fA = async { runCatching { c.getFavorites(24) } }
-                val vA = async { runCatching { c.getViews() } }
-                val lA = async { runCatching {
+                val rA = async { catchingRequest { c.getResume(20) } }
+                val mA = async { catchingRequest { c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 24) } }
+                val sA = async { catchingRequest { c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 24) } }
+                val fA = async { catchingRequest { c.getFavorites(24) } }
+                val vA = async { catchingRequest { c.getViews() } }
+                val lA = async { catchingRequest {
                     c.getLatest(null, 24).distinctBy { it.id }.filter { it.type != "Movie" && it.type != "Series" }
                         .ifEmpty { cached?.latest.orEmpty() }
                 } }
@@ -512,7 +514,7 @@ fun HomeScreen(
         val counts = coroutineScope {
             views.map { view ->
                 async {
-                    view.id to runCatching { countSemaphore.withPermit { c.getLibraryItemCount(view.id) } }.getOrNull()
+                    view.id to catchingRequest { countSemaphore.withPermit { c.getLibraryItemCount(view.id) } }.getOrNull()
                 }
             }.awaitAll()
         }

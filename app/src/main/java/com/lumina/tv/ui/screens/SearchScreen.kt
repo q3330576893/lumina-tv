@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.data.catchingRequest
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -110,7 +112,7 @@ fun SearchScreen(
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "搜索"
         runCatching { inputFocus.requestFocus() }
-        latest = runCatching { client?.getLatest(null, 12) }.getOrNull().orEmpty()
+        latest = catchingRequest { client?.getLatest(null, 12) }.getOrNull().orEmpty()
     }
 
     LaunchedEffect(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow) {

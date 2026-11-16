@@ -135,6 +135,10 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import com.lumina.tv.data.catchingRequest
+import com.lumina.tv.data.withRequestBudget
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lumina.tv.ui.components.GlassPanel
@@ -190,16 +194,17 @@ private suspend fun loadDetailRecommendations(
         }
         detailRelatedCache.remove(cacheKey)
     }
+    var completedSimilar: List<MediaItem> = emptyList()
     var requestFailed = false
     val result = try {
         withTimeoutOrNull(5_000L) {
-        coroutineScope {
-            val similar = async { runCatching { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList()) }
+        withRequestBudget(5_000L) {
+            val similar = async { catchingRequest { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList()).also { completedSimilar = it } }
             val genreCandidates = mutableListOf<MediaItem>()
             val mainGenre = genres.firstOrNull()
             if (mainGenre != null) {
                 for (page in 0..2) {
-                    val pageItems = runCatching {
+                    val pageItems = catchingRequest {
                         client.getItems(
                             types = type, sortBy = "Random", limit = 60, startIndex = page * 60,
                             genre = mainGenre, requestTimeoutSeconds = 5,
@@ -247,8 +252,9 @@ private suspend fun loadDetailRecommendations(
         requestFailed = true
         null
     }
+    currentCoroutineContext().ensureActive()
     val results = if (result == null) {
-        val fallback = runCatching { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList())
+        val fallback = completedSimilar
             .asSequence()
             .filterNot { it.id == itemId }
             .filterNot { current.seriesId != null && it.seriesId == current.seriesId }
@@ -274,12 +280,12 @@ fun DetailScreen(
     id: String,
     onPlay: (MediaItem) -> Unit,
     onPlayWithSource: (MediaItem, String) -> Unit,
-    onPlayFromStart: (MediaItem) -> Unit,
+    onPlayFromStart: (MediaItem, String?) -> Unit,
     onOpenDetail: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    val sourceAudioCaps = remember { runCatching { detect(context) }.getOrDefault(AudioCapabilities(emptyMap())) }
+    val sourceAudioCaps = remember { catchingRequest { detect(context) }.getOrDefault(AudioCapabilities(emptyMap())) }
     val client = AppRuntime.client
     val detailHazeState = remember { HazeState() }
     val scope = rememberCoroutineScope()
@@ -441,8 +447,8 @@ fun DetailScreen(
             sourcesLoading = true
             val startedAt = System.currentTimeMillis()
             PageLog.add("detailLoad id=$id stage=cache-main ms=0")
-            val freshItemJob = scope.launch {
-                val freshItem = runCatching { c.getItem(id) }.getOrNull()
+            val freshItemJob = launch {
+                val freshItem = catchingRequest { c.getItem(id) }.getOrNull()
                 if (freshItem != null) {
                     item = freshItem
                     favoriteAction.syncFromServer(freshItem.isFavorite)
@@ -450,18 +456,18 @@ fun DetailScreen(
                 }
                 PageLog.add("detailLoad id=$id stage=main-refresh ms=${System.currentTimeMillis() - startedAt}")
             }
-            val sourceJob = scope.launch {
-                sources = runCatching { c.getMediaSources(id) }.getOrDefault(cached.sources)
+            val sourceJob = launch {
+                sources = catchingRequest { c.getMediaSources(id) }.getOrDefault(cached.sources)
                 sourcesLoading = false
                 PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - startedAt}")
             }
-            val recommendationJob = scope.launch {
+            val recommendationJob = launch {
                 val current = cached.item ?: return@launch
                 similar = loadDetailRecommendations(c, id, current)
                 similarLoading = false
                 PageLog.add("detailLoad id=$id stage=similar ms=${System.currentTimeMillis() - startedAt}")
             }
-            scope.launch {
+            launch {
                 joinAll(freshItemJob, sourceJob, recommendationJob)
                 LibraryCache.putDetail(id, cached.copy(item = item ?: cached.item, sources = sources, at = System.currentTimeMillis()), cacheRevision)
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - startedAt}")
@@ -476,7 +482,7 @@ fun DetailScreen(
         // 详情 / 分季 / 多源并行拉取，避免串行等待
         val loadStartedAt = System.currentTimeMillis()
         PageLog.add("detailLoad id=$id stage=start")
-        val mainWaitNotice = scope.launch {
+        val mainWaitNotice = launch {
             delay(5_000L)
             if (loading && item == null) {
                 loading = false
@@ -487,6 +493,7 @@ fun DetailScreen(
         var main: MediaItem? = null
         var loadError: Throwable? = null
         try {
+            val finished = withTimeoutOrNull(5_000L) { withRequestBudget(5_000L) {
             for (attempt in 0..2) {
                 try {
                     main = c.getItemForDetail(id)
@@ -503,6 +510,9 @@ fun DetailScreen(
                     if (attempt < 2 && networkFailure) delay(if (attempt == 0) 250L else 500L) else break
                 }
             }
+            true
+            } }
+            if (finished == null) loadError = EmbyException("Detail request deadline exceeded")
         } finally {
             mainWaitNotice.cancel()
         }
@@ -525,33 +535,33 @@ fun DetailScreen(
         PageLog.add("detailLoad id=$id stage=main-ready ms=${System.currentTimeMillis() - loadStartedAt}")
         // TMDB 补充：仅当 Emby 自身无评分时异步拉取，失败静默
         if (it0 != null && it0.rating == null && it0.communityRating == null) {
-            tmdb = runCatching { TmdbClient.lookup(it0.type, it0.seriesName ?: it0.name, it0.year) }.getOrNull()
+            tmdb = catchingRequest { TmdbClient.lookup(it0.type, it0.seriesName ?: it0.name, it0.year) }.getOrNull()
         }
         if (it0 != null) {
-            val seasonJob = scope.launch {
-                val loadedSeasons = if (it0.type == "Series") runCatching { c.getSeasons(id) }.getOrDefault(emptyList()) else emptyList()
+            val seasonJob = launch {
+                val loadedSeasons = if (it0.type == "Series") catchingRequest { c.getSeasons(id) }.getOrDefault(emptyList()) else emptyList()
                 seasons = loadedSeasons
                 val first = loadedSeasons.firstOrNull()
                 val loadedEpisodes = if (first != null) {
-                    LibraryCache.episodesOf(id, first.id) ?: runCatching { c.getEpisodes(id, first.id) }.getOrDefault(emptyList())
+                    LibraryCache.episodesOf(id, first.id) ?: catchingRequest { c.getEpisodes(id, first.id) }.getOrDefault(emptyList())
                 } else emptyList()
                 if (first != null) LibraryCache.putEpisodes(id, first.id, loadedEpisodes, cacheRevision)
                 episodes = loadedEpisodes
                 selectedSeason = first
                 PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
             }
-            val sourceJob = scope.launch {
-                sources = runCatching { c.getMediaSources(id) }.getOrDefault(emptyList())
+            val sourceJob = launch {
+                sources = catchingRequest { c.getMediaSources(id) }.getOrDefault(emptyList())
                 sourcesLoading = false
                 PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - loadStartedAt}")
             }
             similarLoading = true
-            val recommendationJob = scope.launch {
+            val recommendationJob = launch {
                 similar = loadDetailRecommendations(c, id, it0)
                 similarLoading = false
                 PageLog.add("detailLoad id=$id stage=similar ms=${System.currentTimeMillis() - loadStartedAt}")
             }
-            scope.launch {
+            launch {
                 joinAll(seasonJob, sourceJob, recommendationJob)
                 LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()), cacheRevision)
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - loadStartedAt}")
@@ -569,7 +579,7 @@ fun DetailScreen(
                 if (hit != episodes) episodes = hit
                 return@LaunchedEffect
             }
-            val list = runCatching { c.getEpisodes(it0.id, sid) }.getOrDefault(emptyList())
+            val list = catchingRequest { c.getEpisodes(it0.id, sid) }.getOrDefault(emptyList())
             LibraryCache.putEpisodes(it0.id, sid, list, cacheRevision)
             episodes = list
         }
@@ -578,7 +588,7 @@ fun DetailScreen(
     LaunchedEffect(id, item?.id, item?.type, item?.name, item?.seriesName, item?.year, item?.providerIds) {
         val current = item ?: return@LaunchedEffect
         resolvedExternalLinks = null
-        resolvedExternalLinks = runCatching {
+        resolvedExternalLinks = catchingRequest {
             TmdbClient.externalLinks(
                 type = current.type,
                 title = current.seriesName ?: current.name,
@@ -600,7 +610,7 @@ fun DetailScreen(
             mdb = null
             return@LaunchedEffect
         }
-        mdb = runCatching { MdblistClient.ratings(current.type, imdbId, tmdbId) }.getOrNull()
+        mdb = catchingRequest { MdblistClient.ratings(current.type, imdbId, tmdbId) }.getOrNull()
     }
 
     val sourceIdsKey = sources.joinToString(",") { it.id }
@@ -627,7 +637,7 @@ fun DetailScreen(
         detailPreviewUrl = null
         if (detailPreviewRetry == 0) detailPreviewFailure = null
         val previewItem = when (current.type) {
-            "Series" -> episodes.firstOrNull() ?: runCatching {
+            "Series" -> episodes.firstOrNull() ?: catchingRequest {
                 c.getEpisodes(current.id, selectedSeason?.id).firstOrNull()
             }.getOrNull()
             else -> current
@@ -637,7 +647,7 @@ fun DetailScreen(
             PageLog.add("detailPreview stage=skip reason=preview-item-null")
             return@LaunchedEffect
         }
-        val trailer = runCatching { c.getLocalTrailers(previewItem.id).firstOrNull() }.getOrNull()
+        val trailer = catchingRequest { c.getLocalTrailers(previewItem.id).firstOrNull() }.getOrNull()
         val sourceItem = trailer ?: previewItem
         val previewSource = if (sourceItem.id == current.id) {
             if (sources.isEmpty() && sourcesLoading) {
@@ -647,7 +657,7 @@ fun DetailScreen(
             sources.firstOrNull { it.id == selectedSourceId && it.streams.any { stream -> stream.type == "Video" } }
                 ?: sources.firstOrNull { source -> source.streams.any { it.type == "Video" } }
         } else {
-            runCatching { c.getMediaSources(sourceItem.id) }.getOrDefault(emptyList())
+            catchingRequest { c.getMediaSources(sourceItem.id) }.getOrDefault(emptyList())
                 .firstOrNull { source -> source.streams.any { it.type == "Video" } }
         }
         if (previewSource == null && sourceItem.id == current.id && sourcesLoading) {
@@ -682,7 +692,7 @@ fun DetailScreen(
             PageLog.add("detailPreview stage=skip reason=mode-off")
             return@LaunchedEffect
         }
-        val resolution = runCatching {
+        val resolution = catchingRequest {
             c.resolveDetailPreviewUrl(
                 sourceItem.id,
                 resolvedPreviewSource.id,
@@ -718,7 +728,7 @@ fun DetailScreen(
         var focused = false
         for (attempt in 0 until 3) {
             withFrameNanos { }
-            runCatching { playFocus.requestFocus() }
+            catchingRequest { playFocus.requestFocus() }
             withFrameNanos { }
             focused = playButtonFocused
             if (focused) break
@@ -732,7 +742,7 @@ fun DetailScreen(
             sourceMenuWasOpen = true
         } else if (sourceMenuWasOpen) {
             delay(120)
-            runCatching { sourceFocus.requestFocus() }
+            catchingRequest { sourceFocus.requestFocus() }
             sourceMenuWasOpen = false
         }
     }
@@ -748,7 +758,7 @@ fun DetailScreen(
         episodeSourcesLoading = true
         showEpisodeSourceMenu = true
         scope.launch {
-            episodeSources = runCatching { client?.getMediaSources(ep.id) }.getOrDefault(emptyList()).orEmpty()
+            episodeSources = catchingRequest { client?.getMediaSources(ep.id) }.getOrDefault(emptyList()).orEmpty()
             episodeSourcesLoading = false
             if (episodeSources.isEmpty()) {
                 showEpisodeSourceMenu = false
@@ -761,7 +771,7 @@ fun DetailScreen(
     LaunchedEffect(id, item) {
         val current = item ?: return@LaunchedEffect
         if (current.people.isNotEmpty()) return@LaunchedEffect
-        val extra = runCatching { client?.getItemPeople(id) }.getOrNull().orEmpty()
+        val extra = catchingRequest { client?.getItemPeople(id) }.getOrNull().orEmpty()
         if (extra.isNotEmpty()) item = current.copy(people = extra)
     }
 
@@ -987,7 +997,7 @@ fun DetailScreen(
                                                 ?: episodes.firstOrNull { !it.played }
                                                 ?: episodes.firstOrNull()
                                         } else it0
-                                        if (target != null) onPlayFromStart(target)
+                                        if (target != null) onPlayFromStart(target, selectedSourceId.takeIf { target.id == it0.id })
                                     },
                                 ) { focused ->
                                     Box(
@@ -1246,7 +1256,7 @@ fun DetailScreen(
                                 ),
                                 corner = 10.dp,
                                 normalFill = Color(0x14FFFFFF),
-                                onClick = { runCatching { uriHandler.openUri(uri) } },
+                                onClick = { catchingRequest { uriHandler.openUri(uri) } },
                             ) { focused ->
                                 Row(
                                     Modifier.padding(horizontal = 12.dp),
@@ -1424,7 +1434,7 @@ private fun PickerDialog(
         LaunchedEffect(options) {
             if (options.isNotEmpty()) {
                 delay(120)
-                runCatching { requesters.first().requestFocus() }
+                catchingRequest { requesters.first().requestFocus() }
             }
         }
         Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {

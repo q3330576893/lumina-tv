@@ -1,5 +1,10 @@
 ﻿package com.lumina.tv.ui.screens
 
+import com.lumina.tv.data.catchingRequest
+import com.lumina.tv.data.PlaybackStartIntent
+import com.lumina.tv.data.EmbyClient
+import com.lumina.tv.data.TimelineOrigin
+
 import android.os.Build
 import android.text.format.DateFormat
 import android.view.SurfaceHolder
@@ -259,7 +264,7 @@ private fun media3AudioTracks(tracks: Tracks): List<MediaStream> = tracks.groups
 fun PlayerScreen(
     item: MediaItem,
     initialSourceId: String? = null,
-    startPositionMs: Long? = null,
+    startIntent: PlaybackStartIntent = PlaybackStartIntent.Resume,
     onBack: () -> Unit,
     onPlayNext: ((MediaItem) -> Unit)? = null,
 ) {
@@ -336,7 +341,7 @@ fun PlayerScreen(
     var mediaSources by remember(item.id) { mutableStateOf<List<MediaSource>>(emptyList()) }
     var triedSources by remember(item.id) { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(item.id) {
-        mediaSources = runCatching { AppRuntime.client?.getMediaSources(item.id) }.getOrDefault(emptyList()).orEmpty()
+        mediaSources = catchingRequest { AppRuntime.client?.getMediaSources(item.id) }.getOrDefault(emptyList()).orEmpty()
     }
     var reloadForceTranscode by remember(item.id) { mutableStateOf(AppRuntime.prefs?.forceTranscode ?: false) }
     var playbackSource by remember(item.id) { mutableStateOf<MediaSource?>(null) }
@@ -372,7 +377,10 @@ fun PlayerScreen(
     var readyAt by remember(item.id) { mutableLongStateOf(0L) }
     var firstFrameAt by remember(item.id) { mutableLongStateOf(0L) }
     var bytesLoaded by remember(item.id) { mutableLongStateOf(0L) }
-    var pendingResumePositionMs by remember(item.id) { mutableLongStateOf(startPositionMs ?: -1L) }
+    var pendingStartIntent by remember(item.id) { mutableStateOf<PlaybackStartIntent?>(startIntent) }
+    var desiredPlaying by remember(item.id) { mutableStateOf(true) }
+    var pendingPaused by remember(item.id) { mutableStateOf<Boolean?>(null) }
+    var currentTarget by remember(item.id) { mutableStateOf<EmbyClient.PlaybackTarget?>(null) }
     var lastRequestedStartMs by remember(item.id) { mutableLongStateOf(0L) }
     var loadJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var phaseTimes by remember(item.id) { mutableStateOf(JSONObject()) }
@@ -605,20 +613,20 @@ fun PlayerScreen(
         val sid = item.seriesId ?: return@LaunchedEffect
         val c = client ?: return@LaunchedEffect
         LibraryCache.episodesOf(sid, item.seasonId)?.let { episodes = it; return@LaunchedEffect }
-        episodes = runCatching { c.getEpisodes(sid, item.seasonId) }.getOrDefault(emptyList())
+        episodes = catchingRequest { c.getEpisodes(sid, item.seasonId) }.getOrDefault(emptyList())
         LibraryCache.putEpisodes(sid, item.seasonId, episodes)
     }
 
     LaunchedEffect(item.id) {
-        chapters = runCatching { client?.getChapters(item.id) }.getOrNull().orEmpty()
-        playbackMarkers = runCatching { client?.getPlaybackMarkers(item.id) }.getOrNull()
+        chapters = catchingRequest { client?.getChapters(item.id) }.getOrNull().orEmpty()
+        playbackMarkers = catchingRequest { client?.getPlaybackMarkers(item.id) }.getOrNull()
     }
 
     LaunchedEffect(item.id, previewTargetMs, previewActive) {
         val target = previewTargetMs ?: return@LaunchedEffect
         if (!previewActive || previewDisabled || client == null) return@LaunchedEffect
         delay(160)
-        previewFrame = runCatching { client.getTrickplayFrame(item.id, target) }.getOrNull()
+        previewFrame = catchingRequest { client.getTrickplayFrame(item.id, target) }.getOrNull()
     }
 
     fun cancelAutoNext() {
@@ -714,7 +722,8 @@ fun PlayerScreen(
         reloadPending = true
         reloadUsesRecoveryAttempt = recovering
         media3LoadGeneration = -1
-        pendingResumePositionMs = positionMs.takeIf { it > 0L } ?: item.positionTicks / 10_000L
+        pendingStartIntent = PlaybackStartIntent.Restore(positionMs.coerceAtLeast(0L))
+        pendingPaused = !desiredPlaying
         reloadKey++
     }
 
@@ -995,15 +1004,11 @@ fun PlayerScreen(
         readyAt = 0L
         firstFrameAt = 0L
         watchdog.reset()
-        val resumePosition = pendingResumePositionMs.takeIf { it >= 0L } ?: when (activeEngine) {
-            "mpv" -> mpvBackend?.positionMs()?.takeIf { it > 0 } ?: position.takeIf { it > 0 } ?: item.positionTicks / 10_000
-            else -> if (exo.mediaItemCount > 0) {
-            exo.currentPosition.coerceAtLeast(0L).let { current ->
-                val total = exo.duration
-                if (total > 0) current.coerceAtMost(total) else current
-            }
-            } else position.takeIf { it > 0 } ?: item.positionTicks / 10_000
-        }
+        // Snapshot before releasing either engine. Zero is a valid restoration point.
+        val loadIntent = pendingStartIntent ?: PlaybackStartIntent.Restore(position.coerceAtLeast(0L))
+        val resumePosition = loadIntent.positionMs(item.positionTicks / 10_000L)
+        val restorePaused = pendingPaused ?: !desiredPlaying
+        pendingPaused = null
         lastRequestedStartMs = resumePosition
         audioRecoveryJob?.cancel()
         audioRecoveryJob = null
@@ -1040,12 +1045,12 @@ fun PlayerScreen(
                 if (forceTranscode) transcodeFallbackTried = true
                 val maxStreamingBitrate = AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
                 val strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy()
-                val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy)
-                    ?.copy(startPositionMs = resumePosition)
+                val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy,
+                    loadIntent, resumePosition, manualAudioStreamSelection)
                     else null
                 if (badHttpFallbackStage != 0) PageLog.add("prewarm miss nextId=${item.id} reason=fallback_request")
                 val resolvedTarget = cachedTarget ?: c.resolvePlayback(
-                        item, forceTranscode, sourceId, resumePosition, audioStreamIndex,
+                        item, forceTranscode, sourceId, loadIntent, audioStreamIndex,
                         forceDirect = forceDirectNext,
                         removeSubtitleParams = badHttpFallbackStage == 1,
                         preferDirectStreamUrl = badHttpFallbackStage == 2,
@@ -1058,6 +1063,9 @@ fun PlayerScreen(
                 httpFactory.setDefaultRequestProperties(target.headers)
                 phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
                 negotiationDiagnostics = target.negotiationDiagnostics
+                currentTarget = target
+                position = target.startPositionMs
+                lastRequestedStartMs = target.startPositionMs
                 currentPlayMethod = target.playMethod
                 PageLog.add("timeline requestStartMs=$resumePosition playMethod=${target.playMethod} direct=${target.direct} sourceId=${target.source?.id} url=${target.url.substringBefore('?').take(120)}")
                 phaseTimes.put("requestedStartMs", resumePosition)
@@ -1086,7 +1094,7 @@ fun PlayerScreen(
                     }
                 }
                 if (!isCurrentLoad(generation)) return@launch
-                val defaultAudio = target.source?.audioStreams?.firstOrNull { it.isDefault }
+                val defaultAudio = target.source.audioStreams.firstOrNull { it.index == target.audioStreamIndex }
                     ?: target.source?.audioStreams?.firstOrNull()
                 val audioCodec = listOfNotNull(defaultAudio?.codec, defaultAudio?.profile).joinToString(" ").lowercase()
                 val codecMime = audioMime(audioCodec)
@@ -1194,8 +1202,8 @@ fun PlayerScreen(
                             }
                             subtitlePreference = "auto"
                         }
-                        position = state.positionMs
-                        if (state.durationMs > 0L) duration = state.durationMs
+                        target.playerToContentPositionMs(state.positionMs)?.let { position = it }
+                        duration = target.durationMs ?: target.playerToContentPositionMs(state.durationMs) ?: 0L
                         if (state.ready && !state.buffering && !firstFrameRendered) {
                             firstFrameRendered = true
                             matchDisplayFrameRate(currentSurface, mpvBackend?.containerFps())
@@ -1243,7 +1251,7 @@ fun PlayerScreen(
                     backend.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
                     backend.setSubtitleStyle(subtitleColor, subtitleOutline, subtitlePosition, subtitleBg)
                     val preferredAudio = preferredAudioStream(audioStreamIndex, AppRuntime.prefs?.preferredAudioLanguage, mpvAudioStreams)
-                    selectedAudioStreamIndex = audioStreamIndex ?: preferredAudio?.index
+                    selectedAudioStreamIndex = target.audioStreamIndex ?: preferredAudio?.index
                     backend.setAudioTrack(selectedAudioStreamIndex ?: -1)
                     val resolvedSubtitle = resolveSubtitlePreference(
                         AppRuntime.prefs?.subtitlePreferenceFor(item.id),
@@ -1260,7 +1268,7 @@ fun PlayerScreen(
                         }
                         else -> backend.enableSubtitleAuto()
                     }
-                    pendingResumePositionMs = -1L
+                    pendingStartIntent = null
                     var waitedMs = 0
                     while (currentSurface?.isValid != true && waitedMs < 1_500) {
                         delay(50)
@@ -1280,8 +1288,8 @@ fun PlayerScreen(
                     }
                     backend.setSpeed(if (boosting) 3f else speed)
                     if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
-                    backend.load(target.url, target.startPositionMs, externalSubtitles, target.headers)
-                    pendingResumePositionMs = -1L
+                    backend.load(target.url, target.playerStartPositionMs, externalSubtitles, target.headers, paused = restorePaused)
+                    pendingStartIntent = null
                 } else {
                     val configs = if (srcId == null) emptyList() else subs.map { st ->
                         androidx.media3.common.MediaItem.SubtitleConfiguration.Builder(
@@ -1319,7 +1327,7 @@ fun PlayerScreen(
                     val videoSource = DefaultMediaSourceFactory(optionalFactory).createMediaSource(videoItem)
                     subtitleSelectionApplied = false
                     audioSelectionApplied = false
-                    selectedAudioStreamIndex = AppRuntime.prefs?.audioTrackFor(item.id)
+                    selectedAudioStreamIndex = target.audioStreamIndex
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, resolveSubtitlePreference(
                             AppRuntime.prefs?.subtitlePreferenceFor(item.id),
@@ -1333,10 +1341,9 @@ fun PlayerScreen(
                     media3LoadGeneration = generation
                     exo.setMediaSource(videoSource)
                     exo.prepare()
-                    if (resumePosition > 0L) exo.seekTo(resumePosition)
-                    pendingResumePositionMs = -1L
-                    exo.seekTo(target.startPositionMs.coerceAtLeast(0))
-                    exo.playWhenReady = true
+                    pendingStartIntent = null
+                    target.playerStartPositionMs?.let(exo::seekTo)
+                    exo.playWhenReady = !restorePaused
                     exo.setPlaybackSpeed(if (boosting) 3f else speed)
                 }
                 if (isCurrentLoad(generation)) {
@@ -1403,9 +1410,14 @@ fun PlayerScreen(
     }
 
     fun seekPlayerTo(targetMs: Long) {
+        val playerPosition = currentTarget?.contentToPlayerPositionMs(targetMs)
+        if (playerPosition == null) {
+            playbackStatusNotice = "This source does not support verified seeking yet"
+            return
+        }
         when (activeEngine) {
-            "mpv" -> mpvBackend?.seekTo(targetMs)
-            else -> exo.seekTo(targetMs)
+            "mpv" -> mpvBackend?.seekTo(playerPosition)
+            else -> exo.seekTo(playerPosition)
         }
         position = targetMs.coerceAtLeast(0L)
         previewFrame = null
@@ -1413,9 +1425,10 @@ fun PlayerScreen(
     }
 
     fun togglePlayback() {
+        desiredPlaying = !desiredPlaying
         when (activeEngine) {
-            "mpv" -> if (mpvState.playing) mpvBackend?.pause() else mpvBackend?.play()
-            else -> if (exo.isPlaying) exo.pause() else exo.play()
+            "mpv" -> if (desiredPlaying) mpvBackend?.play() else mpvBackend?.pause()
+            else -> if (desiredPlaying) exo.play() else exo.pause()
         }
     }
 
@@ -1988,7 +2001,7 @@ fun PlayerScreen(
 
     fun seekBy(delta: Long) {
         val max = if (duration > 0) duration else Long.MAX_VALUE
-        val current = pendingSeekTarget ?: if (activeEngine == "mpv") mpvBackend?.positionMs() ?: position else exo.currentPosition
+        val current = pendingSeekTarget ?: position
         val to = (current + delta).coerceIn(0L, max)
         val step = kotlin.math.abs(delta) / 1000
         val targetSeconds = (to / 1000L).coerceAtLeast(0L)
@@ -1999,11 +2012,7 @@ fun PlayerScreen(
             return
         }
         seekInFlight = true
-        when (activeEngine) {
-            "mpv" -> mpvBackend?.seekTo(to)
-            else -> exo.seekTo(to)
-        }
-        position = to
+        seekPlayerTo(to)
         seekTimeoutJob?.cancel()
         val generation = sessionGeneration
         seekTimeoutJob = instanceScope.launch {
@@ -2093,18 +2102,21 @@ fun PlayerScreen(
         while (true) {
             delay(500)
             if (!instanceJob.isActive || currentExo !== exo) return@LaunchedEffect
-            position = when (activeEngine) {
-                "mpv" -> mpvBackend?.positionMs() ?: position
-                else -> exo.currentPosition
+            val target = currentTarget
+            val playerPosition = when (activeEngine) {
+                "mpv" -> mpvBackend?.positionMs()
+                else -> exo.currentPosition.takeIf { isCurrentMedia3() }
             }
-            duration = when (activeEngine) {
-                "mpv" -> mpvBackend?.durationMs() ?: duration
-                else -> exo.duration.coerceAtLeast(0)
-            }
+            if (!reloadPending) playerPosition?.let { target?.playerToContentPositionMs(it) }?.let { position = it }
+            duration = target?.durationMs ?: target?.playerToContentPositionMs(when (activeEngine) {
+                "mpv" -> mpvBackend?.durationMs() ?: 0L
+                else -> exo.duration.coerceAtLeast(0L)
+            }) ?: 0L
+            val contentTimelineKnown = target?.timelineOrigin == TimelineOrigin.CONTENT
             val ownsEngine = if (activeEngine == "media3") isCurrentMedia3() else mpvBackend != null && !reloadPending
             val reason = if (ownsEngine) watchdog.onTick(
-                positionMs = position,
-                bufferedMs = if (activeEngine == "media3") exo.bufferedPosition else position,
+                positionMs = playerPosition ?: 0L,
+                bufferedMs = if (activeEngine == "media3") exo.bufferedPosition else playerPosition ?: 0L,
                 state = if (activeEngine == "media3") exo.playbackState else if (isActuallyStalled) Player.STATE_BUFFERING else if (mpvState.ready) Player.STATE_READY else Player.STATE_IDLE,
                 playWhenReady = if (activeEngine == "media3") exo.playWhenReady else mpvState.playing,
                 isSeeking = seekHint != null || seekHoldActive || previewActive,
@@ -2116,19 +2128,19 @@ fun PlayerScreen(
             if (reason != null) requestWatchdogRecovery(reason)
             val creditsSkipSeconds = AppRuntime.prefs?.endCreditsSkipSeconds ?: 30
             val validCreditsStart = currentCreditsStartMs?.takeIf { it > 0L && it < duration }
-            if (creditsSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
+            if (contentTimelineKnown && creditsSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
                 ((validCreditsStart != null && position >= validCreditsStart) ||
                     (validCreditsStart == null && creditsSkipSeconds > 0 && position >= duration - creditsSkipSeconds * 1000L))
             ) {
                 startAutoNext(reportStop = false)
             }
-            if (duration > 0 && item.seriesId != null && prewarmedEpisodeId == null &&
+            if (contentTimelineKnown && duration > 0 && item.seriesId != null && prewarmedEpisodeId == null &&
                 position >= duration - 30_000L
             ) {
                 prewarmedEpisodeId = "pending"
                 instanceScope.launch {
                     val c = client ?: return@launch
-                    val next = runCatching { c.getNextEpisode(item) }.getOrNull()
+                    val next = catchingRequest { c.getNextEpisode(item) }.getOrNull()
                     if (next != null) {
                         prewarmedEpisodeId = next.id
                         prewarmNext(next)
@@ -2155,10 +2167,10 @@ fun PlayerScreen(
                 failurePhase = "首帧"
             }
             sinceReport++
-            if (sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
+            if (contentTimelineKnown && sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
                 sinceReport = 0
                 val paused = if (activeEngine == "mpv") !mpvState.playing else !exo.isPlaying
-                runCatching { AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId, currentPlayMethod) }
+                catchingRequest { AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId, currentPlayMethod) }
             }
         }
     }
@@ -2188,7 +2200,7 @@ fun PlayerScreen(
     LaunchedEffect(item.seriesId) {
         val sid = item.seriesId ?: return@LaunchedEffect
         seasonsLoading = true
-        seasons = runCatching { client?.getSeasons(sid) }.getOrDefault(emptyList()).orEmpty()
+        seasons = catchingRequest { client?.getSeasons(sid) }.getOrDefault(emptyList()).orEmpty()
         seasonsLoading = false
     }
     var seasonChangePendingFocus by remember { mutableStateOf(false) }
@@ -2197,7 +2209,7 @@ fun PlayerScreen(
         val sid = item.seriesId ?: return@LaunchedEffect
         episodesLoading = true
         quickEpisodes = LibraryCache.episodesOf(sid, selectedSeasonId)
-            ?: runCatching { client?.getEpisodes(sid, selectedSeasonId) }.getOrDefault(null).orEmpty()
+            ?: catchingRequest { client?.getEpisodes(sid, selectedSeasonId) }.getOrDefault(null).orEmpty()
         episodesLoading = false
     }
     LaunchedEffect(quickPanel, seasons) {

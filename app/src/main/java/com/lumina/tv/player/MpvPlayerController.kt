@@ -124,7 +124,8 @@ class MpvPlayerController(
     private var softwareRetryUsed = false
     @Volatile private var released = false
     private var pendingUrl: String? = null
-    private var pendingPositionMs = 0L
+    private var pendingPositionMs: Long? = null
+    private var pauseIntent = false
     private var attachedSurface: Surface? = null
     private var lastSurfaceWidth = -1
     private var lastSurfaceHeight = -1
@@ -242,7 +243,7 @@ class MpvPlayerController(
                 lastSurfaceHeight = resolvedHeight
                 if (fileLoaded && pendingUrl != null) {
                     // Re-seek after late attachment to make the Android VO render the already-loaded frame.
-                    mpv?.setPropertyBoolean("pause", false)
+                    mpv?.setPropertyBoolean("pause", pauseIntent)
                     mpv?.command(arrayOf("seek", (positionMs / 1000.0).toString(), "absolute+exact"))
                     Log.i(TAG, "${timestamp()} re-render requested after late surface attachment")
                 }
@@ -348,12 +349,13 @@ class MpvPlayerController(
     }.getOrDefault(false)
 
     /** One external load per controller; software retry creates its own native load below. */
-    fun load(url: String, startPositionMs: Long, subtitleUrls: List<String> = emptyList(), headers: Map<String, String> = emptyMap()) {
+    fun load(url: String, startPositionMs: Long?, subtitleUrls: List<String> = emptyList(), headers: Map<String, String> = emptyMap(), paused: Boolean = false) {
         checkMainThread()
         val load = activeLoad?.takeIf(::isActive) ?: return
         check(pendingUrl == null) { "A new external load requires a new controller" }
         pendingUrl = url
-        pendingPositionMs = startPositionMs.coerceAtLeast(0L)
+        pendingPositionMs = startPositionMs?.coerceAtLeast(0L)
+        pauseIntent = paused
         this.subtitleUrls = subtitleUrls.toList()
         requestHeaders = headers.toMap()
         startPhysicalLoad(load)
@@ -365,7 +367,7 @@ class MpvPlayerController(
         subtitleMappingNotice = null
         ready = false
         fileLoaded = false
-        positionMs = pendingPositionMs
+        positionMs = pendingPositionMs ?: 0L
         durationMs = 0L
         cacheSpeedBytesPerSecond = 0L
         observedProperties.clear()
@@ -380,9 +382,9 @@ class MpvPlayerController(
             load.engine.setPropertyDouble("speed", playbackSpeed.toDouble())
             load.started = true
             load.engine.command(loadCommand(checkNotNull(pendingUrl), pendingPositionMs))
-            playing = true
+            playing = !pauseIntent
             buffering = true
-            load.engine.setPropertyBoolean("pause", false)
+            load.engine.setPropertyBoolean("pause", pauseIntent)
         }.onFailure {
             emit(load, buffering = false, error = "mpv 加载失败：${it.message ?: "未知错误"}", failureKind = FailureKind.LOAD)
             return
@@ -406,21 +408,23 @@ class MpvPlayerController(
 
     private var pendingSubtitles: List<String> = emptyList()
 
-    private fun loadCommand(url: String, startMs: Long): Array<String> = arrayOf(
-        "loadfile", url, "replace", "-1", "start=${startMs / 1000.0}",
-    )
+    private fun loadCommand(url: String, startMs: Long?): Array<String> =
+        if (startMs == null) arrayOf("loadfile", url, "replace")
+        else arrayOf("loadfile", url, "replace", "-1", "start=${startMs / 1000.0}")
 
     fun play() {
         checkMainThread()
         val load = activeLoad?.takeIf(::isActive) ?: return
+        pauseIntent = false
         playing = true
-        mpv?.setPropertyBoolean("pause", false)
+        mpv?.setPropertyBoolean("pause", pauseIntent)
         emit(load)
     }
 
     fun pause() {
         checkMainThread()
         val load = activeLoad?.takeIf(::isActive) ?: return
+        pauseIntent = true
         playing = false
         mpv?.setPropertyBoolean("pause", true)
         emit(load)
