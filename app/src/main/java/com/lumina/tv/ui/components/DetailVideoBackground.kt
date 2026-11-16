@@ -47,6 +47,7 @@ fun DetailVideoBackground(
     url: String?,
     mediaKey: String,
     requestHeaders: Map<String, String> = emptyMap(),
+    requestClient: OkHttpClient? = null,
     playing: Boolean,
     onStatus: (String) -> Unit,
     startAtMs: Long? = null,
@@ -69,7 +70,7 @@ fun DetailVideoBackground(
         val scheme = Uri.parse(url).scheme?.lowercase()
         probeResult = when {
             scheme == "file" || scheme == "content" -> "valid"
-            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url, requestHeaders).let {
+            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url, requestHeaders, requestClient).let {
                 probeAllowsCache = it.valid == true &&
                     it.contentType.orEmpty().let { type -> type.startsWith("video/", true) || type.startsWith("application/octet-stream", true) } &&
                     !url.contains(".m3u8", true)
@@ -85,6 +86,7 @@ fun DetailVideoBackground(
             url = url,
             mediaKey = mediaKey,
             requestHeaders = requestHeaders,
+            requestClient = requestClient,
             cacheAllowed = probeAllowsCache,
             stage = when {
                 url.contains(".m3u8", true) -> "hls"
@@ -105,6 +107,7 @@ private fun DetailVideoPlayback(
     url: String,
     mediaKey: String,
     requestHeaders: Map<String, String>,
+    requestClient: OkHttpClient?,
     cacheAllowed: Boolean,
     stage: String,
     playing: Boolean,
@@ -129,7 +132,7 @@ private fun DetailVideoPlayback(
             oldPlayer.clearMediaItems()
             oldPlayer.release()
         }
-        val httpClient = OkHttpClient.Builder()
+        val httpClient = requestClient ?: OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)
@@ -360,7 +363,7 @@ object VideoSourceProbe {
         return path.endsWith(".m3u8") || !VIDEO_EXTENSION.matches(path)
     }
 
-    suspend fun probe(url: String, headers: Map<String, String> = emptyMap()): VideoSourceProbeResult =
+    suspend fun probe(url: String, headers: Map<String, String> = emptyMap(), requestClient: OkHttpClient? = null): VideoSourceProbeResult =
         withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             cache[url]?.takeIf { now - it.atMs < CACHE_TTL_MS }?.let { return@withContext it.result }
@@ -369,7 +372,9 @@ object VideoSourceProbe {
                     .header("User-Agent", PREVIEW_USER_AGENT)
                 if (!url.contains(".m3u8", true)) builder.header("Range", "bytes=0-511")
                 headers.forEach { (name, value) -> builder.header(name, value) }
-                client.newCall(builder.build()).execute().use { response ->
+                (requestClient ?: client).newCall(builder.build()).apply {
+                    timeout().timeout(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                }.execute().use { response ->
                     val contentType = response.header("Content-Type").orEmpty()
                     val source = response.body?.source()
                     val buffer = Buffer()

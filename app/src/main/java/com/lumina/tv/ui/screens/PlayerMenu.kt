@@ -85,7 +85,7 @@ internal fun OptionMenu(
     currentMpvSubtitleDisabled: Boolean,
     audioStreams: List<MediaStream>,
     selectedAudioStreamIndex: Int?,
-    onAudioStreamSelected: (Int, TrackSelectionOverride?) -> Unit,
+    onAudioStreamSelected: (Int, TrackSelectionOverride?, Boolean) -> Unit,
     onlyMedia3Available: Boolean,
     onSubtitleSelected: (String?) -> Unit,
     onSubtitleOffset: (Long) -> Unit,
@@ -333,11 +333,12 @@ internal fun OptionMenu(
                         val label = listOfNotNull(stream.displayTitle ?: stream.title, stream.language, stream.codec?.uppercase()).distinct().joinToString(" · ").ifBlank { "音轨 ${stream.index}" }
                         val candidates = audioGroups.asSequence().flatMap { group ->
                             (0 until group.length).asSequence().map { index ->
-                                AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index))
+                                AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index), group.isTrackSupported(index))
                             }
                         }.toList()
                         // This maps an explicit menu choice; global language bias is only for automatic selection.
-                        val decodedTrack = bestAudioTrack(stream, candidates, preferredLanguage = null)
+                        // Identify the explicit choice before checking capability: never silently substitute another track.
+                        val decodedTrack = bestAudioTrack(stream, candidates, preferredLanguage = null, preferSupported = false)
                         MenuChip(
                             label = label, width = 148.dp,
                             active = selectedAudioStreamIndex == stream.index ||
@@ -346,13 +347,18 @@ internal fun OptionMenu(
                             focusRequester = if (stream == audioStreams.firstOrNull()) contentFocus else null,
                             onFocusChanged = if (stream == audioStreams.firstOrNull()) ({ contentHasFocus = it }) else null,
                             onClick = {
-                                val override = decodedTrack?.let { candidate ->
+                                val supported = decodedTrack?.let { candidate ->
+                                    candidate.supported && audioGroups.any { group ->
+                                        group.mediaTrackGroup == candidate.group && group.isTrackSupported(candidate.index)
+                                    }
+                                } == true
+                                val override = decodedTrack?.takeIf { supported }?.let { candidate ->
                                     TrackSelectionOverride(candidate.group, candidate.index)
                                 }
                                 val mapped = decodedTrack
                                 val explicit = mapped?.format?.id?.toIntOrNull() == stream.index
                                 PageLog.add("Media3 audio mapping embyIndex=${stream.index} -> ${mapped?.let { it.group.id + ":" + it.index } ?: "unmapped"} mapping=${if (explicit) "explicit" else if (mapped != null) "fallback" else "failed"}")
-                                onAudioStreamSelected(stream.index, override)
+                                onAudioStreamSelected(stream.index, override, decodedTrack != null && !supported)
                             },
                         )
                     }

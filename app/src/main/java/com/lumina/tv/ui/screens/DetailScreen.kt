@@ -296,6 +296,7 @@ fun DetailScreen(
     var sources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
     var sourcesLoading by remember { mutableStateOf(false) }
     var detailPreviewUrl by remember(id) { mutableStateOf<String?>(null) }
+    var detailPreviewHeaders by remember(id) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var detailPreviewKey by remember(id) { mutableStateOf("") }
     var detailPreviewIsTrailer by remember(id) { mutableStateOf(false) }
     var detailPreviewStartMs by remember(id) { mutableStateOf<Long?>(null) }
@@ -307,6 +308,7 @@ fun DetailScreen(
     var detailPreviewFailures by remember(id) { mutableStateOf<List<String>>(emptyList()) }
     var detailPreviewRetry by remember(id) { mutableIntStateOf(0) }
     val previewResults = remember(id) { mutableMapOf<String, Triple<String?, String, Boolean>>() }
+    val previewHeaderResults = remember(id) { mutableMapOf<String, Map<String, String>>() }
     val previewStartTimes = remember(id) { mutableMapOf<String, Long?>() }
     var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var similarLoading by remember { mutableStateOf(false) }
@@ -572,6 +574,7 @@ fun DetailScreen(
         }
         if (detailPreviewRetry == 0) previewResults[requestKey]?.takeIf { !it.first.isNullOrBlank() }?.let { cached ->
             detailPreviewUrl = cached.first
+            detailPreviewHeaders = previewHeaderResults[requestKey].orEmpty()
             detailPreviewKey = cached.second
             detailPreviewIsTrailer = cached.third
             detailPreviewStartMs = previewStartTimes[requestKey]
@@ -650,6 +653,7 @@ fun DetailScreen(
             hlsUnsupportedItems.add(hlsKey)
         }
         detailPreviewUrl = resolution?.url
+        detailPreviewHeaders = resolution?.requiredHttpHeaders.orEmpty()
         if (detailPreviewUrl.isNullOrBlank()) {
             detailVideoPlaying = false
             if (detailPreviewFailures.isEmpty()) {
@@ -662,6 +666,7 @@ fun DetailScreen(
             detailPreviewStage = resolution?.stage
             detailPreviewFailure = null
             previewResults[requestKey] = Triple(detailPreviewUrl, detailPreviewKey, detailPreviewIsTrailer)
+            previewHeaderResults[requestKey] = detailPreviewHeaders
             previewStartTimes[requestKey] = detailPreviewStartMs
         }
     }
@@ -736,7 +741,8 @@ fun DetailScreen(
             DetailVideoBackground(
                 url = detailPreviewUrl,
                 mediaKey = detailPreviewKey,
-                requestHeaders = client?.previewHeaders().orEmpty(),
+                requestHeaders = client?.previewHeaders(detailPreviewUrl, detailPreviewHeaders).orEmpty(),
+                requestClient = client?.previewHttpClient,
                 playing = !loading,
                 onStatus = { status ->
                     detailVideoPlaying = status == "play"

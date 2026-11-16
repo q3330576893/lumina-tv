@@ -36,6 +36,7 @@ data class DetailPreviewResolution(
     val url: String?,
     val stage: String?,
     val failures: List<String>,
+    val requiredHttpHeaders: Map<String, String> = emptyMap(),
 )
 
 private enum class PlaybackRequestFlag(
@@ -126,7 +127,18 @@ class EmbyClient(
         return sb.toString()
     }
 
-    fun previewHeaders(): Map<String, String> = mapOf("X-Emby-Authorization" to authHeader())
+    fun previewHeaders(target: String?, requiredHttpHeaders: Map<String, String> = emptyMap()): Map<String, String> =
+        requiredHttpHeaders.filterKeys { !it.equals("X-Emby-Authorization", true) }.toMutableMap().apply {
+            if (isSameOrigin(baseUrl, target)) put("X-Emby-Authorization", authHeader())
+        }
+
+    val previewHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .addNetworkInterceptor(PreviewOriginInterceptor({ baseUrl }, { authHeader() }))
+            .build()
+    }
 
     private fun url(path: String, params: Map<String, String?> = emptyMap()): String {
         val sb = StringBuilder(normalize(baseUrl)).append(path)
@@ -964,8 +976,9 @@ class EmbyClient(
                     logDetailPreview("direct", "0", "none", "missing-url", null)
                     failures += "direct:missing-url"
                 } else {
-                    val directResult = probeDetailPreview("direct", direct)
-                    if (directResult.valid) return@withContext DetailPreviewResolution(direct, "direct", failures)
+                    val headers = source?.requiredHttpHeaders.orEmpty()
+                    val directResult = probeDetailPreview("direct", direct, headers)
+                    if (directResult.valid) return@withContext DetailPreviewResolution(direct, "direct", failures, headers)
                     failures += "direct:${directResult.verdict}"
                 }
             }
@@ -981,10 +994,13 @@ class EmbyClient(
 
     private data class DetailPreviewProbe(val valid: Boolean, val verdict: String)
 
-    private fun probeDetailPreview(stage: String, target: String): DetailPreviewProbe = try {
-        val request = Request.Builder().url(target).header("Range", "bytes=0-511")
-            .header("X-Emby-Authorization", authHeader()).get().build()
-        http.newCall(request).apply { timeout().timeout(7, TimeUnit.SECONDS) }.execute().use { response ->
+    private fun probeDetailPreview(stage: String, target: String, requiredHttpHeaders: Map<String, String> = emptyMap()): DetailPreviewProbe = try {
+        val request = Request.Builder().url(target).header("Range", "bytes=0-511").apply {
+            previewHeaders(target, requiredHttpHeaders).forEach { (name, value) -> header(name, value) }
+        }.get().build()
+        // The network interceptor rechecks scheme/host/port on EVERY redirect.
+        previewHttpClient.newCall(request).apply { timeout().timeout(7, TimeUnit.SECONDS) }.execute().use { response ->
+            PageLog.add("detailPreviewAuth stage=$stage sameOrigin=${isSameOrigin(baseUrl, response.request.url.toString())} credential=${response.request.header("X-Emby-Authorization") != null}")
             val contentType = response.header("Content-Type").orEmpty().substringBefore(';').trim().lowercase().ifBlank { "none" }
             val prefix = response.body?.source()?.let { source ->
                 val buffer = okio.Buffer()
@@ -1125,6 +1141,9 @@ data class PlaybackTarget(
             resolution = resolution,
             directStreamUrl = o.optString("DirectStreamUrl").ifBlank { null },
             additionalOptions = o.optString("AdditionalOptions").ifBlank { null },
+            requiredHttpHeaders = o.optJSONObject("RequiredHttpHeaders")?.let { headers ->
+                buildMap { headers.keys().forEach { name -> put(name, headers.optString(name)) } }
+            }.orEmpty(),
         )
     }
 

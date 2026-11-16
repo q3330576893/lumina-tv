@@ -4,20 +4,23 @@ import androidx.media3.common.Format
 import androidx.media3.common.TrackGroup
 import com.lumina.tv.data.MediaStream
 
-data class AudioTrackCandidate(val group: TrackGroup, val index: Int, val format: Format)
+data class AudioTrackCandidate(val group: TrackGroup, val index: Int, val format: Format, val supported: Boolean)
 
 fun bestAudioTrack(
     stream: MediaStream,
     candidates: List<AudioTrackCandidate>,
     preferredLanguage: String?,
+    preferSupported: Boolean = true,
 ): AudioTrackCandidate? {
-    candidates.firstOrNull { it.format.id?.toIntOrNull() == stream.index }?.let { return it }
+    // Preserve the existing ID/language mapping within the best capability tier.
+    val eligible = if (preferSupported) candidates.filter { it.supported }.ifEmpty { candidates } else candidates
+    eligible.firstOrNull { it.format.id?.toIntOrNull() == stream.index }?.let { return it }
 
     val streamLanguage = normalizeLanguage(stream.language)
     val preferred = normalizeLanguage(preferredLanguage)
     val embysCommentary = listOfNotNull(stream.title, stream.displayTitle)
         .any { it.contains("commentary", true) || it.contains("评论", true) || it.contains("解说", true) }
-    return candidates.map { candidate ->
+    return eligible.map { candidate ->
         val format = candidate.format
         val codec = format.sampleMimeType?.substringAfter('/') ?: format.codecs.orEmpty()
         val label = format.label.orEmpty()

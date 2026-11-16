@@ -25,6 +25,7 @@ class PlaybackWatchdog {
     private var generation = -1
     private var generationAt = 0L
     private var stateSince = 0L
+    private var playbackState = 0
     private var loadingAt = 0L
     private var loading = false
     private var byteAt = 0L
@@ -39,6 +40,7 @@ class PlaybackWatchdog {
         generation = -1
         generationAt = 0L
         stateSince = 0L
+        playbackState = 0
         loadingAt = 0L
         loading = false
         byteAt = 0L
@@ -55,6 +57,7 @@ class PlaybackWatchdog {
         isSeeking: Boolean, sessionGeneration: Int, durationMs: Long, bytesLoaded: Long, isLoading: Boolean,
     ): WatchdogReason? {
         val now = SystemClock.elapsedRealtime()
+        onPlaybackStateChanged(state)
         if (generation != sessionGeneration) {
             generation = sessionGeneration
             generationAt = now
@@ -92,7 +95,12 @@ class PlaybackWatchdog {
     fun onLoadingChanged(loading: Boolean) {
         this.loading = loading
         loadingAt = SystemClock.elapsedRealtime()
-        stateSince = loadingAt
+    }
+
+    fun onPlaybackStateChanged(state: Int) {
+        if (playbackState == state) return
+        playbackState = state
+        stateSince = SystemClock.elapsedRealtime()
     }
 
     private fun updatePositions(now: Long, positionMs: Long, bufferedMs: Long, bytesLoaded: Long) {
