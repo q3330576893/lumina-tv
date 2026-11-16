@@ -129,6 +129,8 @@ import com.lumina.tv.data.PlaybackMarkers
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.TmdbClient
+import com.lumina.tv.data.WideImageCandidate
+import com.lumina.tv.data.wideImageCandidates
 import com.lumina.tv.data.chooseSimilar
 import com.lumina.tv.data.toSourceOption
 import com.lumina.tv.ui.components.FocusSurface
@@ -256,6 +258,7 @@ fun PlayerScreen(
     var audioCaps by remember(item.id) { mutableStateOf(runCatching { detect(context) }.getOrDefault(AudioCapabilities(emptyMap()))) }
     var audioSupport by remember(item.id) { mutableStateOf(AudioSupport.DECODE_ONLY) }
     val client = AppRuntime.client
+    var failedBufferingImages by remember(item.id, client) { mutableStateOf<Set<String>>(emptySet()) }
     var tmdbBackdrop by remember(item.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(item.id) {
         tmdbBackdrop = runCatching {
@@ -2132,64 +2135,68 @@ fun PlayerScreen(
         if (isBufferingForDisplay) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 val seriesBackdrop = item.seriesId?.let { sid ->
-                    LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, 1920) }
+                    LibraryCache.detailStale(sid)?.item?.let { client?.backdropUrl(it, maxWidth = 1280, quality = 80) }
                 }
-                val itemBackdropImages = buildList {
-                    val backdropCount = ((item.backdropTags.keys.maxOrNull()?.plus(1)) ?: 0)
-                        .coerceAtLeast(if (item.backdropTag != null) 1 else 0)
-                    repeat(backdropCount) { index ->
-                        (client?.backdropUrl(item, index, 1920)
-                            ?: client?.backdropUrlUntagged(item.id, index, 1920))?.let { add(it to false) }
-                    }
+                val bufferingImages = remember(item, client, tmdbBackdrop, seriesBackdrop) {
+                    client?.wideImageCandidates(item, maxWidth = 1280, quality = 80, tmdbUrl = tmdbBackdrop)
+                        .orEmpty().toMutableList().apply {
+                            // Keep the cached series fallback ahead of TMDB and the final poster.
+                            seriesBackdrop?.let { image ->
+                                val fallbackIndex = indexOfFirst { it.source == "tmdb" || it.source == "poster" }
+                                    .takeIf { it >= 0 } ?: size
+                                add(fallbackIndex, WideImageCandidate(image, "parent"))
+                            }
+                        }.distinctBy { it.url }
                 }
-                val bufferingImages = buildList {
-                    tmdbBackdrop?.let { add(it to false) }
-                    addAll(itemBackdropImages)
-                    seriesBackdrop?.let { add(it to false) }
-                    client?.heroStillUrl(item.id, 1)?.let { add(it to false) }
-                    client?.heroStillUrl(item.id, 2)?.let { add(it to false) }
-                    client?.backdropUrlUntagged(item.id, 0, 1920)?.let { add(it to false) }
-                    client?.imageUrl(item, 720)?.let { add(it to true) }
-                }.distinctBy { it.first }
-                var bufferingImageIndex by remember(item.id, bufferingImages) { mutableIntStateOf(0) }
+                val bufferingImageIndex = bufferingImages.indexOfFirst { it.url !in failedBufferingImages }
                 val bufferingImage = bufferingImages.getOrNull(bufferingImageIndex)
-                var bufferingImageLoaded by remember(item.id, bufferingImage?.first) { mutableStateOf(false) }
-                var bufferingRatio by remember(item.id, bufferingImage?.first) { mutableStateOf<Pair<Int, Int>?>(null) }
+                var bufferingImageLoaded by remember(item.id, bufferingImage?.url) { mutableStateOf(false) }
+                var bufferingRatio by remember(item.id, bufferingImage?.url) { mutableStateOf<Pair<Int, Int>?>(null) }
                 val ratio = bufferingRatio
-                val isPosterFallback = bufferingImage?.second == true
+                val isPoster = bufferingImage?.source == "poster"
                 val isWideScreen = ratio?.let { (width, height) ->
                     height > 0 && kotlin.math.abs(width.toFloat() / height - 16f / 9f) / (16f / 9f) <= 0.08f
                 } == true
+                fun rejectBufferingImage() {
+                    val image = bufferingImage?.url ?: return
+                    if (image in failedBufferingImages) return
+                    PageLog.add("bufferingImg candidates=${bufferingImages.size} picked=$bufferingImageIndex source=${bufferingImage.source} ok=false")
+                    failedBufferingImages = failedBufferingImages + image
+                }
                 LaunchedEffect(bufferingImageIndex, bufferingImage, bufferingRatio) {
                     if (bufferingImage == null) {
                         PageLog.add("bufferingImg candidates=${bufferingImages.size} picked=-1 ratio=0x0 scale=crop")
                     } else if (bufferingImageLoaded) {
                         val (width, height) = bufferingRatio ?: (0 to 0)
-                        PageLog.add("bufferingImg candidates=${bufferingImages.size} picked=$bufferingImageIndex ratio=${width}x$height scale=${if (isWideScreen) "fit" else "crop"}")
+                        PageLog.add("bufferingImg candidates=${bufferingImages.size} picked=$bufferingImageIndex source=${bufferingImage.source} ratio=${width}x$height scale=${if (isWideScreen && !isPoster) "fit" else "crop"}")
                     }
                 }
                 if (bufferingImage != null) {
-                    if (!isPosterFallback) {
-                        AsyncImage(
-                            model = bufferingImage.first,
-                            contentDescription = null,
-                            contentScale = if (isWideScreen) ContentScale.Fit else ContentScale.Crop,
-                            alignment = Alignment.Center,
-                            onSuccess = {
+                    AsyncImage(
+                        model = bufferingImage.url,
+                        contentDescription = null,
+                        contentScale = if (isWideScreen && !isPoster) ContentScale.Fit else ContentScale.Crop,
+                        alignment = Alignment.Center,
+                        onSuccess = {
+                            val width = it.result.drawable.intrinsicWidth
+                            val height = it.result.drawable.intrinsicHeight
+                            if (width <= 0 || height <= 0 || (!isPoster && width <= height)) {
+                                rejectBufferingImage()
+                            } else {
                                 bufferingImageLoaded = true
-                                bufferingRatio = it.result.drawable.intrinsicWidth to it.result.drawable.intrinsicHeight
-                            },
-                            onError = { if (bufferingImageIndex < bufferingImages.lastIndex) bufferingImageIndex++ },
-                            modifier = Modifier.fillMaxSize().then(if (ratio == null) Modifier.alpha(0f) else Modifier),
-                        )
-                    } else {
-                        LaunchedEffect(bufferingImageIndex) { bufferingImageIndex = bufferingImages.size }
-                    }
+                                bufferingRatio = width to height
+                            }
+                        },
+                        onError = { rejectBufferingImage() },
+                        modifier = Modifier.fillMaxSize().then(if (ratio == null) Modifier.alpha(0f) else Modifier),
+                    )
                 }
-                if (bufferingImage == null || isPosterFallback) {
+                if (bufferingImage == null) {
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF263142), Color(0xFF10141D)))))
                     Text(item.seriesName ?: item.name, color = TextMain, fontSize = 24.sp, maxLines = 2,
                         modifier = Modifier.align(Alignment.Center).padding(horizontal = 40.dp))
+                    Text("暂无横版剧照", color = TextSub, fontSize = 13.sp,
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 40.dp))
                 }
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {

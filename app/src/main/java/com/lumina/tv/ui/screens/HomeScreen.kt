@@ -133,6 +133,8 @@ import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.TmdbClient
+import com.lumina.tv.data.WideImageCandidate
+import com.lumina.tv.data.wideImageCandidates
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.FocusScale
@@ -1824,48 +1826,71 @@ private fun Hero(
         PageLog.add("heroBackdrop have=${tmdbBackdrops.size}/${items.size}")
     }
 
-    fun heroImageCandidates(heroItem: MediaItem?): List<String> {
-        heroItem ?: return emptyList()
-        val embyBackdrops = buildList {
-            val count = ((heroItem.backdropTags.keys.maxOrNull()?.plus(1)) ?: 0)
-                .coerceAtLeast(if (heroItem.backdropTag != null) 1 else 0)
-            repeat(count) { index ->
-                val url = client?.backdropUrl(heroItem, index, 1920)
-                    ?: client?.backdropUrlUntagged(heroItem.id, index, 1920)
-                url?.takeIf(String::isNotBlank)?.let(::add)
-            }
-        }
-        return buildList {
-            addAll(embyBackdrops)
-            client?.heroStillUrl(heroItem.id, 1)?.takeIf(String::isNotBlank)?.let(::add)
-            client?.heroStillUrl(heroItem.id, 2)?.takeIf(String::isNotBlank)?.let(::add)
-            tmdbBackdrops[heroItem.id]?.takeIf(String::isNotBlank)?.let(::add)
-        }.distinct()
+    fun heroImageCandidates(heroItem: MediaItem?): List<WideImageCandidate> = heroItem?.let { media ->
+        client?.wideImageCandidates(media, maxWidth = 1280, quality = 80, tmdbUrl = tmdbBackdrops[media.id]).orEmpty()
+    }.orEmpty()
+    val heroCandidatesById = remember(items, client, tmdbBackdrops) {
+        items.associate { it.id to heroImageCandidates(it) }
     }
-    var failedHeroImages by remember(items) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
-    fun resolveHeroImage(heroItem: MediaItem?): String? = heroItem?.let { media ->
-        heroImageCandidates(media).firstOrNull { it !in failedHeroImages[media.id].orEmpty() }
+    var failedHeroImages by remember(client) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
+    var failedThumbImages by remember(client) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
+    val lastHeroImageLogs = remember(client) { mutableMapOf<String, Pair<String, Boolean>>() }
+    fun isRejectedHeroImage(image: String?): Boolean =
+        image != null && failedHeroImages.values.any { image in it }
+    fun resolveHeroCandidate(heroItem: MediaItem?): WideImageCandidate? = heroItem?.let { media ->
+        heroCandidatesById[media.id].orEmpty().firstOrNull { !isRejectedHeroImage(it.url) }
+    }
+    fun resolveHeroImage(heroItem: MediaItem?): String? = resolveHeroCandidate(heroItem)?.url
+    fun logHeroImage(media: MediaItem, image: String, success: Boolean) {
+        // A successful top image becomes the bottom layer; do not log that same load twice.
+        val event = image to success
+        if (lastHeroImageLogs[media.id] == event) return
+        lastHeroImageLogs[media.id] = event
+        val cands = heroCandidatesById[media.id].orEmpty()
+        val k = cands.indexOfFirst { it.url == image }
+        val source = cands.getOrNull(k)?.source ?: "unknown"
+        val maxWidth = 1280
+        PageLog.add("heroImg cands=${cands.size} pick=$k src=$source w=$maxWidth ok=$success")
     }
     fun rejectHeroImage(media: MediaItem, image: String) {
+        logHeroImage(media, image, false)
         failedHeroImages = failedHeroImages + (media.id to (failedHeroImages[media.id].orEmpty() + image))
     }
-    val wipeProgress = remember(items) { Animatable(1f) }
+    fun heroImageLoaded(media: MediaItem, image: String, width: Int, height: Int) {
+        val source = heroCandidatesById[media.id].orEmpty().firstOrNull { it.url == image }?.source
+        if (width <= 0 || height <= 0 || (source != "poster" && width <= height)) {
+            rejectHeroImage(media, image)
+        } else {
+            logHeroImage(media, image, true)
+        }
+    }
+    val wipeProgress = remember(items, client) { Animatable(1f) }
     var bottomImage by remember(items, client) { mutableStateOf(resolveHeroImage(item)) }
     var topImage by remember(items, client) { mutableStateOf<String?>(null) }
     var topLoaded by remember(items, client) { mutableStateOf(false) }
     var isForward by remember(items) { mutableStateOf(true) }
     var lastRequestedIndex by remember(items) { mutableStateOf(currentIndex) }
-    var transitionGeneration by remember(items) { mutableStateOf(0) }
-    var transitionJob by remember(items) { mutableStateOf<Job?>(null) }
+    var transitionGeneration by remember(items, client) { mutableStateOf(0) }
+    var transitionJob by remember(items, client) { mutableStateOf<Job?>(null) }
 
-    LaunchedEffect(currentIndex, items, tmdbBackdrops, failedHeroImages, tmdbResolvedIds) {
+    LaunchedEffect(currentIndex, items, client, tmdbBackdrops, failedHeroImages, tmdbResolvedIds) {
         val targetItem = items.getOrNull(currentIndex)
         val targetImage = resolveHeroImage(targetItem)
-        if (targetItem != null && targetImage == null && targetItem.id in tmdbResolvedIds) {
-            onItemUnavailable(targetItem.id)
+        if (isRejectedHeroImage(bottomImage)) bottomImage = null
+        if (targetImage == null || isRejectedHeroImage(topImage)) {
+            // A rejected top candidate must not leave the wipe at zero over an empty layer.
+            transitionJob?.cancel()
+            transitionGeneration += 1
+            topImage = null
+            topLoaded = false
+            wipeProgress.snapTo(1f)
+        }
+        if (targetImage == null) {
+            if (targetItem != null && targetItem.id in tmdbResolvedIds) onItemUnavailable(targetItem.id)
+            lastRequestedIndex = currentIndex
             return@LaunchedEffect
         }
-        if (targetImage == null || targetImage == topImage || (topImage == null && targetImage == bottomImage)) {
+        if (targetImage == topImage || (topImage == null && targetImage == bottomImage)) {
             lastRequestedIndex = currentIndex
             return@LaunchedEffect
         }
@@ -1885,9 +1910,9 @@ private fun Hero(
         topLoaded = false
         wipeProgress.snapTo(0f)
     }
-    LaunchedEffect(topLoaded, transitionGeneration) {
+    LaunchedEffect(topImage, topLoaded, transitionGeneration) {
         val image = topImage ?: return@LaunchedEffect
-        if (!topLoaded) return@LaunchedEffect
+        if (!topLoaded || isRejectedHeroImage(image)) return@LaunchedEffect
         val generation = transitionGeneration
         transitionJob?.cancel()
         transitionJob = transitionScope.launch {
@@ -1899,7 +1924,7 @@ private fun Hero(
             }
         }
     }
-    DisposableEffect(items) {
+    DisposableEffect(items, client) {
         onDispose {
             transitionJob?.cancel()
         }
@@ -1930,13 +1955,17 @@ private fun Hero(
         tmdbInfo = TmdbClient.lookupHero(displayItem.type, displayItem.seriesName ?: displayItem.name, displayItem.year, displayItem.providerIds["OriginalTitle"])
     }
     val titleLogo = embyLogo ?: tmdbInfo?.logoUrl
-    LaunchedEffect(currentIndex, items) {
+    LaunchedEffect(currentIndex, items, client) {
         if (items.size < 2) return@LaunchedEffect
         val next = items[(currentIndex + 1) % items.size]
-        val nextImages = heroImageCandidates(next)
-        nextImages.forEach { nextImage ->
-            val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
-            context.imageLoader.enqueue(request)
+        val nextImage = heroCandidatesById[next.id]?.firstOrNull()?.url ?: return@LaunchedEffect
+        if (isRejectedHeroImage(nextImage)) return@LaunchedEffect
+        val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
+        val prefetch = context.imageLoader.enqueue(request)
+        try {
+            prefetch.job.await()
+        } finally {
+            prefetch.dispose()
         }
     }
     Box(
@@ -1959,31 +1988,31 @@ private fun Hero(
                 .fillMaxSize()
                 .background(Ink)
         ) {
-            if (bottomImage == null && topImage == null) {
+            if (bottomImage == null && topImage == null && item.id in tmdbResolvedIds) {
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
                 Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = 13.sp)
             }
-            bottomImage?.let { image ->
-                val imageOwner = items.firstOrNull { image in heroImageCandidates(it) } ?: item
+            bottomImage?.takeUnless(::isRejectedHeroImage)?.let { image ->
+                val imageOwner = items.firstOrNull { media -> heroCandidatesById[media.id].orEmpty().any { it.url == image } } ?: item
                 HeroBackdropImage(
                     imageUrl = image,
                     onSuccess = { width, height ->
-                        if (height <= 0 || width <= height) rejectHeroImage(imageOwner, image)
+                        heroImageLoaded(imageOwner, image, width, height)
                     },
                     onError = { rejectHeroImage(imageOwner, image) },
                 )
             }
-            topImage?.let { image ->
-                val imageOwner = items.firstOrNull { image in heroImageCandidates(it) } ?: item
+            topImage?.takeUnless(::isRejectedHeroImage)?.let { image ->
+                val imageOwner = items.firstOrNull { media -> heroCandidatesById[media.id].orEmpty().any { it.url == image } } ?: item
                 HeroBackdropImage(
                     imageUrl = image,
                     wipeProgress = wipeProgress.value,
                     isForward = isForward,
                     onLoaded = {
-                        if (image == topImage) topLoaded = true
+                        if (image == topImage && !isRejectedHeroImage(image)) topLoaded = true
                     },
                     onSuccess = { width, height ->
-                        if (height <= 0 || width <= height) rejectHeroImage(imageOwner, image)
+                        heroImageLoaded(imageOwner, image, width, height)
                     },
                     onError = { rejectHeroImage(imageOwner, image) },
                 )
@@ -2098,7 +2127,14 @@ private fun Hero(
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(InkSoft)
                         ) {
-                            HeroThumb(thumbnailItem, client, tmdbBackdrops[thumbnailItem.id])
+                            HeroThumb(
+                                thumbnailItem, client, tmdbBackdrops[thumbnailItem.id],
+                                failedImages = failedThumbImages[thumbnailItem.id].orEmpty(),
+                                onFailed = { image ->
+                                    failedThumbImages = failedThumbImages +
+                                        (thumbnailItem.id to (failedThumbImages[thumbnailItem.id].orEmpty() + image))
+                                },
+                            )
                             Box(
                                 Modifier.fillMaxSize().border(
                                     if (slot == 0) 2.dp else 1.dp,
@@ -2115,32 +2151,38 @@ private fun Hero(
 }
 
 @Composable
-private fun HeroThumb(item: MediaItem, client: EmbyClient?, tmdbBackdrop: String?) {
-    val candidates = remember(item.id, tmdbBackdrop, item.backdropTag, client) {
-        buildList {
-            val backdropCount = ((item.backdropTags.keys.maxOrNull()?.plus(1)) ?: 0)
-                .coerceAtLeast(if (item.backdropTag != null) 1 else 0)
-            repeat(backdropCount) { index ->
-                (client?.backdropUrl(item, index, 640) ?: client?.backdropUrlUntagged(item.id, index, 640))
-                    ?.let(::add)
-            }
-            client?.heroStillUrl(item.id, 1)?.let(::add)
-            client?.heroStillUrl(item.id, 2)?.let(::add)
-            tmdbBackdrop?.let(::add)
-        }.distinct()
+private fun HeroThumb(
+    item: MediaItem,
+    client: EmbyClient?,
+    tmdbBackdrop: String?,
+    failedImages: Set<String>,
+    onFailed: (String) -> Unit,
+) {
+    val candidates = remember(item, tmdbBackdrop, client) {
+        client?.wideImageCandidates(item, maxWidth = 480, quality = 80, tmdbUrl = tmdbBackdrop).orEmpty()
     }
-    var candidateIndex by remember(item.id, candidates) { mutableIntStateOf(0) }
-    var candidateFailed by remember(item.id, candidates) { mutableStateOf(false) }
+    val candidateIndex = candidates.indexOfFirst { it.url !in failedImages }
+    val candidate = candidates.getOrNull(candidateIndex)
+    val candidateFailed = candidate == null
+    LaunchedEffect(item.id, candidate?.url) {
+        PageLog.add("thumbImg id=${item.id} pick=$candidateIndex failed=$candidateFailed")
+    }
+    fun rejectCandidate() {
+        val image = candidate?.url ?: return
+        if (image in failedImages) return
+        PageLog.add("thumbImg id=${item.id} pick=$candidateIndex failed=true")
+        onFailed(image)
+    }
     Box(Modifier.fillMaxSize().background(InkSoft)) {
         if (candidates.isEmpty() || candidateFailed) Icon(Icons.Rounded.Movie, null, tint = TextSub, modifier = Modifier.align(Alignment.Center).size(14.dp))
-        candidates.getOrNull(candidateIndex)?.let { candidate ->
-            AsyncImage(candidate, null, contentScale = ContentScale.Crop,
+        candidate?.let { candidate ->
+            AsyncImage(candidate.url, null, contentScale = ContentScale.Crop,
                 onSuccess = {
-                    if (it.result.drawable.intrinsicHeight <= 0 || it.result.drawable.intrinsicWidth <= it.result.drawable.intrinsicHeight) {
-                        if (candidateIndex < candidates.lastIndex) candidateIndex++ else candidateFailed = true
-                    }
+                    val height = it.result.drawable.intrinsicHeight
+                    val width = it.result.drawable.intrinsicWidth
+                    if (width <= 0 || height <= 0 || (candidate.source != "poster" && width <= height)) rejectCandidate()
                 },
-                onError = { if (candidateIndex < candidates.lastIndex) candidateIndex++ else candidateFailed = true },
+                onError = { rejectCandidate() },
                 modifier = Modifier.fillMaxSize())
         }
     }
@@ -2196,7 +2238,9 @@ private fun HeroBackdropImage(
                 val width = it.result.drawable.intrinsicWidth
                 val height = it.result.drawable.intrinsicHeight
                 onSuccess(width, height)
-                if (height > 0 && width > height) onLoaded()
+                // The caller may reject a portrait candidate, but the wipe must always leave
+                // the loading state so the previous image can remain visible during fallback.
+                onLoaded()
             },
             onError = { onError() },
             modifier = Modifier.fillMaxSize(),

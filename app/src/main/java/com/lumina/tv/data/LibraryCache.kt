@@ -98,7 +98,11 @@ object LibraryCache {
         .putNullable("seasonId", seasonId).putNullable("indexNumber", indexNumber).putNullable("parentIndexNumber", parentIndexNumber)
         .putNullable("seriesName", seriesName).put("positionTicks", positionTicks).put("played", played)
         .put("playedPercentage", playedPercentage).putNullable("primaryImageAspectRatio", primaryImageAspectRatio)
-        .putNullable("backdropTag", backdropTag).putNullable("logoTag", logoTag).put("sourceCount", sourceCount)
+        .putNullable("backdropTag", backdropTag)
+        .put("backdropTags", JSONObject().also { json -> backdropTags.forEach { (index, tag) -> json.put(index.toString(), tag) } })
+        .putNullable("parentBackdropItemId", parentBackdropItemId)
+        .put("parentBackdropTags", JSONObject().also { json -> parentBackdropTags.forEach { (index, tag) -> json.put(index.toString(), tag) } })
+        .putNullable("logoTag", logoTag).put("sourceCount", sourceCount)
         .putNullable("communityRating", communityRating).put("genres", JSONArray(genres)).put("isFavorite", isFavorite)
         .putNullable("resolution", resolution).put("isHdr", isHdr).put("isDolbyVision", isDolbyVision)
         .putNullable("audioFormat", audioFormat)
@@ -109,6 +113,15 @@ object LibraryCache {
 
     private fun JSONObject.putNullable(key: String, value: Any?) = put(key, value ?: JSONObject.NULL)
     private fun JSONObject.nullableString(key: String) = optString(key).takeUnless { it == "null" || it.isBlank() }
+
+    private fun JSONObject.readIndexedTags(key: String): Map<Int, String> =
+        optJSONObject(key)?.let { tags ->
+            tags.keys().asSequence().mapNotNull { rawIndex ->
+                rawIndex.toIntOrNull()?.takeIf { it >= 0 }?.let { index ->
+                    tags.nullableString(rawIndex)?.let { index to it }
+                }
+            }.toMap()
+        }.orEmpty()
 
     private fun JSONObject.readItems(key: String): List<MediaItem> {
         val array = optJSONArray(key) ?: return emptyList()
@@ -124,7 +137,11 @@ object LibraryCache {
                 parentIndexNumber = optional("parentIndexNumber", j.optInt("parentIndexNumber")), seriesName = j.nullableString("seriesName"),
                 positionTicks = j.optLong("positionTicks"), played = j.optBoolean("played"), playedPercentage = j.optDouble("playedPercentage"),
                 primaryImageAspectRatio = optional("primaryImageAspectRatio", j.optDouble("primaryImageAspectRatio")),
-                backdropTag = j.nullableString("backdropTag"), logoTag = j.nullableString("logoTag"), sourceCount = j.optInt("sourceCount"),
+                backdropTag = j.nullableString("backdropTag"),
+                backdropTags = j.readIndexedTags("backdropTags"),
+                parentBackdropItemId = j.nullableString("parentBackdropItemId"),
+                parentBackdropTags = j.readIndexedTags("parentBackdropTags"),
+                logoTag = j.nullableString("logoTag"), sourceCount = j.optInt("sourceCount"),
                 communityRating = optional("communityRating", j.optDouble("communityRating")),
                 genres = j.optJSONArray("genres")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty(),
                 isFavorite = j.optBoolean("isFavorite"), resolution = j.nullableString("resolution"), isHdr = j.optBoolean("isHdr"),

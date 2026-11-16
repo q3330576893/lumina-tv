@@ -20,6 +20,8 @@ data class MediaItem(
     val primaryImageAspectRatio: Double? = null,
     val backdropTag: String? = null,
     val backdropTags: Map<Int, String> = emptyMap(),
+    val parentBackdropItemId: String? = null,
+    val parentBackdropTags: Map<Int, String> = emptyMap(),
     val logoTag: String? = null,
     val sourceCount: Int = 0,
     val communityRating: Double? = null,

@@ -17,6 +17,7 @@
 
     <!-- 凭据加密依赖本机 Keystore，备份恢复到新设备无法解密，且禁止把 token 带出设备 -->
     <application
+        android:name=".LuminaApp"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:banner="@drawable/tv_banner"

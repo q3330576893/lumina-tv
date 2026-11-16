@@ -729,18 +729,38 @@ class EmbyClient(
     private fun parseItems(arr: JSONArray): List<MediaItem> =
         (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.let { parseItem(it) } }
 
+    private fun indexedTags(array: JSONArray): Map<Int, String> =
+        (0 until array.length()).mapNotNull { index ->
+            if (array.isNull(index)) null else array.optString(index).ifBlank { null }?.let { index to it }
+        }.toMap()
+
+    private fun indexedTags(obj: JSONObject): Map<Int, String> =
+        obj.keys().asSequence().mapNotNull { key ->
+            key.toIntOrNull()?.takeIf { it >= 0 && !obj.isNull(key) }?.let { index ->
+                obj.optString(key).ifBlank { null }?.let { index to it }
+            }
+        }.toMap()
+
     private fun parseItem(o: JSONObject): MediaItem {
         val ud = o.optJSONObject("UserData")
         val tags = o.optJSONObject("ImageTags")
-        val backdrops = o.optJSONObject("BackdropImageTags")
-        val backdropTags = buildMap {
-            val names = backdrops?.names() ?: JSONArray()
-            val indexedTags = (0 until names.length()).mapNotNull { i ->
-                val index = names.optString(i).toIntOrNull() ?: return@mapNotNull null
-                backdrops?.optString(index.toString())?.ifBlank { null }?.let { index to it }
-            }.sortedBy { it.first }
-            indexedTags.forEach { (index, tag) -> put(index, tag) }
+        val backdropTags: Map<Int, String> = run {
+            val arr = o.optJSONArray("BackdropImageTags")
+            if (arr != null) {
+                indexedTags(arr)
+            } else {
+                o.optJSONObject("BackdropImageTags")?.let(::indexedTags) ?: emptyMap()
+            }
         }
+        val parentBackdropTags: Map<Int, String> = run {
+            val arr = o.optJSONArray("ParentBackdropImageTags")
+            if (arr != null) {
+                indexedTags(arr)
+            } else {
+                o.optJSONObject("ParentBackdropImageTags")?.let(::indexedTags) ?: emptyMap()
+            }
+        }
+        val parentBackdropItemId = o.optString("ParentBackdropItemId").takeUnless { it.isBlank() || it == "null" }
         val providerIds = buildMap {
             o.optJSONObject("ProviderIds")?.let { ids ->
                 val names = ids.names() ?: JSONArray()
@@ -796,6 +816,8 @@ class EmbyClient(
             imageTag = tags?.optString("Primary")?.ifBlank { null },
             backdropTag = backdropTags[0],
             backdropTags = backdropTags,
+            parentBackdropItemId = parentBackdropItemId,
+            parentBackdropTags = parentBackdropTags,
             logoTag = tags?.optString("Logo")?.ifBlank { null },
             // 请求了 Fields=MediaSources 才有值，用来判断"这一集有几个版本"
             sourceCount = o.optJSONArray("MediaSources")?.length() ?: 0,
@@ -867,25 +889,25 @@ class EmbyClient(
         return url("/Items/$id/Images/Primary", mapOf("maxHeight" to maxHeight.toString(), "tag" to tag, "quality" to "85"))
     }
 
-    fun backdropUrl(item: MediaItem, maxWidth: Int = 1920): String? {
-        return backdropUrl(item, 0, maxWidth)
+    fun backdropUrl(item: MediaItem, maxWidth: Int = 1920, quality: Int = 80): String? {
+        return backdropUrl(item, 0, maxWidth, quality)
     }
 
-    fun backdropUrl(item: MediaItem, index: Int, maxWidth: Int): String? {
+    fun backdropUrl(item: MediaItem, index: Int, maxWidth: Int, quality: Int = 80): String? {
         val tag = item.backdropTags[index] ?: item.backdropTag?.takeIf { index == 0 }
         if (tag == null) return null
-        return url("/Items/${item.id}/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
+        return url("/Items/${item.id}/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to quality.toString()))
     }
 
-    fun backdropUrlUntagged(id: String, index: Int, maxWidth: Int): String {
+    fun backdropUrlUntagged(id: String, index: Int, maxWidth: Int, quality: Int = 80): String {
         require(index >= 0)
-        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "quality" to "90"))
+        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "quality" to quality.toString()))
     }
 
     /** Indexed Hero stills: use the existing authenticated image URL, not an extra metadata request. */
-    fun heroStillUrl(id: String, index: Int): String {
+    fun heroStillUrl(id: String, index: Int, maxWidth: Int = 1920, quality: Int = 80): String {
         require(index in 1..3)
-        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to "1920", "quality" to "90"))
+        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "quality" to quality.toString()))
     }
 
     /** 透明标题图（Emby Logo 图），没有就返回 null 由调用方退回文字标题。 */
@@ -894,9 +916,9 @@ class EmbyClient(
         return url("/Items/${item.id}/Images/Logo", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
-    fun backdropUrl(id: String, tag: String?, maxWidth: Int = 1920): String? {
+    fun backdropUrl(id: String, tag: String?, maxWidth: Int = 1920, quality: Int = 80): String? {
         if (tag == null) return null
-        return url("/Items/$id/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
+        return url("/Items/$id/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to quality.toString()))
     }
 
     /** Resolves a detail backdrop using validated HLS, direct stream, then the controlled static fallback. */
