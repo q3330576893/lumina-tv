@@ -340,8 +340,12 @@ fun DetailScreen(
     var pickerOptions by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var pickerCurrentKey by remember { mutableStateOf<String?>(null) }
     var pickerAction by remember { mutableStateOf<(String) -> Unit>({}) }
-    var selectedAudioIndex by remember(id) { mutableStateOf(AppRuntime.prefs?.audioTrackFor(id)) }
-    var selectedSubtitleKey by remember(id) { mutableStateOf(AppRuntime.prefs?.subtitleTrackFor(id)) }
+    val trackSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
+    var selectedAudioIndex by remember(id, trackSource) { mutableStateOf(AppRuntime.prefs?.audioTrackFor(id, trackSource)) }
+    var selectedSubtitleKey by remember(id, trackSource) { mutableStateOf(
+        AppRuntime.prefs?.subtitlePreferenceFor(id, trackSource)?.let {
+            when (it) { "off" -> "-1"; "auto" -> "auto"; else -> it.removePrefix("track:emby:") }
+        }) }
     // 单集的版本选择
     var episodeTarget by remember { mutableStateOf<MediaItem?>(null) }
     var episodeSources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
@@ -747,10 +751,20 @@ fun DetailScreen(
         }
     }
 
+    val playAction = rememberPlayableItemAction(listOf(id, selectedSourceId, item?.id)) { target, fromStart ->
+        val sourceId = selectedSourceId.takeIf { target.id == id }
+        when {
+            fromStart -> onPlayFromStart(target, sourceId)
+            sourceId != null -> onPlayWithSource(target, sourceId)
+            else -> onPlay(target)
+        }
+    }
+
     /** 单集有多个版本时先选版本，只有一个版本才直接播。 */
     fun pickEpisode(ep: MediaItem) {
+        if (episodeSourcesLoading || playAction.resolving) return
         if (ep.sourceCount <= 1) {
-            onPlay(ep)
+            playAction.play(ep)
             return
         }
         episodeTarget = ep
@@ -758,11 +772,13 @@ fun DetailScreen(
         episodeSourcesLoading = true
         showEpisodeSourceMenu = true
         scope.launch {
-            episodeSources = catchingRequest { client?.getMediaSources(ep.id) }.getOrDefault(emptyList()).orEmpty()
+            val loaded = catchingRequest { client?.getMediaSources(ep.id) }.getOrDefault(emptyList()).orEmpty()
+            if (!pageActive.get() || AppRuntime.client !== client || episodeTarget?.id != ep.id || !showEpisodeSourceMenu) return@launch
+            episodeSources = loaded
             episodeSourcesLoading = false
             if (episodeSources.isEmpty()) {
                 showEpisodeSourceMenu = false
-                onPlay(ep)
+                playAction.play(ep)
             }
         }
     }
@@ -953,16 +969,7 @@ fun DetailScreen(
                                 onFocused = { playButtonFocused = true },
                                 onFocusChanged = { playButtonFocused = it },
                                 onClick = {
-                                    val target = if (it0.type == "Series") {
-                                        episodes.firstOrNull { !it.played && it.positionTicks > 0 }
-                                            ?: episodes.firstOrNull { !it.played }
-                                            ?: episodes.firstOrNull()
-                                    } else it0
-                                    if (target != null) {
-                                        val sourceId = selectedSourceId
-                                        if (target.id == it0.id && sourceId != null) onPlayWithSource(target, sourceId)
-                                        else onPlay(target)
-                                    }
+                                    playAction.play(it0)
                                 },
                             ) { focused ->
                                 Row(
@@ -979,7 +986,7 @@ fun DetailScreen(
                                 ) {
                                     Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF06101F), modifier = Modifier.size(22.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("播放", color = Color(0xFF06101F), fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                                    Text(if (playAction.resolving) "正在查找…" else "播放", color = Color(0xFF06101F), fontSize = 17.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                             if (it0.positionTicks > 0L) {
@@ -992,12 +999,7 @@ fun DetailScreen(
                                     corner = 23.dp,
                                     focusRequester = playFromStartFocus,
                                     onClick = {
-                                        val target = if (it0.type == "Series") {
-                                            episodes.firstOrNull { !it.played && it.positionTicks > 0 }
-                                                ?: episodes.firstOrNull { !it.played }
-                                                ?: episodes.firstOrNull()
-                                        } else it0
-                                        if (target != null) onPlayFromStart(target, selectedSourceId.takeIf { target.id == it0.id })
+                                        playAction.play(it0, fromStart = true)
                                     },
                                 ) { focused ->
                                     Box(
@@ -1198,7 +1200,7 @@ fun DetailScreen(
                                 focusScale = FocusScale.DENSE_GRID,
                                 requestInitialFocus = related.id == focusedRelatedId,
                                 onFocused = { focusedRelatedId = related.id },
-                                onClick = { onOpenDetail(related.id) },
+                                onClick = { playAction.invalidate(); onOpenDetail(related.id) },
                             )
                         }
                     }
@@ -1304,7 +1306,7 @@ fun DetailScreen(
                                 pickerCurrentKey = (selectedAudioIndex ?: audioTracks.firstOrNull()?.index)?.toString()
                                 pickerAction = { key ->
                                     selectedAudioIndex = key.toIntOrNull()
-                                    key.toIntOrNull()?.let { AppRuntime.prefs?.rememberAudioTrack(currentItem.id, it) }
+                                    key.toIntOrNull()?.let { AppRuntime.prefs?.rememberAudioTrack(currentItem.id, it, activeSource) }
                                 }
                                 showSettingsPicker = true
                             }
@@ -1312,11 +1314,13 @@ fun DetailScreen(
                         val subtitleTracks = activeSource?.streams.orEmpty().filter { it.type == "Text" || it.type == "Subtitle" }
                         SettingRow("字幕", if (selectedSubtitleKey == "-1") "关闭" else subtitleTracks.firstOrNull { subtitleKey(it) == selectedSubtitleKey }?.language ?: subtitleTracks.firstOrNull()?.language ?: "默认", enabled = subtitleTracks.isNotEmpty()) {
                             pickerTitle = "选择字幕"
-                            pickerOptions = listOf("-1" to "关闭") + subtitleTracks.map { subtitleKey(it) to (it.language ?: "未知语言") }
+                            pickerOptions = listOf("auto" to "自动", "-1" to "关闭") + subtitleTracks.map { subtitleKey(it) to (it.language ?: "未知语言") }
                             pickerCurrentKey = selectedSubtitleKey
                             pickerAction = { key ->
                                 selectedSubtitleKey = key
-                                AppRuntime.prefs?.rememberSubtitleTrack(currentItem.id, key)
+                                AppRuntime.prefs?.rememberSubtitleTrack(currentItem.id, when (key) {
+                                    "-1" -> "off"; "auto" -> "auto"; else -> "track:emby:$key"
+                                }, activeSource)
                             }
                             showSettingsPicker = true
                         }
@@ -1336,11 +1340,14 @@ fun DetailScreen(
                 audioCaps = sourceAudioCaps,
                 title = "选择版本 · ${ep.name}",
                 onPick = { sid ->
-                    showEpisodeSourceMenu = false
-                    AppRuntime.prefs?.rememberSource(ep.id, sid.takeIf { it.isNotBlank() })
-                    if (sid.isBlank()) onPlay(ep) else onPlayWithSource(ep, sid)
+                    if (pageActive.get() && AppRuntime.client === client && episodeTarget?.id == ep.id) {
+                        playAction.invalidate()
+                        showEpisodeSourceMenu = false
+                        AppRuntime.prefs?.rememberSource(ep.id, sid.takeIf { it.isNotBlank() })
+                        if (sid.isBlank()) onPlay(ep) else onPlayWithSource(ep, sid)
+                    }
                 },
-                onClose = { showEpisodeSourceMenu = false },
+                onClose = { showEpisodeSourceMenu = false; episodeSourcesLoading = false; episodeTarget = null },
             )
         }
 
@@ -1746,7 +1753,7 @@ private fun channelLabel(channels: Int?): String? = when (channels) { 6 -> "5.1"
 private fun audioLabel(stream: com.lumina.tv.data.MediaStream): String =
     listOfNotNull(stream.language ?: "未知语言", stream.codec, stream.channels?.let { "${it}ch" }).joinToString(" ")
 
-private fun subtitleKey(stream: com.lumina.tv.data.MediaStream): String = "${stream.index}:0"
+private fun subtitleKey(stream: com.lumina.tv.data.MediaStream): String = "${stream.index}"
 
 private fun formatBitrate(bitsPerSecond: Long): String = when {
     bitsPerSecond >= 1_000_000 -> "%.1f Mbps".format(bitsPerSecond / 1_000_000.0)

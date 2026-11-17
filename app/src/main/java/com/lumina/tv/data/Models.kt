@@ -36,6 +36,7 @@ data class MediaItem(
     val productionLocations: List<String> = emptyList(),
     val originalLanguage: String? = null,
     val lastPlayedDate: Long? = null,
+    val isMissing: Boolean = false,
 ) {
     /** 规格胶囊徽标：4K / 1080P / HDR / DV / 5.1CH 等 */
     val tags: List<String>
@@ -121,6 +122,8 @@ data class MediaSource(
     val directStreamUrl: String? = null,
     val additionalOptions: String? = null,
     val requiredHttpHeaders: Map<String, String> = emptyMap(),
+    val defaultAudioStreamIndex: Int? = null,
+    val defaultSubtitleStreamIndex: Int? = null,
 ) {
     val audioStreams: List<MediaStream> get() = streams.filter { it.type == "Audio" }
     val subtitleStreams: List<MediaStream> get() = streams.filter { it.type == "Subtitle" }

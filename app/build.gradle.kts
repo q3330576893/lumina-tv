@@ -20,8 +20,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 136
-        versionName = "1.22.95"
+        versionCode = 137
+        versionName = "1.22.96"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
         buildConfigField("String", "MDBLIST_API_KEY", "\"${localProps.getProperty("MDBLIST_API_KEY", "")}\"")
@@ -143,5 +143,13 @@ val p3Checks = tasks.register<JavaExec>("p3Checks") {
     mainClass.set("com.lumina.tv.data.P3ProgressChecks")
 }
 verifyOffline.configure { dependsOn(p3Checks) }
+val p4Checks = tasks.register<JavaExec>("p4Checks") {
+    group = "verification"
+    description = "Check track identity, negotiation preferences and playable episode resolution."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.P4Checks")
+}
+verifyOffline.configure { dependsOn(p4Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }

@@ -5,42 +5,45 @@ import androidx.media3.common.TrackGroup
 import com.lumina.tv.data.MediaStream
 
 data class AudioTrackCandidate(val group: TrackGroup, val index: Int, val format: Format, val supported: Boolean)
+data class Media3TrackKey(val group: TrackGroup, val index: Int) {
+    override fun toString() = "g${group.id.takeIf { progressiveQueueIdentity(it) != null } ?: group.hashCode()}:$index"
+}
 
-fun bestAudioTrack(
-    stream: MediaStream,
-    candidates: List<AudioTrackCandidate>,
-    preferredLanguage: String?,
-    preferSupported: Boolean = true,
-): AudioTrackCandidate? {
-    // Preserve the existing ID/language mapping within the best capability tier.
-    val eligible = if (preferSupported) candidates.filter { it.supported }.ifEmpty { candidates } else candidates
-    eligible.firstOrNull { it.format.id?.toIntOrNull() == stream.index }?.let { return it }
+const val EXTERNAL_SUBTITLE_ID_PREFIX = "lumina-external-subtitle:"
 
-    val streamLanguage = normalizeLanguage(stream.language)
-    val preferred = normalizeLanguage(preferredLanguage)
-    val embysCommentary = listOfNotNull(stream.title, stream.displayTitle)
-        .any { it.contains("commentary", true) || it.contains("评论", true) || it.contains("解说", true) }
-    return eligible.map { candidate ->
-        val format = candidate.format
-        val codec = format.sampleMimeType?.substringAfter('/') ?: format.codecs.orEmpty()
-        val label = format.label.orEmpty()
-        val candidateCommentary = label.contains("commentary", true) || label.contains("评论") || label.contains("解说")
-        var score = 0
-        val candidateLanguage = normalizeLanguage(format.language)
-        if (streamLanguage != null && candidateLanguage == streamLanguage) score += 8
-        if (preferred != null && candidateLanguage == preferred) score += 10
-        if (!stream.codec.isNullOrBlank() && codec.contains(stream.codec, true)) score += 8
-        if (stream.channels != null && stream.channels == format.channelCount) {
-            score += 6
-            if (stream.channels == 6 || stream.channels == 8) score += 2
-        }
-        if (listOfNotNull(stream.title, stream.displayTitle).any { it.isNotBlank() && label.contains(it, true) }) score += 3
-        if (label.contains("default", true) || label.contains("主")) score += 1
-        if (embysCommentary != candidateCommentary) score -= 12
-        candidate to score
-    }.maxWithOrNull(
-        compareBy<Pair<AudioTrackCandidate, Int>> { it.second }
-            .thenBy { -it.first.index }
-            .thenBy { if (stream.channels != null && it.first.format.channelCount == stream.channels) 1 else 0 },
-    )?.takeIf { it.second > 0 }?.first
+/** MergingMediaPeriod adds a numeric child-period prefix to both group IDs and format IDs. */
+internal fun progressiveQueueIdentity(groupId: String): Pair<String, Int>? {
+    if (!groupId.matches(Regex("[0-9]+(?::[0-9]+)*"))) return null
+    return groupId.substringAfterLast(':').toIntOrNull()?.let { groupId.substringBeforeLast(':', "") to it }
+}
+
+internal fun externalSubtitleSourceIndex(formatId: String?): Int? = formatId?.let {
+    Regex("(?:[0-9]+:)*${EXTERNAL_SUBTITLE_ID_PREFIX}([0-9]+)").matchEntire(it)
+        ?.groupValues?.get(1)?.toIntOrNull()
+}
+
+/** Input includes unsupported tracks. Capability belongs to selection, never identity. */
+fun media3TrackMapping(streams: List<MediaStream>, candidates: List<AudioTrackCandidate>,
+    context: TrackMappingContext): TrackMapping<Media3TrackKey> {
+    // Tracks groups can be regrouped by renderer (including unsupported groups). Progressive
+    // group IDs identify queue creation order, not Emby indices or container TrackNumbers.
+    val queues = candidates.mapNotNull { progressiveQueueIdentity(it.group.id) }
+    val verifiedOrder = context.orderEvidence != null && candidates.isNotEmpty() &&
+        candidates.all { it.group.length == 1 && it.format.containerMimeType in
+            setOf("video/x-matroska", "audio/x-matroska", "video/webm", "audio/webm") } &&
+        queues.size == candidates.size && queues.map { it.first }.distinct().size == 1 &&
+        queues.map { it.second }.distinct().size == candidates.size
+    val ordered = if (verifiedOrder) candidates.sortedBy { progressiveQueueIdentity(it.group.id)!!.second } else candidates
+    return buildTrackMapping(streams, ordered.map {
+        val externalIndex = externalSubtitleSourceIndex(it.format.id)
+        PlayerTrack(Media3TrackKey(it.group, it.index), language = it.format.language,
+            codec = it.format.sampleMimeType ?: it.format.codecs, title = it.format.label,
+            channels = it.format.channelCount.takeIf { count -> count > 0 },
+            externalSourceIndex = externalIndex, external = externalIndex != null)
+    }, context.copy(orderEvidence = context.orderEvidence.takeIf { verifiedOrder }))
+}
+
+fun TrackMapping<Media3TrackKey>.candidateFor(embyIndex: Int,
+    candidates: List<AudioTrackCandidate>): AudioTrackCandidate? = playerFor(embyIndex)?.let { key ->
+    candidates.singleOrNull { it.group == key.group && it.index == key.index }
 }

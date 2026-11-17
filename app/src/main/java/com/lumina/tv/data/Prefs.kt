@@ -247,27 +247,33 @@ class Prefs(context: Context) {
         return value
     }
 
-    fun subtitleModeFor(itemId: String): SubtitleMode = when {
-        subtitlePreferenceFor(itemId) == "off" -> SubtitleMode.OFF
-        subtitlePreferenceFor(itemId)?.startsWith("track:") == true -> SubtitleMode.TRACK
+    fun subtitleModeFor(itemId: String, source: MediaSource? = null): SubtitleMode = when {
+        subtitlePreferenceFor(itemId, source) == "off" -> SubtitleMode.OFF
+        subtitlePreferenceFor(itemId, source)?.startsWith("track:") == true -> SubtitleMode.TRACK
         else -> SubtitleMode.AUTO
     }
 
-    fun subtitlePreferenceFor(itemId: String): String? {
+    fun subtitlePreferenceFor(itemId: String, source: MediaSource? = null): String? {
         val key = itemKey("subtitle_track", itemId)
         // 只读该片的手动记忆；旧的跨片字幕轨/关闭状态不能遮住全局语言偏好。
         val stored = migratedSubtitleValue(key, "subtitle_track_$itemId")
             ?: return null
         val value = normalizeSubtitlePreference(stored)
         if (value != stored) sp.edit().putString(key, value).apply()
+        if (value.startsWith("track:")) {
+            if (source == null || sp.getString(itemKey("subtitle_identity", itemId), null) !=
+                com.lumina.tv.player.trackMemoryIdentity(source, "Subtitle")) return null
+            val index = value.removePrefix("track:emby:").toIntOrNull() ?: return null
+            if (source.subtitleStreams.count { it.index == index } != 1) return null
+        }
         return value
     }
 
-    fun subtitleTrackFor(itemId: String): String? = subtitlePreferenceFor(itemId)
+    fun subtitleTrackFor(itemId: String, source: MediaSource? = null): String? = subtitlePreferenceFor(itemId, source)
         ?.takeIf { it.startsWith("track:") }
         ?.removePrefix("track:")
 
-    fun rememberSubtitleTrack(itemId: String, trackKey: String?) {
+    fun rememberSubtitleTrack(itemId: String, trackKey: String?, source: MediaSource? = null) {
         val value = when {
             trackKey == null || trackKey == "off" -> "off"
             trackKey == "auto" -> "auto"
@@ -276,22 +282,27 @@ class Prefs(context: Context) {
             else -> "track:$trackKey"
         }
         val key = itemKey("subtitle_track", itemId)
+        if (value.startsWith("track:")) {
+            val index = value.removePrefix("track:emby:").toIntOrNull() ?: return
+            if (source == null || source.subtitleStreams.count { it.index == index } != 1) return
+        }
         sp.edit()
             .putString(key, value)
+            .putString(itemKey("subtitle_identity", itemId), source?.let { com.lumina.tv.player.trackMemoryIdentity(it, "Subtitle") })
             .apply()
     }
 
-    fun audioTrackFor(itemId: String): Int? {
+    fun audioTrackFor(itemId: String, source: MediaSource? = null): Int? {
+        if (source == null || sp.getString(itemKey("audio_identity", itemId), null) !=
+            com.lumina.tv.player.trackMemoryIdentity(source, "Audio")) return null
         val key = itemKey("audio_track", itemId)
-        if (sp.contains(key)) return sp.getInt(key, -1).takeIf { it >= 0 }
-        if (!sp.contains("audio_track_$itemId")) return null
-        val legacy = sp.getInt("audio_track_$itemId", -1)
-        sp.edit().putInt(key, legacy).remove("audio_track_$itemId").apply()
-        return legacy.takeIf { it >= 0 }
+        return sp.getInt(key, -1).takeIf { index -> source.audioStreams.count { it.index == index } == 1 }
     }
 
-    fun rememberAudioTrack(itemId: String, streamIndex: Int) {
-        sp.edit().putInt(itemKey("audio_track", itemId), streamIndex).apply()
+    fun rememberAudioTrack(itemId: String, streamIndex: Int, source: MediaSource? = null) {
+        if (source == null || source.audioStreams.count { it.index == streamIndex } != 1) return
+        sp.edit().putInt(itemKey("audio_track", itemId), streamIndex)
+            .putString(itemKey("audio_identity", itemId), com.lumina.tv.player.trackMemoryIdentity(source, "Audio")).apply()
     }
 
     fun lastSourceFor(itemId: String): String? = sp.getString(itemKey("last_source", itemId), null)

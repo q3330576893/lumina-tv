@@ -88,6 +88,8 @@ class MpvPlayerController(
         val codec: String?,
         val title: String?,
         val channels: Int?,
+        val external: Boolean,
+        val externalSourceIndex: Int?,
     )
 
     data class State(
@@ -289,13 +291,13 @@ class MpvPlayerController(
     }
 
     fun setAudioStreams(streams: List<MediaStream>) {
+        mappings.remove("audio")
         audioStreams = streams.filter { it.type.equals("Audio", true) }
-        logTrackMapping("audio", audioStreams, "audio")
     }
 
     fun setSubtitleStreams(streams: List<MediaStream>) {
+        mappings.remove("sub")
         subtitleStreams = streams.filter { it.type.equals("Subtitle", true) }
-        logTrackMapping("subtitle", subtitleStreams, "sub")
     }
 
     fun setAudioTrack(index: Int) {
@@ -371,6 +373,7 @@ class MpvPlayerController(
         durationMs = 0L
         cacheSpeedBytesPerSecond = 0L
         observedProperties.clear()
+        mappings.clear()
         pendingSubtitles = subtitleUrls
         val headerFields = requestHeaders.entries.mapNotNull { (key, value) ->
             if (',' in key || ',' in value) null else "$key: $value"
@@ -515,55 +518,61 @@ class MpvPlayerController(
         mpv?.setPropertyInt("sid", id)
     }
 
+    private var trackContext = TrackMappingContext()
+    private var subtitleTrackContext = TrackMappingContext()
+    private var externalSubtitleIndices = emptyMap<String, Int>()
+    private val mappings = mutableMapOf<String, Pair<List<MpvTrack>, TrackMapping<Int>>>()
+
+    fun setTrackMappingContext(context: TrackMappingContext, subtitleIndex: Int? = null) {
+        trackContext = context.copy(orderEvidence = null) // mpv uses ff-index, never src-id or ordinal.
+        subtitleTrackContext = trackContext.copy(negotiatedIndex = subtitleIndex)
+        mappings.clear()
+    }
+
+    fun setExternalSubtitleIdentities(indices: Map<String, Int>) {
+        externalSubtitleIndices = indices.toMap()
+        mappings.remove("sub")
+    }
+
+    private fun trackMapping(type: String, streams: List<MediaStream>): TrackMapping<Int> {
+        val tracks = readMpvTracks(type)
+        mappings[type]?.takeIf { it.first == tracks }?.let { return it.second }
+        val context = if (type == "audio") trackContext else subtitleTrackContext
+        val table = buildTrackMapping(streams, tracks.map {
+            PlayerTrack(it.id, it.ffIndex, it.language, it.codec, it.title, it.channels,
+                it.externalSourceIndex, it.external)
+        }, context)
+        mappings[type] = tracks to table
+        PageLog.add("mpv $type mapping ${table.summary()}")
+        return table
+    }
+
+    private fun findMpvId(type: String, embyIndex: Int, streams: List<MediaStream>): Int? =
+        trackMapping(type, streams).playerFor(embyIndex)
+
     private fun logTrackMapping(type: String, streams: List<MediaStream>, mpvType: String) {
-        val mappings = readMpvTracks(mpvType)
-        val summary = streams.take(8).joinToString { stream ->
-            val mapped = mappings.firstOrNull { it.ffIndex == stream.index }?.id
-                ?: mappings.getOrNull(streams.indexOf(stream))?.id
-            "${stream.index}->${mapped ?: "?"}(${stream.language.orEmpty()}/${stream.codec.orEmpty()})"
-        }
-        val line = "${timestamp()} mpv $type mapping count=${streams.size}/${mappings.size} entries=[$summary]"
-        appendMpvLog(line)
-        PageLog.add(line)
+        trackMapping(mpvType, streams)
     }
 
-    private fun findMpvId(type: String, embyIndex: Int, streams: List<MediaStream>): Int? {
-        val tracks = readMpvTracks(type)
-        val targetStream = streams.firstOrNull { it.index == embyIndex }
-        val exact = tracks.firstOrNull { it.ffIndex == embyIndex }?.takeIf { track ->
-            targetStream?.codec.isNullOrBlank() || track.codec.isNullOrBlank() ||
-                targetStream?.codec?.contains(track.codec.orEmpty(), true) == true ||
-                track.codec?.contains(targetStream?.codec.orEmpty(), true) == true
-        }?.id
-        if (exact != null) return exact
-        val ordinal = streams.indexOfFirst { it.index == embyIndex }
-        val target = streams.getOrNull(ordinal)
-        val scored = tracks.map { track ->
-            val score = (if (!target?.language.isNullOrBlank() && target?.language.equals(track.language, true)) 8 else 0) +
-                (if (!target?.codec.isNullOrBlank() && target?.codec.equals(track.codec, true)) 8 else 0) +
-                (if (target?.channels != null && target.channels == track.channels) 4 else 0) +
-                (if (!target?.title.isNullOrBlank() && target?.title.equals(track.title, true)) 2 else 0)
-            track to score
-        }.maxByOrNull { it.second }?.takeIf { it.second > 0 }?.first
-        val ordinalTrack = tracks.getOrNull(ordinal)?.takeIf { streams.size == tracks.size && scored == null }
-        val selected = scored ?: ordinalTrack
-        val id = selected?.id
-        val mapping = when {
-            scored != null -> "fallback-metadata"
-            ordinalTrack != null -> "fallback-ordinal"
-            else -> "failed"
-        }
-        val line = "${timestamp()} mpv $type mapping=$mapping embyIndex=$embyIndex ordinal=$ordinal id=${id ?: "none"} streamCount=${streams.size} trackCount=${tracks.size}"
-        appendMpvLog(line)
-        PageLog.add(line)
-        return id
+    private fun findEmbyIndex(type: String, id: Int, streams: List<MediaStream>): Int? =
+        trackMapping(type, streams).embyFor(id)
+
+    fun hasAudioMapping(index: Int): Boolean = trackMapping("audio", audioStreams).playerFor(index) != null
+
+    fun currentPlayerAudioId(): Int? = runCatching { mpv?.getPropertyString("aid")?.toIntOrNull() }.getOrNull()
+
+    fun currentAudioEmbyIndex(): Int? = currentPlayerAudioId()?.let { trackMapping("audio", audioStreams).embyFor(it) }
+
+    fun uncertainAudioTracks(): List<Pair<Int, String>> {
+        val table = trackMapping("audio", audioStreams)
+        return readMpvTracks("audio").filter { table.embyFor(it.id) == null }
+            .map { it.id to listOfNotNull(it.title, it.language, it.codec).joinToString(" · ").ifBlank { "音轨 ${it.id}" } }
     }
 
-    private fun findEmbyIndex(type: String, id: Int, streams: List<MediaStream>): Int? {
-        val tracks = readMpvTracks(type)
-        val ffIndex = tracks.firstOrNull { it.id == id }?.ffIndex
-        return streams.firstOrNull { it.index == ffIndex }?.index
-            ?: tracks.indexOfFirst { it.id == id }.takeIf { it >= 0 && it < streams.size }?.let { streams[it].index }
+    fun selectPlayerAudioTrack(id: Int) {
+        if (released || readMpvTracks("audio").none { it.id == id }) return
+        preferredAudioIndex = null
+        mpv?.setPropertyInt("aid", id)
     }
 
     private fun readMpvTracks(type: String): List<MpvTrack> = runCatching {
@@ -573,13 +582,16 @@ class MpvPlayerController(
             val track = tracks.optJSONObject(index) ?: return@mapNotNull null
             if (!track.optString("type").equals(type, true)) return@mapNotNull null
             val id = track.optInt("id", -1).takeIf { it > 0 } ?: return@mapNotNull null
+            val external = track.optBoolean("external", false)
             MpvTrack(
                 id = id,
-                ffIndex = track.optInt("ff-index", -1).takeIf { it >= 0 },
+                ffIndex = track.optInt("ff-index", -1).takeIf { it >= 0 && !external },
                 language = track.optString("lang").takeIf(String::isNotBlank),
                 codec = track.optString("codec").takeIf(String::isNotBlank),
                 title = track.optString("title").takeIf(String::isNotBlank),
                 channels = track.optInt("demux-channel-count", -1).takeIf { it > 0 },
+                external = external,
+                externalSourceIndex = if (external) externalSubtitleIndices[track.optString("external-filename")] else null,
             )
         }
     }.getOrDefault(emptyList())

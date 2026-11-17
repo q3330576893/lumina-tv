@@ -170,8 +170,12 @@ import com.lumina.tv.player.AudioCodecMatrix
 import com.lumina.tv.player.AudioRouteMonitor
 import com.lumina.tv.player.AudioSupport
 import com.lumina.tv.player.AudioTrackCandidate
-import com.lumina.tv.player.bestAudioTrack
-import com.lumina.tv.player.normalizeLanguage
+import com.lumina.tv.player.TrackMapping
+import com.lumina.tv.player.TrackMappingContext
+import com.lumina.tv.player.Media3TrackKey
+import com.lumina.tv.player.media3TrackMapping
+import com.lumina.tv.player.media3OrderEvidence
+import com.lumina.tv.player.candidateFor
 import com.lumina.tv.player.preferredAudioStream
 import com.lumina.tv.player.resolveSubtitlePreference
 import com.lumina.tv.player.sourceHint
@@ -416,7 +420,7 @@ fun PlayerScreen(
     var subtitleOutline by remember { mutableStateOf(AppRuntime.prefs?.subtitleOutline ?: true) }
     var subtitlePosition by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitlePosition ?: 0.08f) }
     var subtitleBg by remember { mutableStateOf(AppRuntime.prefs?.subtitleBg ?: false) }
-    var subtitlePreference by remember(item.id) { mutableStateOf(AppRuntime.prefs?.subtitlePreferenceFor(item.id)) }
+    var subtitlePreference by remember(item.id) { mutableStateOf(AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource)) }
     var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
     var autoNextJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var nextEpisode by remember(item.id) { mutableStateOf<MediaItem?>(null) }
@@ -438,8 +442,19 @@ fun PlayerScreen(
     var previewDisabled by remember(item.id) { mutableStateOf(false) }
     var lastHoldPreviewAt by remember(item.id) { mutableLongStateOf(0L) }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
+    var pendingManualAudio by remember(item.id) { mutableStateOf<Pair<String, Int>?>(null) }
+    fun rememberConfirmedAudio(index: Int?) {
+        val source = playbackSource ?: return
+        val pending = pendingManualAudio ?: return
+        if (pending.first == com.lumina.tv.player.trackMemoryIdentity(source, "Audio") && pending.second == index) {
+            AppRuntime.prefs?.rememberAudioTrack(item.id, pending.second, source)
+            pendingManualAudio = null
+        }
+    }
+    var audioMapping by remember(item.id) { mutableStateOf(TrackMapping<Media3TrackKey>(emptyList())) }
+    var subtitleMapping by remember(item.id) { mutableStateOf(TrackMapping<Media3TrackKey>(emptyList())) }
     var audioSelectionApplied by remember(item.id) { mutableStateOf(false) }
-    var selectedAudioStreamIndex by remember(item.id) { mutableStateOf(AppRuntime.prefs?.audioTrackFor(item.id)) }
+    var selectedAudioStreamIndex by remember(item.id) { mutableStateOf<Int?>(null) }
     var progressSession by remember(item.id, client) { mutableStateOf<PlaybackProgressSession?>(null) }
 
     fun reportStopInAppScope(positionMs: Long) {
@@ -468,7 +483,6 @@ fun PlayerScreen(
             try {
                 client?.prewarmPlayback(
                     next,
-                    audioStreamIndex = AppRuntime.prefs?.audioTrackFor(next.id),
                     strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy(),
                 )
                 ok = client != null
@@ -582,7 +596,7 @@ fun PlayerScreen(
                 playWhenReady = true
                 trackSelectionParameters = trackSelectionParameters.buildUpon()
                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, resolveSubtitlePreference(
-                        AppRuntime.prefs?.subtitlePreferenceFor(item.id),
+                        AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource),
                         AppRuntime.prefs?.preferredSubtitleLanguage,
                         emptyList(),
                     ) == "off")
@@ -998,10 +1012,16 @@ fun PlayerScreen(
     fun loadSource(
         forceTranscode: Boolean,
         sourceId: String? = currentSourceId,
-        audioStreamIndex: Int? = AppRuntime.prefs?.audioTrackFor(item.id),
+        audioStreamIndex: Int? = playbackSource?.takeIf { it.id == sourceId }?.let { source ->
+            pendingManualAudio?.takeIf { it.first == com.lumina.tv.player.trackMemoryIdentity(source, "Audio") }?.second
+                ?: AppRuntime.prefs?.audioTrackFor(item.id, source)
+        },
     ) {
         if (!instanceJob.isActive || currentExo !== exo) return
         val c = client ?: return
+        audioMapping = TrackMapping(emptyList())
+        subtitleMapping = TrackMapping(emptyList())
+        selectedAudioStreamIndex = null
         reportStopInAppScope(position)
         // A native hw->sw retry is part of this same automatic path attempt.
         val recoveryAlreadyAcquired = reloadUsesRecoveryAttempt
@@ -1053,8 +1073,10 @@ fun PlayerScreen(
                 if (forceTranscode) transcodeFallbackTried = true
                 val maxStreamingBitrate = AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
                 val strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy()
+                val preparedTracks = c.preparePlaybackTracks(item.id, sourceId, audioStreamIndex, strategy,
+                    playbackSource?.takeIf { it.id == sourceId }?.let { com.lumina.tv.player.trackMemoryIdentity(it, "Audio") })
                 val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy,
-                    loadIntent, resumePosition, manualAudioStreamSelection)
+                    loadIntent, resumePosition, manualAudioStreamSelection, trackIntent = preparedTracks.intent)
                     else null
                 if (badHttpFallbackStage != 0) PageLog.add("prewarm miss nextId=${item.id} reason=fallback_request")
                 val resolvedTarget = cachedTarget ?: c.resolvePlayback(
@@ -1065,6 +1087,7 @@ fun PlayerScreen(
                         manualAudioStreamSelection = manualAudioStreamSelection,
                         maxStreamingBitrate = maxStreamingBitrate,
                         strategy = strategy,
+                        preparedTracks = preparedTracks,
                     )
                 val target = resolvedTarget
                 if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
@@ -1082,6 +1105,9 @@ fun PlayerScreen(
                 failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
+                if (pendingManualAudio?.first != com.lumina.tv.player.trackMemoryIdentity(target.source, "Audio")) {
+                    pendingManualAudio = null
+                }
                 val sourceVideoRange = target.source?.streams?.firstOrNull { it.type == "Video" }?.videoRangeType.orEmpty().uppercase()
                 AppRuntime.currentVideoRange = when {
                     sourceVideoRange.contains("DOVI") || sourceVideoRange.contains("DOLBY") || sourceVideoRange == "DV" -> "DV"
@@ -1213,9 +1239,9 @@ fun PlayerScreen(
                             return@MpvPlayerController
                         }
                         mpvState = state
+                        if (state.ready) rememberConfirmedAudio(owner.currentAudioEmbyIndex())
                         if (state.subtitleNotice != null) {
-                            if (AppRuntime.prefs?.subtitlePreferenceFor(item.id)?.startsWith("track:") == true) {
-                                AppRuntime.prefs?.rememberSubtitleTrack(item.id, "auto")
+                            if (AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource)?.startsWith("track:") == true) {
                                 playbackStatusNotice = state.subtitleNotice
                             }
                             subtitlePreference = "auto"
@@ -1263,6 +1289,8 @@ fun PlayerScreen(
                     val mpvAudioStreams = playbackSource?.audioStreams
                         ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
                         ?: mediaSources.firstOrNull()?.audioStreams.orEmpty()
+                    backend.setTrackMappingContext(TrackMappingContext(originalFile = target.originalFile,
+                        negotiatedIndex = target.audioStreamIndex, singleOutput = !target.direct), target.trackIntent?.subtitleIndex)
                     backend.setAudioStreams(mpvAudioStreams)
                     val mpvSubtitleStreams = playbackSource?.subtitleStreams
                         ?: mediaSources.firstOrNull { it.id == currentSourceId }?.subtitleStreams
@@ -1271,22 +1299,17 @@ fun PlayerScreen(
                     val subtitleSp = when { subScale >= 2.3f -> 38.4f; subScale >= 1.9f -> 32f; subScale >= 1.5f -> 25.6f; subScale >= 1.2f -> 20.8f; else -> 16f }
                     backend.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
                     backend.setSubtitleStyle(subtitleColor, subtitleOutline, subtitlePosition, subtitleBg)
-                    val preferredAudio = preferredAudioStream(audioStreamIndex, AppRuntime.prefs?.preferredAudioLanguage, mpvAudioStreams)
-                    selectedAudioStreamIndex = target.audioStreamIndex ?: preferredAudio?.index
-                    backend.setAudioTrack(selectedAudioStreamIndex ?: -1)
-                    val resolvedSubtitle = resolveSubtitlePreference(
-                        AppRuntime.prefs?.subtitlePreferenceFor(item.id),
-                        AppRuntime.prefs?.preferredSubtitleLanguage,
-                        mpvSubtitleStreams,
-                    )
+                    backend.setAudioTrack(target.audioStreamIndex ?: -1)
+                    val resolvedSubtitle = target.trackIntent?.subtitlePreference ?: "auto"
                     subtitlePreference = resolvedSubtitle
                     when {
-                        resolvedSubtitle == "off" -> backend.disableSubtitle()
+                        resolvedSubtitle == "off" || target.trackIntent?.requestedSubtitleIndex == -1 -> backend.disableSubtitle()
                         resolvedSubtitle.startsWith("track:") -> {
                             val index = resolvedSubtitle.removePrefix("track:").removePrefix("emby:").toIntOrNull()
                             if (index != null && mpvSubtitleStreams.any { it.index == index }) backend.setSubtitleTrack(index)
                             else backend.enableSubtitleAuto()
                         }
+                        target.trackIntent?.subtitleIndex != null -> backend.setSubtitleTrack(target.trackIntent.subtitleIndex)
                         else -> backend.enableSubtitleAuto()
                     }
                     pendingStartIntent = null
@@ -1307,6 +1330,7 @@ fun PlayerScreen(
                     val externalSubtitles = subs.mapNotNull { stream ->
                         srcId?.let { c.subtitleUrl(item.id, it, stream.index, "vtt") }
                     }
+                    backend.setExternalSubtitleIdentities(externalSubtitles.zip(subs.map { it.index }).toMap())
                     backend.setSpeed(if (boosting) 3f else speed)
                     if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                     backend.load(target.url, target.playerStartPositionMs, externalSubtitles, target.headers, paused = restorePaused)
@@ -1317,7 +1341,7 @@ fun PlayerScreen(
                             android.net.Uri.parse(c.subtitleUrl(item.id, srcId, st.index, "vtt"))
                         )
                             .setMimeType(androidx.media3.common.MimeTypes.TEXT_VTT)
-                            .setId(st.index.toString())
+                            .setId(com.lumina.tv.player.EXTERNAL_SUBTITLE_ID_PREFIX + st.index)
                             .setLabel(st.displayTitle ?: st.language ?: "字幕${st.index}")
                             .setLanguage(st.language)
                             .setSelectionFlags(if (st.isDefault) C.SELECTION_FLAG_DEFAULT else 0)
@@ -1350,11 +1374,7 @@ fun PlayerScreen(
                     audioSelectionApplied = false
                     selectedAudioStreamIndex = target.audioStreamIndex
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, resolveSubtitlePreference(
-                            AppRuntime.prefs?.subtitlePreferenceFor(item.id),
-                            AppRuntime.prefs?.preferredSubtitleLanguage,
-                            target.source?.subtitleStreams.orEmpty(),
-                        ) == "off")
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, target.trackIntent?.subtitlePreference == "off")
                         .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                         .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                         .build()
@@ -1753,51 +1773,39 @@ fun PlayerScreen(
                 val mediaSubs = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { group ->
                     (0 until group.length).map { index -> group to index }
                 }
-                fun mappingSummary(streams: List<MediaStream>, candidates: List<Pair<Tracks.Group, Int>>): String =
-                    streams.take(8).joinToString { stream ->
-                        val direct = candidates.firstOrNull { (group, index) -> group.getTrackFormat(index).id?.toIntOrNull() == stream.index }
-                        val fallback = direct ?: candidates.firstOrNull { (group, index) ->
-                            val format = group.getTrackFormat(index)
-                            (normalizeLanguage(stream.language)?.let { it == normalizeLanguage(format.language) } == true) ||
-                                (!stream.title.isNullOrBlank() && format.label?.contains(stream.title, true) == true)
-                        }
-                        "${stream.index}->${fallback?.let { it.first.mediaTrackGroup.id + ":" + it.second } ?: "?"}${if (direct != null) "(id)" else if (fallback != null) "(fallback)" else "(unmapped)"}"
-                    }
                 val audioCandidates = mediaAudio.map { (group, index) ->
                     AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index), group.isTrackSupported(index))
                 }
                 media3AudioCandidates = audioCandidates
                 media3AudioSourceId = audioSourceKey()
-                val audioMapping = embyAudio.take(8).joinToString { stream ->
-                    val match = bestAudioTrack(stream, audioCandidates, preferredLanguage = AppRuntime.prefs?.preferredAudioLanguage)
-                    "${stream.index}->${match?.let { it.group.id + ":" + it.index } ?: "?"}${if (match?.format?.id?.toIntOrNull() == stream.index) "(id)" else if (match != null) "(fallback)" else "(unmapped)"}"
-                }
-                PageLog.add("Media3 audio mapping count=${embyAudio.size}/${mediaAudio.size} $audioMapping")
-                PageLog.add("Media3 subtitle mapping count=${embySubs.size}/${mediaSubs.size} ${mappingSummary(embySubs, mediaSubs)}")
+                val target = currentTarget
+                val original = target?.originalFile == true
+                val table = media3TrackMapping(embyAudio, audioCandidates, TrackMappingContext(
+                    originalFile = original, orderEvidence = media3OrderEvidence(original, playbackSource?.container),
+                    negotiatedIndex = target?.audioStreamIndex, singleOutput = target?.direct == false))
+                if (table != audioMapping) PageLog.add("Media3 audio mapping load=$sessionGeneration ${table.summary()}")
+                audioMapping = table
+                val textTable = media3TrackMapping(embySubs, mediaSubs.map { (group, index) ->
+                    AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index), group.isTrackSupported(index))
+                }, TrackMappingContext(originalFile = original, negotiatedIndex = target?.trackIntent?.subtitleIndex,
+                    singleOutput = target?.direct == false))
+                if (textTable != subtitleMapping) PageLog.add("Media3 subtitle mapping load=$sessionGeneration ${textTable.summary()}")
+                subtitleMapping = textTable
+                selectedAudioStreamIndex = mediaAudio.firstOrNull { (group, index) -> group.isTrackSelected(index) }
+                    ?.let { (group, index) -> table.embyFor(Media3TrackKey(group.mediaTrackGroup, index)) }
+                rememberConfirmedAudio(selectedAudioStreamIndex)
                 if (!audioSelectionApplied && audioCandidates.isNotEmpty()) {
-                    val rememberedAudio = AppRuntime.prefs?.audioTrackFor(item.id)
-                    val preferredLanguage = AppRuntime.prefs?.preferredAudioLanguage
-                    val stream = preferredAudioStream(rememberedAudio, preferredLanguage, embyAudio)
-                    val language = normalizeLanguage(preferredLanguage)
-                    // A remembered manual choice must also win when the decoder has no exact Emby ID.
+                    val streamIndex = target?.audioStreamIndex
                     val supportedCandidates = audioCandidates.filter { it.supported }
                     val recovered = audioRecoveryTrack?.takeIf { audioRecoverySourceId == audioSourceKey() }?.let { recovery ->
                         supportedCandidates.firstOrNull { it.group == recovery.group && it.index == recovery.index }
                     }
-                    val selected = recovered ?: stream?.let { bestAudioTrack(it, supportedCandidates,
-                        preferredLanguage = preferredLanguage.takeIf { rememberedAudio == null }) }
-                        ?: supportedCandidates.firstOrNull {
-                            rememberedAudio == null && language != null && normalizeLanguage(it.format.language) == language
-                        }
+                    val selected = recovered ?: streamIndex?.let { table.candidateFor(it, audioCandidates) }?.takeIf { it.supported }
                     audioSelectionApplied = true
-                    if (selected?.supported == true && mediaAudio.any { (group, index) ->
-                            group.mediaTrackGroup == selected.group && index == selected.index && group.isTrackSupported(index)
-                        }) {
-                        selectedAudioStreamIndex = if (recovered != null) null else stream?.index ?: selected.format.id?.toIntOrNull()
+                    if (selected != null) {
                         exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                             .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
-                            .addOverride(TrackSelectionOverride(selected.group, selected.index))
-                            .build()
+                            .addOverride(TrackSelectionOverride(selected.group, selected.index)).build()
                     }
                 }
                 if (audioCandidates.isNotEmpty() && audioCandidates.none { it.supported }) {
@@ -1821,13 +1829,11 @@ fun PlayerScreen(
                     }
                 }
                 if (subtitleSelectionApplied) return
-                val rememberedPreference = AppRuntime.prefs?.subtitlePreferenceFor(item.id)
-                val preferredLanguage = AppRuntime.prefs?.preferredSubtitleLanguage
-                // 按片记忆 > 全局偏好 > auto（两种内核共用同一个解析函数）。
-                val resolvedSubtitle = resolveSubtitlePreference(rememberedPreference, preferredLanguage, embySubs)
+                // Use the same source-bound intent that was sent to PlaybackInfo.
+                val resolvedSubtitle = currentTarget?.trackIntent?.subtitlePreference ?: "auto"
                 subtitlePreference = resolvedSubtitle
                 val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
-                if (resolvedSubtitle == "off") {
+                if (resolvedSubtitle == "off" || currentTarget?.trackIntent?.requestedSubtitleIndex == -1) {
                     subtitleSelectionApplied = true
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
@@ -1840,35 +1846,14 @@ fun PlayerScreen(
                     (0 until group.length).map { index -> Triple(group, index, group.getTrackFormat(index)) }
                 }
                 fun findSubtitle(key: String): Triple<Tracks.Group, Int, androidx.media3.common.Format>? {
-                    all.firstOrNull { (group, index, _) -> group.mediaTrackGroup.id + ":" + index == key }?.let { return it }
-                    val streamIndex = key.removePrefix("emby:").substringBefore(':').toIntOrNull() ?: return null
-                    all.firstOrNull { (_, _, format) -> format.id?.toIntOrNull() == streamIndex }?.let { return it }
-                    val stream = embySubs.firstOrNull { it.index == streamIndex }
-                    if (stream != null) {
-                        val language = normalizeLanguage(stream.language)
-                        all.firstOrNull { (_, _, format) ->
-                            val candidateLanguage = normalizeLanguage(format.language)
-                            listOfNotNull(stream.displayTitle, stream.title).any { it.isNotBlank() && it.equals(format.label, true) } &&
-                                (language == null || candidateLanguage == null || candidateLanguage == "und" || candidateLanguage == language)
-                        }?.let { return it }
-                        all.firstOrNull { (_, _, format) -> language != null && normalizeLanguage(format.language) == language }
-                            ?.let { return it }
-                    }
-                    // Retain the old local-index fallback only for legacy keys, never for Emby indices.
-                    return if (key.startsWith("emby:")) null else all.firstOrNull { (_, index, _) -> index == streamIndex }
+                    val streamIndex = key.removePrefix("emby:").toIntOrNull() ?: return null
+                    val mapped = subtitleMapping.playerFor(streamIndex) ?: return null
+                    return all.singleOrNull { (group, index, _) -> group.mediaTrackGroup == mapped.group && index == mapped.index }
                 }
-                val preferred = normalizeLanguage(preferredLanguage)
-                val requested = resolvedSubtitle.takeIf { it.startsWith("track:") }?.removePrefix("track:")?.let(::findSubtitle)
-                    ?: all.firstOrNull { (_, _, format) ->
-                        rememberedPreference == null && preferred != null && normalizeLanguage(format.language) == preferred
-                    }
-                if (rememberedPreference?.startsWith("track:") == true && requested == null) {
-                    AppRuntime.prefs?.rememberSubtitleTrack(item.id, "auto")
-                    playbackStatusNotice = "记住的字幕轨不存在，已恢复自动选择"
+                val selected = currentTarget?.trackIntent?.subtitleIndex?.let { findSubtitle("emby:$it") }
+                if (resolvedSubtitle.startsWith("track:") && selected == null && currentTarget?.direct == true) {
+                    playbackStatusNotice = "字幕对应关系不确定，可在菜单选择播放器字幕"
                 }
-                // No language match (or a lost remembered track) falls back to the source's default.
-                val selected = requested ?: embySubs.firstOrNull { it.isDefault }?.let { findSubtitle("emby:${it.index}") }
-                subtitlePreference = requested?.let { (group, index, _) -> "track:${group.mediaTrackGroup.id}:$index" } ?: "auto"
                 subtitleSelectionApplied = true
                 if (selected != null) {
                     val (group, index, _) = selected
@@ -3210,34 +3195,78 @@ fun PlayerScreen(
                 audioStreams = playbackSource?.audioStreams
                     ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
                     ?: mediaSources.firstOrNull()?.audioStreams.orEmpty(),
-                selectedAudioStreamIndex = selectedAudioStreamIndex,
-                onAudioStreamSelected = { streamIndex, override, unsupported ->
+                selectedAudioStreamIndex = if (activeEngine == "mpv") mpvBackend?.currentAudioEmbyIndex() else selectedAudioStreamIndex,
+                audioMapping = audioMapping,
+                subtitleMapping = subtitleMapping,
+                mpvUncertainAudio = if (activeEngine == "mpv") mpvBackend?.uncertainAudioTracks().orEmpty() else emptyList(),
+                currentMpvAudioId = if (activeEngine == "mpv") mpvBackend?.currentPlayerAudioId() else null,
+                onPlayerAudioSelected = { key, mpvId ->
+                    // A real player track is selectable even without an Emby identity; never persist it.
+                    pendingManualAudio = null
                     audioSelectionApplied = true
-                    selectedAudioStreamIndex = streamIndex
-                    audioRecoveryJob?.cancel()
-                    audioRecoveryJob = null
-                    audioRecoveryTrack = null
-                    audioRecoverySourceId = null
-                    currentPath = currentPath?.copy(audioTrack = streamIndex.toString())
-                    manualAudioStreamSelection = true
-                    AppRuntime.prefs?.rememberAudioTrack(item.id, streamIndex)
-                    if (activeEngine == "mpv") {
-                        mpvBackend?.setAudioTrack(streamIndex)
-                    } else if (unsupported || (override != null && !exo.currentTracks.groups.any { group ->
-                            group.mediaTrackGroup == override.mediaTrackGroup && override.trackIndices.all { group.isTrackSupported(it) }
-                        })) {
-                        audioDecodeNotice = "本机不支持所选音轨，正在尝试软解内核"
-                        PageLog.add("audioCapability action=manual-unsupported index=$streamIndex")
-                        requestAudioRecovery("manual-unsupported")
-                    } else if (override != null) {
+                    if (activeEngine == "mpv" && mpvId != null) mpvBackend?.selectPlayerAudioTrack(mpvId)
+                    if (activeEngine == "media3" && key != null) {
+                        val supported = exo.currentTracks.groups.any { it.mediaTrackGroup == key.group &&
+                            key.index in 0 until it.length && it.isTrackSupported(key.index) }
+                        if (supported) exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                            .clearOverridesOfType(C.TRACK_TYPE_AUDIO).addOverride(TrackSelectionOverride(key.group, key.index)).build()
+                        else playbackStatusNotice = "本机不支持这条音轨"
+                    }
+                },
+                onAudioStreamSelected = { streamIndex, override, unsupported ->
+                    val source = playbackSource
+                    if (source != null && source.audioStreams.any { it.index == streamIndex }) {
+                        audioSelectionApplied = true
+                        audioRecoveryJob?.cancel()
+                        audioRecoveryJob = null
                         audioRecoveryTrack = null
-                        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
-                            .addOverride(override)
-                            .build()
-                    } else {
-                        reloadForceTranscode = false
-                        requestPlaybackReload(position, sessionGeneration)
+                        audioRecoverySourceId = null
+                        val requiresNegotiation = currentTarget?.direct == false
+                        val mapped = if (activeEngine == "mpv")
+                            mpvBackend?.hasAudioMapping(streamIndex) == true else audioMapping.playerFor(streamIndex) != null
+                        if (mapped || requiresNegotiation) currentPath = currentPath?.copy(audioTrack = streamIndex.toString())
+                        pendingManualAudio = com.lumina.tv.player.trackMemoryIdentity(source, "Audio") to streamIndex
+                        manualAudioStreamSelection = true
+                        if (requiresNegotiation) {
+                            loadSource(forceTranscode = currentTarget?.playMethod == "Transcode", audioStreamIndex = streamIndex)
+                        } else if (!mapped) {
+                            pendingManualAudio = null
+                            playbackStatusNotice = "这条音轨的对应关系不确定，请选择下方播放器音轨"
+                            PageLog.add("trackSelection action=unresolved embyIndex=$streamIndex")
+                        } else if (activeEngine == "mpv") {
+                            mpvBackend?.setAudioTrack(streamIndex)
+                            rememberConfirmedAudio(mpvBackend?.currentAudioEmbyIndex())
+                        } else if (unsupported) {
+                            audioDecodeNotice = "本机不支持所选音轨，正在尝试软解内核"
+                            PageLog.add("audioCapability action=manual-unsupported index=$streamIndex")
+                            requestAudioRecovery("manual-unsupported")
+                        } else if (override != null && exo.currentTracks.groups.any { group ->
+                                group.mediaTrackGroup == override.mediaTrackGroup && override.trackIndices.all { group.isTrackSupported(it) }
+                            }) {
+                            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                                .clearOverridesOfType(C.TRACK_TYPE_AUDIO).addOverride(override).build()
+                        }
+                    }
+                },
+                onServerSubtitleSelected = { index ->
+                    playbackSource?.let { source ->
+                        AppRuntime.prefs?.rememberSubtitleTrack(item.id, "track:emby:$index", source)
+                        subtitlePreference = "track:emby:$index"
+                        subtitleSelectionApplied = true
+                        val mapped = subtitleMapping.playerFor(index)
+                        if (currentTarget?.direct == false) {
+                            loadSource(forceTranscode = currentTarget?.playMethod == "Transcode")
+                        } else if (activeEngine == "mpv") {
+                            mpvBackend?.setSubtitleTrack(index)
+                        } else if (mapped != null && exo.currentTracks.groups.any {
+                                it.mediaTrackGroup == mapped.group && it.isTrackSupported(mapped.index)
+                            }) {
+                            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                                .addOverride(TrackSelectionOverride(mapped.group, mapped.index)).build()
+                        } else {
+                            playbackStatusNotice = "字幕对应关系不确定，可在菜单选择播放器字幕"
+                        }
                     }
                 },
                 onSubtitleSelected = { key ->
@@ -3247,9 +3276,25 @@ fun PlayerScreen(
                         key == "auto" -> "auto"
                         else -> "track:$key"
                     }
-                    AppRuntime.prefs?.rememberSubtitleTrack(item.id, stored)
+                    val localKey = key?.takeUnless { it == "auto" }?.let {
+                        val groupId = it.substringBeforeLast(':', "")
+                        val trackIndex = it.substringAfterLast(':').toIntOrNull()
+                        exo.currentTracks.groups.firstOrNull { group -> group.type == C.TRACK_TYPE_TEXT && group.mediaTrackGroup.id == groupId }
+                            ?.let { group -> trackIndex?.let { index -> subtitleMapping.embyFor(Media3TrackKey(group.mediaTrackGroup, index)) } }
+                    }
+                    val serverPreference = when {
+                        key == null || key == "auto" -> stored
+                        key.startsWith("emby:") -> stored
+                        localKey != null -> "track:emby:$localKey"
+                        else -> null
+                    }
+                    if (serverPreference != null) AppRuntime.prefs?.rememberSubtitleTrack(item.id, serverPreference, playbackSource)
                     subtitlePreference = stored
-                    if (activeEngine == "mpv") {
+                    if (currentTarget?.direct == false && serverPreference != null) {
+                        loadSource(forceTranscode = currentTarget?.playMethod == "Transcode")
+                    } else if (key == "auto") {
+                        loadSource(forceTranscode = false)
+                    } else if (activeEngine == "mpv") {
                         if (key == null) mpvBackend?.disableSubtitle()
                         else if (key == "auto") mpvBackend?.enableSubtitleAuto()
                         else key.removePrefix("emby:").toIntOrNull()?.let { mpvBackend?.setSubtitleTrack(it) }
@@ -3319,6 +3364,7 @@ fun PlayerScreen(
                 onResizeMode = { resizeMode = it },
                 onSwitchSource = { sid ->
                     closeOptionMenu()
+                    pendingManualAudio = null
                     AppRuntime.prefs?.rememberSource(item.id, sid)
                     directFallbackTried = false
                     transcodeFallbackTried = false

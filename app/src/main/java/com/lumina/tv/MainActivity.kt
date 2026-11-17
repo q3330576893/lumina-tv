@@ -317,7 +317,10 @@ private fun AppRoot(
             is Screen.Home -> {
                 HomeScreen(
                     onOpenDetail = { id -> navigate(Screen.Detail(id), Screen.Home) },
-                    onPlay = { item -> navigate(Screen.Play(item), Screen.Home) },
+                    onPlay = { item ->
+                        if (backStack.last().screen == Screen.Home && item.type in setOf("Movie", "Episode"))
+                            navigate(Screen.Play(item), Screen.Home)
+                    },
                     onSearch = { navigate(Screen.Search()) },
                     onSettings = { navigate(Screen.Settings) },
                     onSwitchServer = {
@@ -335,9 +338,9 @@ private fun AppRoot(
                 BackHandler { goBack() }
                 DetailScreen(
                     id = target.id,
-                    onPlay = { item -> navigate(Screen.Play(item), target) },
-                    onPlayWithSource = { item, sid -> navigate(Screen.Play(item, sid), target) },
-                    onPlayFromStart = { item, sid -> navigate(Screen.Play(item, sid, PlaybackStartIntent.FromStart), target) },
+                    onPlay = { item -> if (backStack.last().screen == target) navigate(Screen.Play(item), target) },
+                    onPlayWithSource = { item, sid -> if (backStack.last().screen == target) navigate(Screen.Play(item, sid), target) },
+                    onPlayFromStart = { item, sid -> if (backStack.last().screen == target) navigate(Screen.Play(item, sid, PlaybackStartIntent.FromStart), target) },
                     onOpenDetail = { nextId -> navigate(Screen.Detail(nextId), target) },
                     onBack = { goBack() },
                 )

@@ -1956,20 +1956,22 @@ private fun Hero(
         }
     }
     var lastInteractionAt by remember(items) { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(items) {
-        if (items.size < 2) return@LaunchedEffect
-        while (true) {
-            delay(500)
-            if (System.currentTimeMillis() - lastInteractionAt >= 10_000L) {
-                onNext()
-                lastInteractionAt = System.currentTimeMillis()
-            }
-        }
-    }
     val displayItem = if (topImage != null && topLoaded && wipeProgress.value >= 0.5f) {
         items.getOrNull(currentIndex) ?: item
     } else {
         items.firstOrNull { resolveHeroImage(it) == bottomImage } ?: item
+    }
+    val playAction = rememberPlayableItemAction(listOf(item.id, displayItem.id, currentIndex)) { target, _ -> onPlay(target) }
+    LaunchedEffect(items, playAction.resolving) {
+        if (items.size < 2) return@LaunchedEffect
+        while (true) {
+            delay(500)
+            if (!playAction.resolving && System.currentTimeMillis() - lastInteractionAt >= 10_000L) {
+                playAction.invalidate()
+                onNext()
+                lastInteractionAt = System.currentTimeMillis()
+            }
+        }
     }
     // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
     val embyLogo = remember(displayItem.id, displayItem.logoTag) {
@@ -2003,8 +2005,8 @@ private fun Hero(
             .onPreviewKeyEvent { event ->
                 if (!heroHasFocus || event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
                 when (event.key) {
-                    Key.DirectionLeft -> { lastInteractionAt = System.currentTimeMillis(); onPrevious(); true }
-                    Key.DirectionRight -> { lastInteractionAt = System.currentTimeMillis(); onNext(); true }
+                    Key.DirectionLeft -> { lastInteractionAt = System.currentTimeMillis(); playAction.invalidate(); onPrevious(); true }
+                    Key.DirectionRight -> { lastInteractionAt = System.currentTimeMillis(); playAction.invalidate(); onNext(); true }
                     else -> false
                 }
             }
@@ -2105,7 +2107,10 @@ private fun Hero(
                         heroHasFocus = it
                         if (it) onHeroFocusChanged(true)
                     },
-                    onClick = { lastInteractionAt = System.currentTimeMillis(); onPlay(displayItem) },
+                    onClick = {
+                        lastInteractionAt = System.currentTimeMillis()
+                        if (displayItem.id == item.id) playAction.play(displayItem)
+                    },
                 ) { focused ->
                     Row(
                         Modifier.fillMaxSize().background(
@@ -2117,7 +2122,8 @@ private fun Hero(
                         Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF0B1018), modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            if (displayItem.positionTicks > 0) "继续播放" else "立即播放",
+                            if (playAction.resolving) "正在查找…" else if (displayItem.id != item.id) "切换中…"
+                            else if (displayItem.positionTicks > 0) "继续播放" else "立即播放",
                             color = Color(0xFF0B1018), fontSize = 16.sp, fontWeight = FontWeight.Bold,
                         )
                     }
@@ -2132,7 +2138,7 @@ private fun Hero(
                         heroHasFocus = it
                         if (it) onHeroFocusChanged(true)
                     },
-                    onClick = { onOpenDetail(displayItem.seriesId ?: displayItem.id) },
+                    onClick = { playAction.invalidate(); onOpenDetail(displayItem.seriesId ?: displayItem.id) },
                 ) { focused ->
                     Box(
                         Modifier.fillMaxSize().background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF)),

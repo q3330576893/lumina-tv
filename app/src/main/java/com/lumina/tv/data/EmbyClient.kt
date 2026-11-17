@@ -97,13 +97,13 @@ class EmbyClient(
     private val trickplayFiles = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
     private var trickplayBytes = 0L
     private val unavailableTrickplay = ConcurrentHashMap.newKeySet<String>()
-    private val playbackTargetCache = ConcurrentHashMap<PlaybackRequestKey, Pair<Long, PlaybackTarget>>()
+    private val playbackTargetCache = ConcurrentHashMap<TrackAwarePlaybackKey, Pair<Long, PlaybackTarget>>()
     // Diagnostic state lives with the client so it survives the next-episode screen replacement.
     private class PrewarmAttempt(
         val itemId: String,
         val sourceId: String?,
         val strategy: SourceStrategy,
-        val requestKey: PlaybackRequestKey,
+        val requestKey: TrackAwarePlaybackKey,
     ) {
         @Volatile var state: String = "in_progress"
     }
@@ -555,15 +555,17 @@ class EmbyClient(
                                   forceDirect: Boolean, maxStreamingBitrate: Long, strategy: SourceStrategy,
                                   startIntent: PlaybackStartIntent, requestedPositionMs: Long,
                                   manualAudioSelection: Boolean = false, removeSubtitleParams: Boolean = false,
-                                  preferDirectStreamUrl: Boolean = false) = PlaybackRequestKey(itemId, forceTranscode,
-        sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate, strategy, startIntent, requestedPositionMs,
-        manualAudioSelection, removeSubtitleParams, preferDirectStreamUrl)
+                                  preferDirectStreamUrl: Boolean = false,
+                                  trackIntent: PlaybackTrackIntent) = TrackAwarePlaybackKey(PlaybackRequestKey(itemId, forceTranscode,
+        trackIntent.sourceId, trackIntent.audioIndex, forceDirect, maxStreamingBitrate, strategy, startIntent, requestedPositionMs,
+        manualAudioSelection, removeSubtitleParams, preferDirectStreamUrl), trackIntent)
 
     fun cachedPlaybackTarget(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?,
                              forceDirect: Boolean, maxStreamingBitrate: Long = 120_000_000L, strategy: SourceStrategy = SourceStrategy(),
-                             startIntent: PlaybackStartIntent, requestedPositionMs: Long, manualAudioSelection: Boolean = false): PlaybackTarget? {
+                             startIntent: PlaybackStartIntent, requestedPositionMs: Long, manualAudioSelection: Boolean = false,
+                             trackIntent: PlaybackTrackIntent): PlaybackTarget? {
         val key = playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate,
-            strategy, startIntent, requestedPositionMs, manualAudioSelection)
+            strategy, startIntent, requestedPositionMs, manualAudioSelection, trackIntent = trackIntent)
         val cached = playbackTargetCache.remove(key)
         val target = cached?.second?.takeIf { System.currentTimeMillis() - cached.first < 120_000L }
         if (target != null) {
@@ -587,13 +589,18 @@ class EmbyClient(
 
     suspend fun prewarmPlayback(item: MediaItem, sourceId: String? = null, audioStreamIndex: Int? = null,
                                 strategy: SourceStrategy = SourceStrategy()) {
+        val prepared = preparePlaybackTracks(item.id, sourceId, audioStreamIndex, strategy)
+        val forceTranscode = com.lumina.tv.AppRuntime.prefs?.forceTranscode ?: false
+        val maxBitrate = com.lumina.tv.AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
         val attempt = PrewarmAttempt(item.id, sourceId, strategy,
-            playbackTargetKey(item.id, false, sourceId, audioStreamIndex, false, 120_000_000L, strategy,
-                PlaybackStartIntent.Resume, item.positionTicks / 10_000L))
+            playbackTargetKey(item.id, forceTranscode, sourceId, audioStreamIndex, false, maxBitrate, strategy,
+                PlaybackStartIntent.Resume, item.positionTicks / 10_000L, trackIntent = prepared.intent))
         lastPrewarmAttempt = attempt
         try {
-            resolvePlayback(item, mediaSourceId = sourceId, startIntent = PlaybackStartIntent.Resume,
-                audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true, strategy = strategy)
+            resolvePlayback(item, forceTranscode = forceTranscode, maxStreamingBitrate = maxBitrate,
+                mediaSourceId = sourceId, startIntent = PlaybackStartIntent.Resume,
+                audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true, strategy = strategy,
+                preparedTracks = prepared)
             attempt.state = "done"
         } catch (cancelled: CancellationException) {
             attempt.state = "cancelled"
@@ -711,6 +718,32 @@ class EmbyClient(
         parseItems(arr)
     }
 
+    suspend fun resolvePlayableItem(item: MediaItem): PlayableItemResult = resolvePlayableItem(item,
+        loadEpisodes = { seriesId ->
+            withMetadataContext {
+                val episodes = mutableListOf<MediaItem>()
+                val seen = mutableSetOf<String>()
+                var start = 0
+                do {
+                    val page = getJson(url("/Shows/$seriesId/Episodes", mapOf(
+                        "UserId" to userId, "Fields" to "UserData,MediaSources,IsMissing,LocationType",
+                        "SortBy" to "ParentIndexNumber,IndexNumber", "SortOrder" to "Ascending",
+                        "StartIndex" to start.toString(), "Limit" to "200",
+                    )))
+                    val items = parseItems(page.optJSONArray("Items") ?: JSONArray())
+                    val fresh = items.filter { seen.add(it.id) }
+                    if (items.isNotEmpty() && fresh.isEmpty()) throw EmbyException("单集列表未能完整加载，请重试")
+                    episodes += fresh
+                    start += items.size
+                    val total = page.optInt("TotalRecordCount", -1)
+                    if (items.isEmpty() || total >= 0 && start >= total || total < 0 && items.size < 200) break
+                } while (true)
+                episodes
+            }
+        },
+        isPlayable = { episode -> episode.sourceCount > 0 || getMediaSources(episode.id).isNotEmpty() },
+    )
+
     private fun parseItems(arr: JSONArray): List<MediaItem> =
         (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.let { parseItem(it) } }
 
@@ -806,6 +839,8 @@ class EmbyClient(
             logoTag = tags?.optString("Logo")?.ifBlank { null },
             // 请求了 Fields=MediaSources 才有值，用来判断"这一集有几个版本"
             sourceCount = o.optJSONArray("MediaSources")?.length() ?: 0,
+            isMissing = o.optBoolean("IsMissing", false) || o.optBoolean("IsVirtualItem", false) ||
+                o.optString("LocationType").equals("Virtual", true),
             overview = o.optString("Overview").ifBlank { null },
             year = o.optInt("ProductionYear", 0).takeIf { it > 0 },
             runtimeTicks = o.optLong("RunTimeTicks", 0L).takeIf { it > 0 },
@@ -1062,6 +1097,8 @@ class EmbyClient(
         val headers: Map<String, String> = emptyMap(),
         val durationMs: Long? = null,
         val negotiationDiagnostics: JSONObject = JSONObject(),
+        val originalFile: Boolean = false,
+        val trackIntent: PlaybackTrackIntent? = null,
     ) {
         val direct: Boolean get() = mode == PlaybackMode.DirectPlay
         val playMethod: String get() = mode.name
@@ -1125,6 +1162,8 @@ class EmbyClient(
             id = o.optString("Id"),
             name = o.optString("Name", "源").ifBlank { "源" },
             container = normalizeContainer(o.optString("Container")),
+            defaultAudioStreamIndex = o.optInt("DefaultAudioStreamIndex", -1).takeIf { it >= 0 },
+            defaultSubtitleStreamIndex = o.optInt("DefaultSubtitleStreamIndex", -1).takeIf { o.has("DefaultSubtitleStreamIndex") && !o.isNull("DefaultSubtitleStreamIndex") && it >= -1 },
             supportsDirectPlay = o.optBoolean("SupportsDirectPlay", true),
             supportsDirectStream = o.optBoolean("SupportsDirectStream", true),
             streams = streams,
@@ -1222,6 +1261,26 @@ class EmbyClient(
             path.endsWith(".strm", ignoreCase = true)
     }
 
+    private fun trackIntentFor(itemId: String, source: MediaSource, explicitAudio: Int? = null): PlaybackTrackIntent {
+        val prefs = com.lumina.tv.AppRuntime.prefs
+        return resolvePlaybackTrackIntent(source, prefs?.audioTrackFor(itemId, source),
+            prefs?.subtitlePreferenceFor(itemId, source), prefs?.preferredAudioLanguage,
+            prefs?.preferredSubtitleLanguage, explicitAudio)
+    }
+
+    suspend fun preparePlaybackTracks(itemId: String, sourceId: String?, audioIndex: Int?,
+        strategy: SourceStrategy = SourceStrategy(), audioIdentity: String? = null): PreparedPlaybackTracks {
+        val sources = getMediaSources(itemId)
+        if (sources.isEmpty()) throw EmbyException("没有可用片源")
+        val preferredSourceId = sourceId ?: com.lumina.tv.AppRuntime.prefs?.lastSourceFor(itemId)
+        val selected = sources.firstOrNull { it.id == preferredSourceId }
+            ?: if (sourceId != null) throw EmbyException("所选版本已不可用，请重新选择")
+            else sources[chooseSource(sources.mapIndexed { index, source -> source.toSourceOption(index) }, strategy).index]
+        return PreparedPlaybackTracks(selected, trackIntentFor(itemId, selected,
+            audioIndex.takeIf { sourceId == selected.id && audioIdentity ==
+                com.lumina.tv.player.trackMemoryIdentity(selected, "Audio") }), sources)
+    }
+
     suspend fun resolvePlayback(
         item: MediaItem,
         forceTranscode: Boolean = false,
@@ -1236,9 +1295,14 @@ class EmbyClient(
         recordDiagnostics: Boolean = true,
         cacheResult: Boolean = false,
         strategy: SourceStrategy = SourceStrategy(),
+        preparedTracks: PreparedPlaybackTracks? = null,
+        audioIdentity: String? = null,
     ): PlaybackTarget =
         withMetadataContext {
             val startPositionMs = startIntent.positionMs(item.positionTicks / 10_000L)
+            val prepared = preparedTracks ?: preparePlaybackTracks(item.id, mediaSourceId, audioStreamIndex, strategy, audioIdentity)
+            var negotiationSource = prepared.source
+            var trackIntent = prepared.intent
             val infoBody = JSONObject()
                 .put("UserId", userId)
                 .put("StartTimeTicks", startPositionMs.coerceAtLeast(0L) * 10_000)
@@ -1255,59 +1319,31 @@ class EmbyClient(
                 infoBody.put("EnableDirectPlay", false).put("EnableDirectStream", false)
                     .put("AllowVideoStreamCopy", false).put("AllowAudioStreamCopy", false)
             }
-            if (audioStreamIndex != null) infoBody.put("AudioStreamIndex", audioStreamIndex)
-            if (mediaSourceId != null) infoBody.put("MediaSourceId", mediaSourceId)
             val playbackInfoParams = mapOf("UserId" to userId)
-            val info = try {
-                postJson(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
+            var info = JSONObject()
+            var first: JSONObject? = null
+            val negotiatedSources = mutableSetOf<String>()
+            while (true) {
+                if (!negotiatedSources.add(negotiationSource.id) || negotiatedSources.size > 3) {
+                    throw EmbyException("服务器反复变更播放版本，请重新选择片源")
+                }
+                trackIntent.applyToPlaybackInfo(infoBody, disableSubtitles = removeSubtitleParams)
+                info = postJson(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
                     .also { if (recordDiagnostics) lastPlaybackInfoJson = it.toString() }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                throw failure
+                val sources = info.optJSONArray("MediaSources")
+                val responseSources = (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }
+                first = responseSources.firstOrNull { it.optString("Id") == negotiationSource.id }
+                    ?: responseSources.firstOrNull() ?: throw EmbyException("PlaybackInfo returned no usable sources")
+                val returnedId = first.optString("Id").takeIf { it.isNotBlank() }
+                    ?: throw EmbyException("PlaybackInfo source is missing its identity")
+                if (returnedId == negotiationSource.id) break
+                // A source change invalidates numeric choices; re-resolve from that source's inventory.
+                negotiationSource = getMediaSources(item.id).firstOrNull { it.id == returnedId }
+                    ?: throw EmbyException("服务器返回的新版本已不可用")
+                trackIntent = trackIntentFor(item.id, negotiationSource)
+                PageLog.add("trackNegotiation action=source-changed retry=${negotiatedSources.size}")
             }
-            val sources = info.optJSONArray("MediaSources")
-            val sourceOptions = (0 until (sources?.length() ?: 0)).mapNotNull { index ->
-                val option = sources?.optJSONObject(index) ?: return@mapNotNull null
-                val streams = option.optJSONArray("MediaStreams")
-                val video = (0 until (streams?.length() ?: 0)).mapNotNull { streams?.optJSONObject(it) }
-                    .firstOrNull { it.optString("Type").equals("Video", true) }
-                val range = video?.optString("VideoRangeType")?.ifBlank { video.optString("VideoRange") }
-                val codec = video?.optString("Codec")?.ifBlank { null }
-                SourceOption(
-                    id = option.optString("Id"), name = option.optString("Name", "源").ifBlank { "源" }, index = index,
-                    container = normalizeContainer(option.optString("Container")), videoCodec = codec,
-                    videoHeight = video?.optInt("Height")?.takeIf { it > 0 },
-                    bitrate = option.optInt("Bitrate").takeIf { it > 0 },
-                    frameRate = (video?.optDouble("RealFrameRate", 0.0)?.takeIf { it > 0 }
-                        ?: video?.optDouble("AverageFrameRate", 0.0)?.takeIf { it > 0 })?.toFloat(),
-                    isDolbyVision = range.orEmpty().contains("DOVI", true) || range.orEmpty().contains("DOLBY", true) ||
-                        range.equals("DV", true) || codec.orEmpty().contains("dovi", true),
-                    hdrType = range?.takeIf { it.isNotBlank() },
-                )
-            }
-            if (sourceOptions.isEmpty()) throw EmbyException("PlaybackInfo returned no usable sources")
-            val selectedOption = when {
-                mediaSourceId != null -> sourceOptions.firstOrNull { it.id == mediaSourceId }
-                strategy.isDefault -> sourceOptions.firstOrNull()
-                else -> sourceOptions.takeIf { it.isNotEmpty() }?.let { chooseSource(it, strategy) }
-            }
-            val first = when {
-                mediaSourceId != null -> selectedOption?.let { sources?.optJSONObject(it.index) }
-                    ?: throw EmbyException("Requested media source is no longer available: $mediaSourceId")
-                strategy.isDefault -> sources?.optJSONObject(0)
-                else -> selectedOption?.let { sources?.optJSONObject(it.index) }
-            }
-            if (first != null) {
-                val strategyLabel = if (mediaSourceId != null) "explicit" else listOfNotNull(
-                    strategy.dynamicRange.takeIf { it != DynamicRangePref.UNSET }?.let { "dvh" },
-                    strategy.releaseGroups.takeIf { it.isNotEmpty() }?.let { "codec" },
-                    strategy.bitrate.takeIf { it != NumericPref.UNSET }?.let { "bitrate" },
-                    strategy.frameRate.takeIf { it != NumericPref.UNSET }?.let { "fps" },
-                ).joinToString("+").ifBlank { "default" }
-                val chosenName = first.optString("Name", "源").replace(Regex("https?://\\S+", RegexOption.IGNORE_CASE), "[url]").take(120)
-                android.util.Log.i("EmbyClient", "sourcePick chosen=$chosenName count=${sources?.length() ?: 0} strategy=$strategyLabel")
-            }
+            PageLog.add("trackNegotiation audio=${trackIntent.audioIndex} subtitle=${trackIntent.subtitleMode}/${trackIntent.requestedSubtitleIndex}")
             val responsePositionTicks = info.optJSONObject("UserData")
                 ?.optLong("PlaybackPositionTicks", -1L)
                 ?: info.optJSONObject("Item")?.optJSONObject("UserData")?.optLong("PlaybackPositionTicks", -1L)
@@ -1317,11 +1353,12 @@ class EmbyClient(
                 responsePositionTicks.takeIf { it >= 0L }?.div(10_000L))
             val msId = first?.optString("Id")?.takeIf { it.isNotBlank() }
                 ?: throw EmbyException("PlaybackInfo source is missing its identity")
-            val source = parseMediaSource(requireNotNull(first))
-            val selectedAudioIndex = audioStreamIndex?.also { requested ->
-                if (source.audioStreams.none { it.index == requested }) throw EmbyException("Requested audio track is no longer available")
-            } ?: first.optInt("DefaultAudioStreamIndex", -1).takeIf { index -> source.audioStreams.any { it.index == index } }
-                ?: source.audioStreams.firstOrNull { it.isDefault }?.index ?: source.audioStreams.firstOrNull()?.index
+            val responseSource = parseMediaSource(requireNotNull(first))
+            // Keep original source identities even if the output inventory has been reduced.
+            val source = responseSource.copy(streams = negotiationSource.streams,
+                defaultAudioStreamIndex = negotiationSource.defaultAudioStreamIndex,
+                defaultSubtitleStreamIndex = negotiationSource.defaultSubtitleStreamIndex)
+            val selectedAudioIndex = trackIntent.audioIndex
             val playSessionId = info.optString("PlaySessionId").takeIf { it.isNotBlank() }
             val directUrl = url("/Videos/${item.id}/stream", mapOf(
                 "static" to "true", "MediaSourceId" to msId, "DeviceId" to deviceId,
@@ -1387,6 +1424,8 @@ class EmbyClient(
                 startPositionMs = resolvedStartPositionMs,
                 playSessionId = playSessionId,
                 audioStreamIndex = selectedAudioIndex,
+                trackIntent = trackIntent,
+                originalFile = route.second == PlaybackMode.DirectPlay && !isStrmItem && route.first == directUrl,
                 // No server/sample evidence for remux/transcode/STRM timestamp offsets yet.
                 streamStartOffsetMs = if (route.third == TimelineOrigin.CONTENT) 0L else null,
                 timelineOrigin = route.third,
@@ -1401,6 +1440,8 @@ class EmbyClient(
                         }
                         put("MaxStreamingBitrate", infoBody.opt("MaxStreamingBitrate") ?: JSONObject.NULL)
                         put("DeviceProfilePresent", infoBody.has("DeviceProfile"))
+                        put("AudioStreamIndex", infoBody.opt("AudioStreamIndex") ?: JSONObject.NULL)
+                        put("SubtitleStreamIndex", infoBody.opt("SubtitleStreamIndex") ?: JSONObject.NULL)
                     })
                     .put("server", JSONObject().put("playMethod", first?.optString("PlayMethod")?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
                         .put("transcodingUrlType", when {
@@ -1411,11 +1452,12 @@ class EmbyClient(
                     .put("selectedAudioIndex", selectedAudioIndex ?: JSONObject.NULL)
                     .put("mode", route.second.name).put("timelineOrigin", route.third.name)
                     .put("streamStartOffsetMs", if (route.third == TimelineOrigin.CONTENT) 0L else JSONObject.NULL)
-                    .put("selectedSubtitleIndex", JSONObject.NULL),
+                    .put("selectedSubtitleIndex", trackIntent.requestedSubtitleIndex ?: JSONObject.NULL)
+                    .put("subtitleIntent", trackIntent.subtitleMode.name),
             ).also { target ->
                 currentCoroutineContext().ensureActive()
                 if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect, maxStreamingBitrate,
-                        strategy, startIntent, startPositionMs, manualAudioStreamSelection, removeSubtitleParams, preferDirectStreamUrl)] =
+                        strategy, startIntent, startPositionMs, manualAudioStreamSelection, removeSubtitleParams, preferDirectStreamUrl, trackIntent)] =
                     System.currentTimeMillis() to target
             }
         }

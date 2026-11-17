@@ -53,7 +53,8 @@ import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.player.AudioSupport
 import com.lumina.tv.player.AudioTrackCandidate
-import com.lumina.tv.player.bestAudioTrack
+import com.lumina.tv.player.TrackMapping
+import com.lumina.tv.player.Media3TrackKey
 import com.lumina.tv.player.sourceHint
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
@@ -85,6 +86,12 @@ internal fun OptionMenu(
     currentMpvSubtitleDisabled: Boolean,
     audioStreams: List<MediaStream>,
     selectedAudioStreamIndex: Int?,
+    audioMapping: TrackMapping<Media3TrackKey>,
+    subtitleMapping: TrackMapping<Media3TrackKey>,
+    mpvUncertainAudio: List<Pair<Int, String>>,
+    currentMpvAudioId: Int?,
+    onPlayerAudioSelected: (Media3TrackKey?, Int?) -> Unit,
+    onServerSubtitleSelected: (Int) -> Unit,
     onAudioStreamSelected: (Int, TrackSelectionOverride?, Boolean) -> Unit,
     onlyMedia3Available: Boolean,
     onSubtitleSelected: (String?) -> Unit,
@@ -242,11 +249,6 @@ internal fun OptionMenu(
                         onClick = {
                             textDisabled = false
                             onSubtitleSelected("auto")
-                            if (activeEngine == "media3") {
-                                exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                    .clearOverridesOfType(C.TRACK_TYPE_TEXT).build()
-                            }
                         },
                     )
                     MenuChip(
@@ -257,25 +259,23 @@ internal fun OptionMenu(
                         onClick = {
                             textDisabled = true
                             onSubtitleSelected(null)
-                            if (activeEngine == "media3") {
-                                exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
-                            }
                         },
                     )
-                    if (activeEngine == "mpv") subtitleStreams.forEach { stream ->
+                    subtitleStreams.forEach { stream ->
                         val key = "emby:${stream.index}"
                         val label = listOfNotNull(stream.displayTitle ?: stream.title ?: "字幕 ${stream.index}", stream.language, stream.codec?.uppercase()).distinct().joinToString(" · ")
                         MenuChip(
                             label = label, width = 148.dp,
                             active = subtitlePreference == "track:$key" ||
-                                (subtitlePreference == null && currentMpvSubtitleIndex == stream.index),
+                                (subtitlePreference != "off" && if (activeEngine == "mpv") currentMpvSubtitleIndex == stream.index
+                                 else subtitleMapping.playerFor(stream.index)?.let { selectedText == (it.group.id to it.index) } == true),
                             activeColor = Accent,
-                            onClick = { onSubtitleSelected(key) },
+                            onClick = { onServerSubtitleSelected(stream.index) },
                         )
                     }
                     if (activeEngine == "media3") textGroups.forEach { g ->
                       for (trackIndex in 0 until g.length) {
+                        if (subtitleMapping.embyFor(Media3TrackKey(g.mediaTrackGroup, trackIndex)) != null) continue
                         val key = g.mediaTrackGroup.id
                         val f0 = g.getTrackFormat(trackIndex)
                         val label = buildString {
@@ -290,11 +290,6 @@ internal fun OptionMenu(
                             onClick = {
                                 textDisabled = false
                                 onSubtitleSelected(key + ":" + trackIndex)
-                                exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                                    .addOverride(TrackSelectionOverride(g.mediaTrackGroup, trackIndex))
-                                    .build()
                             },
                         )
                       }
@@ -328,39 +323,41 @@ internal fun OptionMenu(
                     AudioSupport.UNSUPPORTED -> "可能无法解码"
                 }
                 Text("音频输出：$audioStatus", color = TextSub, fontSize = 11.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     audioStreams.forEach { stream ->
                         val label = listOfNotNull(stream.displayTitle ?: stream.title, stream.language, stream.codec?.uppercase()).distinct().joinToString(" · ").ifBlank { "音轨 ${stream.index}" }
-                        val candidates = audioGroups.asSequence().flatMap { group ->
-                            (0 until group.length).asSequence().map { index ->
-                                AudioTrackCandidate(group.mediaTrackGroup, index, group.getTrackFormat(index), group.isTrackSupported(index))
-                            }
-                        }.toList()
-                        // This maps an explicit menu choice; global language bias is only for automatic selection.
-                        // Identify the explicit choice before checking capability: never silently substitute another track.
-                        val decodedTrack = bestAudioTrack(stream, candidates, preferredLanguage = null, preferSupported = false)
+                        val decodedTrack = audioMapping.playerFor(stream.index)
                         MenuChip(
                             label = label, width = 148.dp,
-                            active = selectedAudioStreamIndex == stream.index ||
-                                (selectedAudioStreamIndex == null && stream.isDefault),
+                            active = selectedAudioStreamIndex == stream.index,
                             activeColor = Accent,
                             focusRequester = if (stream == audioStreams.firstOrNull()) contentFocus else null,
                             onFocusChanged = if (stream == audioStreams.firstOrNull()) ({ contentHasFocus = it }) else null,
                             onClick = {
                                 val supported = decodedTrack?.let { candidate ->
-                                    candidate.supported && audioGroups.any { group ->
-                                        group.mediaTrackGroup == candidate.group && group.isTrackSupported(candidate.index)
-                                    }
+                                    audioGroups.any { group -> group.mediaTrackGroup == candidate.group &&
+                                        candidate.index in 0 until group.length && group.isTrackSupported(candidate.index) }
                                 } == true
-                                val override = decodedTrack?.takeIf { supported }?.let { candidate ->
-                                    TrackSelectionOverride(candidate.group, candidate.index)
+                                val override = decodedTrack?.takeIf { supported }?.let {
+                                    TrackSelectionOverride(it.group, it.index)
                                 }
-                                val mapped = decodedTrack
-                                val explicit = mapped?.format?.id?.toIntOrNull() == stream.index
-                                PageLog.add("Media3 audio mapping embyIndex=${stream.index} -> ${mapped?.let { it.group.id + ":" + it.index } ?: "unmapped"} mapping=${if (explicit) "explicit" else if (mapped != null) "fallback" else "failed"}")
                                 onAudioStreamSelected(stream.index, override, decodedTrack != null && !supported)
                             },
                         )
+                    }
+                    if (activeEngine == "media3") audioGroups.forEach { group ->
+                        for (index in 0 until group.length) {
+                            val key = Media3TrackKey(group.mediaTrackGroup, index)
+                            if (audioMapping.embyFor(key) != null) continue
+                            val format = group.getTrackFormat(index)
+                            MenuChip(label = "播放器音轨 ${format.label ?: format.language ?: (index + 1)}（对应不确定）", width = 210.dp,
+                                active = group.isTrackSelected(index), activeColor = Accent,
+                                onClick = { onPlayerAudioSelected(key, null) })
+                        }
+                    }
+                    if (activeEngine == "mpv") mpvUncertainAudio.forEach { (id, label) ->
+                        MenuChip(label = "播放器音轨 $label（对应不确定）", width = 210.dp, active = currentMpvAudioId == id, activeColor = Accent,
+                            onClick = { onPlayerAudioSelected(null, id) })
                     }
                     if (audioStreams.isEmpty() && audioGroups.isEmpty()) {
                         Box(Modifier.height(38.dp), contentAlignment = Alignment.Center) {
