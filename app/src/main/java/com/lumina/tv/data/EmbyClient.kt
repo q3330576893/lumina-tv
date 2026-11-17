@@ -16,7 +16,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.io.ByteArrayOutputStream
@@ -165,18 +167,26 @@ class EmbyClient(
     }
 
     private suspend fun getJson(target: String, withToken: Boolean = true, timeoutSeconds: Int? = null): JSONObject =
+        getJson(target, withToken, timeoutSeconds, ::parseJsonObject)
+
+    private suspend fun <T : Any> getJson(
+        target: String,
+        withToken: Boolean = true,
+        timeoutSeconds: Int? = null,
+        decode: (String) -> T,
+    ): T =
         withRequestBudget((timeoutSeconds?.toLong() ?: 20L) * 1_000L) {
             val request = Request.Builder().url(target).header("X-Emby-Authorization", authHeader(withToken)).build()
-            requestJson(request, retryIo = timeoutSeconds != null, retryRateLimit = true)
+            requestJson(request, retryIo = timeoutSeconds != null, retryRateLimit = true, decode = decode)
         }
 
     private suspend fun postJson(target: String, body: String?): JSONObject = withRequestBudget {
         val request = Request.Builder().url(target).header("X-Emby-Authorization", authHeader())
             .post((body ?: "{}").toRequestBody(jsonType)).build()
-        requestJson(request, retryIo = false, retryRateLimit = target.contains("/PlaybackInfo", true))
+        requestJson(request, retryIo = false, retryRateLimit = target.contains("/PlaybackInfo", true), decode = ::parseJsonObject)
     }
 
-    private suspend fun requestJson(request: Request, retryIo: Boolean, retryRateLimit: Boolean): JSONObject {
+    private suspend fun <T : Any> requestJson(request: Request, retryIo: Boolean, retryRateLimit: Boolean, decode: (String) -> T): T {
         var attempts = 0
         var rateLimitRetries = 0
         while (true) {
@@ -190,7 +200,7 @@ class EmbyClient(
                     if (retryDelay != null) null else {
                         val body = response.body?.string().orEmpty()
                         if (!response.isSuccessful) throw EmbyException("HTTP ${response.code}: ${safeErrorBody(body)}", response.code)
-                        parseJsonObject(body)
+                        decode(body)
                     }
                 }
                 currentCoroutineContext().ensureActive()
@@ -426,11 +436,10 @@ class EmbyClient(
     suspend fun getLatest(parentId: String?, limit: Int = 20): List<MediaItem> = withTimeoutOrNull(6_000L) { withMetadataContext(6_000L) {
         val fields = "Overview,PrimaryImageAspectRatio,UserData,ProductionYear,ProductionLocations,OriginalLanguage"
         suspend fun query(path: String, params: Map<String, String?>): List<MediaItem>? = catchingRequest {
-            val response = getJson(url(path, params))
-            val arr = response.optJSONArray("Items") ?: run {
-                lastApiFailure = "HTTP 200 invalid response: missing Items"
-                return@catchingRequest null
-            }
+            val arr = getJson(url(path, params), decode = { body ->
+                parseLatestItemsResponse(body) { lastApiFailure = it }
+                    ?: throw EmbyException("服务器返回了无效的最新项目数据")
+            })
             parseItems(arr)
         }.getOrNull()
         val minimal = mapOf<String, String?>("Limit" to limit.toString())
@@ -1659,6 +1668,21 @@ class EmbyClient(
             return requireNotNull(parseServerAddress(raw)) { "Invalid server address" }.baseUrl
         }
     }
+}
+
+/** Latest accepts either an Items envelope or a root array, without changing request/fallback policy. */
+internal fun parseLatestItemsResponse(body: String, onFailure: (String) -> Unit): JSONArray? {
+    val root = try {
+        JSONTokener(body).nextValue()
+    } catch (_: JSONException) {
+        onFailure(if (body.trimStart().startsWith("["))
+            "HTTP 200 invalid response: top-level array parse failed"
+        else "HTTP 200 invalid response: malformed JSON (expected Items object or top-level array)")
+        return null
+    }
+    val items = (root as? JSONObject)?.optJSONArray("Items") ?: root as? JSONArray
+    if (items == null) onFailure("HTTP 200 invalid response: missing Items and no top-level array")
+    return items
 }
 
 private fun parseDvProfile(stream: JSONObject): Int? {

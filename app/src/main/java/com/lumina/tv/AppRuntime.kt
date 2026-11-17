@@ -12,6 +12,7 @@ import com.lumina.tv.data.Prefs
 import com.lumina.tv.data.ProgressQueue
 import com.lumina.tv.data.SecureStore
 import com.lumina.tv.data.Session
+import com.lumina.tv.data.canonicalServerKey
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.pair.PairingServer
 import com.lumina.tv.diag.PageLog
@@ -132,8 +133,9 @@ object AppRuntime {
 
     fun switchToServer(url: String): Boolean {
         val p = prefs ?: return false
+        val serverKey = canonicalServerKey(url) ?: return false
         val saved = p.savedServerList().firstOrNull {
-            it.url.trimEnd('/').equals(url.trimEnd('/'), ignoreCase = true)
+            canonicalServerKey(it.url) == serverKey
         } ?: return false
         if (saved.token.isBlank()) return false
         val switched = Session(

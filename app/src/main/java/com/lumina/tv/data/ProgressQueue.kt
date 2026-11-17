@@ -140,7 +140,7 @@ class ProgressQueue internal constructor(private val file: File? = null) {
             if (isNull(key)) null else optString(key).takeIf { it.isNotBlank() }
 
         private fun serverHash(serverUrl: String): String = MessageDigest.getInstance("SHA-256")
-            .digest(EmbyClient.normalize(serverUrl).lowercase().toByteArray(Charsets.UTF_8))
+            .digest(requireNotNull(canonicalServerKey(serverUrl)) { "Invalid server address" }.toByteArray(Charsets.UTF_8))
             .take(8)
             .joinToString("") { "%02x".format(it) }
 

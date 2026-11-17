@@ -130,6 +130,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     var unsupportedScan by remember { mutableStateOf(false) }
     var successDialogServer by remember { mutableStateOf<String?>(null) }
     var pendingPairConfig by remember { mutableStateOf<PairConfig?>(null) }
+    var pairArrivalTick by remember { mutableStateOf(0) }
     var pairNotice by remember { mutableStateOf<String?>(null) }
     val loginFocusRequester = remember { FocusRequester() }
     val passFocusRequester = remember { FocusRequester() }
@@ -294,6 +295,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
             val address = parseServerAddress(server) ?: return@config false
             fillAddress(address)
             user = pairedUser; pass = pairedPass; paired = true
+            pairArrivalTick++
             pendingLoginBase = address.baseUrl
             AppRuntime.updatePairingStatus("电视正在连接服务器…")
             submit(pairedUser, pairedPass)
@@ -324,6 +326,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         pairingNote = config.note
         pendingLoginBase = null
         pairNotice = "已接收手机推送的配置（${config.alias.ifBlank { config.host }}），确认后点『连接并登录』"
+        pairArrivalTick++
         // Keep pending until login succeeds (confirmed), or this screen closes (cancelled).
         pendingPairConfig = null
         loginFocusRequester.requestFocus()
@@ -397,6 +400,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                         scheme = scheme, onScheme = { scheme = it },
                         busy = loading || probing, probing = probing, error = error,
                         pairingUrl = AppRuntime.pairingUrl,
+                        pairArrivalTick = pairArrivalTick,
                         onLogin = { submit() }, onScan = { launchScan() }, onHelp = { helpOpen = true },
                         pairNotice = pairNotice, onNoticeDismiss = { pairNotice = null },
                         loginFocusRequester = loginFocusRequester,
@@ -416,6 +420,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                     scheme = scheme, onScheme = { scheme = it },
                     busy = loading || probing, probing = probing, error = error,
                     pairingUrl = AppRuntime.pairingUrl,
+                    pairArrivalTick = pairArrivalTick,
                     onLogin = { submit() }, onScan = { launchScan() }, onHelp = { helpOpen = true },
                     pairNotice = pairNotice, onNoticeDismiss = { pairNotice = null },
                     loginFocusRequester = loginFocusRequester,
@@ -601,6 +606,7 @@ private fun LoginCard(
     scheme: String, onScheme: (String) -> Unit,
     busy: Boolean, probing: Boolean, error: String?,
     pairingUrl: String,
+    pairArrivalTick: Int,
     onLogin: () -> Unit, onScan: () -> Unit, onHelp: () -> Unit,
     pairNotice: String?, onNoticeDismiss: () -> Unit,
     loginFocusRequester: FocusRequester,
@@ -613,6 +619,14 @@ private fun LoginCard(
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val shape = RoundedCornerShape(28.dp)
+    LaunchedEffect(pairArrivalTick) {
+        if (pairArrivalTick > 0) qrOpen = false
+        else { delay(150); runCatching { hostFocusRequester.requestFocus() } }
+    }
+    // Request focus after the Dialog has left composition, including its window focus restoration.
+    LaunchedEffect(pairArrivalTick, qrOpen) {
+        if (pairArrivalTick > 0 && !qrOpen) loginFocusRequester.requestFocus()
+    }
     Column(
         modifier.shadow(20.dp, shape, clip = false).clip(shape)
             .background(Color(0xE60C0E16))
@@ -625,8 +639,6 @@ private fun LoginCard(
             },
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        LaunchedEffect(Unit) { delay(150); runCatching { hostFocusRequester.requestFocus() } }
-
         // 标题 + 扫码
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {

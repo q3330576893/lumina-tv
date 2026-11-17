@@ -20,8 +20,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 139
-        versionName = "1.22.98"
+        versionCode = 140
+        versionName = "1.22.99"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
         buildConfigField("String", "MDBLIST_API_KEY", "\"${localProps.getProperty("MDBLIST_API_KEY", "")}\"")
@@ -168,5 +168,13 @@ val p6Checks = tasks.register<JavaExec>("p6Checks") {
     mainClass.set("com.lumina.tv.P6Checks")
 }
 verifyOffline.configure { dependsOn(p6Checks) }
+val e1Checks = tasks.register<JavaExec>("e1Checks") {
+    group = "verification"
+    description = "Check pairing authorization, Latest response shapes and canonical server identity migration."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.E1Checks")
+}
+verifyOffline.configure { dependsOn(e1Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }

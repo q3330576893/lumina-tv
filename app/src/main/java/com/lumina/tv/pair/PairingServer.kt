@@ -44,20 +44,22 @@ class PairingServer(
     }
 
     override fun serve(session: IHTTPSession): Response {
-        val uri = session.uri
+        // NanoHTTPD may reuse its session for keep-alive; parsing state belongs to this request.
+        val request = PairingRequestSession(session)
+        val uri = request.uri
         return try {
             when {
                 uri == "/" || uri == "/index.html" -> page()
-                uri == "/api/state" && authorized(session) -> newFixedLengthResponse(
+                uri == "/api/state" && authorized(request, authorize) -> newFixedLengthResponse(
                     Response.Status.OK, "application/json; charset=utf-8", stateProvider()
                 )
-                uri == "/api/config" -> handleConfig(session)
-                uri == "/api/pair/request" -> handlePairRequest(session)
-                uri == "/api/pair/pending" -> handlePairPending(session)
-                uri == "/api/pair/confirm" -> handlePairResolution(session, "confirmed")
-                uri == "/api/pair/cancel" -> handlePairResolution(session, "cancelled")
-                uri == "/api/remote" && authorized(session) -> handleRemote(session)
-                uri == "/api/search" && authorized(session) -> handleSearch(session)
+                uri == "/api/config" -> handleConfig(request)
+                uri == "/api/pair/request" -> handlePairRequest(request)
+                uri == "/api/pair/pending" -> handlePairPending(request)
+                uri == "/api/pair/confirm" -> handlePairResolution(request, "confirmed")
+                uri == "/api/pair/cancel" -> handlePairResolution(request, "cancelled")
+                uri == "/api/remote" && authorized(request, authorize) -> handleRemote(request)
+                uri == "/api/search" && authorized(request, authorize) -> handleSearch(request)
                 uri.startsWith("/api/") -> json("{\"ok\":false,\"msg\":\"配对授权无效或已过期\"}")
                 else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found")
             }
@@ -65,9 +67,6 @@ class PairingServer(
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "error: ${e.message}")
         }
     }
-
-    private fun authorized(session: IHTTPSession): Boolean =
-        authorize(session.parameters["token"]?.firstOrNull().orEmpty())
 
     private fun param(session: IHTTPSession, key: String): String {
         val files = HashMap<String, String>()
@@ -197,6 +196,20 @@ class PairingServer(
 
     companion object {
         const val DEFAULT_PORT = 8971
+
+        internal fun authorized(session: IHTTPSession, authorize: (String) -> Boolean): Boolean {
+            return try {
+                if (session is PairingRequestSession && session.bodyParseFailed) return false
+                var token = session.parameters["token"]?.firstOrNull { it.isNotBlank() }.orEmpty()
+                if (token.isEmpty() && session.method == Method.POST) {
+                    session.parseBody(HashMap())
+                    token = session.parameters["token"]?.firstOrNull { it.isNotBlank() }.orEmpty()
+                }
+                token.isNotEmpty() && authorize(token)
+            } catch (_: Exception) {
+                false
+            }
+        }
 
         fun start(
             stateProvider: () -> String,
@@ -395,10 +408,12 @@ function pollPairStatus(){
 function k(a){
   post('/api/remote',{action:a},function(r){
     var s=document.getElementById('remoteStatus');
+    if(!(r&&r.ok)){s.innerText='失败：'+((r&&r.msg)||'未授权或已过期');return;}
     s.innerText='已发送：'+a;
     if(navigator.vibrate)navigator.vibrate(8);
   });
 }
+
 setInterval(function(){
   fetch('/api/state?token='+encodeURIComponent(new URLSearchParams(location.search).get('token')||'')).then(r=>r.json()).then(function(s){
     if(s&&s.screen)document.getElementById('hint').innerText=s.screen;
@@ -416,4 +431,25 @@ document.getElementById('host').addEventListener('paste',function(e){
 </body>
 </html>
 """.trimIndent()
+}
+
+/** Share one body parse between authorization and handlers, including a failed parse. */
+internal class PairingRequestSession(private val session: NanoHTTPD.IHTTPSession) : NanoHTTPD.IHTTPSession by session {
+    private var parsed = false
+    private var failure: Exception? = null
+    private val bodyFiles = HashMap<String, String>()
+    val bodyParseFailed: Boolean get() = failure != null
+
+    override fun parseBody(files: MutableMap<String, String>) {
+        if (!parsed) {
+            parsed = true
+            try {
+                session.parseBody(bodyFiles)
+            } catch (error: Exception) {
+                failure = error
+            }
+        }
+        failure?.let { throw it }
+        files.putAll(bodyFiles)
+    }
 }

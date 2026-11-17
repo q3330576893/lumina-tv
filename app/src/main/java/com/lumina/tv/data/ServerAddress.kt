@@ -48,10 +48,16 @@ fun parseServerAddress(
     ServerAddress(builder.build())
 }.getOrNull()
 
+/**
+ * The single server identity: HttpUrl lowercases scheme/host and omits default ports;
+ * the encoded path keeps its case (reverse proxies may distinguish it), without trailing slashes.
+ */
+fun canonicalServerKey(serverUrl: String): String? = parseServerAddress(serverUrl)?.baseUrl
+
 /** Shared by local content state, recommendations and preview caches. Never creates an anonymous partition. */
 fun identityScope(serverUrl: String, userId: String): String? {
     if (userId.isBlank()) return null
-    val server = parseServerAddress(serverUrl)?.baseUrl ?: return null
+    val server = canonicalServerKey(serverUrl) ?: return null
     return stableCacheDigest(server, userId)
 }
 

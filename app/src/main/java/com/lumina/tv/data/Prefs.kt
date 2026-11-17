@@ -15,8 +15,8 @@ data class SavedServer(
 )
 
 /** 极轻量的本地配置存储：服务器、凭证、播放内核偏好。 */
-class Prefs(context: Context) {
-    private val sp = context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE)
+class Prefs internal constructor(private val sp: SharedPreferences) {
+    constructor(context: Context) : this(context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE))
 
     init {
         if (sp.contains("end_skip_seconds")) {
@@ -226,12 +226,33 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putString("preferred_audio_language", v.takeIf { it in setOf("", "zh", "en", "ja", "ko") } ?: "").apply()
 
     private fun ns(): String {
-        val server = baseUrl.trim().lowercase().ifBlank { "none" }
+        val server = canonicalServerKey(baseUrl) ?: baseUrl.trim().ifBlank { "none" }
+        return namespace(server)
+    }
+
+    // Preserve the exact old rule, including its raw URL/default-port/trailing-slash differences.
+    private fun legacyNs(): String = namespace(baseUrl.trim().lowercase().ifBlank { "none" })
+
+    private fun namespace(server: String): String {
         val user = userId.ifBlank { "none" }
         return Integer.toHexString(server.hashCode()) + "_" + user.replace(Regex("[^A-Za-z0-9._-]"), "_")
     }
 
-    private fun itemKey(prefix: String, itemId: String) = "${prefix}_${ns()}_$itemId"
+    private fun itemKey(prefix: String, itemId: String): String {
+        val key = "${prefix}_${ns()}_$itemId"
+        val legacyKey = "${prefix}_${legacyNs()}_$itemId"
+        val marker = "item_ns_migrated_v2_$key"
+        if (key != legacyKey && !sp.getBoolean(marker, false)) {
+            val edit = sp.edit()
+            if (!sp.contains(key) && sp.contains(legacyKey)) {
+                if (prefix == "audio_track") edit.putInt(key, sp.getInt(legacyKey, -1))
+                else edit.putString(key, sp.getString(legacyKey, null))
+            }
+            // Copy and marker share one edit. Retain old keys; never resurrect a later cleared value.
+            edit.putBoolean(marker, true).apply()
+        }
+        return key
+    }
 
     private fun normalizeSubtitlePreference(stored: String): String = when {
         stored == "off" || stored == "auto" || stored.startsWith("track:") -> stored
