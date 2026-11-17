@@ -164,6 +164,16 @@ import com.lumina.tv.player.PlaybackDelivery
 import com.lumina.tv.player.PlaybackFailureReason
 import com.lumina.tv.player.selectPlaybackEngine
 import com.lumina.tv.player.PlaybackRecoveryBudget
+import com.lumina.tv.player.PlayerLifecycle
+import com.lumina.tv.player.PlaybackSpeedState
+import com.lumina.tv.player.CreditsCountdown
+import com.lumina.tv.player.creditsWindowStartMs
+import com.lumina.tv.player.shouldCancelCreditsForSeek
+import com.lumina.tv.player.ContainerRecovery
+import com.lumina.tv.player.containerRecovery
+import com.lumina.tv.player.playbackSourceJson
+import com.lumina.tv.player.serverTranscodingAvailable
+import com.lumina.tv.player.withStopPositionSample
 import com.lumina.tv.player.PlaybackWatchdog
 import com.lumina.tv.player.WatchdogReason
 import com.lumina.tv.player.StabilityMetrics
@@ -304,7 +314,7 @@ fun PlayerScreen(
     var estimatedBitrate by remember { mutableLongStateOf(0L) }
     var seekStepSeconds by remember { mutableIntStateOf(AppRuntime.prefs?.seekStepSeconds ?: 10) }
     var error by remember { mutableStateOf<String?>(null) }
-    var speed by remember { mutableFloatStateOf(AppRuntime.prefs?.defaultSpeed ?: 1.0f) }
+    var speedState by remember { mutableStateOf(PlaybackSpeedState(AppRuntime.prefs?.defaultSpeed ?: 1.0f)) }
     var optionMenu by remember { mutableStateOf(false) }
     var quickPanel by remember { mutableStateOf(QuickPanel.NONE) }
     var exitPromptAt by remember { mutableLongStateOf(0L) }
@@ -415,8 +425,6 @@ fun PlayerScreen(
     var failurePhase by remember(item.id) { mutableStateOf("未知") }
     var currentSourceId by remember(item.id) { mutableStateOf(initialSourceId) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
-    var boosting by remember { mutableStateOf(false) }
-    var nextTriggered by remember(item.id) { mutableStateOf(false) }
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var prewarmedEpisodeId by remember(item.id) { mutableStateOf<String?>(null) }
     var prewarmJob by remember(item.id) { mutableStateOf<Job?>(null) }
@@ -430,9 +438,6 @@ fun PlayerScreen(
     var subtitleBg by remember { mutableStateOf(AppRuntime.prefs?.subtitleBg ?: false) }
     var subtitlePreference by remember(item.id) { mutableStateOf(AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource)) }
     var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
-    var autoNextJob by remember(item.id) { mutableStateOf<Job?>(null) }
-    var nextEpisode by remember(item.id) { mutableStateOf<MediaItem?>(null) }
-    var nextCountdown by remember(item.id) { mutableIntStateOf(0) }
     var seekHoldDirection by remember { mutableIntStateOf(0) }
     var seekHoldActive by remember { mutableStateOf(false) }
     var seekHoldDelta by remember { mutableLongStateOf(0L) }
@@ -591,6 +596,7 @@ fun PlayerScreen(
         playerBuilder
             .build()
             .apply {
+                PlayerLifecycle.registry.created(this, "media3", "playback:${item.id}")
                 setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
                 playWhenReady = true
                 trackSelectionParameters = trackSelectionParameters.buildUpon()
@@ -605,8 +611,10 @@ fun PlayerScreen(
 
     // Work that touches a player belongs to that exact instance, even across suspension.
     val currentExo by rememberUpdatedState(exo)
+    val attachedPlayerView = remember(exo) { java.util.concurrent.atomic.AtomicReference<PlayerView?>(null) }
     val instanceJob = remember(exo, item.id) { SupervisorJob(scope.coroutineContext[Job]) }
     val instanceScope = remember(instanceJob) { CoroutineScope(scope.coroutineContext + instanceJob) }
+    val creditsCountdown = remember(exo, item.id) { CreditsCountdown<MediaItem>(instanceScope, { PageLog.add(it) }) }
     var media3LoadGeneration by remember(exo, item.id) { mutableIntStateOf(-1) }
     fun isCurrentLoad(generation: Int): Boolean =
         instanceJob.isActive && currentExo === exo && generation == sessionGeneration
@@ -657,13 +665,16 @@ fun PlayerScreen(
     fun reportStopInAppScope() {
         val stopClient = client ?: return
         val session = progressSession?.takeUnless { it.isClosed } ?: return
-        val sample = timelinePosition(observedPlayerPositionMs() ?: lastPlayerPositionMs)
-        recordTimelineDiagnostics(sample)
-        // Snapshot the actual player before release; a request/seek target is never a Stop fallback.
-        stopClient.reportStop(session, sample.reportPositionMs, paused = !isPlaying,
-            timelineUnverified = sample.timelineUnverified, playerPositionMs = sample.playerPositionMs)
-        phaseTimes.put("lastStop", stopClient.lastProgressDiagnostics)
-        PageLog.add("progress: event=Stop contentPos=${sample.contentPositionMs} playerPos=${sample.playerPositionMs} unverified=${sample.timelineUnverified}")
+        withStopPositionSample(observedPlayerPositionMs(), lastPlayerPositionMs,
+            onMissing = { PageLog.add("progress: skip Stop reason=no-position-sample") }) { playerMs ->
+            val sample = timelinePosition(playerMs)
+            recordTimelineDiagnostics(sample)
+            // Snapshot the actual player before release; a request/seek target is never a Stop fallback.
+            stopClient.reportStop(session, sample.reportPositionMs, paused = !isPlaying,
+                timelineUnverified = sample.timelineUnverified, playerPositionMs = sample.playerPositionMs)
+            phaseTimes.put("lastStop", stopClient.lastProgressDiagnostics)
+            PageLog.add("progress: event=Stop contentPos=${sample.contentPositionMs} playerPos=${sample.playerPositionMs} unverified=${sample.timelineUnverified}")
+        }
     }
 
     fun confirmSeek(playerMs: Long?, now: Long, commandFailed: Boolean = false) {
@@ -727,8 +738,11 @@ fun PlayerScreen(
 
     DisposableEffect(exo, item.id) {
         onDispose {
+            reportStopInAppScope()
             instanceJob.cancel()
-            runCatching { exo.release() }
+            attachedPlayerView.getAndSet(null)?.player = null
+            runCatching { exo.clearVideoSurface(); exo.release() }
+                .onSuccess { PlayerLifecycle.registry.released(exo, "playback-disposed") }
         }
     }
 
@@ -754,16 +768,18 @@ fun PlayerScreen(
         previewFrame = catchingRequest { client.getTrickplayFrame(item.id, target) }.getOrNull()
     }
 
-    fun cancelAutoNext() {
-        autoNextJob?.cancel()
-        autoNextJob = null
-        nextEpisode = null
-        nextCountdown = 0
+    fun cancelCreditsCountdown(reason: String, allowRestart: Boolean = true) {
+        creditsCountdown.cancel(reason, allowRestart)
+    }
+
+    fun playbackPaused(): Boolean = !desiredPlaying || when (activeEngine) {
+        "mpv" -> !mpvState.playing && !mpvState.ended
+        else -> !exo.playWhenReady
     }
 
     fun switchEpisode(next: MediaItem, reportStop: Boolean = true) {
         val playNext = onPlayNext ?: return
-        cancelAutoNext()
+        cancelCreditsCountdown("episode-switch")
         sessionGeneration++
         loadJob?.cancel()
         rangeProbeJob?.cancel()
@@ -775,22 +791,14 @@ fun PlayerScreen(
     }
 
     fun startAutoNext(reportStop: Boolean = true) {
-        if (nextTriggered || AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null) return
-        nextTriggered = true
+        if (AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null || playbackPaused()) return
         val generation = sessionGeneration
-        autoNextJob = instanceScope.launch {
-            val c = client ?: return@launch
-            val next = c.getNextEpisode(item) ?: return@launch
-            if (!isCurrentLoad(generation)) return@launch
-            nextEpisode = next
-            nextCountdown = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6)
-            while (nextCountdown > 0) {
-                delay(1000)
-                if (!isCurrentLoad(generation) || nextEpisode?.id != next.id) return@launch
-                nextCountdown--
-            }
-            if (nextEpisode?.id == next.id) switchEpisode(next, reportStop)
-        }
+        creditsCountdown.start(
+            seconds = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6),
+            next = { client?.getNextEpisode(item)?.takeIf { isCurrentLoad(generation) } },
+            canContinue = { isCurrentLoad(generation) && !playbackPaused() },
+            onComplete = { next -> switchEpisode(next, reportStop) },
+        )
     }
 
     fun updateStalled(stalled: Boolean) {
@@ -961,20 +969,52 @@ fun PlayerScreen(
         val codec = playbackSource?.audioStreams?.let { streams ->
             streams.firstOrNull { it.index == selectedAudioStreamIndex } ?: streams.firstOrNull()
         }?.codec?.uppercase() ?: "未知编码"
-        val sourceJson = runCatching {
-            val sources = JSONObject(client?.lastPlaybackInfoJson.orEmpty()).optJSONArray("MediaSources")
-            (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }
-                .firstOrNull { it.optString("Id") == currentSourceId }
-        }.getOrNull()
+        val sourceJson = playbackSourceJson(client?.lastPlaybackInfoJson, currentSourceId)
         val serverMessage = when {
             sourceJson == null -> "未取得可用的服务器转码信息"
-            !sourceJson.optBoolean("SupportsTranscoding", false) || sourceJson.optString("TranscodingUrl").isBlank() ->
-                "服务器也未提供转码"
+            !serverTranscodingAvailable(sourceJson) -> "服务器也未提供转码"
             else -> "服务器转码也未能恢复播放"
         }
         val recoveryMessage = if (audioMpvKey() in audioMpvAttempts || audioMpvKey() in audioMpvFailures)
             "软解未能恢复" else "自动恢复次数已用完"
         return "该片音轨（$codec）本机无法硬解，$recoveryMessage，$serverMessage。请换片源或音轨。"
+    }
+
+    fun recoverUnsupportedContainer(errorCodeName: String, generation: Int) {
+        val canTranscode = serverTranscodingAvailable(playbackSourceJson(client?.lastPlaybackInfoJson, currentSourceId))
+        // Recheck mpv even after a transcode attempt, before declaring a terminal container failure.
+        when (containerRecovery(canTryMpvPath(), canTranscode, transcodeFallbackTried)) {
+            ContainerRecovery.MPV -> {
+                enginePinned = "mpv"
+                reloadForceTranscode = false
+                forceDirectNext = false
+                updateStalled(true)
+                error = null
+                failurePhase = "解封装"
+                audioDecodeNotice = "直连容器无法解析，正在尝试 mpv"
+                engineSwitchTrace.add("mpv-fallback:container:$errorCodeName")
+                requestAutomaticReload(position, generation, "media3:$errorCodeName")
+            }
+            ContainerRecovery.TRANSCODE -> {
+                transcodeFallbackTried = true
+                forceDirectNext = false
+                degraded = true
+                enginePinned = "media3"
+                reloadForceTranscode = true
+                updateStalled(true)
+                error = null
+                failurePhase = "解封装"
+                audioDecodeNotice = "直连容器无法解析，正在尝试转码"
+                engineSwitchTrace.add("transcode-fallback:$errorCodeName")
+                requestAutomaticReload(position, generation, "media3:$errorCodeName")
+            }
+            ContainerRecovery.TERMINAL -> {
+                updateStalled(false)
+                error = if (transcodeFallbackTried) "该片源容器不受支持，转码后仍失败"
+                    else "该片源容器不受支持，且无可用的 mpv 或服务器转码路径"
+                engineSwitchTrace.add("container-terminal:direct:$errorCodeName")
+            }
+        }
     }
 
     fun finishAudioRecovery(reason: String) {
@@ -1168,8 +1208,8 @@ fun PlayerScreen(
         lastRequestedStartMs = resumePosition
         audioRecoveryJob?.cancel()
         audioRecoveryJob = null
-        cancelAutoNext()
-        nextTriggered = false
+        cancelCreditsCountdown("load")
+        speedState = speedState.forNewLoad()
         loadJob?.cancel()
         rangeProbeJob?.cancel()
         val generation = ++sessionGeneration
@@ -1186,6 +1226,10 @@ fun PlayerScreen(
         mpvBackend = null
         mpvState = MpvPlayerController.State()
         exo.pause()
+        // pause() retains MediaCodec and its buffers. Retire the old media before negotiating
+        // another load/engine, so mpv cannot start alongside a suspended Media3 decoder.
+        exo.stop()
+        exo.clearMediaItems()
         PageLog.add("playback reload session=${playbackDiagnostics.sessionId} load=${playbackDiagnostics.identity} gen=$generation fromGen=${generation - 1} positionMs=$resumePosition engine=$activeEngine")
         playStartAt = android.os.SystemClock.elapsedRealtime()
         phaseTimes = JSONObject().put("identity", playbackDiagnostics.identityJson())
@@ -1275,8 +1319,7 @@ fun PlayerScreen(
                     context, audioEncoding, defaultAudio?.channels ?: 2, defaultAudio?.sampleRate ?: 0, audioCaps,
                     codecMime,
                 )
-                // 统一走 media3 优先：不再因为音轨编码就提前把内核换成 mpv，
-                // 由 media3 真正解码失败后再自动回落，避免“什么都用 MPV 转圈”。
+                // 音轨编码的能力判断留给实际播放；显式 soft 模式在 DV 规则之后优先 mpv。
                 // DV Profile 7 是双层封装，media3 解不了基底+增强层，直接交给 mpv
                 val videoStreamForDv = target.source?.streams?.firstOrNull { it.type == "Video" }
                 val rangeType = videoStreamForDv?.videoRangeType.orEmpty().uppercase()
@@ -1360,6 +1403,8 @@ fun PlayerScreen(
                                     reportStopInAppScope()
                                     progressSession = c.reportStart(item.id, position, srcId, target.playMethod,
                                         target.playSessionId, paused = !desiredPlaying)
+                                    speedState = speedState.forNewLoad()
+                                    owner.setSpeed(speedState.userSpeed)
                                     retry()
                                 }
                             }
@@ -1484,7 +1529,8 @@ fun PlayerScreen(
                         srcId?.let { c.subtitleUrl(item.id, it, stream.index, "vtt") }
                     }
                     backend.setExternalSubtitleIdentities(externalSubtitles.zip(subs.map { it.index }).toMap())
-                    backend.setSpeed(if (boosting) 3f else speed)
+                    backend.setSpeed(speedState.effectiveSpeed)
+                    backend.setAspectMode(resizeMode)
                     if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                     backend.load(target.url, target.playerStartPositionMs, externalSubtitles, target.headers, paused = restorePaused)
                     pendingStartIntent = null
@@ -1538,7 +1584,7 @@ fun PlayerScreen(
                     pendingStartIntent = null
                     target.playerStartPositionMs?.let(exo::seekTo)
                     exo.playWhenReady = !restorePaused
-                    exo.setPlaybackSpeed(if (boosting) 3f else speed)
+                    exo.setPlaybackSpeed(speedState.effectiveSpeed)
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -1593,14 +1639,22 @@ fun PlayerScreen(
         AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
     }
 
+    LaunchedEffect(activeEngine, mpvBackend, resizeMode) {
+        if (activeEngine == "mpv") mpvBackend?.setAspectMode(resizeMode)
+    }
+
     // One entry point for initial load, rebuild, engine switch and explicit reload.
     LaunchedEffect(exo, item.id, reloadKey) {
         loadSource(forceTranscode = reloadForceTranscode)
     }
 
-    fun seekPlayerTo(targetMs: Long) {
+    fun seekPlayerTo(targetMs: Long, chapter: Boolean = false) {
         val target = currentTarget
         val displayTarget = targetMs.coerceAtLeast(0L)
+        val creditsWindow = creditsWindowStartMs(duration, currentCreditsStartMs, AppRuntime.prefs?.endCreditsSkipSeconds ?: 30)
+        if (shouldCancelCreditsForSeek(position, displayTarget, creditsWindow, chapter)) {
+            cancelCreditsCountdown(if (chapter) "chapter-before-credits" else "seek-before-credits")
+        }
         val playerPosition = target?.contentToPlayerPositionMs(displayTarget) ?: displayTarget
         val now = android.os.SystemClock.elapsedRealtime()
         val beforeSeek = observedPlayerPositionMs() ?: lastPlayerPositionMs
@@ -1638,6 +1692,7 @@ fun PlayerScreen(
 
     fun togglePlayback() {
         desiredPlaying = !desiredPlaying
+        if (!desiredPlaying) cancelCreditsCountdown("pause")
         when (activeEngine) {
             "mpv" -> if (desiredPlaying) mpvBackend?.play() else mpvBackend?.pause()
             else -> if (desiredPlaying) exo.play() else exo.pause()
@@ -1645,11 +1700,21 @@ fun PlayerScreen(
     }
 
     fun setPlaybackSpeed(value: Float) {
-        speed = value
         when (activeEngine) {
             "mpv" -> mpvBackend?.setSpeed(value)
             else -> exo.setPlaybackSpeed(value)
         }
+    }
+
+    fun selectUserSpeed(value: Float) {
+        speedState = speedState.select(value)
+        AppRuntime.prefs?.defaultSpeed = speedState.userSpeed
+        setPlaybackSpeed(speedState.userSpeed)
+    }
+
+    fun setBoostActive(active: Boolean) {
+        speedState = speedState.boost(active)
+        setPlaybackSpeed(speedState.effectiveSpeed)
     }
 
     DisposableEffect(exo, item.id) {
@@ -1738,15 +1803,7 @@ fun PlayerScreen(
                             engineSwitchTrace.add("non-video-response:$contentType")
                             updateStalled(false)
                         } else {
-                            transcodeFallbackTried = true
-                            forceDirectNext = false
-                            degraded = true
-                            enginePinned = "media3"
-                            reloadForceTranscode = true
-                            failurePhase = "解封装"
-                            audioDecodeNotice = "直连容器无法解析，正在尝试转码"
-                            engineSwitchTrace.add("transcode-fallback:${err.errorCodeName}")
-                            requestAutomaticReload(position, sessionGeneration, "media3:${err.errorCodeName}")
+                            recoverUnsupportedContainer(err.errorCodeName, generation)
                         }
                     }
                 } else if (nonVideoResponse) {
@@ -1813,21 +1870,8 @@ fun PlayerScreen(
                     updateStalled(false)
                     error = "该片源无法播放（转码流与直连都失败）"
                     engineSwitchTrace.add("container-terminal:hls:${err.errorCodeName}")
-                } else if (containerUnsupported && !currentIsHls && !transcodeFallbackTried) {
-                    transcodeFallbackTried = true
-                    forceDirectNext = false
-                    degraded = true
-                    enginePinned = "media3"
-                    reloadForceTranscode = true
-                    updateStalled(true)
-                    error = null
-                    audioDecodeNotice = "直连容器无法解析，正在尝试转码"
-                    engineSwitchTrace.add("transcode-fallback:${err.errorCodeName}")
-                    requestAutomaticReload(position, sessionGeneration, "media3:${err.errorCodeName}")
                 } else if (containerUnsupported) {
-                    updateStalled(false)
-                    error = "该片源容器不受支持，转码后仍失败"
-                    engineSwitchTrace.add("container-terminal:direct:${err.errorCodeName}")
+                    recoverUnsupportedContainer(err.errorCodeName, sessionGeneration)
                 } else if (!degraded) {
                     degraded = true
                     transcodeFallbackTried = true
@@ -2054,6 +2098,7 @@ fun PlayerScreen(
             }
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 if (!isCurrentMedia3()) return
+                if (!playWhenReady) cancelCreditsCountdown("media3-pause")
                 updateStalled(playWhenReady && exo.playbackState == Player.STATE_BUFFERING)
                 if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS) {
                     AudioFocusGuard.record("loss paused=${!playWhenReady}")
@@ -2085,6 +2130,7 @@ fun PlayerScreen(
             }
 
             override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
+                PlayerLifecycle.registry.decoderReleased(exo, decoderName)
                 if (!isCurrentMedia3Event(eventTime)) return
                 playbackDiagnostics.identity?.let { playbackDiagnostics.decoder(it, false, null) }
             }
@@ -2112,6 +2158,7 @@ fun PlayerScreen(
                 initializedTimestampMs: Long,
                 initializationDurationMs: Long,
             ) {
+                PlayerLifecycle.registry.decoderInitialized(exo, decoderName)
                 if (!isCurrentMedia3Event(eventTime)) return
                 activeVideoDecoder = decoderName
                 playbackDiagnostics.identity?.let { playbackDiagnostics.decoder(it, false, decoderName) }
@@ -2191,7 +2238,7 @@ fun PlayerScreen(
         onDispose {
             reportStopInAppScope()
             prewarmJob?.cancel()
-            autoNextJob?.cancel()
+            cancelCreditsCountdown("player-disposed")
             watchdog.reset()
             val session = JSONObject()
                 .put("itemId", item.id).put("itemName", item.name).put("engine", activeEngine)
@@ -2365,10 +2412,11 @@ fun PlayerScreen(
                 requestWatchdogRecovery(reason)
             }
             val creditsSkipSeconds = AppRuntime.prefs?.endCreditsSkipSeconds ?: 30
-            val validCreditsStart = currentCreditsStartMs?.takeIf { it > 0L && it < duration }
-            if (contentTimelineKnown && creditsSkipSeconds > 0 && duration > 0 && item.seriesId != null && !nextTriggered &&
-                ((validCreditsStart != null && position >= validCreditsStart) ||
-                    (validCreditsStart == null && creditsSkipSeconds > 0 && position >= duration - creditsSkipSeconds * 1000L))
+            val creditsWindow = creditsWindowStartMs(duration, currentCreditsStartMs, creditsSkipSeconds)
+            if (playbackPaused() && creditsCountdown.active) cancelCreditsCountdown("pause-observed")
+            if (contentTimelineKnown && creditsWindow != null && item.seriesId != null && !creditsCountdown.triggered &&
+                !playbackPaused() && seekConfirmation == null && !seekInFlight && !seekHoldActive && !previewActive &&
+                position >= creditsWindow
             ) {
                 startAutoNext(reportStop = false)
             }
@@ -2419,8 +2467,8 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, boosting, optionMenu, quickPanel, controlHasFocus) {
-        if (controlsVisible && isPlaying && !optionMenu && quickPanel == QuickPanel.NONE && !boosting) {
+    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, speedState.boostActive, optionMenu, quickPanel, controlHasFocus) {
+        if (controlsVisible && isPlaying && !optionMenu && quickPanel == QuickPanel.NONE && !speedState.boostActive) {
             val remaining = (lastInteractionAt + 5_000L - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
             delay(remaining)
             if (android.os.SystemClock.elapsedRealtime() - lastInteractionAt >= 5_000L && !controlHasFocus) controlsVisible = false
@@ -2509,7 +2557,7 @@ fun PlayerScreen(
     fun exitPlayback() {
         sessionGeneration++
         instanceJob.cancel()
-        cancelAutoNext()
+        cancelCreditsCountdown("player-exit")
         showExitPrompt = false
         exitPromptAt = 0L
         reportStopInAppScope()
@@ -2581,6 +2629,7 @@ fun PlayerScreen(
         if (activeEngine == "media3") AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
+                    attachedPlayerView.set(this)
                     useController = false
                     player = exo
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -2588,6 +2637,7 @@ fun PlayerScreen(
                 }
             },
             update = { pv ->
+                attachedPlayerView.set(pv)
                 if (pv.player !== exo) pv.player = exo
                 pv.resizeMode = resizeMode
                 pv.subtitleView?.apply {
@@ -2607,7 +2657,10 @@ fun PlayerScreen(
                     setBottomPaddingFraction(subtitlePosition.coerceIn(0f, 0.25f))
                 }
             },
-            onRelease = { pv -> pv.player = null },
+            onRelease = { pv ->
+                pv.player = null
+                attachedPlayerView.compareAndSet(pv, null)
+            },
             modifier = Modifier.fillMaxSize(),
         )
         if (activeEngine != "media3") key(item.id) { AndroidView(
@@ -2834,7 +2887,7 @@ fun PlayerScreen(
                         LazyColumn(Modifier.heightIn(max = 470.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             items(chapters) { chapter ->
                                 FocusSurface(Modifier.fillMaxWidth().height(42.dp), corner = 8.dp, scaleTo = 1f, onClick = {
-                                    seekPlayerTo(chapter.startMs)
+                                    seekPlayerTo(chapter.startMs, chapter = true)
                                     chapterPanel = false
                                     controlsVisible = true
                                 }) { focused ->
@@ -2868,12 +2921,12 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = boosting,
+            visible = speedState.boostActive,
             enter = fadeIn(), exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
             Text(
-                if (boosting) "3x 快进中 »»" else seekHint.orEmpty(),
+                if (speedState.boostActive) "3x 快进中 »»" else seekHint.orEmpty(),
                 color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .padding(top = 24.dp)
@@ -2883,7 +2936,7 @@ fun PlayerScreen(
         }
 
         // 下一集倒计时卡片
-        nextEpisode?.let { ne ->
+        creditsCountdown.nextItem?.let { ne ->
             Box(
                 Modifier
                     .align(Alignment.BottomEnd)
@@ -2893,7 +2946,7 @@ fun PlayerScreen(
             ) {
                 Column {
                     Text(
-                        "${nextCountdown} 秒后播放下一集",
+                        "${creditsCountdown.remainingSeconds} 秒后播放下一集",
                         color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.height(4.dp))
@@ -2920,7 +2973,7 @@ fun PlayerScreen(
                         FocusSurface(
                             modifier = Modifier.height(34.dp).width(80.dp),
                             corner = 17.dp, scaleTo = 1.04f,
-                            onClick = { cancelAutoNext() },
+                            onClick = { cancelCreditsCountdown("cancel-button", allowRestart = false) },
                         ) { focused ->
                             Box(
                                 Modifier.fillMaxSize().background(
@@ -2942,22 +2995,20 @@ fun PlayerScreen(
                     .focusRequester(hideFocus)
                     .focusable()
                     .onKeyEvent { ev ->
-                        if (ev.type == KeyEventType.KeyDown && nextEpisode != null) {
-                            cancelAutoNext()
+                        if (ev.type == KeyEventType.KeyDown && creditsCountdown.nextItem != null) {
+                            cancelCreditsCountdown("remote-key", allowRestart = false)
                         }
                         when (ev.key) {
                             Key.DirectionCenter, Key.Enter -> {
                                 if (ev.type == KeyEventType.KeyDown) {
                                     if (ev.nativeKeyEvent.repeatCount == 0) okDownAt = System.currentTimeMillis()
-                                    else if (!boosting && System.currentTimeMillis() - okDownAt > 480) {
-                                        boosting = true
-                                        setPlaybackSpeed(3f)
+                                    else if (!speedState.boostActive && System.currentTimeMillis() - okDownAt > 480) {
+                                        setBoostActive(true)
                                     }
                                     true
                                 } else {
-                                    if (boosting) {
-                                        boosting = false
-                                        setPlaybackSpeed(speed)
+                                    if (speedState.boostActive) {
+                                        setBoostActive(false)
                                     } else {
                                         controlsVisible = true
                                     }
@@ -3159,7 +3210,7 @@ fun PlayerScreen(
                     horizontalAlignment = Alignment.End,
                 ) {
                     Text(
-                        if (speed == 1f) clockText else "$clockText  ${"%.1f".format(Locale.US, speed)}x",
+                        if (speedState.userSpeed == 1f) clockText else "$clockText  ${"%.1f".format(Locale.US, speedState.userSpeed)}x",
                         color = Color.White.copy(alpha = 0.8f),
                         fontSize = 14.sp,
                     )
@@ -3228,7 +3279,7 @@ fun PlayerScreen(
                     ) {
                         items(SPEEDS.size) { index ->
                             val s = SPEEDS[index]
-                            val active = kotlin.math.abs(speed - s) < 0.01f
+                            val active = kotlin.math.abs(speedState.userSpeed - s) < 0.01f
                             FocusSurface(
                                 modifier = Modifier.fillMaxWidth().height(36.dp)
                                     .focusRequester(speedItemFocuses[index])
@@ -3242,7 +3293,7 @@ fun PlayerScreen(
                                 scaleTo = 1.08f,
                                 onFocusChanged = { if (it) quickContentHasFocus = true },
                                 onClick = {
-                                    setPlaybackSpeed(s)
+                                    selectUserSpeed(s)
                                     closeQuickPanel(speedFocus)
                                 },
                             ) { focused ->

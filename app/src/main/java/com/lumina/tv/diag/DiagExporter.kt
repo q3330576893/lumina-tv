@@ -35,7 +35,7 @@ object DiagExporter {
         val meta = baseMeta(context, outcome).put("engine", JSONObject()
             .put("prefs", prefs?.playerEngine ?: "unknown")
             .put("active", "unknown")
-            .put("mpvAvailable", "not probed")
+            .put("mpvAvailable", "not_probed")
             .put("kernels", JSONArray().put("media3").put("mpv")))
         return DiagPayload(
             metaJson = meta.toString(2),

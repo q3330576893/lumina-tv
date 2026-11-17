@@ -10,6 +10,8 @@ import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.player.PlaybackDiagnostics
+import com.lumina.tv.player.mpvAvailabilityDiagnostic
+import com.lumina.tv.player.PlayerLifecycle
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
@@ -77,9 +79,11 @@ internal fun buildPlayerDiagPayload(
         .put("engine", JSONObject()
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
             .put("active", activeEngine)
-            .put("mpvAvailable", mpvBackend?.unavailableReason == null && mpvBackend != null)
+            .put("mpvAvailable", mpvAvailabilityDiagnostic(mpvBackend != null, mpvBackend?.unavailableReason))
             .put("mpvUnavailableReason", mpvBackend?.unavailableReason ?: JSONObject.NULL)
             .put("mpvProperties", JSONObject(mpvBackend?.diagnosticProperties().orEmpty()))
+            .put("liveVideoDecoders", PlayerLifecycle.registry.liveVideoDecoders)
+            .put("videoDecoderCountScope", "media3_callbacks;mpv_lifecycle_only")
             .put("kernels", JSONArray().put("media3").put("mpv")))
         .put("media", JSONObject()
             .put("id", item.id)

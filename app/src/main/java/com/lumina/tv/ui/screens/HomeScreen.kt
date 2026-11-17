@@ -680,16 +680,16 @@ fun HomeScreen(
         if (cached.isNotEmpty()) viewContents = viewContents + cached
     }
 
-    val heroPool = (latest + movies + series + favorites).distinctBy { it.id }
-    val heroItems = remember(heroPool, unavailableHeroIds) {
-        pickHeroItems(heroPool.filterNot { it.id in unavailableHeroIds }, latest.map { it.id }.toHashSet(), 6)
-    }
+    val heroItems = rememberHomeHeroItems(latest, movies, series, favorites, unavailableHeroIds, ::pickHeroItems)
     val hero = heroItems.getOrNull(heroIndex.coerceAtMost((heroItems.size - 1).coerceAtLeast(0)))
     LaunchedEffect(heroItems.size) {
         if (heroItems.isEmpty()) heroIndex = 0
         else if (heroIndex > heroItems.lastIndex) heroIndex = heroItems.lastIndex
     }
-    val homeLibraries = views.filterNot { AppRuntime.prefs?.isViewHidden(it.id) ?: false }
+    val hiddenHomeViewIds = AppRuntime.prefs?.hiddenViewIds.orEmpty()
+    val homeLibraries = remember(views, hiddenHomeViewIds) {
+        views.filterNot { it.id in hiddenHomeViewIds }
+    }
     val firstSectionKey: String? = when {
         resume.isNotEmpty() -> "resume"
         homeLibraries.isNotEmpty() -> "library-${homeLibraries.first().id}"
@@ -1763,7 +1763,7 @@ private fun TopButton(icon: androidx.compose.ui.graphics.vector.ImageVector, lab
  */
 private val recentlyShownHeroIds = mutableListOf<String>()
 
-private fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: Int = 6): List<MediaItem> {
+internal fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: Int = 6): List<MediaItem> {
     if (pool.isEmpty() || size <= 0) return emptyList()
     val seed = System.currentTimeMillis() / 3_600_000L
     val shownIds = synchronized(recentlyShownHeroIds) { recentlyShownHeroIds.toSet() }

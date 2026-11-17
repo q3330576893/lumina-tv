@@ -20,8 +20,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 141
-        versionName = "1.23.0"
+        versionCode = 142
+        versionName = "1.23.1"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
         buildConfigField("String", "MDBLIST_API_KEY", "\"${localProps.getProperty("MDBLIST_API_KEY", "")}\"")
@@ -184,5 +184,13 @@ val e2Checks = tasks.register<JavaExec>("e2Checks") {
     mainClass.set("com.lumina.tv.E2Checks")
 }
 verifyOffline.configure { dependsOn(e2Checks) }
+val e4Checks = tasks.register<JavaExec>("e4Checks") {
+    group = "verification"
+    description = "Check container recovery, player lifecycles and playback controls."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.E4Checks")
+}
+verifyOffline.configure { dependsOn(e4Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }

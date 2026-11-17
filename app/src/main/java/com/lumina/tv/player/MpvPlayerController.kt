@@ -148,6 +148,7 @@ class MpvPlayerController(
         checkMainThread()
         if (released) return InitializationResult.Failed("控制器已释放")
         if (activeLoad != null) return InitializationResult.Ready
+        PlayerLifecycle.registry.created(this, "mpv", "playback:$generation")
         recordPreviousAbnormalSession()
         clearSessionLog()
         return createNativeLoad(software = false)
@@ -224,6 +225,18 @@ class MpvPlayerController(
     private val subtitleOptions = linkedMapOf<String, String>()
     private var subtitleDelayMs = 0L
     private var playbackSpeed = 1f
+    private var aspectMode = 0
+
+    fun setAspectMode(mode: Int) {
+        aspectMode = mode
+        if (!released) activeLoad?.let { applyAspectMode(it) }
+    }
+
+    private fun applyAspectMode(load: NativeLoad) {
+        applyMpvAspectMode(aspectMode,
+            setBoolean = { name, value -> load.engine.setPropertyBoolean(name, value) },
+            setDouble = { name, value -> load.engine.setPropertyDouble(name, value) })
+    }
     private var requestHeaders: Map<String, String> = emptyMap()
     private var subtitleUrls: List<String> = emptyList()
 
@@ -376,6 +389,7 @@ class MpvPlayerController(
         cacheSpeedBytesPerSecond = 0L
         observedProperties.clear()
         mappings.clear()
+        applyAspectMode(load)
         pendingSubtitles = subtitleUrls
         val headerFields = requestHeaders.entries.mapNotNull { (key, value) ->
             if (',' in key || ',' in value) null else "$key: $value"
@@ -697,6 +711,7 @@ class MpvPlayerController(
         handler.removeCallbacksAndMessages(null)
         audioDiagnostics.close()
         activeLoad?.let { destroyNativeLoad(it) }
+        PlayerLifecycle.registry.released(this, reason)
         loadGate.close()
         attachedSurface = null
         runCatching { sessionStateFile.writeText(JSONObject().put("active", false).put("endedAt", timestamp()).put("reason", reason).toString(), Charsets.UTF_8) }
@@ -832,6 +847,7 @@ class MpvPlayerController(
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
                 fileLoaded = true
+                applyAspectMode(load)
                 buffering = false
                 Log.i(TAG, "${timestamp()} received FILE_LOADED")
                 checkAudioOutput(load, "file-loaded")

@@ -37,6 +37,7 @@ import com.lumina.tv.data.PreviewVideoCache
 import com.lumina.tv.data.PreviewCacheRecovery
 import com.lumina.tv.data.previewResourceKey
 import com.lumina.tv.diag.PageLog
+import com.lumina.tv.player.PlayerLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -138,14 +139,20 @@ private fun DetailVideoPlayback(
     var staticBitrateEstimate by remember(url) { mutableStateOf(0L) }
     val isStaticFallback = remember(url) { Uri.parse(url).getQueryParameter("static") == "true" }
     val playerState = remember { mutableStateOf<ExoPlayer?>(null) }
-    LaunchedEffect(url, mediaKey, bypassCache) {
-        playerState.value?.let { oldPlayer ->
-            oldPlayer.pause()
-            oldPlayer.stop()
-            oldPlayer.clearMediaItems()
-            oldPlayer.release()
-        }
+    fun releasePlayer(reason: String) {
+        val oldPlayer = playerState.value ?: return
         playerState.value = null
+        oldPlayer.clearVideoSurface()
+        oldPlayer.release()
+        PlayerLifecycle.registry.released(oldPlayer, reason)
+    }
+    // Install ownership even before the first LaunchedEffect creates a player. Navigation can
+    // remove the preview between creation and the following recomposition.
+    DisposableEffect(playerState) {
+        onDispose { releasePlayer("detail-preview-disposed") }
+    }
+    LaunchedEffect(url, mediaKey, bypassCache) {
+        releasePlayer("detail-preview-replaced")
         firstFrame = false
         if (recovery.shouldRemove(freshFrame = false)) PreviewVideoCache.remove(context, mediaKey)
         val httpClient = requestClient ?: OkHttpClient.Builder()
@@ -175,6 +182,16 @@ private fun DetailVideoPlayback(
             .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory))
             .build()
             .apply {
+                PlayerLifecycle.registry.created(this, "media3", "detail-preview")
+                addAnalyticsListener(object : AnalyticsListener {
+                    override fun onVideoDecoderInitialized(
+                        eventTime: AnalyticsListener.EventTime, decoderName: String,
+                        initializedTimestampMs: Long, initializationDurationMs: Long,
+                    ) { PlayerLifecycle.registry.decoderInitialized(this@apply, decoderName) }
+                    override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
+                        PlayerLifecycle.registry.decoderReleased(this@apply, decoderName)
+                    }
+                })
                 volume = 0f
                 setMediaItem(mediaItem)
             }
@@ -263,17 +280,6 @@ private fun DetailVideoPlayback(
         onDispose { player.removeAnalyticsListener(listener) }
     }
 
-    DisposableEffect(playerState) {
-        onDispose {
-            playerState.value?.let {
-                it.pause()
-                it.stop()
-                it.clearMediaItems()
-                it.release()
-            }
-        }
-    }
-
     LaunchedEffect(player, playing, failed) {
         if (playing && !failed) {
             if (player.playbackState == Player.STATE_IDLE) player.prepare()
@@ -353,6 +359,10 @@ private fun DetailVideoPlayback(
                     view.isFocusable = false
                     view.isFocusableInTouchMode = false
                     if (view.isAvailable) player.setVideoTextureView(view)
+                },
+                onRelease = { view ->
+                    view.surfaceTextureListener = null
+                    if (playerState.value === player) player.clearVideoTextureView(view)
                 },
             )
         }

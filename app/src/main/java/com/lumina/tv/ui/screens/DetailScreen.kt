@@ -276,6 +276,7 @@ internal suspend fun loadDetailRecommendations(
 @OptIn(ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun DetailScreen(
     id: String,
+    previewActive: Boolean = true,
     onPlay: (MediaItem) -> Unit,
     onPlayWithSource: (MediaItem, String) -> Unit,
     onPlayFromStart: (MediaItem, String?) -> Unit,
@@ -822,7 +823,8 @@ fun DetailScreen(
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
             )
-            DetailVideoBackground(
+            // Navigation animations keep this detail page composed; remove the preview immediately.
+            if (previewActive) DetailVideoBackground(
                 url = detailPreviewUrl,
                 mediaKey = detailPreviewKey,
                 previewStage = detailPreviewStage,

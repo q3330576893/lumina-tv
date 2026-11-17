@@ -42,6 +42,7 @@ internal fun selectPlaybackEngine(
     val preferred = pinned ?: when {
         isDvP7 -> "mpv"
         isDolbyVision -> "media3"
+        path.audioMode == "soft" -> "mpv"
         preference == "mpv" -> "mpv"
         else -> "media3"
     }

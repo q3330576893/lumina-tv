@@ -338,6 +338,7 @@ private fun AppRoot(
                 BackHandler { goBack() }
                 DetailScreen(
                     id = target.id,
+                    previewActive = target == screen,
                     onPlay = { item -> if (backStack.last().screen == target) navigate(Screen.Play(item), target) },
                     onPlayWithSource = { item, sid -> if (backStack.last().screen == target) navigate(Screen.Play(item, sid), target) },
                     onPlayFromStart = { item, sid -> if (backStack.last().screen == target) navigate(Screen.Play(item, sid, PlaybackStartIntent.FromStart), target) },
@@ -347,7 +348,9 @@ private fun AppRoot(
             }
 
             is Screen.Play -> {
-                PlayerScreen(
+                // AnimatedContent retains the outgoing page. Release its player in this frame,
+                // before the next page's LaunchedEffect can prepare another video decoder.
+                if (target == screen) PlayerScreen(
                     item = target.item,
                     initialSourceId = target.sourceId,
                     startIntent = target.startIntent,
