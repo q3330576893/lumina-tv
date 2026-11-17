@@ -1114,26 +1114,26 @@ class EmbyClient(
         val startPositionMs: Long,
         val playSessionId: String?,
         val audioStreamIndex: Int?,
-        val streamStartOffsetMs: Long?,
+        var streamStartOffsetMs: Long?,
         val timelineOrigin: TimelineOrigin,
         val headers: Map<String, String> = emptyMap(),
         val durationMs: Long? = null,
         val negotiationDiagnostics: JSONObject = JSONObject(),
         val originalFile: Boolean = false,
         val trackIntent: PlaybackTrackIntent? = null,
+        val isStrmDirectLink: Boolean = false,
     ) {
         val direct: Boolean get() = mode == PlaybackMode.DirectPlay
         val playMethod: String get() = mode.name
-        // UNKNOWN deliberately returns null: StartTimeTicks does not prove a timestamp origin.
-        fun playerToContentPositionMs(playerMs: Long): Long? = when (timelineOrigin) {
-            TimelineOrigin.CONTENT -> playerMs.coerceAtLeast(0L)
-            TimelineOrigin.UNKNOWN -> null
-        }
-        fun contentToPlayerPositionMs(contentMs: Long): Long? = when (timelineOrigin) {
-            TimelineOrigin.CONTENT -> contentMs.coerceAtLeast(0L)
-            TimelineOrigin.UNKNOWN -> null
-        }
+        internal var timeline = TimelineCalibrationWindow(startPositionMs, durationMs)
+            private set
+        internal fun resetTimeline() { timeline = TimelineCalibrationWindow(startPositionMs, durationMs) }
+        fun playerToContentPositionMs(playerMs: Long): Long? = timeline.calibration.playerToContentPositionMs(playerMs)
+        fun contentToPlayerPositionMs(contentMs: Long): Long? = timeline.calibration.contentToPlayerPositionMs(contentMs)
+        // An initial STRM seek is an unverified attempt, not evidence for offset=0.
+        // Negotiated remux/transcode URLs already carry StartTimeTicks and get no additional seek here.
         val playerStartPositionMs: Long? get() = contentToPlayerPositionMs(startPositionMs)
+            ?: startPositionMs.takeIf { timelineOrigin == TimelineOrigin.CONTENT || isStrmDirectLink }
     }
 
     /** 解析单个 MediaSource JSON 为模型（含大小与分辨率）。 */
@@ -1415,9 +1415,6 @@ class EmbyClient(
                     TimelineOrigin.UNKNOWN)
                 else -> throw EmbyException("The selected source has no usable negotiated playback route")
             }
-            if (isStrmItem && !forceTranscode && resolvedStartPositionMs > 0L) {
-                throw EmbyException("This external source has an unverified timeline; resume is unavailable")
-            }
             val finalUrl = if (route.third == TimelineOrigin.CONTENT || isStrmItem && !forceTranscode) route.first
                 else negotiatedUrl(route.first, resolvedStartPositionMs, selectedAudioIndex, playSessionId, removeSubtitleParams)
             val finalPath = android.net.Uri.parse(finalUrl).path.orEmpty()
@@ -1449,7 +1446,8 @@ class EmbyClient(
                 audioStreamIndex = selectedAudioIndex,
                 trackIntent = trackIntent,
                 originalFile = route.second == PlaybackMode.DirectPlay && !isStrmItem && route.first == directUrl,
-                // No server/sample evidence for remux/transcode/STRM timestamp offsets yet.
+                isStrmDirectLink = isStrmItem && !forceTranscode,
+                // Runtime calibration replaces this diagnostic value after the first frame.
                 streamStartOffsetMs = if (route.third == TimelineOrigin.CONTENT) 0L else null,
                 timelineOrigin = route.third,
                 headers = previewHeaders(finalUrl, headers).toMap(),
@@ -1585,11 +1583,29 @@ class EmbyClient(
         paused: Boolean = false,
     ): PlaybackProgressSession = progressSender.start(itemId, positionMs, sourceId, playSessionId, playMethod, paused)
 
-    fun reportProgress(session: PlaybackProgressSession, positionMs: Long, paused: Boolean): Boolean =
-        progressSender.progress(session, positionMs, paused)
+    // Local diagnostic metadata only. It never enters PendingProgress, the outbox or the Emby body.
+    @Volatile var lastProgressDiagnostics: JSONObject = JSONObject()
+        private set
 
-    fun reportStop(session: PlaybackProgressSession, positionMs: Long, paused: Boolean = true): Boolean =
-        progressSender.stop(session, positionMs, paused)
+    fun reportProgress(session: PlaybackProgressSession, positionMs: Long, paused: Boolean,
+        timelineUnverified: Boolean = false, playerPositionMs: Long? = null): Boolean {
+        val admitted = progressSender.progress(session, positionMs, paused)
+        if (admitted) recordProgressDiagnostics("Progress", positionMs, timelineUnverified, playerPositionMs)
+        return admitted
+    }
+
+    fun reportStop(session: PlaybackProgressSession, positionMs: Long, paused: Boolean = true,
+        timelineUnverified: Boolean = false, playerPositionMs: Long? = null): Boolean {
+        val admitted = progressSender.stop(session, positionMs, paused)
+        if (admitted) recordProgressDiagnostics("Stop", positionMs, timelineUnverified, playerPositionMs)
+        return admitted
+    }
+
+    private fun recordProgressDiagnostics(event: String, positionMs: Long, unverified: Boolean, playerMs: Long?) {
+        lastProgressDiagnostics = JSONObject().put("event", event).put("positionMs", positionMs)
+            .put("contentPos", if (unverified) JSONObject.NULL else positionMs)
+            .put("playerPos", playerMs ?: JSONObject.NULL).put("timelineUnverified", unverified)
+    }
 
     /** The sole HTTP entry for Start/Progress/Stop, invoked only by the serial sender. */
     private suspend fun sendProgressEvent(event: PendingProgress): Boolean = catchingRequest {

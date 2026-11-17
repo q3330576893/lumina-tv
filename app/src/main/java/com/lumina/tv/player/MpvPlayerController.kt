@@ -120,6 +120,7 @@ class MpvPlayerController(
     var unavailableReason: String? = null
         private set
     private var positionMs = 0L
+    private var positionAvailable = false
     private var durationMs = 0L
     private var ready = false
     private var playing = false
@@ -369,7 +370,8 @@ class MpvPlayerController(
         subtitleMappingNotice = null
         ready = false
         fileLoaded = false
-        positionMs = pendingPositionMs ?: 0L
+        positionMs = 0L
+        positionAvailable = false
         durationMs = 0L
         cacheSpeedBytesPerSecond = 0L
         observedProperties.clear()
@@ -437,8 +439,8 @@ class MpvPlayerController(
         checkMainThread()
         val load = activeLoad?.takeIf(::isActive) ?: return
         load.ended = false
-        positionMs = ms.coerceAtLeast(0L)
-        mpv?.command(arrayOf("seek", (positionMs / 1000.0).toString(), "absolute+exact"))
+        val requestedMs = ms.coerceAtLeast(0L)
+        mpv?.command(arrayOf("seek", (requestedMs / 1000.0).toString(), "absolute+exact"))
         emit(load)
     }
 
@@ -448,6 +450,8 @@ class MpvPlayerController(
     }
 
     fun positionMs(): Long = positionMs
+    /** Only time-pos observations count; neither load --start nor seek commands update this value. */
+    fun observedPositionMs(): Long? = positionMs.takeIf { positionAvailable }
     fun durationMs(): Long = durationMs
 
     fun containerFps(): Float? = runCatching {
@@ -794,7 +798,10 @@ class MpvPlayerController(
     }
     private fun handleProperty(load: NativeLoad, property: String, value: Double) {
         when (property) {
-            "time-pos" -> positionMs = (value * 1000.0).toLong().coerceAtLeast(0L)
+            "time-pos" -> if (value.isFinite() && value >= 0.0) {
+                positionMs = (value * 1000.0).toLong()
+                positionAvailable = true
+            }
             "duration" -> durationMs = (value * 1000.0).toLong().coerceAtLeast(0L)
         }
         emit(load)

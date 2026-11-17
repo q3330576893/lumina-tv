@@ -5,6 +5,9 @@ import com.lumina.tv.data.PlaybackStartIntent
 import com.lumina.tv.data.PlaybackProgressSession
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.TimelineOrigin
+import com.lumina.tv.data.TimelinePosition
+import com.lumina.tv.player.PendingSeekConfirmation
+import com.lumina.tv.player.SeekConfirmation
 
 import android.os.Build
 import android.text.format.DateFormat
@@ -387,6 +390,11 @@ fun PlayerScreen(
     var desiredPlaying by remember(item.id) { mutableStateOf(true) }
     var pendingPaused by remember(item.id) { mutableStateOf<Boolean?>(null) }
     var currentTarget by remember(item.id) { mutableStateOf<EmbyClient.PlaybackTarget?>(null) }
+    var lastPlayerPositionMs by remember(item.id) { mutableStateOf<Long?>(null) }
+    var media3PositionAvailable by remember(item.id) { mutableStateOf(false) }
+    var strmRestartNoticePending by remember(item.id) { mutableStateOf(false) }
+    var strmRestartNoticeShown by remember(item.id) { mutableStateOf(false) }
+    var strmResumeFallback by remember(item.id) { mutableStateOf<JSONObject?>(null) }
     var lastRequestedStartMs by remember(item.id) { mutableLongStateOf(0L) }
     var loadJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var phaseTimes by remember(item.id) { mutableStateOf(JSONObject()) }
@@ -432,6 +440,8 @@ fun PlayerScreen(
     var seekInFlight by remember { mutableStateOf(false) }
     var pendingSeekTarget by remember { mutableStateOf<Long?>(null) }
     var seekTimeoutJob by remember { mutableStateOf<Job?>(null) }
+    var seekConfirmation by remember(item.id) { mutableStateOf<PendingSeekConfirmation?>(null) }
+    var seekConfirmationJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var seekLastKeyAt by remember { mutableLongStateOf(0L) }
     var chapters by remember { mutableStateOf<List<MediaChapter>>(emptyList()) }
     var playbackMarkers by remember(item.id) { mutableStateOf<PlaybackMarkers?>(null) }
@@ -456,17 +466,6 @@ fun PlayerScreen(
     var audioSelectionApplied by remember(item.id) { mutableStateOf(false) }
     var selectedAudioStreamIndex by remember(item.id) { mutableStateOf<Int?>(null) }
     var progressSession by remember(item.id, client) { mutableStateOf<PlaybackProgressSession?>(null) }
-
-    fun reportStopInAppScope(positionMs: Long) {
-        val stopClient = client ?: return
-        val session = progressSession ?: return
-        // Admission and closing are synchronous; HTTP belongs to the client's application sender.
-        stopClient.reportStop(session, positionMs.coerceAtLeast(0L), paused = !isPlaying)
-    }
-
-    LaunchedEffect(error, progressSession) {
-        if (error != null) reportStopInAppScope(position)
-    }
 
     val introSeconds = playbackMarkers?.introEndMs?.takeIf { it > 0L && (duration <= 0L || it < duration) }
         ?.div(1000L)?.toInt()
@@ -620,6 +619,112 @@ fun PlayerScreen(
         return eventTime.timeline.getWindow(eventTime.windowIndex, window).mediaItem.mediaId == "${item.id}:$media3LoadGeneration"
     }
 
+    fun showTimelineNotice(message: String) {
+        playbackStatusNotice = message
+        scope.launch {
+            delay(4_000L)
+            if (playbackStatusNotice == message) playbackStatusNotice = null
+        }
+    }
+
+    fun observedPlayerPositionMs(): Long? = runCatching { when (activeEngine) {
+        "mpv" -> mpvBackend?.observedPositionMs()
+        // Media3 masks its position with the requested seek until a frame is rendered.
+        else -> if (media3PositionAvailable && !reloadPending && exo.playbackState != Player.STATE_IDLE &&
+            exo.currentMediaItem?.mediaId == "${item.id}:$media3LoadGeneration") {
+            exo.currentPosition.takeIf { it >= 0L }
+        } else null
+    } }.getOrNull()
+
+    fun timelinePosition(playerMs: Long?): TimelinePosition = currentTarget?.timeline?.position(playerMs)
+        ?: TimelinePosition(playerMs, null)
+
+    fun recordTimelineDiagnostics(sample: TimelinePosition) {
+        val target = currentTarget
+        val calibration = target?.timeline?.calibration
+        phaseTimes.put("timeline", JSONObject()
+            .put("origin", target?.timelineOrigin?.name ?: "UNKNOWN")
+            .put("offsetMs", calibration?.offsetMs ?: JSONObject.NULL)
+            .put("confidence", calibration?.confidence?.name ?: "UNMEASURED")
+            .put("evidence", calibration?.evidence ?: "no-playback-target")
+            .put("locked", target?.timeline?.locked ?: false))
+        phaseTimes.put("progress", JSONObject()
+            .put("contentPos", sample.contentPositionMs ?: JSONObject.NULL)
+            .put("playerPos", sample.playerPositionMs ?: JSONObject.NULL)
+            .put("timelineUnverified", sample.timelineUnverified))
+    }
+
+    fun reportStopInAppScope() {
+        val stopClient = client ?: return
+        val session = progressSession?.takeUnless { it.isClosed } ?: return
+        val sample = timelinePosition(observedPlayerPositionMs() ?: lastPlayerPositionMs)
+        recordTimelineDiagnostics(sample)
+        // Snapshot the actual player before release; a request/seek target is never a Stop fallback.
+        stopClient.reportStop(session, sample.reportPositionMs, paused = !isPlaying,
+            timelineUnverified = sample.timelineUnverified, playerPositionMs = sample.playerPositionMs)
+        phaseTimes.put("lastStop", stopClient.lastProgressDiagnostics)
+        PageLog.add("progress: event=Stop contentPos=${sample.contentPositionMs} playerPos=${sample.playerPositionMs} unverified=${sample.timelineUnverified}")
+    }
+
+    fun confirmSeek(playerMs: Long?, now: Long, commandFailed: Boolean = false) {
+        val pending = seekConfirmation ?: return
+        val result = if (commandFailed) SeekConfirmation.ROLLED_BACK else pending.evaluate(playerMs, now)
+        if (result == SeekConfirmation.PENDING) return
+        seekConfirmation = null
+        seekConfirmationJob?.cancel()
+        phaseTimes.put("seekConfirmation", JSONObject().put("state", result.name)
+            .put("targetMs", pending.displayTargetMs).put("playerTargetMs", pending.playerTargetMs)
+            .put("fromPlayerMs", pending.fromPlayerMs ?: JSONObject.NULL)
+            .put("commandFailed", commandFailed)
+            .put("playerPos", playerMs ?: JSONObject.NULL).put("elapsedMs", now - pending.requestedAtMs))
+        if (result == SeekConfirmation.ROLLED_BACK) {
+            seekHint = null
+            showTimelineNotice("跳转未生效，已恢复实际播放位置")
+        }
+    }
+
+    fun observeTimelinePosition(target: EmbyClient.PlaybackTarget, playerMs: Long?, playerDur: Long?, now: Long) {
+        if (target !== currentTarget || reloadPending) return
+        if (target.timeline.sample(playerMs, playerDur, now)) {
+            val calibration = target.timeline.calibration
+            target.streamStartOffsetMs = calibration.offsetMs
+            negotiationDiagnostics.put("streamStartOffsetMs", calibration.offsetMs ?: JSONObject.NULL)
+            PageLog.add("timeline: origin=${target.timelineOrigin} offset=${calibration.offsetMs} confidence=${calibration.confidence} evidence=${calibration.evidence}")
+        }
+        if (playerMs != null) {
+            lastPlayerPositionMs = playerMs
+            position = target.timeline.position(playerMs).reportPositionMs
+        }
+        confirmSeek(playerMs, now)
+        val sample = target.timeline.position(lastPlayerPositionMs)
+        recordTimelineDiagnostics(sample)
+        duration = target.durationMs ?: playerDur?.takeIf { it > 0L }?.let {
+            target.playerToContentPositionMs(it) ?: it
+        } ?: duration
+    }
+
+    LaunchedEffect(error, progressSession) {
+        if (error != null) reportStopInAppScope()
+    }
+
+    DisposableEffect(exo, item.id) {
+        // Also reopen the observation gate if a seek is ignored and ordinary frames keep arriving.
+        // We use the callback as frame evidence, not its container-dependent presentation timestamp.
+        val listener = androidx.media3.exoplayer.video.VideoFrameMetadataListener { _, _, _, _ ->
+            if (!media3PositionAvailable) instanceScope.launch {
+                if (isCurrentMedia3() && exo.playbackState == Player.STATE_READY && !media3PositionAvailable) {
+                    media3PositionAvailable = true
+                    currentTarget?.let { target ->
+                        observeTimelinePosition(target, exo.currentPosition.takeIf { it >= 0L }, exo.duration,
+                            android.os.SystemClock.elapsedRealtime())
+                    }
+                }
+            }
+        }
+        exo.setVideoFrameMetadataListener(listener)
+        onDispose { exo.clearVideoFrameMetadataListener(listener) }
+    }
+
     DisposableEffect(exo, item.id) {
         onDispose {
             instanceJob.cancel()
@@ -664,7 +769,7 @@ fun PlayerScreen(
         rangeProbeJob?.cancel()
         audioRecoveryJob?.cancel()
         watchdog.reset()
-        if (reportStop) reportStopInAppScope(position)
+        if (reportStop) reportStopInAppScope()
         playNext(next)
         // The new item owns its load timing and generation; no countdown resets them.
     }
@@ -737,13 +842,38 @@ fun PlayerScreen(
             return
         }
         if (reloadPending) return
-        reportStopInAppScope(positionMs)
+        reportStopInAppScope()
         reloadPending = true
         reloadUsesRecoveryAttempt = recovering
         media3LoadGeneration = -1
         pendingStartIntent = PlaybackStartIntent.Restore(positionMs.coerceAtLeast(0L))
         pendingPaused = !desiredPlaying
         reloadKey++
+    }
+
+    fun checkStrmResume(target: EmbyClient.PlaybackTarget, now: Long) {
+        if (target !== currentTarget || reloadPending || !target.isStrmDirectLink) return
+        if (target.timeline.shouldRestartStrmFromZero(lastPlayerPositionMs, now)) {
+            strmResumeFallback = JSONObject().put("action", "restart-from-zero")
+                .put("requestedStartMs", target.startPositionMs)
+                .put("lastPlayerPositionMs", lastPlayerPositionMs ?: JSONObject.NULL)
+            phaseTimes.put("strmResumeFallback", strmResumeFallback)
+            PageLog.add("timeline: STRM resume not reached in 8000ms; restarting from zero")
+            strmRestartNoticePending = !strmRestartNoticeShown
+            requestPlaybackReload(0L, sessionGeneration)
+        }
+    }
+
+    fun onTimelineFirstFrame(target: EmbyClient.PlaybackTarget, now: Long) {
+        if (!target.timeline.firstFrame(now)) return
+        val generation = sessionGeneration
+        val window = target.timeline
+        instanceScope.launch {
+            delay(8_000L)
+            if (!isCurrentLoad(generation) || currentTarget !== target || target.timeline !== window || reloadPending) return@launch
+            observeTimelinePosition(target, observedPlayerPositionMs(), null, android.os.SystemClock.elapsedRealtime())
+            checkStrmResume(target, android.os.SystemClock.elapsedRealtime())
+        }
     }
 
     fun recordPathFailure(reason: PlaybackFailureReason, detail: String) {
@@ -1020,7 +1150,7 @@ fun PlayerScreen(
         audioMapping = TrackMapping(emptyList())
         subtitleMapping = TrackMapping(emptyList())
         selectedAudioStreamIndex = null
-        reportStopInAppScope(position)
+        reportStopInAppScope()
         // A native hw->sw retry is part of this same automatic path attempt.
         val recoveryAlreadyAcquired = reloadUsesRecoveryAttempt
         reloadUsesRecoveryAttempt = false
@@ -1043,6 +1173,14 @@ fun PlayerScreen(
         loadJob?.cancel()
         rangeProbeJob?.cancel()
         val generation = ++sessionGeneration
+        seekConfirmationJob?.cancel()
+        seekConfirmation = null
+        pendingSeekTarget = null
+        seekTimeoutJob?.cancel()
+        seekInFlight = false
+        lastPlayerPositionMs = null
+        media3PositionAvailable = false
+        currentTarget = null
         playbackDiagnostics.begin(generation, loadStartedAt)
         mpvBackend?.release("external-load-replaced")
         mpvBackend = null
@@ -1051,6 +1189,7 @@ fun PlayerScreen(
         PageLog.add("playback reload session=${playbackDiagnostics.sessionId} load=${playbackDiagnostics.identity} gen=$generation fromGen=${generation - 1} positionMs=$resumePosition engine=$activeEngine")
         playStartAt = android.os.SystemClock.elapsedRealtime()
         phaseTimes = JSONObject().put("identity", playbackDiagnostics.identityJson())
+            .put("strmResumeFallback", strmResumeFallback ?: JSONObject.NULL)
             .put("loadToReadyMs", JSONObject.NULL)
             .put("loadToFirstFrameMs", JSONObject.NULL)
             .put("readyToFirstFrameMs", JSONObject.NULL)
@@ -1087,13 +1226,14 @@ fun PlayerScreen(
                         strategy = strategy,
                         preparedTracks = preparedTracks,
                     )
-                val target = resolvedTarget
+                // Cached negotiation is reusable; runtime measurements belong to this load only.
+                val target = resolvedTarget.copy(negotiationDiagnostics = JSONObject(resolvedTarget.negotiationDiagnostics.toString()))
                 if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                 httpFactory.setDefaultRequestProperties(target.headers)
                 phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
                 negotiationDiagnostics = target.negotiationDiagnostics
                 currentTarget = target
-                position = target.startPositionMs
+                recordTimelineDiagnostics(target.timeline.position(null))
                 lastRequestedStartMs = target.startPositionMs
                 currentPlayMethod = target.playMethod
                 PageLog.add("timeline requestStartMs=$resumePosition playMethod=${target.playMethod} direct=${target.direct} sourceId=${target.source?.id} url=${target.url.substringBefore('?').take(120)}")
@@ -1217,7 +1357,7 @@ fun PlayerScreen(
                             val retryWithProgressSession = {
                                 if (needed()) {
                                     playbackDiagnostics.retry(load, android.os.SystemClock.elapsedRealtime())
-                                    reportStopInAppScope(position)
+                                    reportStopInAppScope()
                                     progressSession = c.reportStart(item.id, position, srcId, target.playMethod,
                                         target.playSessionId, paused = !desiredPlaying)
                                     retry()
@@ -1237,6 +1377,12 @@ fun PlayerScreen(
                             PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration")
                             return@MpvPlayerController
                         }
+                        if (playbackDiagnostics.identity != load && (playbackDiagnostics.identity?.physicalId ?: 0L) > 0L) {
+                            target.resetTimeline()
+                            lastPlayerPositionMs = null
+                            seekConfirmationJob?.cancel()
+                            seekConfirmation = null
+                        }
                         playbackDiagnostics.activate(load, android.os.SystemClock.elapsedRealtime())
                         phaseTimes.put("identity", playbackDiagnostics.identityJson())
                         mpvState = state
@@ -1247,9 +1393,8 @@ fun PlayerScreen(
                             }
                             subtitlePreference = "auto"
                         }
-                        target.playerToContentPositionMs(state.positionMs)?.let { position = it }
-                        duration = target.durationMs ?: target.playerToContentPositionMs(state.durationMs) ?: 0L
                         if (state.ready && !state.buffering) {
+                            onTimelineFirstFrame(target, android.os.SystemClock.elapsedRealtime())
                             playbackDiagnostics.firstFrame(load, android.os.SystemClock.elapsedRealtime(), "mpv.ready (no rendered-frame callback)")
                         }
                         if (state.ready && !state.buffering && !firstFrameRendered) {
@@ -1265,6 +1410,8 @@ fun PlayerScreen(
                                 .put("readyToFirstFrameMs", readyToFirstFrameMs)
                                 .put("firstFrameMs", loadToFirstFrameMs)
                         }
+                        observeTimelinePosition(target, owner.observedPositionMs(), state.durationMs,
+                            android.os.SystemClock.elapsedRealtime())
                         isPlaying = state.playing && !state.buffering
                         // mpv buffering means paused-for-cache/startup, not background cache fill.
                         updateStalled(state.buffering && (state.playing || !state.ready) && !state.ended && state.error == null)
@@ -1276,7 +1423,7 @@ fun PlayerScreen(
                             return@MpvPlayerController
                         }
                         if (state.ended) {
-                            reportStopInAppScope(position)
+                            reportStopInAppScope()
                             startAutoNext()
                         }
                         if (state.error != null) {
@@ -1452,16 +1599,39 @@ fun PlayerScreen(
     }
 
     fun seekPlayerTo(targetMs: Long) {
-        val playerPosition = currentTarget?.contentToPlayerPositionMs(targetMs)
-        if (playerPosition == null) {
-            playbackStatusNotice = "This source does not support verified seeking yet"
-            return
+        val target = currentTarget
+        val displayTarget = targetMs.coerceAtLeast(0L)
+        val playerPosition = target?.contentToPlayerPositionMs(displayTarget) ?: displayTarget
+        val now = android.os.SystemClock.elapsedRealtime()
+        val beforeSeek = observedPlayerPositionMs() ?: lastPlayerPositionMs
+        target?.timeline?.beforeSeek()
+        seekConfirmationJob?.cancel()
+        seekConfirmation = PendingSeekConfirmation(displayTarget, playerPosition, beforeSeek, now)
+        phaseTimes.put("seekConfirmation", JSONObject().put("state", SeekConfirmation.PENDING.name)
+            .put("targetMs", displayTarget).put("playerTargetMs", playerPosition)
+            .put("timelineUnverified", target?.timeline?.calibration?.offsetMs == null))
+        val attempted = runCatching {
+            when (activeEngine) {
+                "mpv" -> checkNotNull(mpvBackend).seekTo(playerPosition)
+                else -> {
+                    media3PositionAvailable = false
+                    exo.seekTo(playerPosition)
+                }
+            }
         }
-        when (activeEngine) {
-            "mpv" -> mpvBackend?.seekTo(playerPosition)
-            else -> exo.seekTo(playerPosition)
+        if (attempted.isFailure) {
+            confirmSeek(null, now, commandFailed = true)
+        } else {
+            val generation = sessionGeneration
+            seekConfirmationJob = instanceScope.launch {
+                delay(PendingSeekConfirmation.TIMEOUT_MS)
+                if (isCurrentLoad(generation)) {
+                    val observed = observedPlayerPositionMs()
+                    target?.let { observeTimelinePosition(it, observed, null, android.os.SystemClock.elapsedRealtime()) }
+                    confirmSeek(observed, android.os.SystemClock.elapsedRealtime())
+                }
+            }
         }
-        position = targetMs.coerceAtLeast(0L)
         previewFrame = null
         previewTargetMs = null
     }
@@ -1748,6 +1918,7 @@ fun PlayerScreen(
                 updateStalled(state == Player.STATE_BUFFERING && exo.playWhenReady)
                 watchdog.onPlaybackStateChanged(state)
                 if (state == Player.STATE_READY) {
+                    if (exo.currentTracks.groups.none { it.type == C.TRACK_TYPE_VIDEO }) media3PositionAvailable = true
                     if (!phaseTimes.has("seekOffsetMs")) {
                         val actual = exo.currentPosition
                         val requested = lastRequestedStartMs
@@ -1764,7 +1935,7 @@ fun PlayerScreen(
                     playbackStatusNotice = null
                 }
                 if (state == Player.STATE_ENDED) {
-                    reportStopInAppScope(position)
+                    reportStopInAppScope()
                     startAutoNext()
                 }
             }
@@ -1953,10 +2124,16 @@ fun PlayerScreen(
                 renderTimeMs: Long,
             ) {
                 if (!isCurrentMedia3Event(eventTime)) return
+                media3PositionAvailable = true
+                val now = android.os.SystemClock.elapsedRealtime()
+                currentTarget?.let { target ->
+                    onTimelineFirstFrame(target, now)
+                    observeTimelinePosition(target, exo.currentPosition.takeIf { it >= 0L }, exo.duration, now)
+                }
                 firstFrameRendered = true
                 updateStalled(exo.playbackState == Player.STATE_BUFFERING && exo.playWhenReady)
                 phaseTimes.put("firstFramePositionMs", exo.currentPosition)
-                firstFrameAt = android.os.SystemClock.elapsedRealtime()
+                if (firstFrameAt == 0L) firstFrameAt = now
                 val effectiveReadyAt = readyAt.takeIf { it > 0L } ?: firstFrameAt
                 if (readyAt == 0L) readyAt = effectiveReadyAt
                 val loadToReadyMs = (effectiveReadyAt - loadStartedAt).coerceAtLeast(0L)
@@ -1968,7 +2145,13 @@ fun PlayerScreen(
                     .put("firstFrameMs", loadToFirstFrameMs)
                 playbackDiagnostics.identity?.let { playbackDiagnostics.firstFrame(it, firstFrameAt, "Media3.onRenderedFirstFrame") }
                 readyWithoutFrameSince = 0L
-                playbackStatusNotice = null
+                if (strmRestartNoticePending) {
+                    strmRestartNoticePending = false
+                    strmRestartNoticeShown = true
+                    showTimelineNotice("此片源未能续播，已从头播放")
+                } else if (seekConfirmation == null && phaseTimes.optJSONObject("seekConfirmation")?.optString("state") != "ROLLED_BACK") {
+                    playbackStatusNotice = null
+                }
                 matchDisplayFrameRate(output as? Surface, exo.videoFormat?.frameRate)
                 val generation = sessionGeneration
                 instanceScope.launch {
@@ -2006,7 +2189,7 @@ fun PlayerScreen(
 
     DisposableEffect(item.id) {
         onDispose {
-            reportStopInAppScope(position)
+            reportStopInAppScope()
             prewarmJob?.cancel()
             autoNextJob?.cancel()
             watchdog.reset()
@@ -2047,7 +2230,7 @@ fun PlayerScreen(
 
     fun seekBy(delta: Long) {
         val max = if (duration > 0) duration else Long.MAX_VALUE
-        val current = pendingSeekTarget ?: position
+        val current = pendingSeekTarget ?: seekConfirmation?.displayTargetMs ?: position
         val to = (current + delta).coerceIn(0L, max)
         val step = kotlin.math.abs(delta) / 1000
         val targetSeconds = (to / 1000L).coerceAtLeast(0L)
@@ -2149,15 +2332,19 @@ fun PlayerScreen(
             delay(500)
             if (!instanceJob.isActive || currentExo !== exo) return@LaunchedEffect
             val target = currentTarget
-            val playerPosition = when (activeEngine) {
-                "mpv" -> mpvBackend?.positionMs()
-                else -> exo.currentPosition.takeIf { isCurrentMedia3() }
+            val now = android.os.SystemClock.elapsedRealtime()
+            val playerPosition = observedPlayerPositionMs()
+            val playerDuration = when (activeEngine) {
+                "mpv" -> mpvBackend?.durationMs()
+                else -> exo.duration.takeIf { isCurrentMedia3() && it > 0L }
             }
-            if (!reloadPending) playerPosition?.let { target?.playerToContentPositionMs(it) }?.let { position = it }
-            duration = target?.durationMs ?: target?.playerToContentPositionMs(when (activeEngine) {
-                "mpv" -> mpvBackend?.durationMs() ?: 0L
-                else -> exo.duration.coerceAtLeast(0L)
-            }) ?: 0L
+            target?.let { observeTimelinePosition(it, playerPosition, playerDuration, now) }
+            target?.let { checkStrmResume(it, now) }
+            if (activeEngine == "mpv" && strmRestartNoticePending && mpvState.ready && !reloadPending && target?.startPositionMs == 0L) {
+                strmRestartNoticePending = false
+                strmRestartNoticeShown = true
+                showTimelineNotice("此片源未能续播，已从头播放")
+            }
             val contentTimelineKnown = target?.timelineOrigin == TimelineOrigin.CONTENT
             val ownsEngine = if (activeEngine == "media3") isCurrentMedia3() else mpvBackend != null && !reloadPending
             val reason = if (ownsEngine) watchdog.onTick(
@@ -2219,11 +2406,15 @@ fun PlayerScreen(
             }
             sinceReport++
             val reportSession = progressSession
-            if (contentTimelineKnown && error == null && !reloadPending && reportSession != null && !reportSession.isClosed &&
-                sinceReport >= 10 && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
+            if (error == null && !reloadPending && reportSession != null && !reportSession.isClosed &&
+                sinceReport >= 10 && lastPlayerPositionMs != null) {
                 sinceReport = 0
                 val paused = if (activeEngine == "mpv") !mpvState.playing else !exo.isPlaying
-                client?.reportProgress(reportSession, position, paused)
+                val sample = timelinePosition(lastPlayerPositionMs)
+                client?.reportProgress(reportSession, sample.reportPositionMs, paused,
+                    timelineUnverified = sample.timelineUnverified, playerPositionMs = sample.playerPositionMs)
+                phaseTimes.put("lastProgress", client?.lastProgressDiagnostics ?: JSONObject.NULL)
+                PageLog.add("progress: event=Progress contentPos=${sample.contentPositionMs} playerPos=${sample.playerPositionMs} unverified=${sample.timelineUnverified}")
             }
         }
     }
@@ -2321,7 +2512,7 @@ fun PlayerScreen(
         cancelAutoNext()
         showExitPrompt = false
         exitPromptAt = 0L
-        reportStopInAppScope(position)
+        reportStopInAppScope()
         if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
         onBack()
     }
@@ -2644,7 +2835,6 @@ fun PlayerScreen(
                             items(chapters) { chapter ->
                                 FocusSurface(Modifier.fillMaxWidth().height(42.dp), corner = 8.dp, scaleTo = 1f, onClick = {
                                     seekPlayerTo(chapter.startMs)
-                                    position = chapter.startMs
                                     chapterPanel = false
                                     controlsVisible = true
                                 }) { focused ->
@@ -2909,7 +3099,6 @@ fun PlayerScreen(
                         onFocusedChange = { controlHasFocus = it },
                         onSeek = { target ->
                             seekPlayerTo(target)
-                            position = target
                         },
                     )
                     Spacer(Modifier.height(4.dp))
@@ -3175,7 +3364,7 @@ fun PlayerScreen(
                                         onClick = {
                                             if (!active) {
                                                 quickPanel = QuickPanel.NONE
-                                                reportStopInAppScope(position)
+                                                reportStopInAppScope()
                                                 onPlayNext?.invoke(ep)
                                             }
                                         },
