@@ -2,6 +2,7 @@
 
 import com.lumina.tv.data.catchingRequest
 import com.lumina.tv.data.PlaybackStartIntent
+import com.lumina.tv.data.PlaybackProgressSession
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.TimelineOrigin
 
@@ -439,12 +440,17 @@ fun PlayerScreen(
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
     var audioSelectionApplied by remember(item.id) { mutableStateOf(false) }
     var selectedAudioStreamIndex by remember(item.id) { mutableStateOf(AppRuntime.prefs?.audioTrackFor(item.id)) }
+    var progressSession by remember(item.id, client) { mutableStateOf<PlaybackProgressSession?>(null) }
 
     fun reportStopInAppScope(positionMs: Long) {
         val stopClient = client ?: return
-        val stopItemId = item.id
-        val stopPosition = positionMs.coerceAtLeast(0L)
-        AppRuntime.appScope.launch { runCatching { stopClient.reportStop(stopItemId, stopPosition) } }
+        val session = progressSession ?: return
+        // Admission and closing are synchronous; HTTP belongs to the client's application sender.
+        stopClient.reportStop(session, positionMs.coerceAtLeast(0L), paused = !isPlaying)
+    }
+
+    LaunchedEffect(error, progressSession) {
+        if (error != null) reportStopInAppScope(position)
     }
 
     val introSeconds = playbackMarkers?.introEndMs?.takeIf { it > 0L && (duration <= 0L || it < duration) }
@@ -719,6 +725,7 @@ fun PlayerScreen(
             return
         }
         if (reloadPending) return
+        reportStopInAppScope(positionMs)
         reloadPending = true
         reloadUsesRecoveryAttempt = recovering
         media3LoadGeneration = -1
@@ -995,6 +1002,7 @@ fun PlayerScreen(
     ) {
         if (!instanceJob.isActive || currentExo !== exo) return
         val c = client ?: return
+        reportStopInAppScope(position)
         // A native hw->sw retry is part of this same automatic path attempt.
         val recoveryAlreadyAcquired = reloadUsesRecoveryAttempt
         reloadUsesRecoveryAttempt = false
@@ -1175,18 +1183,28 @@ fun PlayerScreen(
                     ?.filter { it.type == "Subtitle" && it.isExternal }
                     .orEmpty()
                 val srcId = target.source?.id
+                progressSession = c.reportStart(item.id, target.startPositionMs, srcId, target.playMethod,
+                    target.playSessionId, paused = restorePaused)
                 if (activeEngine == "mpv") {
                     mpvBackend?.release("new-external-load")
                     mpvState = MpvPlayerController.State()
                     val backend = MpvPlayerController(context, generation, onSoftwareRetry = { owner, load, needed, retry ->
                         if (mpvBackend === owner && isCurrentLoad(load.generation)) {
+                            val retryWithProgressSession = {
+                                if (needed()) {
+                                    reportStopInAppScope(position)
+                                    progressSession = c.reportStart(item.id, position, srcId, target.playMethod,
+                                        target.playSessionId, paused = !desiredPlaying)
+                                    retry()
+                                }
+                            }
                             if (recoveryAlreadyAcquired) {
                                 if (needed()) {
                                     PageLog.add("automaticRecovery reuse=mpv-software-retry gen=$generation attempts=${recoveryBudget.attempts}")
-                                    retry()
+                                    retryWithProgressSession()
                                 }
                             } else {
-                                recoverAutomatically("mpv-software-retry", generation, stillNeeded = needed, action = retry)
+                                recoverAutomatically("mpv-software-retry", generation, stillNeeded = needed, action = retryWithProgressSession)
                             }
                         }
                     }) { owner, load, state ->
@@ -1229,7 +1247,10 @@ fun PlayerScreen(
                             recordAudioMpvFailure()
                             return@MpvPlayerController
                         }
-                        if (state.ended) startAutoNext()
+                        if (state.ended) {
+                            reportStopInAppScope(position)
+                            startAutoNext()
+                        }
                         if (state.error != null) {
                             handleMpvFailure(state.failureKind ?: MpvPlayerController.FailureKind.LOAD, state.error, generation)
                         }
@@ -1345,11 +1366,6 @@ fun PlayerScreen(
                     target.playerStartPositionMs?.let(exo::seekTo)
                     exo.playWhenReady = !restorePaused
                     exo.setPlaybackSpeed(if (boosting) 3f else speed)
-                }
-                if (isCurrentLoad(generation)) {
-                    try { c.reportStart(item.id, target.startPositionMs, target.source?.id, target.playMethod) }
-                    catch (e: kotlinx.coroutines.CancellationException) { throw e }
-                    catch (e: Exception) { android.util.Log.w("LuminaTV", "Playback start report failed", e) }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -1721,7 +1737,10 @@ fun PlayerScreen(
                 } else if (state == Player.STATE_BUFFERING) {
                     playbackStatusNotice = null
                 }
-                if (state == Player.STATE_ENDED) startAutoNext()
+                if (state == Player.STATE_ENDED) {
+                    reportStopInAppScope(position)
+                    startAutoNext()
+                }
             }
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
@@ -2167,10 +2186,12 @@ fun PlayerScreen(
                 failurePhase = "首帧"
             }
             sinceReport++
-            if (contentTimelineKnown && sinceReport >= 10 && AppRuntime.client != null && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
+            val reportSession = progressSession
+            if (contentTimelineKnown && error == null && !reloadPending && reportSession != null && !reportSession.isClosed &&
+                sinceReport >= 10 && duration > 0 && ((activeEngine == "mpv" && mpvState.playing) || (activeEngine == "media3" && exo.isPlaying) || position > 0)) {
                 sinceReport = 0
                 val paused = if (activeEngine == "mpv") !mpvState.playing else !exo.isPlaying
-                catchingRequest { AppRuntime.client?.reportProgress(item.id, position, paused, currentSourceId, currentPlayMethod) }
+                client?.reportProgress(reportSession, position, paused)
             }
         }
     }

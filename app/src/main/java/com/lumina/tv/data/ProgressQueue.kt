@@ -5,122 +5,129 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
+import java.util.UUID
 
-data class PendingProgress(
-    val itemId: String,
-    val positionMs: Long,
-    val at: Long,
-    val eventType: String = "stop",
-    val paused: Boolean = false,
-    val mediaSourceId: String? = null,
-    val playMethod: String = "DirectPlay",
-)
-
-class ProgressQueue(
-    context: Context,
-    serverUrl: String,
-    userId: String,
-) {
-    private val file = File(
+class ProgressQueue internal constructor(private val file: File? = null) {
+    constructor(context: Context, serverUrl: String, userId: String) : this(File(
         context.filesDir,
         "progress_queue_${serverHash(serverUrl)}_${safeUserId(userId)}.json",
-    )
-    private val entries = ArrayDeque<PendingProgress>()
+    ))
 
-    init {
-        load()
-    }
+    private val entries = ArrayDeque<PendingProgress>()
+    private var inFlight: PendingProgress? = null
+
+    init { load() }
 
     @Synchronized
-    fun enqueue(progress: PendingProgress) {
-        if (progress.itemId.isBlank()) return
-        if (progress.eventType == "stop") {
-            entries.removeAll { it.itemId == progress.itemId }
-        } else {
-            entries.removeAll { it.itemId == progress.itemId && it.eventType == progress.eventType }
-        }
-        entries.addLast(progress)
-        while (entries.size > MAX_ENTRIES) entries.removeFirst()
+    internal fun enqueue(event: PendingProgress) {
+        require(event.itemId.isNotBlank() && event.localSessionId.isNotBlank() && event.eventId.isNotBlank())
+        require(event.sequence > 0L)
+        if (entries.any { it.eventId == event.eventId }) return
+        entries.addLast(event)
+        trimToCapacity()
         persist()
     }
 
     @Synchronized
-    fun peek(limit: Int = RETRY_BATCH_SIZE): List<PendingProgress> =
-        entries.take(limit.coerceIn(0, RETRY_BATCH_SIZE))
-
-    @Synchronized
-    fun remove(progress: PendingProgress) {
-        if (entries.remove(progress)) persist()
+    internal fun claimNext(): PendingProgress? {
+        check(inFlight == null) { "Only one progress event may be in flight" }
+        return entries.firstOrNull()?.also { inFlight = it }
     }
 
     @Synchronized
-    fun removeThrough(itemId: String, positionMs: Long, eventType: String) {
-        val eventTypes = when (eventType) {
-            "progress" -> setOf("progress")
-            "stop" -> setOf("start", "progress", "stop")
-            "start" -> setOf("start")
-            else -> emptySet()
+    internal fun release(event: PendingProgress) {
+        if (inFlight == event) inFlight = null
+    }
+
+    /** Only the exact event claimed for this HTTP request is acknowledged. No position comparison. */
+    @Synchronized
+    internal fun acknowledge(sent: PendingProgress): Boolean {
+        if (inFlight != sent) return false
+        val removed = entries.removeAll {
+            it.localSessionId == sent.localSessionId && it.sequence == sent.sequence && it.eventId == sent.eventId
         }
-        if (entries.removeAll {
-                it.itemId == itemId && it.eventType in eventTypes &&
-                    (eventType == "stop" || it.positionMs <= positionMs)
-            }
-        ) persist()
+        inFlight = null
+        if (removed) persist()
+        return removed
     }
 
     @Synchronized
-    fun isEmpty(): Boolean = entries.isEmpty()
+    internal fun snapshot(): List<PendingProgress> = entries.toList()
 
     @Synchronized
     fun clear() {
         entries.clear()
-        if (file.exists()) file.delete()
+        if (file?.exists() == true) file.delete()
     }
 
     private fun load() {
         val restored = runCatching {
-            val array = JSONArray(file.takeIf { it.exists() }?.readText().orEmpty().ifBlank { "[]" })
+            val array = JSONArray(file?.takeIf { it.exists() }?.readText().orEmpty().ifBlank { "[]" })
             (0 until array.length()).mapNotNull { index ->
-                array.optJSONObject(index)?.let { item ->
-                    PendingProgress(
-                        itemId = item.optString("itemId"),
-                        positionMs = item.optLong("positionMs"),
-                        at = item.optLong("at"),
-                        eventType = item.optString("eventType", "stop").takeIf { it in EVENT_TYPES } ?: "stop",
-                        paused = item.optBoolean("paused", false),
-                        mediaSourceId = item.optString("mediaSourceId").takeIf { it.isNotBlank() },
-                        playMethod = item.optString("playMethod", "DirectPlay"),
-                    )
-                }?.takeIf { it.itemId.isNotBlank() }
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                val itemId = item.optString("itemId").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val localSessionId = item.stringOrNull("localSessionId")
+                val eventId = item.stringOrNull("eventId")
+                val sequence = item.optLong("sequence", 0L)
+                val identified = localSessionId != null && eventId != null && sequence > 0L
+                // Legacy rows cannot reveal playback boundaries. Give EACH row an isolated historical
+                // session, persist it immediately, and never infer a live session from item/source IDs.
+                val orphanId = if (identified) null else UUID.randomUUID().toString()
+                PendingProgress(
+                    localSessionId = if (identified) checkNotNull(localSessionId) else "orphan-$orphanId",
+                    sequence = if (identified) sequence else 1L,
+                    eventId = if (identified) checkNotNull(eventId) else "orphan-event-$orphanId",
+                    playSessionId = item.stringOrNull("playSessionId"),
+                    sourceId = item.stringOrNull("sourceId") ?: item.stringOrNull("mediaSourceId"),
+                    itemId = itemId,
+                    eventType = ProgressEventType.entries.firstOrNull { it.name.equals(item.optString("eventType"), true) }
+                        ?: ProgressEventType.Stop,
+                    positionMs = item.optLong("positionMs").coerceAtLeast(0L),
+                    paused = item.optBoolean("paused", false),
+                    playMethod = item.optString("playMethod", "DirectPlay"),
+                    at = item.optLong("at"),
+                )
             }
         }.getOrDefault(emptyList())
 
-        restored.sortedBy { it.at }.forEach { progress ->
-            entries.removeAll { it.itemId == progress.itemId && it.eventType == progress.eventType }
-            entries.addLast(progress)
+        // File order is enqueue order. Wall clocks and playback positions may move backwards.
+        entries.addAll(restored.distinctBy { it.eventId })
+        trimToCapacity()
+        if (file?.exists() == true) persist()
+    }
+
+    private fun trimToCapacity() {
+        // Retain the existing bounded outbox policy. Capacity eviction is not an HTTP ACK,
+        // and must never evict the event whose request is still in flight.
+        while (entries.size > MAX_ENTRIES) {
+            val oldest = entries.firstOrNull { it != inFlight } ?: break
+            entries.remove(oldest)
         }
-        while (entries.size > MAX_ENTRIES) entries.removeFirst()
-        if (restored.size != entries.size || file.exists()) persist()
     }
 
     private fun persist() {
+        val destination = file ?: return
         runCatching {
             val json = JSONArray().apply {
-                entries.forEach { progress ->
+                entries.forEach { event ->
                     put(JSONObject()
-                        .put("itemId", progress.itemId)
-                        .put("positionMs", progress.positionMs)
-                        .put("at", progress.at)
-                        .put("eventType", progress.eventType)
-                        .put("paused", progress.paused)
-                        .put("mediaSourceId", progress.mediaSourceId ?: JSONObject.NULL)
-                        .put("playMethod", progress.playMethod))
+                        .put("localSessionId", event.localSessionId)
+                        .put("sequence", event.sequence)
+                        .put("eventId", event.eventId)
+                        .put("playSessionId", event.playSessionId ?: JSONObject.NULL)
+                        .put("sourceId", event.sourceId ?: JSONObject.NULL)
+                        .put("itemId", event.itemId)
+                        .put("eventType", event.eventType.name)
+                        .put("positionMs", event.positionMs)
+                        .put("paused", event.paused)
+                        .put("playMethod", event.playMethod)
+                        .put("at", event.at))
                 }
             }.toString()
-            val temp = File(file.parentFile, "${file.name}.tmp")
+            val temp = File(destination.parentFile, "${destination.name}.tmp")
             temp.writeText(json)
-            if (!temp.renameTo(file)) {
-                file.writeText(json)
+            if (!temp.renameTo(destination)) {
+                destination.writeText(json)
                 temp.delete()
             }
         }
@@ -128,8 +135,9 @@ class ProgressQueue(
 
     companion object {
         const val MAX_ENTRIES = 50
-        const val RETRY_BATCH_SIZE = 5
-        private val EVENT_TYPES = setOf("start", "progress", "stop")
+
+        private fun JSONObject.stringOrNull(key: String): String? =
+            if (isNull(key)) null else optString(key).takeIf { it.isNotBlank() }
 
         private fun serverHash(serverUrl: String): String = MessageDigest.getInstance("SHA-256")
             .digest(EmbyClient.normalize(serverUrl).lowercase().toByteArray(Charsets.UTF_8))

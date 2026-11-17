@@ -61,7 +61,7 @@ class EmbyClient(
     private val deviceId: String = "lumina-tv",
     val userName: String = "",
     val serverName: String = "Emby",
-    private val progressQueue: ProgressQueue? = null,
+    progressQueue: ProgressQueue? = null,
 ) {
     @Volatile var lastPlaybackInfoJson: String? = null
         private set
@@ -90,10 +90,9 @@ class EmbyClient(
 
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val progressFlushMutex = Mutex()
-    private val progressScheduleLock = Any()
-    @Volatile private var progressFlushScheduled = false
-    @Volatile private var lastProgressFlushAt = 0L
+    private val progressOutbox = progressQueue ?: ProgressQueue()
+    // AppRuntime owns this client. Playback screens only submit snapshots; they never own HTTP jobs.
+    private val progressSender = ProgressSender(progressScope, progressOutbox, send = ::sendProgressEvent)
     private val trickplayMutex = Mutex()
     private val trickplayFiles = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
     private var trickplayBytes = 0L
@@ -1511,99 +1510,47 @@ class EmbyClient(
 
     // ---------------- 进度上报 ----------------
 
-    suspend fun reportStart(itemId: String, positionMs: Long, mediaSourceId: String?, playMethod: String) = withMetadataContext {
-        if (sendStart(itemId, positionMs, mediaSourceId, playMethod)) {
-            progressQueue?.removeThrough(itemId, positionMs, "start")
-        } else {
-            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis(), "start", mediaSourceId = mediaSourceId, playMethod = playMethod))
+    fun reportStart(
+        itemId: String,
+        positionMs: Long,
+        sourceId: String?,
+        playMethod: String,
+        playSessionId: String?,
+        paused: Boolean = false,
+    ): PlaybackProgressSession = progressSender.start(itemId, positionMs, sourceId, playSessionId, playMethod, paused)
+
+    fun reportProgress(session: PlaybackProgressSession, positionMs: Long, paused: Boolean): Boolean =
+        progressSender.progress(session, positionMs, paused)
+
+    fun reportStop(session: PlaybackProgressSession, positionMs: Long, paused: Boolean = true): Boolean =
+        progressSender.stop(session, positionMs, paused)
+
+    /** The sole HTTP entry for Start/Progress/Stop, invoked only by the serial sender. */
+    private suspend fun sendProgressEvent(event: PendingProgress): Boolean = catchingRequest {
+        val path = when (event.eventType) {
+            ProgressEventType.Start -> "/Sessions/Playing"
+            ProgressEventType.Progress -> "/Sessions/Playing/Progress"
+            ProgressEventType.Stop -> "/Sessions/Playing/Stopped"
         }
-    }
+        val body = JSONObject()
+            .put("ItemId", event.itemId)
+            .put("PositionTicks", event.positionMs * 10_000L)
+            .put("IsPaused", event.paused)
+            .put("PlayMethod", event.playMethod)
+            .put("MediaSourceId", event.sourceId ?: event.itemId)
+        event.playSessionId?.let { body.put("PlaySessionId", it) }
+        if (event.eventType != ProgressEventType.Stop) body.put("CanSeek", true)
+        postJson(url(path), body.toString())
+    }.onFailure {
+        lastApiFailure = "report${event.eventType}: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}"
+    }.isSuccess
 
-    suspend fun reportProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String) = withMetadataContext {
-        if (sendProgress(itemId, positionMs, paused, mediaSourceId, playMethod)) {
-            progressQueue?.removeThrough(itemId, positionMs, "progress")
-        } else {
-            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis(), "progress", paused, mediaSourceId, playMethod))
-        }
-    }
+    fun requestProgressFlush() = progressSender.requestFlush()
 
-    suspend fun reportStop(itemId: String, positionMs: Long) = withMetadataContext {
-        if (sendStop(itemId, positionMs)) {
-            progressQueue?.removeThrough(itemId, positionMs, "stop")
-        } else {
-            progressQueue?.enqueue(PendingProgress(itemId, positionMs, System.currentTimeMillis(), "stop"))
-        }
-    }
-
-    private suspend fun sendStart(itemId: String, positionMs: Long, mediaSourceId: String?, playMethod: String): Boolean = catchingRequest {
-        postJson(url("/Sessions/Playing", emptyMap()), JSONObject()
-            .put("ItemId", itemId)
-            .put("PositionTicks", positionMs * 10_000)
-            .put("CanSeek", true)
-            .put("IsPaused", false)
-            .put("PlayMethod", playMethod)
-            .put("MediaSourceId", mediaSourceId ?: itemId)
-            .toString())
-    }.onFailure { lastApiFailure = "reportStart: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }.isSuccess
-
-    private suspend fun sendProgress(itemId: String, positionMs: Long, paused: Boolean, mediaSourceId: String?, playMethod: String): Boolean = catchingRequest {
-        postJson(url("/Sessions/Playing/Progress", emptyMap()), JSONObject()
-            .put("ItemId", itemId)
-            .put("PositionTicks", positionMs * 10_000)
-            .put("IsPaused", paused)
-            .put("CanSeek", true)
-            .put("PlayMethod", playMethod)
-            .put("MediaSourceId", mediaSourceId ?: itemId)
-            .toString())
-    }.onFailure { lastApiFailure = "reportProgress: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }.isSuccess
-
-    private suspend fun sendStop(itemId: String, positionMs: Long): Boolean = catchingRequest {
-        postJson(url("/Sessions/Playing/Stopped", emptyMap()), JSONObject()
-            .put("ItemId", itemId)
-            .put("PositionTicks", positionMs * 10_000)
-            .toString())
-    }.onFailure { lastApiFailure = "reportStop: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}" }.isSuccess
-
-    fun requestProgressFlush() {
-        val queue = progressQueue ?: return
-        if (queue.isEmpty()) return
-        synchronized(progressScheduleLock) {
-            if (progressFlushScheduled) return
-            progressFlushScheduled = true
-        }
-        progressScope.launch {
-            val waitMs = (lastProgressFlushAt + PROGRESS_FLUSH_DEBOUNCE_MS - System.currentTimeMillis()).coerceAtLeast(0L)
-            if (waitMs > 0L) delay(waitMs)
-            try {
-                flushPendingProgress()
-            } finally {
-                synchronized(progressScheduleLock) { progressFlushScheduled = false }
-            }
-        }
-    }
-
-    private suspend fun flushPendingProgress() = progressFlushMutex.withLock {
-        val queue = progressQueue ?: return@withLock
-        lastProgressFlushAt = System.currentTimeMillis()
-        queue.peek().forEach { progress ->
-            val sent = when (progress.eventType) {
-                "progress" -> sendProgress(progress.itemId, progress.positionMs, progress.paused, progress.mediaSourceId, progress.playMethod)
-                "start" -> sendStart(progress.itemId, progress.positionMs, progress.mediaSourceId, progress.playMethod)
-                else -> sendStop(progress.itemId, progress.positionMs)
-            }
-            if (sent) {
-                if (progress.eventType == "progress" || progress.eventType == "stop") {
-                    queue.removeThrough(progress.itemId, progress.positionMs, progress.eventType)
-                } else queue.remove(progress)
-            }
-        }
-    }
-
-    fun clearPendingProgress() {
-        progressQueue?.clear()
-    }
+    fun clearPendingProgress() = progressOutbox.clear()
 
     fun close() {
+        progressSender.close()
         progressScope.cancel()
     }
 
@@ -1640,7 +1587,6 @@ class EmbyClient(
 
     companion object {
         private const val SEARCH_REQUEST_ATTEMPTS = 2
-        private const val PROGRESS_FLUSH_DEBOUNCE_MS = 10_000L
         private val BIF_MAGIC = byteArrayOf(0x89.toByte(), 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A)
         private const val MAX_TRICKPLAY_FILE_BYTES = 16L * 1024 * 1024
         private const val MAX_TRICKPLAY_BYTES = 64L * 1024 * 1024

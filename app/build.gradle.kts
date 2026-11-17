@@ -20,8 +20,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 135
-        versionName = "1.22.94"
+        versionCode = 136
+        versionName = "1.22.95"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
         buildConfigField("String", "MDBLIST_API_KEY", "\"${localProps.getProperty("MDBLIST_API_KEY", "")}\"")
@@ -124,7 +124,7 @@ val p1Checks = tasks.register<JavaExec>("p1Checks") {
 }
 val verifyOffline = tasks.register("verifyOffline") {
     group = "verification"
-    description = "Mandatory offline logic gate: samples, A1 and P1 assertions."
+    description = "Mandatory offline logic gate: samples, A1, P1, P2 and P3 assertions."
     dependsOn(samples, p1Checks)
 }
 val p2Checks = tasks.register<JavaExec>("p2Checks") {
@@ -135,5 +135,13 @@ val p2Checks = tasks.register<JavaExec>("p2Checks") {
     mainClass.set("com.lumina.tv.player.P2PlaybackChecks")
 }
 verifyOffline.configure { dependsOn(p2Checks) }
+val p3Checks = tasks.register<JavaExec>("p3Checks") {
+    group = "verification"
+    description = "Check serial progress delivery, exact ACKs and playback session closure."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.data.P3ProgressChecks")
+}
+verifyOffline.configure { dependsOn(p3Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }
