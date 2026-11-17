@@ -9,7 +9,7 @@ import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
 import com.lumina.tv.player.MpvPlayerController
-import com.lumina.tv.player.StabilityMetrics
+import com.lumina.tv.player.PlaybackDiagnostics
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
@@ -48,6 +48,8 @@ internal fun buildPlayerDiagPayload(
     currentSourceId: String?,
     currentPlayMethod: String,
     duration: Long,
+    playbackDiagnostics: PlaybackDiagnostics,
+    selectedAudioStreamIndex: Int?,
 ): DiagPayload {
     val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
     val isDolbyVision = videoStream?.let {
@@ -60,10 +62,16 @@ internal fun buildPlayerDiagPayload(
             display.contains("DOVI") || display.contains("DOLBYVISION")
     } ?: false
     val phases = JSONObject(phaseTimes.toString())
+    val readback = if (activeEngine == "mpv") mpvBackend?.diagnosticReadback(playbackDiagnostics.identity).orEmpty() else emptyMap()
+    val actualDecoder = playbackDiagnostics.actualDecoder(activeEngine, readback)
+    val actualOutput = playbackDiagnostics.actualAudioOutput(activeEngine, readback)
+    val actualAudioIndex = if (activeEngine == "mpv") mpvBackend?.currentAudioEmbyIndex() else selectedAudioStreamIndex
+    val audioStream = playbackSource?.audioStreams?.firstOrNull { it.index == actualAudioIndex }
     if (activeEngine == "mpv") listOf("decoderInitMs", "compatMappingMs", "firstFrameMs", "stableOutputMs").forEach { key ->
         if (phases.isNull(key)) phases.put(key, "N/A")
     }
     val meta = DiagExporter.baseMeta(context, outcome)
+        .put("load", playbackDiagnostics.identityJson())
         .put("engine", JSONObject()
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
             .put("active", activeEngine)
@@ -86,7 +94,7 @@ internal fun buildPlayerDiagPayload(
                 .put("displayTitle", videoStream?.displayTitle ?: JSONObject.NULL)
                 .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
                 .put("decoderPath", dvDecoderPath ?: JSONObject.NULL)))
-        .put("playback", JSONObject().put("url", currentPlaybackUrl ?: JSONObject.NULL)
+        .put("playback", JSONObject()
             .put("urlType", currentPlaybackUrl?.let {
                 when { it.contains(".m3u8", true) -> "hls"; else -> "static" }
             } ?: "none").put("negotiation", negotiationDiagnostics)
@@ -98,17 +106,25 @@ internal fun buildPlayerDiagPayload(
                 .put("sourceFps", videoStream?.frameRate ?: JSONObject.NULL)
                 .put("firstFrameLatencyMs", phases.opt("firstFrameMs"))))
         .put("audioDecode", JSONObject()
-            .put("audioDecodeMode", audioDecodeMode)
-            .put("audioSupport", audioSupport)
-            .put("declareDtsDirectPlay", AppRuntime.prefs?.declareDtsDirectPlay ?: false)
-            .put("audioDecodePath", when {
-                audioDecodeMode == "passthrough" -> "passthrough"
-                activeEngine == "mpv" -> "local-soft-mpv"
-                else -> "direct"
-            })
-            .put("audioCodec", playbackSource?.audioStreams?.firstOrNull { it.isDefault }?.codec ?: playbackSource?.audioStreams?.firstOrNull()?.codec ?: JSONObject.NULL)
-            .put("channels", playbackSource?.audioStreams?.firstOrNull { it.isDefault }?.channels ?: playbackSource?.audioStreams?.firstOrNull()?.channels ?: JSONObject.NULL)
-            .put("transcoded", playbackSource?.let { !it.supportsDirectPlay || degraded } ?: false))
+            .put("load", playbackDiagnostics.identityJson())
+            .put("sourceFormat", JSONObject()
+                .put("container", playbackSource?.container ?: "unknown")
+                .put("selectedAudioStreamIndex", actualAudioIndex ?: "unknown")
+                .put("codec", audioStream?.codec ?: "unknown")
+                .put("channels", audioStream?.channels ?: "unknown")
+                .put("audioStreams", JSONArray().apply {
+                    playbackSource?.audioStreams.orEmpty().forEach { stream ->
+                        put(JSONObject().put("index", stream.index).put("codec", stream.codec ?: "unknown")
+                            .put("channels", stream.channels ?: "unknown").put("sampleRate", stream.sampleRate ?: "unknown"))
+                    }
+                }))
+            .put("selectionPolicy", JSONObject()
+                .put("requestedAudioMode", audioDecodeMode)
+                .put("audioSupportAssessment", audioSupport)
+                .put("declareDtsDirectPlay", AppRuntime.prefs?.declareDtsDirectPlay ?: false)
+                .put("selectedEngine", activeEngine).put("negotiatedPlayMethod", currentPlayMethod))
+            .put("actualDecoder", actualDecoder)
+            .put("actualAudioOutput", actualOutput))
         .put("engineSwitchTrace", JSONArray(engineSwitchTrace))
     val streams = JSONArray().apply {
         playbackSource?.streams.orEmpty().forEach { stream ->
@@ -161,13 +177,9 @@ internal fun buildPlayerDiagPayload(
         .put("mpvErrorPresent", mpvState.error != null)
         .put("mpvSoftwareRetryCount", mpvBackend?.softwareRetryCount() ?: 0)
         .put("audioDecodeFailure", AppRuntime.prefs?.lastPlaybackAudioFailure ?: "")
-        .put("metrics", JSONObject()
-            .put("firstFrameMs", StabilityMetrics.firstFrameMs ?: JSONObject.NULL)
-            .put("rebufferCount", StabilityMetrics.rebufferCount)
-            .put("rebufferDurationMs", StabilityMetrics.rebufferDurationMs)
+        .put("metrics", playbackDiagnostics.snapshot(android.os.SystemClock.elapsedRealtime())
             .put("droppedFrames", droppedFrames + (mpvBackend?.diagnosticProperties()?.get("vo-drop-frame-count")?.toLongOrNull() ?: 0L))
-            .put("retryCount", StabilityMetrics.retryCount)
-            .put("watchdogHits", StabilityMetrics.watchdogHits))
+            .put("droppedFramesScope", "screen-session"))
     return DiagPayload(
         metaJson = meta.toString(2),
         playbackInfoJson = playbackInfoJson ?: JSONObject().put("reason", "PlaybackInfo was not captured").toString(2),

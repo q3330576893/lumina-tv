@@ -224,6 +224,13 @@ fun HomeScreen(
     var movies by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.movies ?: emptyList()) }
     var series by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
     var favorites by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
+    val favoritesPager = remember(client) {
+        client?.let { c -> com.lumina.tv.data.FavoritesPager(
+            com.lumina.tv.data.favoritesQueryKey(c.baseUrl, c.userId),
+            currentRevision = { LibraryCache.userDataRevision }, fetch = c::getFavorites,
+        ) }
+    }
+    val favoritesGridState = remember(favoritesPager) { LazyGridState() }
     var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
     var libraryCounts by remember { mutableStateOf<Map<String, Int?>>(emptyMap()) }
     var libraryRecentBackdropUrls by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
@@ -295,6 +302,7 @@ fun HomeScreen(
     }
     // 保存位置：只有"恢复完成"之后才写回，避免刚进页面时的 (0,0) 把记忆冲掉
     LaunchedEffect(gridStateKey, gridState, pendingGridRestore, userDataRevision) {
+        if (tab == HomeTab.Favorites) return@LaunchedEffect
         if (pendingGridRestore != null) return@LaunchedEffect
         snapshotFlow {
             Triple(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset, gridItems.size)
@@ -305,6 +313,7 @@ fun HomeScreen(
 
     // 恢复位置：必须等条目到齐（含上次已加载的分页数量）再滚，否则会被列表钳到 0
     LaunchedEffect(gridStateKey, gridState, pendingGridRestore, userDataRevision, selectedLibrary) {
+        if (tab == HomeTab.Favorites) return@LaunchedEffect
         val target = pendingGridRestore ?: return@LaunchedEffect
         val (wantIndex, wantOffset, wantLoaded) = target
         snapshotFlow { gridLoading }.first { !it }
@@ -312,7 +321,7 @@ fun HomeScreen(
             pendingGridRestore = null
             return@LaunchedEffect
         }
-        // 电影/剧集/收藏是一次性全量拉取，没有分页，直接进入滚动恢复
+        // 收藏由 FavoritesPager 独立恢复；电影/剧集直接进入滚动恢复。
         while (selectedLibrary != null && librarySort != "random" && gridItems.size < wantLoaded && gridHasMore) {
             val lib = selectedLibrary
             if (client != null) {
@@ -432,7 +441,7 @@ fun HomeScreen(
                 val rA = async { catchingRequest { c.getResume(20) } }
                 val mA = async { catchingRequest { c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 24) } }
                 val sA = async { catchingRequest { c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 24) } }
-                val fA = async { catchingRequest { c.getFavorites(24) } }
+                val fA = async { catchingRequest { c.getFavorites(24, startIndex = 0).items } }
                 val vA = async { catchingRequest { c.getViews() } }
                 val lA = async { catchingRequest {
                     c.getLatest(null, 24).distinctBy { it.id }.filter { it.type != "Movie" && it.type != "Series" }
@@ -536,6 +545,7 @@ fun HomeScreen(
 
     // 切换标签：Movies/Series 直接复用首页已加载的数据，不再额外请求
     LaunchedEffect(tab, selectedLibrary, gridStateKey, userDataRevision) {
+        if (tab == HomeTab.Favorites) return@LaunchedEffect
         val requestTab = tab
         val requestLibrary = selectedLibrary
         val requestSort = librarySort
@@ -565,16 +575,9 @@ fun HomeScreen(
             gridRefreshing = false
             return@LaunchedEffect
         }
-        if (requestTab == HomeTab.Favorites && favorites.isNotEmpty()) {
-            gridItems = favorites
-            gridLoading = false
-            gridRefreshing = false
-            return@LaunchedEffect
-        }
         val key = when (requestTab) {
             HomeTab.Movies -> "movies"
             HomeTab.Series -> "series"
-            HomeTab.Favorites -> "favorites"
             HomeTab.Media -> libraryBrowseKey(requestLibrary?.id.orEmpty(), requestSort, requestOrder)
             else -> return@LaunchedEffect
         }
@@ -596,7 +599,6 @@ fun HomeScreen(
                 when (requestTab) {
                     HomeTab.Movies -> c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
                     HomeTab.Series -> c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
-                    HomeTab.Favorites -> c.getFavorites(120)
                     HomeTab.Media -> requestLibrary?.let {
                         val (sb, so) = sortParams(requestSort, requestOrder)
                         PageLog.add("libraryQuery path=initial SortBy=$sb SortOrder=$so start=0 limit=50")
@@ -632,6 +634,7 @@ fun HomeScreen(
     }
 
     LaunchedEffect(selectedLibrary, gridStateKey, userDataRevision) {
+        if (tab == HomeTab.Favorites) return@LaunchedEffect
         if (selectedLibrary == null || librarySort == "random") return@LaunchedEffect
         val activeSort = librarySort
         val activeOrder = librarySortOrder
@@ -735,7 +738,7 @@ fun HomeScreen(
     }
     val hasContentTarget = when (tab) {
         HomeTab.Recommend -> firstSectionKey != null
-        HomeTab.Favorites -> gridItems.isNotEmpty()
+        HomeTab.Favorites -> favoritesPager?.state?.items?.isNotEmpty() == true
         HomeTab.Media -> selectedLibraryId == null && views.any { !(AppRuntime.prefs?.isViewHidden(it.id) ?: false) }
         else -> false
     }
@@ -767,7 +770,7 @@ fun HomeScreen(
                     runCatching { heroPlayFocus.requestFocus() }
                 }
                 HomeTab.Favorites -> {
-                    gridState.scrollToItem(0)
+                    favoritesGridState.scrollToItem(0)
                     withFrameNanos { }
                     withFrameNanos { }
                     runCatching { favoritesContentFocus.requestFocus() }
@@ -784,7 +787,7 @@ fun HomeScreen(
     }
     val navContentFocus = when (tab) {
         HomeTab.Recommend -> if (hasContentTarget) firstContentFocus else FocusRequester.Default
-        HomeTab.Favorites -> if (gridItems.isNotEmpty()) favoritesContentFocus else FocusRequester.Default
+        HomeTab.Favorites -> if (hasContentTarget) favoritesContentFocus else FocusRequester.Default
         HomeTab.Media -> if (selectedLibraryId == null && views.any { !(AppRuntime.prefs?.isViewHidden(it.id) ?: false) }) mediaLibraryContentFocus else FocusRequester.Default
         else -> FocusRequester.Default
     }
@@ -809,6 +812,10 @@ fun HomeScreen(
         } else false
     }) {
         when {
+            tab == HomeTab.Favorites && client != null && favoritesPager != null -> FavoritesScreen(
+                client, favoritesPager, favoritesGridState, favorites, userDataRevision,
+                favoritesContentFocus, onOpenDetail,
+            )
             loading -> LoadingView(text = "正在读取影库…")
                 error != null -> Column(
                     Modifier.fillMaxSize().clickable { reloadToken++ },

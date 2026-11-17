@@ -274,8 +274,20 @@ class EmbyClient(
         }.getOrNull()
     }
 
-    suspend fun getFavorites(limit: Int = 24): List<MediaItem> = withMetadataContext {
-        getItems(types = "Movie,Series,Episode", sortBy = "DateCreated", sortOrder = "Descending", limit = limit, filters = "IsFavorite")
+    suspend fun getFavorites(limit: Int = 24, startIndex: Int = 0): FavoritesPage = withMetadataContext {
+        require(limit > 0 && startIndex >= 0)
+        val response = getJson(url("/Users/$userId/Items", mapOf(
+            "Recursive" to "true", "IncludeItemTypes" to "Movie,Series,Episode",
+            "Filters" to "IsFavorite", "SortBy" to FAVORITES_SORT, "SortOrder" to "Descending",
+            "Limit" to limit.toString(), "StartIndex" to startIndex.toString(),
+            "EnableTotalRecordCount" to "true",
+            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProductionLocations,OriginalLanguage",
+            "ImageTypeLimit" to "1", "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo",
+        )))
+        val rows = response.optJSONArray("Items") ?: JSONArray()
+        val total = response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
+        // Advance by rows consumed from this response, never by the de-duplicated UI size.
+        FavoritesPage(parseItems(rows), total, favoritesNextOffset(startIndex, rows.length(), total))
     }
 
     /** 全部类型（题材）名称。多级兜底：/Genres → /Items/Filters → 本地汇总。 */

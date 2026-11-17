@@ -240,6 +240,7 @@ object LibraryCache {
     fun invalidateUserData(context: Context, baseUrl: String, userId: String, itemId: String,
         favorite: Boolean? = null, played: Boolean? = null) {
         synchronized(this) {
+            FavoritesCache.invalidate(favoritesQueryKey(baseUrl, userId), itemId, favorite, played)
             removeHomeDisk(context, baseUrl, userId)
             homeWriteTimes.remove(homeFile(context, baseUrl, userId).name)
             home = null
@@ -278,6 +279,7 @@ object LibraryCache {
 
     fun clear() {
         synchronized(this) {
+            FavoritesCache.clear()
             userDataRevision++
             home = null
             details.clear()

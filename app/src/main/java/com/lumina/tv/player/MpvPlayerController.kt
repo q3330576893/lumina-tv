@@ -461,6 +461,17 @@ class MpvPlayerController(
         listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
     }
     fun softwareRetryCount(): Int = softwareRetryCount
+    fun diagnosticLoadIdentity(): LoadIdentity? = activeLoad?.takeIf(::isActive)?.identity
+
+    /** Fresh readback only: never expose cached properties from a retired physical load as actual output. */
+    fun diagnosticReadback(identity: LoadIdentity?): Map<String, String> {
+        checkMainThread()
+        val load = activeLoad?.takeIf { isActive(it) && it.identity == identity } ?: return emptyMap()
+        return listOf("audio-decoder", "video-decoder", "hwdec-current", "current-ao",
+            "audio-out-params/format", "audio-out-params/channels", "audio-out-params/samplerate")
+            .mapNotNull { key -> runCatching { load.engine.getPropertyString(key) }.getOrNull()?.let { key to it } }.toMap()
+    }
+
     fun diagnosticProperties(): Map<String, String> {
         checkMainThread()
         val properties = observedProperties.toMutableMap()

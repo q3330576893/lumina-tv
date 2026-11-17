@@ -1,0 +1,9 @@
+// gradle --offline -I app/src/test/java/com/lumina/tv/p6-checks.init.gradle :app:p6Checks :app:verifyOffline
+gradle.projectsEvaluated {
+    def app = gradle.rootProject.project(':app')
+    app.tasks.register('p6Checks', JavaExec) {
+        dependsOn app.tasks.named('samples')
+        classpath = app.tasks.named('samples').get().classpath
+        mainClass = 'com.lumina.tv.P6Checks'
+    }
+}
