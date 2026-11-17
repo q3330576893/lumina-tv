@@ -23,6 +23,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.ui.screens.accountFocusTargets
+import com.lumina.tv.ui.screens.accountRequesterKeys
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
@@ -42,15 +44,9 @@ fun SettingsAccount(
     var renameServerText by remember { mutableStateOf("") }
     var showLogoutConfirmation by remember { mutableStateOf(false) }
     val session = AppRuntime.session
-    val serverRows = savedServers.flatMap { (_, url) ->
-        listOf("account:switch:$url", "account:edit:$url", "account:delete:$url")
-    }
-    val rowKeys = buildList {
-        add("account:current-edit")
-        add("account:save-current")
-        addAll(if (savedServers.isEmpty()) listOf("account:empty") else serverRows)
-        add("account:logout")
-    }
+    val savedServerUrls = savedServers.map { it.second }
+    val focusTargets = accountFocusTargets(savedServerUrls)
+    val rowKeys = accountRequesterKeys(savedServerUrls)
     val requesters = remember(rowKeys) {
         rowKeys.mapIndexed { index, key -> key to if (index == 0) firstFocusRequester else FocusRequester() }.toMap()
     }
@@ -114,7 +110,7 @@ fun SettingsAccount(
                     },
                     focusRequester = requireNotNull(requesters["account:current-edit"]),
                     leftRequester = railRequester,
-                    upRequester = requireNotNull(requesters["account:current-edit"]),
+                    upRequester = focusTargets.getValue("account:current-edit").up?.let(requesters::getValue),
                     onFocused = onFocused,
                     showDivider = false,
                 )
@@ -143,7 +139,8 @@ fun SettingsAccount(
                         },
                         focusRequester = requireNotNull(requesters["account:switch:$url"]),
                         leftRequester = railRequester,
-                        upRequester = if (index == 0) requireNotNull(requesters["account:switch:$url"]) else requireNotNull(requesters["account:delete:${savedServers[index - 1].second}"]),
+                        upRequester = focusTargets.getValue("account:switch:$url").up?.let(requesters::getValue),
+                        downRequester = focusTargets.getValue("account:switch:$url").down?.let(requesters::getValue),
                         onFocused = onFocused,
                     )
                     ActionRow(
@@ -154,7 +151,8 @@ fun SettingsAccount(
                         onClick = { renameServerUrl = url; renameServerText = name },
                         focusRequester = requireNotNull(requesters["account:edit:$url"]),
                         leftRequester = railRequester,
-                        upRequester = requireNotNull(requesters["account:switch:$url"]),
+                        upRequester = focusTargets.getValue("account:edit:$url").up?.let(requesters::getValue),
+                        downRequester = focusTargets.getValue("account:edit:$url").down?.let(requesters::getValue),
                         onFocused = onFocused,
                     )
                     ActionRow(
@@ -168,8 +166,8 @@ fun SettingsAccount(
                         },
                         focusRequester = requireNotNull(requesters["account:delete:$url"]),
                         leftRequester = railRequester,
-                        upRequester = requireNotNull(requesters["account:edit:$url"]),
-                        downRequester = requireNotNull(requesters["account:save-current"]),
+                        upRequester = focusTargets.getValue("account:delete:$url").up?.let(requesters::getValue),
+                        downRequester = focusTargets.getValue("account:delete:$url").down?.let(requesters::getValue),
                         onFocused = onFocused,
                         danger = true,
                         showDivider = false,
@@ -187,10 +185,8 @@ fun SettingsAccount(
                     onClick = { prefs?.saveCurrentServer(); savedServers = prefs?.savedServers().orEmpty() },
                     focusRequester = requireNotNull(requesters["account:save-current"]),
                     leftRequester = railRequester,
-                    upRequester = when {
-                        savedServers.isEmpty() -> requireNotNull(requesters["account:empty"])
-                        else -> requireNotNull(requesters["account:delete:${savedServers.last().second}"])
-                    },
+                    upRequester = focusTargets.getValue("account:save-current").up?.let(requesters::getValue),
+                    downRequester = focusTargets.getValue("account:save-current").down?.let(requesters::getValue),
                     onFocused = onFocused,
                 )
                 ActionRow(
@@ -201,8 +197,7 @@ fun SettingsAccount(
                     onClick = { showLogoutConfirmation = true },
                     focusRequester = requireNotNull(requesters["account:logout"]),
                     leftRequester = railRequester,
-                    upRequester = requireNotNull(requesters["account:save-current"]),
-                    downRequester = requireNotNull(requesters["account:logout"]),
+                    upRequester = focusTargets.getValue("account:logout").up?.let(requesters::getValue),
                     onFocused = onFocused,
                     danger = true,
                     showDivider = false,

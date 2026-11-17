@@ -259,6 +259,9 @@ fun HomeScreen(
     var gridAppending by remember(gridStateKey, userDataRevision) { mutableStateOf(false) }
     var gridNextIndex by remember(gridStateKey, userDataRevision) { mutableStateOf(0) }
     var gridHasMore by remember(gridStateKey, userDataRevision) { mutableStateOf(false) }
+    var gridAppendFailed by remember(gridStateKey, userDataRevision) { mutableStateOf(false) }
+    var gridRetryRequested by remember(gridStateKey, userDataRevision) { mutableIntStateOf(0) }
+    var gridRetryHandled by remember(gridStateKey, userDataRevision) { mutableIntStateOf(0) }
     val gridState = remember(gridStateKey) {
         gridStates.getOrPut(gridStateKey) { LazyGridState() }
     }
@@ -336,15 +339,21 @@ fun HomeScreen(
                     currentCoroutineContext().ensureActive()
                     if (page.isNotEmpty()) {
                         gridItems = (gridItems + page).distinctBy { it.id }
-                        gridNextIndex += page.size
-                        gridHasMore = page.size == 50
+                        val progress = libraryAppendProgress(gridNextIndex, gridHasMore, page.size)
+                        gridNextIndex = progress.nextIndex
+                        gridHasMore = progress.hasMore
                     } else {
                         gridHasMore = false
+                        gridAppendFailed = false
                     }
                 } catch (cancelled: kotlinx.coroutines.CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
-                    gridHasMore = false
+                    val progress = libraryAppendProgress(gridNextIndex, gridHasMore, pageSize = null)
+                    gridNextIndex = progress.nextIndex
+                    gridHasMore = progress.hasMore
+                    gridAppendFailed = progress.failed
+                    break
                 } finally {
                     gridAppending = false
                 }
@@ -555,6 +564,7 @@ fun HomeScreen(
         if (requestTab == HomeTab.Media && requestLibrary != null) {
             gridNextIndex = 0
             gridHasMore = false
+            gridAppendFailed = false
         }
         if (requestTab == HomeTab.Recommend || (requestTab == HomeTab.Media && selectedLibraryId == null)) {
             gridLoading = false
@@ -587,6 +597,7 @@ fun HomeScreen(
                 libraryTotalCount = requestLibrary?.let { libraryCounts[it.id] }
                 gridNextIndex = it.size
                 gridHasMore = requestSort != "random" && it.size == 50
+                gridAppendFailed = false
             }
             gridLoading = false
             gridRefreshing = false
@@ -618,6 +629,7 @@ fun HomeScreen(
                     libraryTotalCount = AppRuntime.client?.lastTotalRecordCount
                     gridNextIndex = list.size
                     gridHasMore = requestSort != "random" && list.size == 50
+                    gridAppendFailed = false
                 } else {
                     gridItems = list
                 }
@@ -633,7 +645,7 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(selectedLibrary, gridStateKey, userDataRevision) {
+    LaunchedEffect(selectedLibrary, gridStateKey, userDataRevision, gridRetryRequested) {
         if (tab == HomeTab.Favorites) return@LaunchedEffect
         if (selectedLibrary == null || librarySort == "random") return@LaunchedEffect
         val activeSort = librarySort
@@ -642,11 +654,14 @@ fun HomeScreen(
             val info = gridState.layoutInfo
             Triple(info.visibleItemsInfo.lastOrNull()?.index ?: -1, gridItems.size, gridLoading || pendingGridRestore != null)
         }.collect { (lastVisible, _, waiting) ->
-            if (!waiting && lastVisible >= gridItems.lastIndex - 8 && gridHasMore && !gridLoading && !gridAppending) {
+            if (!waiting && lastVisible >= gridItems.lastIndex - 8 && gridHasMore && !gridLoading && !gridAppending &&
+                (!gridAppendFailed || shouldRetryLibraryAppend(gridAppendFailed, gridRetryRequested, gridRetryHandled))
+            ) {
                 val c = client ?: return@collect
                 val library = selectedLibrary ?: return@collect
                 val (sortBy, sortOrder) = sortParams(activeSort, activeOrder)
                 gridAppending = true
+                gridRetryHandled = gridRetryRequested
                 try {
                     PageLog.add("libraryQuery path=append SortBy=$sortBy SortOrder=$sortOrder start=$gridNextIndex limit=50")
                     val page = c.getItems(parentId = library.id, types = collectionTypeToItemTypes(library.type),
@@ -655,13 +670,18 @@ fun HomeScreen(
                     currentCoroutineContext().ensureActive()
                     if (selectedLibrary == library && librarySort == activeSort && librarySortOrder == activeOrder) {
                         gridItems = (gridItems + page).distinctBy { it.id }
-                        gridNextIndex += page.size
-                        gridHasMore = page.size == 50
+                        val progress = libraryAppendProgress(gridNextIndex, gridHasMore, page.size)
+                        gridNextIndex = progress.nextIndex
+                        gridHasMore = progress.hasMore
+                        gridAppendFailed = false
                     }
                 } catch (cancelled: kotlinx.coroutines.CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
-                    gridHasMore = false
+                    val progress = libraryAppendProgress(gridNextIndex, gridHasMore, pageSize = null)
+                    gridNextIndex = progress.nextIndex
+                    gridHasMore = progress.hasMore
+                    gridAppendFailed = progress.failed
                 } finally {
                     gridAppending = false
                 }
@@ -1065,6 +1085,16 @@ fun HomeScreen(
                         }
                         if (gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
                             androidx.compose.material3.CircularProgressIndicator(Modifier.padding(20.dp).size(24.dp), color = Accent, strokeWidth = 2.dp)
+                        }
+                        if (gridAppendFailed && gridHasMore && !gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
+                            FocusSurface(
+                                modifier = Modifier.fillMaxWidth().height(48.dp),
+                                onClick = { gridRetryRequested++ },
+                            ) { focused ->
+                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
+                                    Text("加载失败，按 OK 重试", color = TextMain, fontSize = 13.sp)
+                                }
+                            }
                         }
                     }
                 }

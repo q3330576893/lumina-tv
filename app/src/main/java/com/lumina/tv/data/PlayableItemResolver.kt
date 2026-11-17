@@ -1,5 +1,32 @@
 package com.lumina.tv.data
 
+import kotlinx.coroutines.CancellationException
+
+enum class EpisodeSourceAvailability {
+    HAS_SOURCE,
+    NO_SOURCE,
+    PROBE_FAILED,
+}
+
+internal suspend fun <T> probeMediaSources(load: suspend () -> List<T>): Result<List<T>> = try {
+    Result.success(load())
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (failure: Exception) {
+    Result.failure(failure)
+}
+
+internal fun <T> episodeSourceAvailability(result: Result<List<T>>): EpisodeSourceAvailability =
+    result.fold(
+        onSuccess = { if (it.isEmpty()) EpisodeSourceAvailability.NO_SOURCE else EpisodeSourceAvailability.HAS_SOURCE },
+        onFailure = { EpisodeSourceAvailability.PROBE_FAILED },
+    )
+
+internal suspend fun probeEpisodeSource(
+    episode: MediaItem,
+    probe: suspend (MediaItem) -> EpisodeSourceAvailability,
+): EpisodeSourceAvailability = if (episode.sourceCount > 0) EpisodeSourceAvailability.HAS_SOURCE else probe(episode)
+
 sealed interface PlayableItemResult {
     data class Ready(val item: MediaItem) : PlayableItemResult
     data class ReplayAvailable(val firstEpisode: MediaItem, val allWatched: Boolean) : PlayableItemResult
@@ -10,16 +37,16 @@ sealed interface PlayableItemResult {
 suspend fun resolvePlayableItem(
     item: MediaItem,
     loadEpisodes: suspend (String) -> List<MediaItem>,
-    isPlayable: suspend (MediaItem) -> Boolean,
+    probeSource: suspend (MediaItem) -> EpisodeSourceAvailability,
 ): PlayableItemResult {
     if (item.type == "Movie" || item.type == "Episode") return PlayableItemResult.Ready(item)
     if (item.type != "Series") return PlayableItemResult.Unavailable
     val episodes = loadEpisodes(item.id).filter { it.type == "Episode" && !it.isMissing }
         .distinctBy { it.id }.sortedWith(compareBy<MediaItem> { it.parentIndexNumber ?: Int.MAX_VALUE }
             .thenBy { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
-    val checked = mutableMapOf<String, Boolean>()
-    suspend fun playable(episode: MediaItem): Boolean = checked[episode.id]
-        ?: isPlayable(episode).also { checked[episode.id] = it }
+    val checked = mutableMapOf<String, EpisodeSourceAvailability>()
+    suspend fun playable(episode: MediaItem): Boolean = (checked[episode.id]
+        ?: probeEpisodeSource(episode, probeSource).also { checked[episode.id] = it }) != EpisodeSourceAvailability.NO_SOURCE
     for (episode in episodes.filter { !it.played && it.positionTicks > 0L }) {
         if (playable(episode)) return PlayableItemResult.Ready(episode)
     }

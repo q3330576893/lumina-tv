@@ -762,7 +762,9 @@ class EmbyClient(
                 episodes
             }
         },
-        isPlayable = { episode -> episode.sourceCount > 0 || getMediaSources(episode.id).isNotEmpty() },
+        probeSource = { episode ->
+            episodeSourceAvailability(getMediaSourcesResult(episode.id))
+        },
     )
 
     private fun parseItems(arr: JSONArray): List<MediaItem> =
@@ -1202,8 +1204,11 @@ class EmbyClient(
     }
 
     /** 拉取全部可选源（选源菜单用）。 */
-    suspend fun getMediaSources(itemId: String): List<MediaSource> = withMetadataContext {
-        catchingRequest {
+    suspend fun getMediaSources(itemId: String): List<MediaSource> =
+        getMediaSourcesResult(itemId).getOrDefault(emptyList())
+
+    internal suspend fun getMediaSourcesResult(itemId: String): Result<List<MediaSource>> = withMetadataContext {
+        probeMediaSources {
             fun playbackInfoBody(includeDeviceProfile: Boolean) = JSONObject()
                 .put("UserId", userId)
                 .put("IsPlayback", false)
@@ -1224,7 +1229,7 @@ class EmbyClient(
                 }.getOrDefault(emptyList())
                 retried.ifEmpty { initial }
             }
-        }.getOrDefault(emptyList())
+        }
     }
 
     /** 读取纯文本响应：.strm 内容是文本，不能按 JSON 解析 */

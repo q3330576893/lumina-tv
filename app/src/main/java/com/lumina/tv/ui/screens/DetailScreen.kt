@@ -298,6 +298,7 @@ fun DetailScreen(
     var item by remember(id, client) { mutableStateOf<MediaItem?>(null) }
     var seasons by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var episodeLoadError by remember { mutableStateOf<String?>(null) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
     var mdb by remember(id, accountScope) { mutableStateOf<MdblistClient.Ratings?>(null) }
@@ -548,11 +549,8 @@ fun DetailScreen(
                 val loadedSeasons = if (it0.type == "Series") catchingRequest { c.getSeasons(id) }.getOrDefault(emptyList()) else emptyList()
                 seasons = loadedSeasons
                 val first = loadedSeasons.firstOrNull()
-                val loadedEpisodes = if (first != null) {
-                    LibraryCache.episodesOf(id, first.id) ?: catchingRequest { c.getEpisodes(id, first.id) }.getOrDefault(emptyList())
-                } else emptyList()
-                if (first != null) LibraryCache.putEpisodes(id, first.id, loadedEpisodes, cacheRevision)
-                episodes = loadedEpisodes
+                episodes = first?.let { LibraryCache.episodesOf(id, it.id) }.orEmpty()
+                episodeLoadError = null
                 selectedSeason = first
                 PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
             }
@@ -583,19 +581,28 @@ fun DetailScreen(
         } finally { similarLoading = false }
     }
 
-    LaunchedEffect(selectedSeason) {
+    LaunchedEffect(id, item?.id, selectedSeason) {
         val cacheRevision = LibraryCache.userDataRevision
         val c = client ?: return@LaunchedEffect
         val it0 = item ?: return@LaunchedEffect
         if (it0.type == "Series" && selectedSeason != null) {
             val sid = selectedSeason?.id
-            LibraryCache.episodesOf(it0.id, sid)?.let { hit ->
-                if (hit != episodes) episodes = hit
+            cachedSeasonEpisodeState(LibraryCache.episodesOf(it0.id, sid))?.let { hit ->
+                if (hit.episodes != episodes) episodes = hit.episodes
+                episodeLoadError = null
                 return@LaunchedEffect
             }
-            val list = catchingRequest { c.getEpisodes(it0.id, sid) }.getOrDefault(emptyList())
-            LibraryCache.putEpisodes(it0.id, sid, list, cacheRevision)
-            episodes = list
+            episodes = beginSeasonEpisodeLoad<MediaItem>().episodes
+            episodeLoadError = null
+            val result = catchingRequest { c.getEpisodes(it0.id, sid) }
+            val loaded = completeSeasonEpisodeLoad(result) { list ->
+                LibraryCache.putEpisodes(it0.id, sid, list, cacheRevision)
+            }
+            episodes = loaded.episodes
+            episodeLoadError = loaded.error?.message ?: if (loaded.error != null) "剧集读取失败，请重试" else null
+            if (loaded.error != null) {
+                android.widget.Toast.makeText(context, "剧集读取失败，请重试", android.widget.Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -1155,7 +1162,13 @@ fun DetailScreen(
                                 modifier = Modifier.height(34.dp),
                                 corner = 17.dp,
                                 scaleTo = 1.06f,
-                                onClick = { selectedSeason = s },
+                                onClick = {
+                                    if (selectedSeason?.id != s.id) {
+                                        episodes = emptyList()
+                                        episodeLoadError = null
+                                        selectedSeason = s
+                                    }
+                                },
                             ) { focused ->
                                 Box(
                                     Modifier.fillMaxSize().background(
@@ -1181,6 +1194,8 @@ fun DetailScreen(
                             EpisodeCard(ep, client?.imageUrl(ep, 360)) { pickEpisode(ep) }
                         }
                     }
+                } else if (episodeLoadError != null) {
+                    Text("剧集读取失败：${episodeLoadError}", color = TextSub, fontSize = 12.sp)
                 }
                 val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
                 if (cast.isNotEmpty()) {
