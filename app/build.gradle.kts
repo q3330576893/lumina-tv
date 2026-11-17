@@ -20,8 +20,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 137
-        versionName = "1.22.96"
+        versionCode = 138
+        versionName = "1.22.97"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
         buildConfigField("String", "MDBLIST_API_KEY", "\"${localProps.getProperty("MDBLIST_API_KEY", "")}\"")
@@ -151,5 +151,13 @@ val p4Checks = tasks.register<JavaExec>("p4Checks") {
     mainClass.set("com.lumina.tv.P4Checks")
 }
 verifyOffline.configure { dependsOn(p4Checks) }
+val p5Checks = tasks.register<JavaExec>("p5Checks") {
+    group = "verification"
+    description = "Check account content state, recommendation/preview cache boundaries and basePath."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.data.P5Checks")
+}
+verifyOffline.configure { dependsOn(p5Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }

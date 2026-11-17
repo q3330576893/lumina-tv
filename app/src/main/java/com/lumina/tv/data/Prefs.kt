@@ -448,10 +448,13 @@ class Prefs(context: Context) {
         get() = sp.getInt("global_intro_seconds", 0)
         set(v) = sp.edit().putInt("global_intro_seconds", v).apply()
 
-    /** 每部剧集的片头时长（itemId -> 秒），JSON 存储 */
+    private val contentState: AccountContentState?
+        get() = identityScope(baseUrl, userId)?.let { AccountContentState(sp, it) }
+
+    /** 每部剧集的片头时长（itemId -> 秒），按服务器与账号存储 */
     var introMapJson: String
-        get() = sp.getString("intro_map", "{}") ?: "{}"
-        set(v) = sp.edit().putString("intro_map", v).apply()
+        get() = contentState?.introMapJson ?: "{}"
+        set(v) { contentState?.introMapJson = v }
 
     fun introSecondsFor(itemId: String): Int {
         if (itemId.isBlank()) return 0
@@ -463,9 +466,7 @@ class Prefs(context: Context) {
 
     fun setIntroSeconds(itemId: String, seconds: Int) {
         if (itemId.isBlank()) return
-        val obj = runCatching { org.json.JSONObject(introMapJson) }.getOrDefault(org.json.JSONObject())
-        obj.put(itemId, seconds)
-        introMapJson = obj.toString()
+        contentState?.setIntroSeconds(itemId, seconds)
     }
 
     val deviceId: String
@@ -479,62 +480,23 @@ class Prefs(context: Context) {
 
     /** 首页媒体库隐藏的服务器分类 ID（勾掉即不在首页显示） */
     var hiddenViewIds: Set<String>
-        get() = sp.getStringSet("hidden_view_ids", emptySet()) ?: emptySet()
-        set(v) = sp.edit().putStringSet("hidden_view_ids", v).apply()
+        get() = contentState?.hiddenViewIds.orEmpty()
+        set(v) { contentState?.hiddenViewIds = v }
 
     fun isViewHidden(viewId: String): Boolean = viewId in hiddenViewIds
 
     fun toggleViewHidden(viewId: String) {
-        val cur = hiddenViewIds.toMutableSet()
-        if (!cur.add(viewId)) cur.remove(viewId)
-        hiddenViewIds = cur
+        contentState?.toggleViewHidden(viewId)
     }
 
-    var hiddenResumeIds: Map<String, Long>
-        get() = runCatching {
-            val json = org.json.JSONObject(sp.getString("hidden_resume_ids", "{}") ?: "{}")
-            buildMap { json.keys().forEach { id -> put(id, json.optLong(id, 0L)) } }
-        }.getOrDefault(emptyMap())
-        set(value) {
-            val json = org.json.JSONObject()
-            value.forEach { (id, timestamp) -> json.put(id, timestamp) }
-            sp.edit().putString("hidden_resume_ids", json.toString()).apply()
-        }
-
-    private var hiddenResumePositions: Map<String, Long>
-        get() = runCatching {
-            val json = org.json.JSONObject(sp.getString("hidden_resume_positions", "{}") ?: "{}")
-            buildMap { json.keys().forEach { id -> put(id, json.optLong(id, 0L)) } }
-        }.getOrDefault(emptyMap())
-        set(value) {
-            val json = org.json.JSONObject()
-            value.forEach { (id, position) -> json.put(id, position) }
-            sp.edit().putString("hidden_resume_positions", json.toString()).apply()
-        }
+    val hiddenResumeIds: Map<String, Long> get() = contentState?.hiddenResumeIds.orEmpty()
 
     fun hideResumeItem(item: MediaItem, hiddenAt: Long = System.currentTimeMillis()) {
-        hiddenResumeIds = hiddenResumeIds + (item.id to hiddenAt)
-        hiddenResumePositions = hiddenResumePositions + (item.id to item.positionTicks)
+        contentState?.hideResumeItem(item, hiddenAt)
     }
 
-    fun visibleResumeItems(items: List<MediaItem>): List<MediaItem> {
-        val hidden = hiddenResumeIds.toMutableMap()
-        val positions = hiddenResumePositions.toMutableMap()
-        val visible = items.filter { item ->
-            val hiddenAt = hidden[item.id] ?: return@filter true
-            val savedPosition = positions[item.id]
-            val playedAgain = (item.lastPlayedDate?.let { it > hiddenAt } == true) ||
-                (savedPosition != null && item.positionTicks != savedPosition)
-            if (playedAgain) {
-                hidden.remove(item.id)
-                positions.remove(item.id)
-                true
-            } else false
-        }
-        if (hidden != hiddenResumeIds) hiddenResumeIds = hidden
-        if (positions != hiddenResumePositions) hiddenResumePositions = positions
-        return visible
-    }
+    fun visibleResumeItems(items: List<MediaItem>): List<MediaItem> =
+        contentState?.visibleResumeItems(items) ?: items
 
     fun saveSession(s: Session) {
         baseUrl = s.baseUrl

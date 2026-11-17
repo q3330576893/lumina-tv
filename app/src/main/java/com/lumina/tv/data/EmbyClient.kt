@@ -828,6 +828,7 @@ class EmbyClient(
             else -> null
         }
         return MediaItem(
+            contentVersion = previewContentVersion(o),
             id = o.optString("Id"),
             name = o.optString("Name"),
             type = o.optString("Type"),
@@ -1079,7 +1080,7 @@ class EmbyClient(
         val candidate = value?.trim().orEmpty()
         if (candidate.isBlank()) return null
         return if (candidate.startsWith("http", true)) candidate
-        else baseUrl.trimEnd('/') + "/" + candidate.trimStart('/')
+        else requireNotNull(parseServerAddress(baseUrl)).resolve(candidate)
     }
 
     // ---------------- 播放 ----------------
@@ -1159,6 +1160,7 @@ class EmbyClient(
             }
         }
         return MediaSource(
+            contentVersion = previewContentVersion(o),
             id = o.optString("Id"),
             name = o.optString("Name", "源").ifBlank { "源" },
             container = normalizeContainer(o.optString("Container")),
@@ -1510,6 +1512,7 @@ class EmbyClient(
 
     suspend fun setPlayed(itemId: String, played: Boolean): Result<Boolean> =
         setUserDataFlag(itemId, "PlayedItems", "Played", played)
+            .onSuccess { DetailRecommendationCache.watchStateChanged(baseUrl, userId) }
 
     private suspend fun setUserDataFlag(itemId: String, endpoint: String, field: String, target: Boolean): Result<Boolean> =
         userDataMutationMutex.withLock {
@@ -1583,6 +1586,8 @@ class EmbyClient(
         event.playSessionId?.let { body.put("PlaySessionId", it) }
         if (event.eventType != ProgressEventType.Stop) body.put("CanSeek", true)
         postJson(url(path), body.toString())
+    }.onSuccess {
+        DetailRecommendationCache.watchStateChanged(baseUrl, userId)
     }.onFailure {
         lastApiFailure = "report${event.eventType}: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}"
     }.isSuccess
@@ -1614,7 +1619,10 @@ class EmbyClient(
                     .header("X-Emby-Authorization", authHeader())
                     .delete()
                     .build()
-                if (http.readCancellable(request) { it.isSuccessful }) cleared++
+                if (http.readCancellable(request) { it.isSuccessful }) {
+                    cleared++
+                    DetailRecommendationCache.watchStateChanged(baseUrl, userId)
+                }
             }
             if (page.size < 100) break
         }
@@ -1635,13 +1643,8 @@ class EmbyClient(
         private const val MAX_TRICKPLAY_FRAMES = 1_000_000
 
         fun normalize(raw: String): String {
-            var s = raw.trim()
-            if (s.isEmpty()) return s
-            if (!s.startsWith("http://") && !s.startsWith("https://")) s = "http://$s"
-            s = s.trimEnd('/')
-            if (s.endsWith("/web/index.html")) s = s.removeSuffix("/web/index.html")
-            if (s.endsWith("/web")) s = s.removeSuffix("/web")
-            return s
+            if (raw.isBlank()) return ""
+            return requireNotNull(parseServerAddress(raw)) { "Invalid server address" }.baseUrl
         }
     }
 }

@@ -150,14 +150,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.net.URLEncoder
+import androidx.compose.runtime.collectAsState
+import com.lumina.tv.data.identityScope
+import com.lumina.tv.data.DetailRecommendationCache
+import com.lumina.tv.data.RelatedCacheKey
+import com.lumina.tv.data.previewCacheKey
+import com.lumina.tv.data.previewSourceVersion
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
 private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-private data class RelatedCacheEntry(val items: List<MediaItem>, val storedAt: Long, val dayIndex: String, val empty: Boolean)
-private val detailRelatedCache = java.util.Collections.synchronizedMap(mutableMapOf<String, RelatedCacheEntry>())
-private const val DETAIL_RELATED_TTL_MS = 6 * 60 * 60 * 1000L
-private const val DETAIL_RELATED_EMPTY_TTL_MS = 30 * 60 * 1000L
-
 @OptIn(ExperimentalFoundationApi::class)
 private object DetailNoBringIntoViewSpec : BringIntoViewSpec {
     override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
@@ -170,7 +171,7 @@ private object DetailNoBringIntoViewSpec : BringIntoViewSpec {
 }
 private const val DETAIL_PREVIEW_FAILURE_TTL_MS = 10 * 60 * 1000L
 
-private suspend fun loadDetailRecommendations(
+internal suspend fun loadDetailRecommendations(
     client: com.lumina.tv.data.EmbyClient,
     itemId: String,
     current: MediaItem,
@@ -185,14 +186,12 @@ private suspend fun loadDetailRecommendations(
     val type = current.type.takeIf { it == "Movie" || it == "Series" } ?: return emptyList()
     val currentRegion = bucketOf(current)
     val currentBucket = currentRegion.first
-    val cacheKey = "$itemId|$type|$currentBucket|$genreKey"
-    detailRelatedCache[cacheKey]?.let { entry ->
-        val ttl = if (entry.empty) DETAIL_RELATED_EMPTY_TTL_MS else DETAIL_RELATED_TTL_MS
-        if ((entry.empty || entry.dayIndex == dayIndex) && System.currentTimeMillis() - entry.storedAt < ttl) {
-            PageLog.add("detailRelated id=$itemId top12=${entry.items.take(12).joinToString(",") { "${it.id}:${it.name}" }} cache=hit")
-            return entry.items
-        }
-        detailRelatedCache.remove(cacheKey)
+    val account = identityScope(client.baseUrl, client.userId) ?: return emptyList()
+    val revision = DetailRecommendationCache.revision(account)
+    val cacheKey = RelatedCacheKey(account, itemId, type, currentBucket.toString(), genreKey)
+    DetailRecommendationCache.get(cacheKey, dayIndex)?.let { cached ->
+        PageLog.add("detailRelated id=$itemId top12=${cached.take(12).joinToString(",") { "${it.id}:${it.name}" }} cache=hit")
+        return cached
     }
     var completedSimilar: List<MediaItem> = emptyList()
     var requestFailed = false
@@ -268,8 +267,7 @@ private suspend fun loadDetailRecommendations(
         }
         return fallback
     } else result
-    detailRelatedCache[cacheKey] = RelatedCacheEntry(results, System.currentTimeMillis(), dayIndex, results.isEmpty())
-    if (detailRelatedCache.size > 100) detailRelatedCache.keys.firstOrNull()?.let(detailRelatedCache::remove)
+    DetailRecommendationCache.put(cacheKey, results, dayIndex, revision)
     PageLog.add("detailRelated id=$itemId top12=${results.joinToString(",") { "${it.id}:${it.name}" }}")
     return results
 }
@@ -287,39 +285,46 @@ fun DetailScreen(
     val context = LocalContext.current
     val sourceAudioCaps = remember { catchingRequest { detect(context) }.getOrDefault(AudioCapabilities(emptyMap())) }
     val client = AppRuntime.client
+    val accountScope = client?.let { identityScope(it.baseUrl, it.userId) }
+    val recommendationRevisions by DetailRecommendationCache.revisions.collectAsState()
+    val recommendationRevision = recommendationRevisions[accountScope] ?: 0L
     val detailHazeState = remember { HazeState() }
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
-    var loadFailed by remember(id) { mutableStateOf(false) }
-    var itemNotFound by remember(id) { mutableStateOf(false) }
-    var detailRetry by remember(id) { mutableStateOf(0) }
+    var loadFailed by remember(id, accountScope) { mutableStateOf(false) }
+    var itemNotFound by remember(id, accountScope) { mutableStateOf(false) }
+    var detailRetry by remember(id, accountScope) { mutableStateOf(0) }
     var item by remember(id, client) { mutableStateOf<MediaItem?>(null) }
     var seasons by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
-    var mdb by remember(id) { mutableStateOf<MdblistClient.Ratings?>(null) }
-    var resolvedExternalLinks by remember(id) { mutableStateOf<TmdbClient.ExternalLinks?>(null) }
+    var mdb by remember(id, accountScope) { mutableStateOf<MdblistClient.Ratings?>(null) }
+    var resolvedExternalLinks by remember(id, accountScope) { mutableStateOf<TmdbClient.ExternalLinks?>(null) }
     var mediaInfoExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var sources by remember(id, client) { mutableStateOf<List<MediaSource>>(emptyList()) }
     var sourcesLoading by remember(id, client) { mutableStateOf(true) }
-    var detailPreviewUrl by remember(id) { mutableStateOf<String?>(null) }
-    var detailPreviewHeaders by remember(id) { mutableStateOf<Map<String, String>>(emptyMap()) }
-    var detailPreviewKey by remember(id) { mutableStateOf("") }
-    var detailPreviewIsTrailer by remember(id) { mutableStateOf(false) }
-    var detailPreviewStartMs by remember(id) { mutableStateOf<Long?>(null) }
-    var detailVideoPlaying by remember(id) { mutableStateOf(false) }
-    var detailPreviewFailure by remember(id) { mutableStateOf<String?>(null) }
-    var detailPreviewFromStage by remember(id) { mutableStateOf("hls") }
-    var detailPreviewStage by remember(id) { mutableStateOf<String?>(null) }
-    var detailPreviewRequestKey by remember(id) { mutableStateOf("") }
-    var detailPreviewFailures by remember(id) { mutableStateOf<List<String>>(emptyList()) }
-    var detailPreviewRetry by remember(id) { mutableIntStateOf(0) }
-    val previewResults = remember(id) { mutableMapOf<String, Triple<String?, String, Boolean>>() }
-    val previewHeaderResults = remember(id) { mutableMapOf<String, Map<String, String>>() }
-    val previewStartTimes = remember(id) { mutableMapOf<String, Long?>() }
-    var similar by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var similarLoading by remember { mutableStateOf(false) }
+    var previewMetadataReady by remember(id, client) { mutableStateOf(false) }
+    var detailPreviewFailureKey by remember(id, accountScope) { mutableStateOf("") }
+    var detailPreviewHlsKey by remember(id, accountScope) { mutableStateOf("") }
+    val previewStages = remember(id, accountScope) { mutableMapOf<String, String?>() }
+    var detailPreviewUrl by remember(id, accountScope) { mutableStateOf<String?>(null) }
+    var detailPreviewHeaders by remember(id, accountScope) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var detailPreviewKey by remember(id, accountScope) { mutableStateOf("") }
+    var detailPreviewIsTrailer by remember(id, accountScope) { mutableStateOf(false) }
+    var detailPreviewStartMs by remember(id, accountScope) { mutableStateOf<Long?>(null) }
+    var detailVideoPlaying by remember(id, accountScope) { mutableStateOf(false) }
+    var detailPreviewFailure by remember(id, accountScope) { mutableStateOf<String?>(null) }
+    var detailPreviewFromStage by remember(id, accountScope) { mutableStateOf("hls") }
+    var detailPreviewStage by remember(id, accountScope) { mutableStateOf<String?>(null) }
+    var detailPreviewRequestKey by remember(id, accountScope) { mutableStateOf("") }
+    var detailPreviewFailures by remember(id, accountScope) { mutableStateOf<List<String>>(emptyList()) }
+    var detailPreviewRetry by remember(id, accountScope) { mutableIntStateOf(0) }
+    val previewResults = remember(id, accountScope) { mutableMapOf<String, Triple<String?, String, Boolean>>() }
+    val previewHeaderResults = remember(id, accountScope) { mutableMapOf<String, Map<String, String>>() }
+    val previewStartTimes = remember(id, accountScope) { mutableMapOf<String, Long?>() }
+    var similar by remember(id, accountScope) { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var similarLoading by remember(id, accountScope) { mutableStateOf(false) }
     var showSourceMenu by remember { mutableStateOf(false) }
     var sourceMenuWasOpen by remember { mutableStateOf(false) }
     var requestedSourceId by remember(id, client) { mutableStateOf(AppRuntime.prefs?.lastSourceFor(id)) }
@@ -396,7 +401,7 @@ fun DetailScreen(
         if (playButtonFocused || topRegionFocused) detailScrollState.scrollTo(0)
     }
 
-    LaunchedEffect(id) {
+    LaunchedEffect(id, accountScope) {
         detailPreviewFromStage = "hls"
         detailPreviewFailures = emptyList()
         detailPreviewStage = null
@@ -405,7 +410,7 @@ fun DetailScreen(
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
-    androidx.compose.runtime.DisposableEffect(lifecycleOwner, id) {
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner, id, accountScope) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME && detailPreviewFromStage == "done") {
                 detailPreviewFromStage = "hls"
@@ -421,7 +426,8 @@ fun DetailScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(id, detailRetry) {
+    LaunchedEffect(id, accountScope, detailRetry) {
+        previewMetadataReady = false
         val cacheRevision = LibraryCache.userDataRevision
         synchronized(failedDetailBackgroundKeys) {
             val now = System.currentTimeMillis()
@@ -465,14 +471,9 @@ fun DetailScreen(
                 sourcesLoading = false
                 PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - startedAt}")
             }
-            val recommendationJob = launch {
-                val current = cached.item ?: return@launch
-                similar = loadDetailRecommendations(c, id, current)
-                similarLoading = false
-                PageLog.add("detailLoad id=$id stage=similar ms=${System.currentTimeMillis() - startedAt}")
-            }
             launch {
-                joinAll(freshItemJob, sourceJob, recommendationJob)
+                joinAll(freshItemJob, sourceJob)
+                previewMetadataReady = true
                 LibraryCache.putDetail(id, cached.copy(item = item ?: cached.item, sources = sources, at = System.currentTimeMillis()), cacheRevision)
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - startedAt}")
             }
@@ -559,18 +560,26 @@ fun DetailScreen(
                 sourcesLoading = false
                 PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - loadStartedAt}")
             }
-            similarLoading = true
-            val recommendationJob = launch {
-                similar = loadDetailRecommendations(c, id, it0)
-                similarLoading = false
-                PageLog.add("detailLoad id=$id stage=similar ms=${System.currentTimeMillis() - loadStartedAt}")
-            }
             launch {
-                joinAll(seasonJob, sourceJob, recommendationJob)
+                joinAll(seasonJob, sourceJob)
+                previewMetadataReady = true
                 LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()), cacheRevision)
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - loadStartedAt}")
             }
         }
+    }
+
+    LaunchedEffect(id, accountScope, item?.type, item?.genres, item?.productionLocations, item?.originalLanguage, recommendationRevision) {
+        val c = client ?: return@LaunchedEffect
+        val current = item ?: return@LaunchedEffect
+        similar = emptyList()
+        similarLoading = true
+        val startedAt = System.currentTimeMillis()
+        try {
+            val result = loadDetailRecommendations(c, id, current)
+            if (accountScope != null && recommendationRevision == DetailRecommendationCache.revision(accountScope)) similar = result
+            PageLog.add("detailLoad id=$id stage=similar ms=${System.currentTimeMillis() - startedAt}")
+        } finally { similarLoading = false }
     }
 
     LaunchedEffect(selectedSeason) {
@@ -617,11 +626,12 @@ fun DetailScreen(
         mdb = catchingRequest { MdblistClient.ratings(current.type, imdbId, tmdbId) }.getOrNull()
     }
 
-    val sourceIdsKey = sources.joinToString(",") { it.id }
-    LaunchedEffect(id, item?.id, selectedSourceId, selectedSeason?.id, episodes.firstOrNull()?.id, sourceIdsKey, detailPreviewRetry) {
+    val sourceIdsKey = sources.joinToString(",") { "${it.id}:${previewSourceVersion(it)}" }
+    LaunchedEffect(id, accountScope, item?.contentVersion, previewMetadataReady, selectedSourceId, selectedSeason?.id, episodes.firstOrNull(), sourceIdsKey, detailPreviewRetry) {
+        if (!previewMetadataReady) return@LaunchedEffect
         val c = client ?: run { PageLog.add("detailPreview stage=skip reason=client-null"); return@LaunchedEffect }
         val current = item ?: run { PageLog.add("detailPreview stage=skip reason=item-null"); return@LaunchedEffect }
-        val requestKey = "${current.id}|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}"
+        val requestKey = "$accountScope|${current.id}|${current.contentVersion}|$sourceIdsKey|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}|${episodes.firstOrNull()?.contentVersion.orEmpty()}"
         if (detailPreviewRequestKey != requestKey) {
             detailPreviewRequestKey = requestKey
             detailPreviewFromStage = "hls"
@@ -634,6 +644,7 @@ fun DetailScreen(
             detailPreviewKey = cached.second
             detailPreviewIsTrailer = cached.third
             detailPreviewStartMs = previewStartTimes[requestKey]
+            detailPreviewStage = previewStages[requestKey]
             detailVideoPlaying = false
             PageLog.add("detailPreview stage=skip reason=cache-hit")
             return@LaunchedEffect
@@ -646,7 +657,7 @@ fun DetailScreen(
             }.getOrNull()
             else -> current
         } ?: run {
-            detailPreviewKey = "${current.id}:unknown"
+            detailPreviewKey = "$accountScope:${current.id}:unknown"
             detailVideoPlaying = false
             PageLog.add("detailPreview stage=skip reason=preview-item-null")
             return@LaunchedEffect
@@ -669,12 +680,15 @@ fun DetailScreen(
             return@LaunchedEffect
         }
         val resolvedPreviewSource = previewSource ?: run {
-            detailPreviewKey = "${previewItem.id}:${sourceItem.id}:unknown"
+            detailPreviewKey = "$accountScope:${previewItem.id}:${sourceItem.id}:unknown"
             detailVideoPlaying = false
             PageLog.add("detailPreview stage=skip reason=preview-source-null")
             return@LaunchedEffect
         }
-        val hlsKey = "${sourceItem.id}|${resolvedPreviewSource.id}"
+        val previewKind = if (trailer != null) "trailer" else "clip"
+        val contentKey = previewCacheKey(c.baseUrl, c.userId, sourceItem, resolvedPreviewSource, previewKind) ?: return@LaunchedEffect
+        val hlsKey = "$contentKey:hls"
+        detailPreviewHlsKey = hlsKey
         val backgroundMode = AppRuntime.prefs?.detailBackgroundVideo ?: "auto"
         if (backgroundMode != "720p" && hlsKey in hlsUnsupportedItems && detailPreviewFromStage == "hls") {
             detailPreviewFromStage = "direct"
@@ -684,14 +698,14 @@ fun DetailScreen(
         detailPreviewStartMs = if (trailer != null) 0L else {
             AppRuntime.prefs?.introSecondsFor(previewItem.id)?.takeIf { it > 0 }?.times(1000L)
         }
-        detailPreviewKey = "${previewItem.id}:${sourceItem.id}:${resolvedPreviewSource.id}"
-        val failedAt = failedDetailBackgroundKeys[detailPreviewKey]
+        detailPreviewFailureKey = "$contentKey:$backgroundMode"
+        val failedAt = failedDetailBackgroundKeys[detailPreviewFailureKey]
         if (failedAt != null && System.currentTimeMillis() - failedAt < DETAIL_PREVIEW_FAILURE_TTL_MS) {
             detailVideoPlaying = false
             PageLog.add("detailPreview stage=skip reason=blacklist")
             return@LaunchedEffect
         }
-        if (failedAt != null) failedDetailBackgroundKeys.remove(detailPreviewKey)
+        if (failedAt != null) failedDetailBackgroundKeys.remove(detailPreviewFailureKey)
         if (AppRuntime.prefs?.detailBackgroundVideo == "off") {
             PageLog.add("detailPreview stage=skip reason=mode-off")
             return@LaunchedEffect
@@ -720,10 +734,12 @@ fun DetailScreen(
             PageLog.add("detailPreview stage=done failures=${detailPreviewFailure}")
         } else {
             detailPreviewStage = resolution?.stage
+            detailPreviewKey = "$contentKey:${resolution?.stage}:$backgroundMode"
             detailPreviewFailure = null
             previewResults[requestKey] = Triple(detailPreviewUrl, detailPreviewKey, detailPreviewIsTrailer)
             previewHeaderResults[requestKey] = detailPreviewHeaders
             previewStartTimes[requestKey] = detailPreviewStartMs
+            previewStages[requestKey] = detailPreviewStage
         }
     }
 
@@ -809,6 +825,7 @@ fun DetailScreen(
             DetailVideoBackground(
                 url = detailPreviewUrl,
                 mediaKey = detailPreviewKey,
+                previewStage = detailPreviewStage,
                 requestHeaders = client?.previewHeaders(detailPreviewUrl, detailPreviewHeaders).orEmpty(),
                 requestClient = client?.previewHttpClient,
                 playing = !loading,
@@ -820,7 +837,7 @@ fun DetailScreen(
                         detailPreviewFailures = (detailPreviewFailures + reason).distinct()
                         PageLog.add("detailPreview stage=$failedStage verdict=playback-failed")
                         if (failedStage == "hls" && status.contains("#EXTM3U", ignoreCase = true) && AppRuntime.prefs?.detailBackgroundVideo != "720p") {
-                            hlsUnsupportedItems.add(detailPreviewKey.split(':').takeLast(2).joinToString("|"))
+                            hlsUnsupportedItems.add(detailPreviewHlsKey)
                         }
                         detailPreviewUrl = null
                         if (failedStage == "static") {

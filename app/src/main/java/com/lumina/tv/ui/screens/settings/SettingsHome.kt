@@ -39,7 +39,8 @@ fun SettingsHome(
 ) {
     val prefs = AppRuntime.prefs
     val views = LibraryCache.home?.views.orEmpty()
-    var hiddenIds by remember { mutableStateOf(prefs?.hiddenViewIds.orEmpty()) }
+    val accountScope = prefs?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
+    var hiddenIds by remember(accountScope) { mutableStateOf(prefs?.hiddenViewIds.orEmpty()) }
     val itemCounts = remember { mutableStateMapOf<String, Int>() }
     var countLoadComplete by remember { mutableStateOf(false) }
     val requesters = remember(views.map(LibraryView::id)) {

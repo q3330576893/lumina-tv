@@ -110,7 +110,7 @@ object AppRuntime {
     fun applySession(s: Session) {
         val previous = session
         val identityChanged = previous != null &&
-            (!previous.baseUrl.trimEnd('/').equals(s.baseUrl.trimEnd('/'), ignoreCase = true) || previous.userId != s.userId)
+            com.lumina.tv.data.identityScope(previous.baseUrl, previous.userId) != com.lumina.tv.data.identityScope(s.baseUrl, s.userId)
         if (identityChanged) {
             client?.clearPendingProgress()
             applicationContext?.let { com.lumina.tv.data.LibraryCache.removeHomeDisk(it, previous.baseUrl, previous.userId) }

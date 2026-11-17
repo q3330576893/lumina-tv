@@ -215,7 +215,7 @@ fun HomeScreen(
     var resumeItems by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.resume ?: emptyList()) }
     var resumeFilterVersion by remember { mutableIntStateOf(0) }
     // SharedPreferences filtering runs only when these remember keys change.
-    val resume = remember(resumeItems, resumeFilterVersion) {
+    val resume = remember(resumeItems, resumeFilterVersion, client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }) {
         AppRuntime.prefs?.visibleResumeItems(resumeItems) ?: resumeItems
     }
     var pendingResumeRemoval by remember { mutableStateOf<MediaItem?>(null) }

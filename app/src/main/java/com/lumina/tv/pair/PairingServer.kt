@@ -7,6 +7,7 @@ import java.io.IOException
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import org.json.JSONObject
+import com.lumina.tv.data.parseServerAddress
 
 data class PairConfig(
     val alias: String,
@@ -17,9 +18,6 @@ data class PairConfig(
     val path: String,
     val user: String,
     val pass: String,
-    val directOnly: Boolean,
-    val strmDirect: Boolean,
-    val trustAllSsl: Boolean,
 )
 
 /**
@@ -119,12 +117,12 @@ class PairingServer(
             path = fields["path"].orEmpty().trim().ifBlank { "/" },
             user = fields["user"].orEmpty().trim(),
             pass = fields["pass"].orEmpty(),
-            directOnly = fields["directOnly"] == "true",
-            strmDirect = fields["strmDirect"] == "true",
-            trustAllSsl = fields["trustAllSsl"] == "true",
         )
         if (config.host.isBlank() || config.user.isBlank()) {
             return json(JSONObject().put("ok", false).put("msg", "地址和用户名不能为空").toString())
+        }
+        if (parseServerAddress(config.host, config.scheme, config.port, config.path) == null) {
+            return json(JSONObject().put("ok", false).put("msg", "地址或端口无效").toString())
         }
         synchronized(this) {
             expirePending()
@@ -320,11 +318,6 @@ button:active{transform:scale(.97)}
   <input id="user" placeholder="Emby 用户名" autocapitalize="off" autocorrect="off">
   <label for="pass">密码</label>
   <input id="pass" type="password" placeholder="密码（可留空）">
-  <div class="group">高级</div>
-  <label class="check"><input id="directOnly" type="checkbox">仅直连</label>
-  <label class="check"><input id="strmDirect" type="checkbox">STRM 直链</label>
-  <label class="check"><input id="trustAllSsl" type="checkbox">信任所有 SSL</label>
-  <div class="warning">⚠ 信任所有 SSL 会忽略证书校验，存在安全风险。</div>
   <button onclick="sendConfig()">同步到电视</button>
   <div class="status" id="cfgStatus"></div>
 </div>
@@ -382,10 +375,7 @@ function sendConfig(){
     host:h,
     port:document.getElementById('port').value||'8096',
     path:document.getElementById('path').value||'/',
-    user:u,pass:p,
-    directOnly:document.getElementById('directOnly').checked,
-    strmDirect:document.getElementById('strmDirect').checked,
-    trustAllSsl:document.getElementById('trustAllSsl').checked
+    user:u,pass:p
   },function(r){
     document.getElementById('cfgStatus').innerText=r.msg||'';
     if(r.ok&&r.state==='pending'){

@@ -12,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
@@ -26,11 +27,15 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.Cache
+import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.lumina.tv.data.PreviewVideoCache
+import com.lumina.tv.data.PreviewCacheRecovery
+import com.lumina.tv.data.previewResourceKey
 import com.lumina.tv.diag.PageLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -46,6 +51,7 @@ import java.util.concurrent.TimeUnit
 fun DetailVideoBackground(
     url: String?,
     mediaKey: String,
+    previewStage: String? = null,
     requestHeaders: Map<String, String> = emptyMap(),
     requestClient: OkHttpClient? = null,
     playing: Boolean,
@@ -56,6 +62,7 @@ fun DetailVideoBackground(
 ) {
     var probeResult by remember(url, mediaKey) { mutableStateOf<String?>(null) }
     var probeAllowsCache by remember(url, mediaKey) { mutableStateOf(false) }
+    var resourceKey by remember(url, mediaKey) { mutableStateOf(mediaKey) }
 
     LaunchedEffect(url, mediaKey) {
         probeResult = null
@@ -70,10 +77,11 @@ fun DetailVideoBackground(
         val scheme = Uri.parse(url).scheme?.lowercase()
         probeResult = when {
             scheme == "file" || scheme == "content" -> "valid"
-            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url, requestHeaders, requestClient).let {
+            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url, mediaKey, requestHeaders, requestClient).let {
                 probeAllowsCache = it.valid == true &&
                     it.contentType.orEmpty().let { type -> type.startsWith("video/", true) || type.startsWith("application/octet-stream", true) } &&
-                    !url.contains(".m3u8", true)
+                    previewStage != "hls" && !it.prefix.trimStart().startsWith("#EXTM3U", true) && !url.contains(".m3u8", true)
+                resourceKey = previewResourceKey(mediaKey, it.etag, it.lastModified, it.length)
                 if (it.valid == true) "valid" else if (it.reason == "html") "skip=html" else "skip=err"
             }
             else -> "skip=url"
@@ -82,23 +90,25 @@ fun DetailVideoBackground(
     }
 
     if (probeResult == "valid" && !url.isNullOrBlank()) {
-        DetailVideoPlayback(
-            url = url,
-            mediaKey = mediaKey,
-            requestHeaders = requestHeaders,
-            requestClient = requestClient,
-            cacheAllowed = probeAllowsCache,
-            stage = when {
-                url.contains(".m3u8", true) -> "hls"
-                Uri.parse(url).getQueryParameter("static") == "true" -> "static"
-                else -> "direct"
-            },
-            playing = playing,
-            onStatus = onStatus,
-            startAtMs = startAtMs,
-            loopWholeItem = loopWholeItem,
-            modifier = modifier,
-        )
+        key(url, resourceKey) {
+            DetailVideoPlayback(
+                url = url,
+                mediaKey = resourceKey,
+                requestHeaders = requestHeaders,
+                requestClient = requestClient,
+                cacheAllowed = probeAllowsCache,
+                stage = previewStage ?: when {
+                    url.contains(".m3u8", true) -> "hls"
+                    Uri.parse(url).getQueryParameter("static") == "true" -> "static"
+                    else -> "direct"
+                },
+                playing = playing,
+                onStatus = onStatus,
+                startAtMs = startAtMs,
+                loopWholeItem = loopWholeItem,
+                modifier = modifier,
+            )
+        }
     }
 }
 
@@ -117,21 +127,27 @@ private fun DetailVideoPlayback(
     modifier: Modifier,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var firstFrame by remember(url) { mutableStateOf(false) }
-    var failed by remember(url) { mutableStateOf(false) }
+    var firstFrame by remember(url, mediaKey) { mutableStateOf(false) }
+    var failed by remember(url, mediaKey) { mutableStateOf(false) }
+    val recovery = remember(url, mediaKey) { PreviewCacheRecovery() }
+    var bypassCache by remember(url, mediaKey) { mutableStateOf(false) }
+    val cachedBytesRead = remember(url, mediaKey, bypassCache) { java.util.concurrent.atomic.AtomicLong(0L) }
     var loopStartMs by remember(url) { mutableStateOf(0L) }
     var loopEndMs by remember(url) { mutableStateOf(0L) }
     var staticBytesLoaded by remember(url) { mutableStateOf(0L) }
     var staticBitrateEstimate by remember(url) { mutableStateOf(0L) }
     val isStaticFallback = remember(url) { Uri.parse(url).getQueryParameter("static") == "true" }
     val playerState = remember { mutableStateOf<ExoPlayer?>(null) }
-    LaunchedEffect(url, mediaKey) {
+    LaunchedEffect(url, mediaKey, bypassCache) {
         playerState.value?.let { oldPlayer ->
             oldPlayer.pause()
             oldPlayer.stop()
             oldPlayer.clearMediaItems()
             oldPlayer.release()
         }
+        playerState.value = null
+        firstFrame = false
+        if (recovery.shouldRemove(freshFrame = false)) PreviewVideoCache.remove(context, mediaKey)
         val httpClient = requestClient ?: OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
@@ -141,19 +157,19 @@ private fun DetailVideoPlayback(
         val httpFactory = OkHttpDataSource.Factory(httpClient)
             .setUserAgent(PREVIEW_USER_AGENT)
             .setDefaultRequestProperties(requestHeaders)
-        val cacheKey = mediaKey.split(':').takeLast(2).let { parts ->
-            if (parts.size == 2) "bg:${parts[0]}:${parts[1]}" else "bg:$mediaKey"
-        }
-        val dataSourceFactory = if (cacheAllowed) {
-            PreviewVideoCache.remove(context, cacheKey)
+        val dataSourceFactory = if (cacheAllowed && !bypassCache) {
             CacheDataSource.Factory()
                 .setCache(PreviewVideoCache.get(context))
                 .setUpstreamDataSourceFactory(httpFactory)
-                .setCacheKeyFactory { dataSpec -> cacheUriKey(Uri.parse(dataSpec.key ?: dataSpec.uri.toString())) }
+                .setCacheKeyFactory { mediaKey }
+                .setEventListener(object : CacheDataSource.EventListener {
+                    override fun onCachedBytesRead(cacheSizeBytes: Long, cachedBytes: Long) { cachedBytesRead.addAndGet(cachedBytes) }
+                    override fun onCacheIgnored(reason: Int) = Unit
+                })
         } else httpFactory
         val builder = MediaItem.Builder().setUri(url)
         if (url.contains(".m3u8", true)) builder.setMimeType(MimeTypes.APPLICATION_M3U8)
-        if (cacheAllowed) builder.setCustomCacheKey(cacheKey)
+        if (cacheAllowed && !bypassCache) builder.setCustomCacheKey(mediaKey)
         val mediaItem = builder.build()
         val nextPlayer = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory))
@@ -178,6 +194,7 @@ private fun DetailVideoPlayback(
 
             override fun onRenderedFirstFrame() {
                 firstFrame = true
+                if (recovery.shouldRemove(freshFrame = true)) PreviewVideoCache.remove(context, mediaKey)
                 onStatus("play")
                 if (isStaticFallback) {
                     PageLog.add("detailPreview stage=static-startup bitrate=${staticBitrateEstimate}bps bytes=${staticBytesLoaded}")
@@ -203,6 +220,19 @@ private fun DetailVideoPlayback(
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                val cacheReadFailure = !bypassCache && generateSequence<Throwable>(error) { it.cause }.any {
+                    it is Cache.CacheException || it is FileDataSource.FileDataSourceException
+                }
+                val malformedCachedInput = cachedBytesRead.get() > 0L && error.errorCode in setOf(
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+                    PlaybackException.ERROR_CODE_DECODING_FAILED,
+                )
+                if (cacheAllowed && recovery.retry(cacheReadFailure, malformedCachedInput)) {
+                    bypassCache = true
+                    PageLog.add("detailPreview stage=$stage cache-retry=upstream-once")
+                    return
+                }
                 failed = true
                 val cause = (error.cause?.toString() ?: error.message.orEmpty()).lineSequence().firstOrNull().orEmpty().take(120)
                 PageLog.add("detailPreview stage=$stage error=${error.errorCodeName} cause=$cause")
@@ -329,20 +359,15 @@ private fun DetailVideoPlayback(
     }
 }
 
-private fun cacheUriKey(uri: Uri): String {
-    if (!uri.isHierarchical) return uri.toString()
-    return uri.buildUpon().clearQuery().apply {
-        uri.queryParameterNames.filterNot { it.contains("api_key", true) || it.contains("token", true) || it.contains("authorization", true) }
-            .forEach { name -> uri.getQueryParameters(name).forEach { appendQueryParameter(name, it) } }
-    }.build().toString()
-}
-
 data class VideoSourceProbeResult(
     val valid: Boolean?,
     val statusCode: Int? = null,
     val contentType: String? = null,
     val prefix: String = "",
     val reason: String = "unknown",
+    val etag: String? = null,
+    val lastModified: String? = null,
+    val length: String? = null,
 )
 
 object VideoSourceProbe {
@@ -363,10 +388,11 @@ object VideoSourceProbe {
         return path.endsWith(".m3u8") || !VIDEO_EXTENSION.matches(path)
     }
 
-    suspend fun probe(url: String, headers: Map<String, String> = emptyMap(), requestClient: OkHttpClient? = null): VideoSourceProbeResult =
+    suspend fun probe(url: String, mediaKey: String, headers: Map<String, String> = emptyMap(), requestClient: OkHttpClient? = null): VideoSourceProbeResult =
         withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
-            cache[url]?.takeIf { now - it.atMs < CACHE_TTL_MS }?.let { return@withContext it.result }
+            val key = "$mediaKey|$url"
+            cache[key]?.takeIf { now - it.atMs < CACHE_TTL_MS }?.let { return@withContext it.result }
             val result = runCatching {
                 val builder = Request.Builder().url(url)
                     .header("User-Agent", PREVIEW_USER_AGENT)
@@ -406,6 +432,9 @@ object VideoSourceProbe {
                         statusCode = response.code,
                         contentType = contentType,
                         prefix = snippet,
+                        etag = response.header("ETag"),
+                        lastModified = response.header("Last-Modified"),
+                        length = response.header("Content-Range")?.substringAfterLast('/') ?: response.header("Content-Length"),
                         reason = when {
                             !response.isSuccessful -> "http"
                             htmlOrJsonType || textInvalid -> "html"
@@ -415,7 +444,10 @@ object VideoSourceProbe {
                     )
                 }
             }.getOrElse { VideoSourceProbeResult(valid = null, reason = "unknown") }
-            if (result.valid != null) cache[url] = Cached(result, now)
+            // Successful entries revalidate their HTTP content version on every page entry (512 bytes).
+            // Only failed probes use the short, identity-scoped negative cache.
+            if (result.valid == false) cache[key] = Cached(result, now)
+            cache.entries.removeAll { now - it.value.atMs >= CACHE_TTL_MS }
             result
         }
 

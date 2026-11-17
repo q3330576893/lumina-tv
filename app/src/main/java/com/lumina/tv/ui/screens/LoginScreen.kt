@@ -89,6 +89,8 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.SavedServer
+import com.lumina.tv.data.ServerAddress
+import com.lumina.tv.data.parseServerAddress
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.QrCode
@@ -108,14 +110,10 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     val activity = remember(context) { context.findActivity() }
     val scope = rememberCoroutineScope()
     val prefs = AppRuntime.prefs
-    var scheme by remember { mutableStateOf("http") }
-    var host by remember {
-        mutableStateOf(prefs?.baseUrl?.let { runCatching { Uri.parse(it).host }.getOrNull() ?: it.removePrefix("https://").removePrefix("http://").substringBefore(':') }.orEmpty())
-    }
-    var port by remember {
-        mutableStateOf(prefs?.baseUrl?.let { runCatching { Uri.parse(it).port }.getOrDefault(-1) }
-            ?.takeIf { it > 0 }?.toString() ?: "8096")
-    }
+    val initialAddress = remember { prefs?.baseUrl?.let { parseServerAddress(it) } }
+    var scheme by remember { mutableStateOf(initialAddress?.scheme ?: "http") }
+    var host by remember { mutableStateOf(initialAddress?.hostWithPath.orEmpty()) }
+    var port by remember { mutableStateOf(initialAddress?.port?.toString() ?: "8096") }
     var user by remember { mutableStateOf(prefs?.userName.orEmpty()) }
     var pass by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
@@ -136,6 +134,12 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     val loginFocusRequester = remember { FocusRequester() }
     val passFocusRequester = remember { FocusRequester() }
 
+    fun fillAddress(address: ServerAddress) {
+        scheme = address.scheme
+        host = address.hostWithPath
+        port = address.port.toString()
+    }
+
     val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val parsed = IntentIntegrator.parseActivityResult(result.resultCode, result.data)
         val raw = parsed?.contents
@@ -143,48 +147,23 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
             unsupportedScan = true
             return@rememberLauncherForActivityResult
         }
-        val uri = runCatching { Uri.parse(raw) }.getOrNull()
+        val uri = runCatching { Uri.parse(raw).takeIf { it.isHierarchical } }.getOrNull()
         val json = runCatching { org.json.JSONObject(raw) }.getOrNull()
-        val server = uri?.getQueryParameter("server") ?: uri?.getQueryParameter("url") ?: json?.optString("server")?.takeIf { it.isNotBlank() }
+        val server = uri?.getQueryParameter("server") ?: uri?.getQueryParameter("url") ?: json?.optString("server")?.ifBlank { json.optString("url") }?.takeIf { it.isNotBlank() }
         val scanUser = uri?.getQueryParameter("user") ?: uri?.getQueryParameter("username") ?: json?.optString("username")?.ifBlank { json.optString("user") }
         val scanPass = uri?.getQueryParameter("pass") ?: uri?.getQueryParameter("password") ?: json?.optString("password")?.ifBlank { json.optString("pass") }
-        val direct = runCatching { Uri.parse(raw) }.getOrNull()
-        when {
-            !server.isNullOrBlank() -> {
-                val parsedServer = runCatching { Uri.parse(if (server.startsWith("http")) server else "http://$server") }.getOrNull()
-                scheme = parsedServer?.scheme?.takeIf { it == "https" } ?: "http"
-                host = parsedServer?.host.orEmpty()
-                port = parsedServer?.port?.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
-                user = scanUser.orEmpty()
-                pass = scanPass.orEmpty()
-                scanError = null
-            }
-            direct?.host != null -> {
-                scheme = direct.scheme ?: "http"
-                host = direct.host.orEmpty()
-                port = direct.port.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
-                user = direct.getQueryParameter("user") ?: user
-                pass = direct.getQueryParameter("pass") ?: pass
-                scanError = null
-            }
-            json != null -> scanError = "二维码中缺少服务器地址或账号字段。"
-            else -> scanError = "二维码格式无法识别。请扫描包含服务器地址、用户名和密码的 Lumina 配置码。"
-        }
-        val resolvedUser = scanUser ?: direct?.getQueryParameter("user") ?: direct?.getQueryParameter("username")
-        val resolvedPass = scanPass ?: direct?.getQueryParameter("pass") ?: direct?.getQueryParameter("password")
-        val resolvedServer = server?.let { if (it.startsWith("http")) it else "http://$it" } ?: direct?.takeIf { it.host != null }?.let {
-            "${it.scheme ?: "http"}://${it.host}:${it.port.takeIf { p -> p > 0 } ?: if (it.scheme == "https") 8920 else 8096}"
-        }
-        if (scanError == null && !resolvedServer.isNullOrBlank() && !resolvedUser.isNullOrBlank() && !resolvedPass.isNullOrBlank()) {
-            user = resolvedUser
-            pass = resolvedPass
-            val base = Uri.parse(if (resolvedServer.startsWith("http")) resolvedServer else "http://$resolvedServer")
-            scheme = base.scheme?.takeIf { it == "https" } ?: "http"
-            host = base.host.orEmpty()
-            port = base.port.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
-            pendingLoginBase = "${scheme}://${host}:${port}"
+        val address = (server ?: raw.takeIf { json == null })?.let { parseServerAddress(it) }
+        if (address == null) {
+            scanError = "二维码中缺少有效的服务器地址。"
+        } else if (!scanUser.isNullOrBlank() && scanPass != null) {
+            fillAddress(address)
+            user = scanUser
+            pass = scanPass
+            scanError = null
+            pendingLoginBase = address.baseUrl
             scanLoginRequested = true
-        } else if (scanError == null) {
+        } else {
+            fillAddress(address)
             scanError = "二维码缺少完整的服务器地址、用户名或密码。"
         }
 
@@ -260,19 +239,24 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
     fun submit(name: String = user, password: String = pass) {
         if (loading || probing) return
-        val cleanHost = host.trim().removePrefix("http://").removePrefix("https://").trimEnd('/')
-        if (cleanHost.isBlank() || name.isBlank()) { error = "请填写服务器地址和用户名"; return }
+        if (host.isBlank() || name.isBlank()) { error = "请填写服务器地址和用户名"; return }
         val selectedPort = port.trim().ifBlank { if (scheme == "https") "8920" else "8096" }
-        val primary = pendingLoginBase ?: "$scheme://$cleanHost:$selectedPort"
-        val onlyPrimary = pendingLoginBase != null
+        val address = pendingLoginBase?.let { parseServerAddress(it) }
+            ?: parseServerAddress(host, scheme, selectedPort)
+            ?: run { error = "服务器地址或端口无效"; return }
+        val primary = address.baseUrl
+        val onlyPrimary = pendingLoginBase != null || host.contains("://") || paired
         pendingLoginBase = null
         scope.launch {
             probing = true; error = null
             val candidates = buildList {
                 add(primary)
-                if (!onlyPrimary && scheme == "http") { add("http://$cleanHost:8096"); add("https://$cleanHost:8920") }
-                else if (!onlyPrimary) { add("https://$cleanHost:8920"); add("http://$cleanHost:8096") }
-                if (!onlyPrimary) add("http://$cleanHost:80")
+                if (!onlyPrimary && address.scheme == "http") {
+                    add(address.withEndpoint("http", 8096).baseUrl); add(address.withEndpoint("https", 8920).baseUrl)
+                } else if (!onlyPrimary) {
+                    add(address.withEndpoint("https", 8920).baseUrl); add(address.withEndpoint("http", 8096).baseUrl)
+                }
+                if (!onlyPrimary) add(address.withEndpoint("http", 80).baseUrl)
 
             }.distinct()
             val deadline = System.currentTimeMillis() + 26_000L
@@ -307,15 +291,10 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     DisposableEffect(Unit) {
         AppRuntime.onPairConfig = config@{ server, pairedUser, pairedPass ->
             if (loading || probing) return@config false
-            val u = runCatching { Uri.parse(if (server.startsWith("http")) server else "http://$server") }.getOrNull()
-            scheme = if (u?.scheme == "https") "https" else "http"
-            host = u?.host ?: server.substringBefore(':')
-            if (u?.host == null && server.contains(':')) {
-                server.substringAfterLast(':').substringBefore('/').toIntOrNull()?.let { port = it.toString() }
-            }
-            port = u?.port?.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
+            val address = parseServerAddress(server) ?: return@config false
+            fillAddress(address)
             user = pairedUser; pass = pairedPass; paired = true
-            pendingLoginBase = "${scheme}://${host}:${port}"
+            pendingLoginBase = address.baseUrl
             AppRuntime.updatePairingStatus("电视正在连接服务器…")
             submit(pairedUser, pairedPass)
 
@@ -323,6 +302,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         }
         AppRuntime.onPairRequest = { config -> pendingPairConfig = config }
         onDispose {
+            AppRuntime.resolvePairRequest("cancelled")
             AppRuntime.onPairConfig = null
             AppRuntime.onPairRequest = null
         }
@@ -330,9 +310,13 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
     LaunchedEffect(pendingPairConfig) {
         val config = pendingPairConfig ?: return@LaunchedEffect
-        scheme = config.scheme
-        host = config.host
-        port = config.port.toString()
+        val address = parseServerAddress(config.host, config.scheme, config.port, config.path) ?: run {
+            error = "配对地址或端口无效"
+            AppRuntime.resolvePairRequest("cancelled")
+            pendingPairConfig = null
+            return@LaunchedEffect
+        }
+        fillAddress(address)
         user = config.user
         pass = config.pass
         paired = true
@@ -340,7 +324,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         pairingNote = config.note
         pendingLoginBase = null
         pairNotice = "已接收手机推送的配置（${config.alias.ifBlank { config.host }}），确认后点『连接并登录』"
-        AppRuntime.resolvePairRequest("received")
+        // Keep pending until login succeeds (confirmed), or this screen closes (cancelled).
         pendingPairConfig = null
         loginFocusRequester.requestFocus()
     }
@@ -378,10 +362,8 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
         val savedServers = remember { AppRuntime.prefs?.savedServerList().orEmpty() }
         fun fillFromSaved(server: SavedServer) {
-            val u = runCatching { Uri.parse(server.url) }.getOrNull()
-            scheme = if (u?.scheme == "https") "https" else "http"
-            host = u?.host ?: server.url.substringAfter("://").substringBefore(':').substringBefore('/')
-            port = u?.port?.takeIf { it > 0 }?.toString() ?: if (scheme == "https") "8920" else "8096"
+            val address = parseServerAddress(server.url) ?: return
+            fillAddress(address)
             user = server.userName
             pass = ""
             pairNotice = "已填入 ${server.name}，补上密码即可登录"
@@ -753,7 +735,7 @@ private fun LoginCard(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            GlassField(host, onHost, "IP 或域名", Modifier.weight(1f), ImeAction.Next, focusRequester = hostFocusRequester)
+            GlassField(host, onHost, "地址（可含 /emby）", Modifier.weight(1f), ImeAction.Next, focusRequester = hostFocusRequester)
             GlassField(port, onPort, "端口", Modifier.width(92.dp), ImeAction.Next, keyboardType = KeyboardType.Number)
         }
         GlassField(user, onUser, "Emby 用户名", Modifier.fillMaxWidth(), ImeAction.Next)
