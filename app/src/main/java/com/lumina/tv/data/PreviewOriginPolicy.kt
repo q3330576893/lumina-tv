@@ -16,12 +16,6 @@ internal class PreviewOriginInterceptor(
     private val authorization: () -> String,
 ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val builder = request.newBuilder().removeHeader("X-Emby-Authorization")
-        if (isSameOrigin(baseUrl(), request.url.toString())) {
-            builder.header("X-Emby-Authorization", authorization())
-        }
-        // A network interceptor runs again for every redirect and every HLS child request.
-        return chain.proceed(builder.build())
+        return OriginAuthInterceptor { OriginCredentials(baseUrl(), authorization()) }.intercept(chain)
     }
 }

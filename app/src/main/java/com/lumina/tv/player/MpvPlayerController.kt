@@ -8,10 +8,14 @@ import java.util.concurrent.atomic.AtomicLong
 import android.util.Log
 import android.view.Surface
 import com.lumina.tv.data.MediaStream
+import com.lumina.tv.data.nativePlaybackHeaders
 import com.lumina.tv.diag.PageLog
 import org.jellycine.mpv.MPVLib
 import java.io.File
 import java.util.ArrayDeque
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CompletableDeferred
+import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.json.JSONArray
 
@@ -19,11 +23,13 @@ import org.json.JSONArray
 class MpvPlayerController(
     context: Context,
     private val generation: Int,
+    private val tlsCaFile: File,
+    subtitleHttpClient: OkHttpClient,
     private val onSoftwareRetry: (MpvPlayerController, LoadIdentity, () -> Boolean, () -> Unit) -> Unit,
     private val onState: (MpvPlayerController, LoadIdentity, State) -> Unit,
 ) {
     data class LoadIdentity(val generation: Int, val physicalId: Long, val software: Boolean)
-    enum class FailureKind { INITIALIZATION, SURFACE, HTTP, DECODING, FIRST_FRAME_TIMEOUT, LOAD }
+    enum class FailureKind { INITIALIZATION, SURFACE, HTTP, DECODING, FIRST_FRAME_TIMEOUT, LOAD, CERT_INVALID }
     sealed interface InitializationResult {
         data object Ready : InitializationResult
         data class Failed(val reason: String, val identity: LoadIdentity? = null) : InitializationResult
@@ -31,6 +37,10 @@ class MpvPlayerController(
 
     // Each observer closes over this object, never a mutable generation field.
     private inner class NativeLoad(val identity: LoadIdentity, val engine: MPVLib) {
+        val subtitleIo = LoadScopedIo(identity, { isActive(this) }, { task -> handler.post(task) })
+        val subtitleFiles = mutableSetOf<File>() // Only accessed on subtitleIo's serial executor.
+        val subtitleAliases = ConcurrentHashMap<String, Int>()
+        var subtitlePending = 0
         @Volatile var started = false
         var failureKind: FailureKind? = null
         var retryPending = false
@@ -52,6 +62,11 @@ class MpvPlayerController(
                 val at = timestamp()
                 enqueue(this@NativeLoad, requireStarted = false) {
                     appendMpvLog("$at load=${identity.physicalId} $prefix/$level $text")
+                    if (isMpvCertificateFailure(text)) {
+                        failureKind = FailureKind.CERT_INVALID
+                        emit(this@NativeLoad, buffering = false, error = CERTIFICATE_ERROR_MESSAGE, failureKind = FailureKind.CERT_INVALID)
+                        return@enqueue
+                    }
                     // Preserve a useful cause when END_FILE cannot expose its reason in this API.
                     if (Regex("(?i)HTTP[^\n]*(?:4[0-9]{2}|5[0-9]{2})|server returned|connection refused|failed to resolve").containsMatchIn(text)) {
                         failureKind = FailureKind.HTTP
@@ -104,6 +119,7 @@ class MpvPlayerController(
         val cacheSpeedBytesPerSecond: Long = 0L,
         val subtitleNotice: String? = null,
         val failureKind: FailureKind? = null,
+        val subtitleFallbackToAuto: Boolean = false,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -140,6 +156,9 @@ class MpvPlayerController(
     private var preferredSubtitleIndex: Int? = null
     private var subtitleDisabled = false
     private var subtitleMappingNotice: String? = null
+    private var subtitleFallbackToAuto = false
+    private val subtitleDownload = ExternalSubtitleDownload(subtitleHttpClient)
+    private var lastRetirement: CompletableDeferred<Unit>? = null
     private var audioSilentCodec: String? = null
     private var cacheSpeedBytesPerSecond = 0L
 
@@ -180,9 +199,11 @@ class MpvPlayerController(
                 "hwdec-codecs" to "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1",
                 "cache" to "yes",
                 "keep-open" to "no",
-                "tls-verify" to "no",
                 "sub-scale" to "1.0",
             ).forEach { (key, value) -> engine.setOptionString(key, value) }
+            MpvTlsPolicy.options(tlsCaFile).forEach { (key, value) ->
+                check(engine.setOptionString(key, value) >= 0) { "无法启用 TLS 证书验证" }
+            }
             engine.init()
             engine.addObserver(load.observer)
             engine.addLogObserver(load.logObserver)
@@ -211,15 +232,21 @@ class MpvPlayerController(
         }
     }
 
-    private fun destroyNativeLoad(load: NativeLoad) {
+    private fun destroyNativeLoad(load: NativeLoad): CompletableDeferred<Unit> {
         checkMainThread()
         loadGate.retire(load)
         handler.removeCallbacksAndMessages(load)
-        runCatching { load.engine.removeObserver(load.observer) }
-        runCatching { load.engine.removeLogObserver(load.logObserver) }
-        runCatching { load.engine.detachSurface() }
-        // Observers only enqueue work; never destroy from the native event thread.
-        runCatching { load.engine.destroy() }
+        val retirement = load.subtitleIo.retire {
+            runCatching { load.engine.removeObserver(load.observer) }
+            runCatching { load.engine.removeLogObserver(load.logObserver) }
+            runCatching { load.engine.detachSurface() }
+            // This serial executor owns both subtitle JNI and destruction. Never wait on the UI.
+            runCatching { load.engine.destroy() }
+            load.subtitleFiles.forEach(File::delete)
+        }
+        lastRetirement = retirement
+        MpvRetirementFence.track(retirement)
+        return retirement
     }
 
     private val subtitleOptions = linkedMapOf<String, String>()
@@ -325,6 +352,8 @@ class MpvPlayerController(
         if (released) return
         preferredSubtitleIndex = embyStreamIndex
         subtitleDisabled = false
+        subtitleMappingNotice = null
+        subtitleFallbackToAuto = false
         if (fileLoaded) {
             loadPendingSubtitles()
             applyPreferredSubtitleTrack()
@@ -333,6 +362,8 @@ class MpvPlayerController(
 
     fun disableSubtitle() {
         if (released) return
+        subtitleMappingNotice = null
+        subtitleFallbackToAuto = false
         preferredSubtitleIndex = null
         subtitleDisabled = true
         runCatching { mpv?.setPropertyString("sid", "no") }
@@ -341,6 +372,8 @@ class MpvPlayerController(
 
     fun enableSubtitleAuto() {
         if (released) return
+        subtitleMappingNotice = null
+        subtitleFallbackToAuto = false
         preferredSubtitleIndex = null
         subtitleDisabled = false
         if (fileLoaded) loadPendingSubtitles()
@@ -350,9 +383,36 @@ class MpvPlayerController(
 
     private fun loadPendingSubtitles() {
         if (subtitleDisabled) return
+        val load = activeLoad?.takeIf(::isActive) ?: return
         val subtitles = pendingSubtitles
         pendingSubtitles = emptyList()
-        subtitles.forEach { mpv?.command(arrayOf("sub-add", it, "auto")) }
+        load.subtitlePending += subtitles.size
+        subtitles.forEach { url ->
+            val embyIndex = externalSubtitleIndices[url]
+            val headers = requestHeaders
+            load.subtitleIo.submit({
+                val file = File.createTempFile("mpv-sub-${load.identity.physicalId}-", ".vtt", appContext.cacheDir)
+                load.subtitleFiles += file
+                subtitleDownload.fetch(url, headers, file, load.subtitleIo)
+                load.subtitleIo.checkCurrent()
+                if (embyIndex != null) {
+                    load.subtitleAliases[file.absolutePath] = embyIndex
+                    load.subtitleAliases[file.toURI().toString()] = embyIndex
+                }
+                // A bounded, validated local VTT is the ONLY input to this synchronous JNI call.
+                load.engine.command(arrayOf("sub-add", file.absolutePath, "auto"))
+            }) { result ->
+                load.subtitlePending--
+                mappings.remove("sub")
+                result.exceptionOrNull()?.let { failure ->
+                    subtitleMappingNotice = if (isCertificateFailure(failure)) CERTIFICATE_ERROR_MESSAGE
+                        else "外挂字幕加载失败或超时，视频继续播放；可在字幕菜单换轨或关闭字幕"
+                    appendMpvLog("${timestamp()} subtitle load failed: ${failure.javaClass.simpleName}")
+                }
+                if (subtitleDisabled) disableSubtitle() else applyPreferredSubtitleTrack()
+                emit(load)
+            }
+        }
     }
 
     fun currentSubtitleEmbyIndex(): Int? {
@@ -373,7 +433,7 @@ class MpvPlayerController(
         pendingPositionMs = startPositionMs?.coerceAtLeast(0L)
         pauseIntent = paused
         this.subtitleUrls = subtitleUrls.toList()
-        requestHeaders = headers.toMap()
+        requestHeaders = nativePlaybackHeaders(headers)
         startPhysicalLoad(load)
     }
 
@@ -381,6 +441,7 @@ class MpvPlayerController(
         if (!isActive(load)) return
         audioSilentCodec = null
         subtitleMappingNotice = null
+        subtitleFallbackToAuto = false
         ready = false
         fileLoaded = false
         positionMs = 0L
@@ -535,8 +596,11 @@ class MpvPlayerController(
         val embyIndex = preferredSubtitleIndex ?: return
         val id = findMpvId("sub", embyIndex, subtitleStreams)
         if (id == null) {
+            // FILE_LOADED/track-list can precede asynchronous external track arrival.
+            if (load.subtitlePending > 0 || pendingSubtitles.isNotEmpty()) return
             appendMpvLog("${timestamp()} mpv subtitle map failed: embyIndex=$embyIndex mapping=fallback-unavailable")
-            subtitleMappingNotice = "记住的字幕轨不存在，已恢复自动选择"
+            subtitleMappingNotice = missingSubtitleTrackNotice(subtitleMappingNotice)
+            subtitleFallbackToAuto = true
             preferredSubtitleIndex = null
             subtitleDisabled = false
             runCatching { mpv?.setPropertyString("sid", "auto") }
@@ -620,7 +684,8 @@ class MpvPlayerController(
                 title = track.optString("title").takeIf(String::isNotBlank),
                 channels = track.optInt("demux-channel-count", -1).takeIf { it > 0 },
                 external = external,
-                externalSourceIndex = if (external) externalSubtitleIndices[track.optString("external-filename")] else null,
+                externalSourceIndex = if (external) externalSubtitleIndices[track.optString("external-filename")]
+                    ?: activeLoad?.subtitleAliases?.get(track.optString("external-filename")) else null,
             )
         }
     }.getOrDefault(emptyList())
@@ -710,8 +775,12 @@ class MpvPlayerController(
         released = true
         handler.removeCallbacksAndMessages(null)
         audioDiagnostics.close()
-        activeLoad?.let { destroyNativeLoad(it) }
-        PlayerLifecycle.registry.released(this, reason)
+        val retirement = activeLoad?.let { destroyNativeLoad(it) } ?: lastRetirement
+        val cleanup = {
+            tlsCaFile.delete()
+            PlayerLifecycle.registry.released(this, reason)
+        }
+        if (retirement == null) cleanup() else retirement.invokeOnCompletion { cleanup() }
         loadGate.close()
         attachedSurface = null
         runCatching { sessionStateFile.writeText(JSONObject().put("active", false).put("endedAt", timestamp()).put("reason", reason).toString(), Charsets.UTF_8) }
@@ -719,6 +788,10 @@ class MpvPlayerController(
 
     private fun onLoadTimeout(load: NativeLoad) {
         if (!isActive(load) || ready) return
+        if (load.failureKind == FailureKind.CERT_INVALID) {
+            emit(load, buffering = false, error = CERTIFICATE_ERROR_MESSAGE, failureKind = FailureKind.CERT_INVALID)
+            return
+        }
         if (load.failureKind == FailureKind.HTTP) {
             emit(load, buffering = false, error = "mpv HTTP 请求失败", failureKind = FailureKind.HTTP)
             return
@@ -742,29 +815,35 @@ class MpvPlayerController(
         if (!isActive(load)) return
         softwareRetryUsed = true
         softwareRetryCount++
-        val surface = attachedSurface
-        val width = lastSurfaceWidth
-        val height = lastSurfaceHeight
-        destroyNativeLoad(load)
-        attachedSurface = null
+        val retirement = destroyNativeLoad(load)
         fileLoaded = false
         ready = false
-        val result = createNativeLoad(software = true)
-        if (result is InitializationResult.Failed) {
-            // Explicit initialization outcome of a live controller, not a native event.
-            if (!released && activeLoad == null) {
-                onState(this, checkNotNull(result.identity), State(error = result.reason, failureKind = FailureKind.INITIALIZATION))
+        retirement.invokeOnCompletion {
+            handler.post {
+                if (released || activeLoad != null) return@post
+                // Surface callbacks can run during retirement. Rebind the latest surface, not a
+                // stale pre-retirement snapshot or a surface cached while activeLoad was null.
+                val surface = attachedSurface
+                val width = lastSurfaceWidth
+                val height = lastSurfaceHeight
+                attachedSurface = null
+                val result = createNativeLoad(software = true)
+                if (result is InitializationResult.Failed) {
+                    if (!released && activeLoad == null) {
+                        onState(this, checkNotNull(result.identity), State(error = result.reason, failureKind = FailureKind.INITIALIZATION))
+                    }
+                    return@post
+                }
+                val retry = checkNotNull(activeLoad)
+                if (surface?.isValid != true) {
+                    emit(retry, buffering = false, error = "播放画面未就绪（Surface 未创建）", failureKind = FailureKind.SURFACE)
+                    return@post
+                }
+                attachSurface(surface, width, height)
+                appendMpvLog("${timestamp()} load=${retry.identity} hwdec fallback -> no")
+                startPhysicalLoad(retry)
             }
-            return
         }
-        val retry = checkNotNull(activeLoad)
-        if (surface?.isValid != true) {
-            emit(retry, buffering = false, error = "播放画面未就绪（Surface 未创建）", failureKind = FailureKind.SURFACE)
-            return
-        }
-        attachSurface(surface, width, height)
-        appendMpvLog("${timestamp()} load=${retry.identity} hwdec fallback -> no")
-        startPhysicalLoad(retry)
     }
 
     private fun handleProperty(load: NativeLoad, property: String, value: String) {
@@ -900,7 +979,7 @@ class MpvPlayerController(
         checkMainThread()
         if (!isActive(load) || load.terminal) return
         if (error != null) load.terminal = true
-        onState(this, load.identity, State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec, cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind))
+        onState(this, load.identity, State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec, cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind, subtitleFallbackToAuto))
     }
 
     private companion object {

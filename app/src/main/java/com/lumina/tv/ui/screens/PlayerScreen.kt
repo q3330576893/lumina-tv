@@ -2,12 +2,27 @@
 
 import com.lumina.tv.data.catchingRequest
 import com.lumina.tv.data.PlaybackStartIntent
+import com.lumina.tv.data.playbackReloadIntent
 import com.lumina.tv.data.PlaybackProgressSession
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.TimelineOrigin
 import com.lumina.tv.data.TimelinePosition
 import com.lumina.tv.player.PendingSeekConfirmation
 import com.lumina.tv.player.SeekConfirmation
+import com.lumina.tv.player.CERTIFICATE_ERROR_MESSAGE
+import com.lumina.tv.player.MpvTlsPolicy
+import com.lumina.tv.player.MpvRetirementFence
+import com.lumina.tv.player.ServerCertificateErrors
+import com.lumina.tv.player.isCertificateFailure
+import com.lumina.tv.player.HiddenPlaybackKey
+import com.lumina.tv.player.HiddenPlaybackInputState
+import com.lumina.tv.player.HiddenPlaybackEvent
+import com.lumina.tv.player.HiddenPlaybackAction
+import com.lumina.tv.player.HIDDEN_OK_HOLD_MS
+import com.lumina.tv.player.reduceHiddenPlaybackInput
+import com.lumina.tv.player.hiddenTouchEnabled
+import com.lumina.tv.player.playbackControlsOverlayVisible
+import com.lumina.tv.player.trickplayCanPresent
 
 import android.os.Build
 import android.text.format.DateFormat
@@ -28,6 +43,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -103,6 +119,10 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -123,7 +143,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -229,6 +249,7 @@ private fun playbackNetworkMessage(error: Throwable): String {
     val message = causeChain.joinToString(" ") { it.message.orEmpty() }
     val status = causeChain.filterIsInstance<com.lumina.tv.data.EmbyException>().firstNotNullOfOrNull { it.httpStatus }
     return when {
+        isCertificateFailure(error) -> CERTIFICATE_ERROR_MESSAGE
         status == 401 || status == 403 || message.contains("HTTP 401") || message.contains("HTTP 403") -> "登录已失效，请重新登录"
         status != null && status >= 500 -> "服务器错误（$status）"
         causeChain.any { it is java.net.SocketException || it is java.net.SocketTimeoutException || it is java.io.InterruptedIOException } ||
@@ -396,7 +417,9 @@ fun PlayerScreen(
     var readyAt by remember(item.id) { mutableLongStateOf(0L) }
     var firstFrameAt by remember(item.id) { mutableLongStateOf(0L) }
     var bytesLoaded by remember(item.id) { mutableLongStateOf(0L) }
-    var pendingStartIntent by remember(item.id) { mutableStateOf<PlaybackStartIntent?>(startIntent) }
+    val initialStartIntent = remember(item.id) { startIntent }
+    var recoveryStartIntent by remember(item.id) { mutableStateOf(initialStartIntent) }
+    var pendingStartIntent by remember(item.id) { mutableStateOf<PlaybackStartIntent?>(initialStartIntent) }
     var desiredPlaying by remember(item.id) { mutableStateOf(true) }
     var pendingPaused by remember(item.id) { mutableStateOf<Boolean?>(null) }
     var currentTarget by remember(item.id) { mutableStateOf<EmbyClient.PlaybackTarget?>(null) }
@@ -442,6 +465,7 @@ fun PlayerScreen(
     var seekHoldActive by remember { mutableStateOf(false) }
     var seekHoldDelta by remember { mutableLongStateOf(0L) }
     var seekHoldJob by remember { mutableStateOf<Job?>(null) }
+    var hiddenInputState by remember(item.id) { mutableStateOf(HiddenPlaybackInputState()) }
     var seekInFlight by remember { mutableStateOf(false) }
     var pendingSeekTarget by remember { mutableStateOf<Long?>(null) }
     var seekTimeoutJob by remember { mutableStateOf<Job?>(null) }
@@ -543,13 +567,9 @@ fun PlayerScreen(
     var restoreMenuFocusUntil by remember { mutableLongStateOf(0L) }
     var titleLogoFailed by remember(item.id) { mutableStateOf(false) }
 
-    var okDownAt by remember(item.id) { mutableLongStateOf(0L) }
 
-    val httpFactory = remember {
-        DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(12_000)
-            .setReadTimeoutMs(30_000)
+    val httpFactory = remember(client) {
+        OkHttpDataSource.Factory(client?.playbackHttpClient ?: okhttp3.OkHttpClient())
             .setUserAgent("LuminaTV/1.5 (Android)")
     }
 
@@ -705,6 +725,7 @@ fun PlayerScreen(
         if (playerMs != null) {
             lastPlayerPositionMs = playerMs
             position = target.timeline.position(playerMs).reportPositionMs
+            recoveryStartIntent = playbackReloadIntent(recoveryStartIntent, target.timeline.position(playerMs))
         }
         confirmSeek(playerMs, now)
         val sample = target.timeline.position(lastPlayerPositionMs)
@@ -761,11 +782,19 @@ fun PlayerScreen(
         playbackMarkers = catchingRequest { client?.getPlaybackMarkers(item.id) }.getOrNull()
     }
 
-    LaunchedEffect(item.id, previewTargetMs, previewActive) {
+    val isBufferingForDisplay = isActuallyStalled && showStallOverlay &&
+        error == null && playbackStatusNotice == null
+    val controlsOverlayVisible = playbackControlsOverlayVisible(controlsVisible, seekHoldActive, optionMenu, isBufferingForDisplay)
+    val canShowTrickplay = trickplayCanPresent(controlsOverlayVisible, previewActive, duration,
+        previewDisabled || quickPanel != QuickPanel.NONE || error != null)
+    LaunchedEffect(item.id, sessionGeneration, previewTargetMs, canShowTrickplay, client) {
+        previewFrame = null
         val target = previewTargetMs ?: return@LaunchedEffect
-        if (!previewActive || previewDisabled || client == null) return@LaunchedEffect
+        if (!canShowTrickplay || client == null) return@LaunchedEffect
+        val generation = sessionGeneration
         delay(160)
-        previewFrame = catchingRequest { client.getTrickplayFrame(item.id, target) }.getOrNull()
+        val frame = catchingRequest { client.getTrickplayFrame(item.id, target) }.getOrNull()
+        if (isCurrentLoad(generation)) previewFrame = frame
     }
 
     fun cancelCreditsCountdown(reason: String, allowRestart: Boolean = true) {
@@ -844,17 +873,20 @@ fun PlayerScreen(
         phaseTimes.put("downloadLoadingCount", loadingCount).put("downloadLoadingDurationMs", loadingDurationMs)
     }
 
-    fun requestPlaybackReload(positionMs: Long, generation: Int) {
+    fun requestPlaybackReload(generation: Int, explicitIntent: PlaybackStartIntent? = null) {
         if (!isCurrentLoad(generation)) {
             PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration")
             return
         }
         if (reloadPending) return
+        val sample = (observedPlayerPositionMs() ?: lastPlayerPositionMs)?.let(::timelinePosition)
+        val retryIntent = explicitIntent ?: playbackReloadIntent(recoveryStartIntent, sample)
         reportStopInAppScope()
         reloadPending = true
         reloadUsesRecoveryAttempt = recovering
         media3LoadGeneration = -1
-        pendingStartIntent = PlaybackStartIntent.Restore(positionMs.coerceAtLeast(0L))
+        pendingStartIntent = retryIntent
+        recoveryStartIntent = retryIntent
         pendingPaused = !desiredPlaying
         reloadKey++
     }
@@ -868,7 +900,7 @@ fun PlayerScreen(
             phaseTimes.put("strmResumeFallback", strmResumeFallback)
             PageLog.add("timeline: STRM resume not reached in 8000ms; restarting from zero")
             strmRestartNoticePending = !strmRestartNoticeShown
-            requestPlaybackReload(0L, sessionGeneration)
+            requestPlaybackReload(sessionGeneration, PlaybackStartIntent.FromStart)
         }
     }
 
@@ -953,8 +985,22 @@ fun PlayerScreen(
         }
     }
 
-    fun requestAutomaticReload(positionMs: Long, generation: Int, reason: String) {
-        recoverAutomatically(reason, generation) { requestPlaybackReload(positionMs, generation) }
+    fun requestAutomaticReload(generation: Int, reason: String) {
+        recoverAutomatically(reason, generation) { requestPlaybackReload(generation) }
+    }
+
+    fun showCertificateError(engine: String) {
+        // A queued cooldown/fallback must not later overwrite a terminal certificate decision.
+        audioRecoveryJob?.cancel()
+        audioRecoveryJob = null
+        recovering = false
+        client?.baseUrl?.let(ServerCertificateErrors::record)
+        lastPlaybackErrorJson = JSONObject().put("engine", engine).put("category", "CERT_INVALID").put("action", "check_certificate").toString()
+        PageLog.add("playbackError category=CERT_INVALID engine=$engine action=check_certificate")
+        updateStalled(false)
+        playbackStatusNotice = null
+        failurePhase = "证书验证"
+        error = CERTIFICATE_ERROR_MESSAGE
     }
 
     fun audioSourceKey(): String = currentSourceId ?: playbackSource?.id ?: item.id
@@ -993,7 +1039,7 @@ fun PlayerScreen(
                 failurePhase = "解封装"
                 audioDecodeNotice = "直连容器无法解析，正在尝试 mpv"
                 engineSwitchTrace.add("mpv-fallback:container:$errorCodeName")
-                requestAutomaticReload(position, generation, "media3:$errorCodeName")
+                requestAutomaticReload(generation, "media3:$errorCodeName")
             }
             ContainerRecovery.TRANSCODE -> {
                 transcodeFallbackTried = true
@@ -1006,7 +1052,7 @@ fun PlayerScreen(
                 failurePhase = "解封装"
                 audioDecodeNotice = "直连容器无法解析，正在尝试转码"
                 engineSwitchTrace.add("transcode-fallback:$errorCodeName")
-                requestAutomaticReload(position, generation, "media3:$errorCodeName")
+                requestAutomaticReload(generation, "media3:$errorCodeName")
             }
             ContainerRecovery.TERMINAL -> {
                 updateStalled(false)
@@ -1061,7 +1107,6 @@ fun PlayerScreen(
             return
         }
         val generation = sessionGeneration
-        val resume = position
         recoverAutomatically("audio:$reason", generation) {
             error = null
             playbackStatusNotice = null
@@ -1074,7 +1119,7 @@ fun PlayerScreen(
                 PageLog.add("audioRecovery action=mpv reason=$reason attempts=${recoveryBudget.attempts}")
                 enginePinned = "mpv"
                 mpvState = MpvPlayerController.State()
-                requestPlaybackReload(resume, generation)
+                requestPlaybackReload(generation)
             } else {
                 enginePinned = "media3"
                 mpvBackend?.release("audio-recovery")
@@ -1091,7 +1136,7 @@ fun PlayerScreen(
                     audioDecodeNotice = "本机无法播放该音轨，正在尝试服务器转码"
                     PageLog.add("audioRecovery action=transcode attempts=${recoveryBudget.attempts}")
                 }
-                requestPlaybackReload(resume, generation)
+                requestPlaybackReload(generation)
             }
         }
     }
@@ -1111,6 +1156,12 @@ fun PlayerScreen(
 
     fun handleMpvFailure(kind: MpvPlayerController.FailureKind, detail: String, generation: Int) {
         if (!isCurrentLoad(generation) || reloadPending) return
+        if (kind == MpvPlayerController.FailureKind.CERT_INVALID) {
+            showCertificateError("mpv")
+            mpvBackend?.release("certificate-invalid")
+            mpvBackend = null
+            return
+        }
         val reason = when (kind) {
             MpvPlayerController.FailureKind.INITIALIZATION -> PlaybackFailureReason.INITIALIZATION
             MpvPlayerController.FailureKind.SURFACE -> PlaybackFailureReason.SURFACE
@@ -1118,6 +1169,7 @@ fun PlayerScreen(
             MpvPlayerController.FailureKind.DECODING -> PlaybackFailureReason.DECODING
             MpvPlayerController.FailureKind.FIRST_FRAME_TIMEOUT -> PlaybackFailureReason.FIRST_FRAME_TIMEOUT
             MpvPlayerController.FailureKind.LOAD -> PlaybackFailureReason.LOAD
+            MpvPlayerController.FailureKind.CERT_INVALID -> error("Certificate errors are terminal")
         }
         recordPathFailure(reason, detail)
         if (recordAudioMpvFailure()) return
@@ -1133,7 +1185,7 @@ fun PlayerScreen(
         }
         audioDecodeNotice = "$detail，正在尝试可用播放路径"
         reloadForceTranscode = currentPath?.delivery == PlaybackDelivery.TRANSCODE
-        requestAutomaticReload(position, generation, "mpv:$reason")
+        requestAutomaticReload(generation, "mpv:$reason")
     }
 
     LaunchedEffect(item.id, mediaSources, initialSourceId, currentSourceId) {
@@ -1142,7 +1194,7 @@ fun PlayerScreen(
             if (remembered != null && mediaSources.any { it.id == remembered }) {
                 currentSourceId = remembered
                 if (sessionGeneration > 0 && playbackSource?.id != remembered) {
-                    requestPlaybackReload(position, sessionGeneration)
+                    requestPlaybackReload(sessionGeneration)
                 }
             }
         }
@@ -1166,7 +1218,7 @@ fun PlayerScreen(
                 audioDecodeMode = "auto"
                 AppRuntime.prefs?.audioDecodeMode = "auto"
                 enginePinned = null
-                requestPlaybackReload(position, sessionGeneration)
+                requestPlaybackReload(sessionGeneration)
             }
     }
     DisposableEffect(context, item.id) {
@@ -1201,7 +1253,7 @@ fun PlayerScreen(
         firstFrameAt = 0L
         watchdog.reset()
         // Snapshot before releasing either engine. Zero is a valid restoration point.
-        val loadIntent = pendingStartIntent ?: PlaybackStartIntent.Restore(position.coerceAtLeast(0L))
+        val loadIntent = pendingStartIntent ?: recoveryStartIntent
         val resumePosition = loadIntent.positionMs(item.positionTicks / 10_000L)
         val restorePaused = pendingPaused ?: !desiredPlaying
         pendingPaused = null
@@ -1251,6 +1303,8 @@ fun PlayerScreen(
             dvDecoderPath = null
             failurePhase = "解析"
             try {
+                MpvRetirementFence.await()
+                if (!isCurrentLoad(generation)) return@launch
                 if (forceTranscode) transcodeFallbackTried = true
                 val maxStreamingBitrate = AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
                 val strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy()
@@ -1302,7 +1356,7 @@ fun PlayerScreen(
                 val targetIsHls = target.url.contains("master.m3u8", true) || target.url.contains(".m3u8", true)
                 if (targetIsHls) transcodeFallbackTried = true
                 rangeProbeJob = instanceScope.launch {
-                    val probeResult = runCatching { PlaybackRangeProbe.probe(target.url, target.headers) }
+                    val probeResult = runCatching { PlaybackRangeProbe.probe(target.url, target.headers, c.playbackHttpClient) }
                         .getOrElse { JSONObject().put("error", it.javaClass.simpleName) }
                     if (isCurrentLoad(generation)) {
                         rangeProbeDiagnostics = probeResult
@@ -1373,10 +1427,7 @@ fun PlayerScreen(
                     ?: if (target.direct) null else "转码"
                 val cacheLimit = AppRuntime.prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L
                 PlaybackCache.setLimit(cacheLimit)
-                val upstreamFactory = DefaultHttpDataSource.Factory()
-                    .setAllowCrossProtocolRedirects(true)
-                    .setConnectTimeoutMs(12_000)
-                    .setReadTimeoutMs(30_000)
+                val upstreamFactory = OkHttpDataSource.Factory(c.playbackHttpClient)
                     .setUserAgent("LuminaTV/1.5 (Android)")
                     .setDefaultRequestProperties(target.headers)
                 val cacheFactory = if (cacheLimit > 0L) PlaybackCache.dataSourceFactory(context, upstreamFactory) else null
@@ -1395,13 +1446,15 @@ fun PlayerScreen(
                 if (activeEngine == "mpv") {
                     mpvBackend?.release("new-external-load")
                     mpvState = MpvPlayerController.State()
-                    val backend = MpvPlayerController(context, generation, onSoftwareRetry = { owner, load, needed, retry ->
+                    val caBundle = MpvTlsPolicy.platformCaBundle(context.cacheDir)
+                    if (!isCurrentLoad(generation)) { caBundle.delete(); return@launch }
+                    val backend = MpvPlayerController(context, generation, caBundle, c.playbackHttpClient, onSoftwareRetry = { owner, load, needed, retry ->
                         if (mpvBackend === owner && isCurrentLoad(load.generation)) {
                             val retryWithProgressSession = {
                                 if (needed()) {
                                     playbackDiagnostics.retry(load, android.os.SystemClock.elapsedRealtime())
                                     reportStopInAppScope()
-                                    progressSession = c.reportStart(item.id, position, srcId, target.playMethod,
+                                    progressSession = c.reportStart(item.id, target.startPositionMs, srcId, target.playMethod,
                                         target.playSessionId, paused = !desiredPlaying)
                                     speedState = speedState.forNewLoad()
                                     owner.setSpeed(speedState.userSpeed)
@@ -1433,10 +1486,9 @@ fun PlayerScreen(
                         mpvState = state
                         if (state.ready) rememberConfirmedAudio(owner.currentAudioEmbyIndex())
                         if (state.subtitleNotice != null) {
-                            if (AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource)?.startsWith("track:") == true) {
-                                playbackStatusNotice = state.subtitleNotice
-                            }
-                            subtitlePreference = "auto"
+                            playbackStatusNotice = state.subtitleNotice
+                            if (state.subtitleNotice.contains("CERT_INVALID")) ServerCertificateErrors.record(c.baseUrl)
+                            if (state.subtitleFallbackToAuto) subtitlePreference = "auto"
                         }
                         if (state.ready && !state.buffering) {
                             onTimelineFirstFrame(target, android.os.SystemClock.elapsedRealtime())
@@ -1546,9 +1598,9 @@ fun PlayerScreen(
                             .setSelectionFlags(if (st.isDefault) C.SELECTION_FLAG_DEFAULT else 0)
                             .build()
                     }
-                    val subtitleHttpFactory = DefaultHttpDataSource.Factory()
-                        .setAllowCrossProtocolRedirects(true)
-                        .setConnectTimeoutMs(5_000).setReadTimeoutMs(5_000)
+                    val subtitleHttpFactory = OkHttpDataSource.Factory(c.playbackHttpClient.newBuilder()
+                        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS).build())
                         .setUserAgent("LuminaTV/1.5 (Android)")
                     val optionalFactory = OptionalVttDataSourceFactory(
                         cacheFactory ?: upstreamFactory,
@@ -1593,6 +1645,9 @@ fun PlayerScreen(
                 updateStalled(false)
                 if (failurePhase == "未知") failurePhase = "解析"
                 val reason = playbackNetworkMessage(e)
+                if (isCertificateFailure(e)) {
+                    showCertificateError(activeEngine)
+                }
                 // PlaybackInfo/HTTP negotiation is shared by both engines.
                 // A request failure is not evidence that mpv initialization failed.
                 error = reason
@@ -1686,8 +1741,10 @@ fun PlayerScreen(
                 }
             }
         }
-        previewFrame = null
-        previewTargetMs = null
+        if (!seekHoldActive) {
+            previewFrame = null
+            previewTargetMs = null
+        }
     }
 
     fun togglePlayback() {
@@ -1720,8 +1777,13 @@ fun PlayerScreen(
     DisposableEffect(exo, item.id) {
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
-                if (!isCurrentMedia3() || audioRecoveryJob?.isActive == true) return
+                if (!isCurrentMedia3()) return
                 val errorClass = classifyPlaybackError(err)
+                if (errorClass.category == PlaybackErrorCategory.CERT_INVALID) {
+                    showCertificateError("media3")
+                    return
+                }
+                if (audioRecoveryJob?.isActive == true) return
                 android.util.Log.e("LuminaTV", "Media3 playback failed code=${err.errorCode}", err)
                 PageLog.add("playbackError category=${errorClass.category.name} code=${err.errorCode} action=${errorClass.action}")
                 failurePhase = when {
@@ -1844,7 +1906,7 @@ fun PlayerScreen(
                     error = null
                     audioDecodeNotice = if (badHttpFallbackStage == 1) "HTTP 400，正在尝试移除字幕转码参数" else "字幕参数回退失败，正在尝试服务器直连地址"
                     engineSwitchTrace.add("http-400-fallback:$badHttpFallbackStage")
-                    requestAutomaticReload(position, sessionGeneration, "media3:${err.errorCodeName}")
+                    requestAutomaticReload(sessionGeneration, "media3:${err.errorCodeName}")
                 } else if (audioDecodeMode == "passthrough" && decodingUnsupported) {
                     requestAudioRecovery("passthrough-unsupported")
                 } else if (audioDecodingUnsupported) {
@@ -1854,7 +1916,7 @@ fun PlayerScreen(
                     audioDecodeNotice = "本机解码不支持该音轨，已自动切到 mpv 本地软解"
                     enginePinned = "mpv"
                     reloadForceTranscode = false
-                    requestAutomaticReload(position, sessionGeneration, "media3-decoding")
+                    requestAutomaticReload(sessionGeneration, "media3-decoding")
                 } else if (containerUnsupported && currentIsHls && !directFallbackTried) {
                     directFallbackTried = true
                     forceDirectNext = true
@@ -1865,7 +1927,7 @@ fun PlayerScreen(
                     error = null
                     audioDecodeNotice = "转码流不可用，已改用直连播放"
                     engineSwitchTrace.add("direct-fallback:${err.errorCodeName}")
-                    requestAutomaticReload(position, sessionGeneration, "media3:${err.errorCodeName}")
+                    requestAutomaticReload(sessionGeneration, "media3:${err.errorCodeName}")
                 } else if (containerUnsupported && currentIsHls) {
                     updateStalled(false)
                     error = "该片源无法播放（转码流与直连都失败）"
@@ -1877,7 +1939,7 @@ fun PlayerScreen(
                     transcodeFallbackTried = true
                     reloadForceTranscode = true
                     error = "直连失败，自动切换转码…"
-                    requestAutomaticReload(position, sessionGeneration, "media3:${err.errorCodeName}")
+                    requestAutomaticReload(sessionGeneration, "media3:${err.errorCodeName}")
                 } else if (!rebuildRetry && !containerUnsupported) {
                     error = "媒体服务器转码流失败，重试转码路径…"
                     reloadForceTranscode = true
@@ -1885,7 +1947,7 @@ fun PlayerScreen(
                     val generation = sessionGeneration
                     recoverAutomatically("media3-rebuild", generation) {
                         rebuildRetry = true
-                        requestPlaybackReload(position, generation)
+                        requestPlaybackReload(generation)
                     }
                 } else if (mediaSources.size > 1 &&
                     mediaSources.any { it.id != currentSourceId && it.id !in triedSources }
@@ -1911,7 +1973,7 @@ fun PlayerScreen(
                     playbackSource = next
                     audioDecodeNotice = "当前版本播不了，换「${next.displayLabel}」再试"
                     engineSwitchTrace.add("source-fallback:${next.id}:${err.errorCodeName}")
-                    requestAutomaticReload(position, sessionGeneration, "media3:${err.errorCodeName}")
+                    requestAutomaticReload(sessionGeneration, "media3:${err.errorCodeName}")
                 } else if (decodingUnsupported && canTryMpvPath()) {
                     enginePinned = "mpv"
                     updateStalled(true)
@@ -1922,7 +1984,7 @@ fun PlayerScreen(
                     audioDecodeNotice = "Media3 无法播放该文件（${err.errorCodeName}$dvPathMessage），已自动切换 mpv"
                     engineSwitchTrace.add("mpv-auto-fallback:${err.errorCodeName}")
                     reloadForceTranscode = false
-                    requestAutomaticReload(position, sessionGeneration, "media3-decoding")
+                    requestAutomaticReload(sessionGeneration, "media3-decoding")
                 } else {
                     updateStalled(false)
                     val cause = generateSequence(err as Throwable?) { it.cause }
@@ -2349,6 +2411,50 @@ fun PlayerScreen(
         seekHoldDelta = 0L
     }
 
+    fun dispatchHiddenInput(event: HiddenPlaybackEvent): Boolean {
+        val transition = reduceHiddenPlaybackInput(hiddenInputState, event, android.os.SystemClock.elapsedRealtime(),
+            hiddenTouchEnabled(controlsVisible, optionMenu, quickPanel != QuickPanel.NONE, error != null))
+        hiddenInputState = transition.state
+        transition.actions.forEach { action -> when (action) {
+            HiddenPlaybackAction.ShowControls -> controlsVisible = true
+            is HiddenPlaybackAction.Boost -> setBoostActive(action.enabled)
+            is HiddenPlaybackAction.BeginSeek -> beginSeekHold(action.direction, action.repeat)
+            is HiddenPlaybackAction.EndSeek -> endSeekHold(action.direction)
+        } }
+        return transition.consumed
+    }
+
+    LaunchedEffect(hiddenInputState.key, hiddenInputState.downAtMs) {
+        if (hiddenInputState.key == HiddenPlaybackKey.OK) {
+            delay(HIDDEN_OK_HOLD_MS)
+            dispatchHiddenInput(HiddenPlaybackEvent.HoldTimeout)
+        }
+    }
+    LaunchedEffect(optionMenu, quickPanel, error, sessionGeneration) {
+        // A new load, menu or terminal error cancels the previous capture; KeyUp cannot fire short.
+        dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
+    }
+    val inputLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(inputLifecycleOwner, exo, item.id) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
+        }
+        inputLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            inputLifecycleOwner.lifecycle.removeObserver(observer)
+            seekHoldJob?.cancel()
+            seekHoldJob = null
+            seekHoldDirection = 0
+            seekHoldActive = false
+            seekHoldDelta = 0L
+            hiddenInputState = HiddenPlaybackInputState()
+            speedState = speedState.boost(false)
+            previewActive = false
+            previewFrame = null
+            previewTargetMs = null
+        }
+    }
+
     fun requestWatchdogRecovery(reason: WatchdogReason) {
         if (recovering || audioRecoveryJob?.isActive == true || optionMenu || error != null || reloadPending) return
         val generation = sessionGeneration
@@ -2368,7 +2474,7 @@ fun PlayerScreen(
                 }
             }
             reloadForceTranscode = currentPath?.delivery == PlaybackDelivery.TRANSCODE
-            requestPlaybackReload(recoveryPosition, generation)
+            requestPlaybackReload(generation)
         }
     }
 
@@ -2467,8 +2573,8 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, speedState.boostActive, optionMenu, quickPanel, controlHasFocus) {
-        if (controlsVisible && isPlaying && !optionMenu && quickPanel == QuickPanel.NONE && !speedState.boostActive) {
+    LaunchedEffect(controlsVisible, lastInteractionAt, isPlaying, speedState.boostActive, optionMenu, quickPanel, controlHasFocus, hiddenInputState.active) {
+        if (controlsVisible && isPlaying && !optionMenu && quickPanel == QuickPanel.NONE && !speedState.boostActive && !hiddenInputState.active) {
             val remaining = (lastInteractionAt + 5_000L - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)
             delay(remaining)
             if (android.os.SystemClock.elapsedRealtime() - lastInteractionAt >= 5_000L && !controlHasFocus) controlsVisible = false
@@ -2476,12 +2582,12 @@ fun PlayerScreen(
     }
 
     // 焦点：控制栏隐藏时由捕获层拿焦点，显示时把焦点交给播放按钮
-    LaunchedEffect(controlsVisible, optionMenu, quickPanel) {
+    LaunchedEffect(controlsVisible, optionMenu, quickPanel, hiddenInputState.active) {
         delay(80)
         if (!optionMenu && quickPanel == QuickPanel.NONE &&
             android.os.SystemClock.elapsedRealtime() >= restoreMenuFocusUntil
         ) {
-            if (controlsVisible) {
+            if (controlsVisible && !hiddenInputState.active) {
                 if (!controlHasFocus) runCatching { playFocus.requestFocus() }
             } else {
                 runCatching { hideFocus.requestFocus() }
@@ -2611,6 +2717,25 @@ fun PlayerScreen(
 
     Box(
         Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
+            val capturedKey = when (event.key) {
+                Key.DirectionCenter, Key.Enter -> HiddenPlaybackKey.OK
+                Key.DirectionLeft -> HiddenPlaybackKey.LEFT
+                Key.DirectionRight -> HiddenPlaybackKey.RIGHT
+                else -> null
+            }
+            if (capturedKey != null && (!controlsVisible || hiddenInputState.active) &&
+                !optionMenu && quickPanel == QuickPanel.NONE && error == null) {
+                val input = if (event.nativeKeyEvent.isCanceled) HiddenPlaybackEvent.Cancel else when (event.type) {
+                    KeyEventType.KeyDown -> HiddenPlaybackEvent.Down(capturedKey, event.nativeKeyEvent.repeatCount)
+                    KeyEventType.KeyUp -> HiddenPlaybackEvent.Up(capturedKey)
+                    else -> null
+                }
+                if (input != null) {
+                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+                    if (input is HiddenPlaybackEvent.Down && creditsCountdown.nextItem != null) cancelCreditsCountdown("remote-key", allowRestart = false)
+                    if (dispatchHiddenInput(input) || !controlsVisible) return@onPreviewKeyEvent true
+                }
+            }
             if (event.type == KeyEventType.KeyDown && event.key != Key.Back) {
                 lastInteractionAt = android.os.SystemClock.elapsedRealtime()
                 if (event.key == Key.DirectionUp || event.key == Key.DirectionDown ||
@@ -2706,8 +2831,15 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize(),
         ) }
 
-        val isBufferingForDisplay = isActuallyStalled && showStallOverlay &&
-            error == null && playbackStatusNotice == null
+        // Above both native surfaces, below buttons/menus/countdown: only blank hidden taps hit it.
+        if (hiddenTouchEnabled(controlsVisible, optionMenu, quickPanel != QuickPanel.NONE, error != null)) {
+            Box(Modifier.fillMaxSize().pointerInput(item.id) {
+                detectTapGestures(onTap = {
+                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+                    dispatchHiddenInput(HiddenPlaybackEvent.Tap)
+                })
+            })
+        }
         if (isBufferingForDisplay) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 val seriesBackdrop = item.seriesId?.let { sid ->
@@ -2818,7 +2950,7 @@ fun PlayerScreen(
                         error = null
                         playbackStatusNotice = null
                         beginManualAttempt()
-                        requestPlaybackReload(position, sessionGeneration)
+                        requestPlaybackReload(sessionGeneration)
                     }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
                             Text("重试", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
@@ -2845,7 +2977,7 @@ fun PlayerScreen(
                                 triedSources = emptySet()
                                 reloadForceTranscode = false
                                 error = null
-                                requestPlaybackReload(position, sessionGeneration)
+                                requestPlaybackReload(sessionGeneration)
                             }
                         }) { focused ->
                             Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
@@ -2858,7 +2990,7 @@ fun PlayerScreen(
                     FocusSurface(Modifier.width(190.dp).height(40.dp), corner = 20.dp, onClick = {
                         bufferingTimedOut = false
                         reloadForceTranscode = true
-                        requestPlaybackReload(position, sessionGeneration)
+                        requestPlaybackReload(sessionGeneration)
                     }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
                             Text("立即切换转码", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
@@ -2987,42 +3119,23 @@ fun PlayerScreen(
             }
         }
 
-        // 隐藏控制栏时的按键捕获层：方向键 seek、OK 呼出控制栏、长按 OK 3 倍速
-        if ((!controlsVisible || seekHoldDirection != 0) && !optionMenu) {
+        // Stable focus receiver. Root preview owns OK/Left/Right until KeyUp; visibility never unmounts it.
+        run {
             Box(
                 Modifier
                     .fillMaxSize()
                     .focusRequester(hideFocus)
+                    .focusProperties {
+                        canFocus = hiddenTouchEnabled(controlsVisible, optionMenu, quickPanel != QuickPanel.NONE, error != null) || hiddenInputState.active
+                    }
+                    .onFocusChanged { if (!it.isFocused) dispatchHiddenInput(HiddenPlaybackEvent.Cancel) }
                     .focusable()
                     .onKeyEvent { ev ->
+                        if (controlsVisible || optionMenu || quickPanel != QuickPanel.NONE || error != null) return@onKeyEvent false
                         if (ev.type == KeyEventType.KeyDown && creditsCountdown.nextItem != null) {
                             cancelCreditsCountdown("remote-key", allowRestart = false)
                         }
                         when (ev.key) {
-                            Key.DirectionCenter, Key.Enter -> {
-                                if (ev.type == KeyEventType.KeyDown) {
-                                    if (ev.nativeKeyEvent.repeatCount == 0) okDownAt = System.currentTimeMillis()
-                                    else if (!speedState.boostActive && System.currentTimeMillis() - okDownAt > 480) {
-                                        setBoostActive(true)
-                                    }
-                                    true
-                                } else {
-                                    if (speedState.boostActive) {
-                                        setBoostActive(false)
-                                    } else {
-                                        controlsVisible = true
-                                    }
-                                    true
-                                }
-                            }
-                            Key.DirectionLeft -> {
-                                if (ev.type == KeyEventType.KeyDown) beginSeekHold(-1, ev.nativeKeyEvent.repeatCount) else endSeekHold(-1)
-                                true
-                            }
-                            Key.DirectionRight -> {
-                                if (ev.type == KeyEventType.KeyDown) beginSeekHold(1, ev.nativeKeyEvent.repeatCount) else endSeekHold(1)
-                                true
-                            }
                             Key.DirectionUp, Key.DirectionDown -> {
                                 if (ev.type == KeyEventType.KeyDown) controlsVisible = true
                                 true
@@ -3088,7 +3201,7 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = controlsVisible && !optionMenu && !isBufferingForDisplay,
+            visible = controlsOverlayVisible,
             enter = fadeIn(animationSpec = tween(200)),
             exit = if (isBufferingForDisplay) ExitTransition.None else fadeOut(animationSpec = tween(200)),
         ) {
@@ -3101,7 +3214,7 @@ fun PlayerScreen(
                 ) {
                     val frame = previewFrame
                     val target = previewTargetMs
-                    if (previewActive && frame != null && target != null && duration > 0) {
+                    if (canShowTrickplay && frame != null && target != null) {
                         BoxWithConstraints(Modifier.fillMaxWidth().height(100.dp)) {
                             val previewWidth = 160.dp
                             val x = (maxWidth * (target.toFloat() / duration).coerceIn(0f, 1f) - previewWidth / 2)
@@ -3631,7 +3744,7 @@ fun PlayerScreen(
                     }
                     engineSwitchTrace.add("audio-decode-mode=$mode")
                     reloadForceTranscode = false
-                    requestPlaybackReload(position, sessionGeneration)
+                    requestPlaybackReload(sessionGeneration)
                 },
                 onSeekStepChanged = {
                     seekStepSeconds = it
@@ -3644,7 +3757,7 @@ fun PlayerScreen(
                         val next = engines[(engines.indexOf(activeEngine).coerceAtLeast(0) + 1) % engines.size]
                         enginePinned = next
                         reloadForceTranscode = false
-                        requestPlaybackReload(position, sessionGeneration)
+                        requestPlaybackReload(sessionGeneration)
                     }
                 },
                 onlyMedia3Available = false,
@@ -3662,7 +3775,7 @@ fun PlayerScreen(
                     audioRecoveryTrack = null
                     audioRecoverySourceId = null
                     reloadForceTranscode = AppRuntime.prefs?.forceTranscode ?: false
-                    requestPlaybackReload(position, sessionGeneration)
+                    requestPlaybackReload(sessionGeneration)
                 },
                 onRememberIntro = {
                     AppRuntime.prefs?.setIntroSeconds(item.id, (position / 1000L).toInt())
@@ -3688,7 +3801,7 @@ fun PlayerScreen(
                             beginManualAttempt()
                             enginePinned = "mpv"
                             reloadForceTranscode = false
-                            requestPlaybackReload(position, sessionGeneration)
+                            requestPlaybackReload(sessionGeneration)
                         }) { focused ->
                             Box(Modifier.fillMaxSize().background(if (focused) Accent else Color(0x22FFFFFF), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
                                 Text("尝试", color = if (focused) Color(0xFF06101F) else TextMain)

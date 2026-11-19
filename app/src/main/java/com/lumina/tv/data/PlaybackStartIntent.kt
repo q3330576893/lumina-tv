@@ -13,3 +13,8 @@ sealed interface PlaybackStartIntent {
         is Restore -> position
     }
 }
+
+/** UI/requested positions are deliberately not accepted. A real observed zero remains meaningful. */
+internal fun playbackReloadIntent(previous: PlaybackStartIntent, sample: TimelinePosition?): PlaybackStartIntent =
+    if (sample?.playerPositionMs != null && sample.contentPositionMs != null)
+        PlaybackStartIntent.Restore(sample.contentPositionMs) else previous

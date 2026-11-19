@@ -20,7 +20,7 @@ fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification
     val causes = generateSequence(error as Throwable?) { it.cause }.toList()
     val statusCodes = causes.mapNotNull { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode }
     val category = when {
-        causes.any { it is javax.net.ssl.SSLHandshakeException || it is java.security.cert.CertPathValidatorException } -> PlaybackErrorCategory.CERT_INVALID
+        isCertificateFailure(error) -> PlaybackErrorCategory.CERT_INVALID
         error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> PlaybackErrorCategory.AUDIO_OUTPUT
         error.errorCode == PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED -> PlaybackErrorCategory.RESOURCE_RECLAIMED
@@ -63,18 +63,17 @@ fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification
 }
 
 object PlaybackRangeProbe {
-    private val client by lazy {
-        OkHttpClient.Builder()
+    internal fun httpClient(playbackClient: OkHttpClient): OkHttpClient =
+        playbackClient.newBuilder()
             .connectTimeout(3, TimeUnit.SECONDS)
             .readTimeout(7, TimeUnit.SECONDS)
             .callTimeout(7, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
-    }
 
-    suspend fun probe(url: String, headers: Map<String, String>): JSONObject = suspendCancellableCoroutine { continuation ->
-        val started = android.os.SystemClock.elapsedRealtime()
+    suspend fun probe(url: String, headers: Map<String, String>, playbackClient: OkHttpClient): JSONObject = suspendCancellableCoroutine { continuation ->
+        val started = System.nanoTime() / 1_000_000L
         val request = runCatching {
             Request.Builder().url(url).header("Range", "bytes=0-1023").header("User-Agent", "LuminaTV/1.5 (Android)").apply {
                 headers.forEach { (name, value) -> header(name, value) }
@@ -83,7 +82,7 @@ object PlaybackRangeProbe {
             continuation.resume(JSONObject().put("status", JSONObject.NULL).put("error", it.javaClass.simpleName))
             return@suspendCancellableCoroutine
         }
-        val call = client.newCall(request)
+        val call = httpClient(playbackClient).newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -92,7 +91,7 @@ object PlaybackRangeProbe {
                     .put("rangeSupported", JSONObject.NULL)
                     .put("size", JSONObject.NULL)
                     .put("redirects", 0)
-                    .put("elapsedMs", android.os.SystemClock.elapsedRealtime() - started)
+                    .put("elapsedMs", System.nanoTime() / 1_000_000L - started)
                     .put("error", e.javaClass.simpleName))
             }
 
@@ -108,7 +107,7 @@ object PlaybackRangeProbe {
                         .put("size", it.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
                             ?: it.header("Content-Length")?.toLongOrNull() ?: JSONObject.NULL)
                         .put("redirects", redirects)
-                        .put("elapsedMs", android.os.SystemClock.elapsedRealtime() - started))
+                        .put("elapsedMs", System.nanoTime() / 1_000_000L - started))
                 }
             }
         })

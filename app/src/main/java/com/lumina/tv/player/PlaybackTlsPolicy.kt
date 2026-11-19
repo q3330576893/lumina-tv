@@ -1,0 +1,56 @@
+package com.lumina.tv.player
+
+import com.lumina.tv.data.canonicalServerKey
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.security.KeyStore
+import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
+
+internal const val CERTIFICATE_ERROR_MESSAGE = "证书验证失败（CERT_INVALID），请检查服务器证书、主机名和设备时间；自签证书需先配置受信任的证书"
+
+internal fun isCertificateFailure(error: Throwable): Boolean = generateSequence(error) { it.cause }.any {
+    it is SSLHandshakeException || it is SSLPeerUnverifiedException || it is java.security.cert.CertificateException ||
+        it is java.security.cert.CertPathValidatorException
+}
+
+/** Match TLS causes, not general network failures or arbitrary strings containing 'certificate'. */
+private val mpvCertificateFailurePattern = Regex(
+    "(?i)\\bcertificate\\b[^\\n]*(?:(?:verify|verification|validation)[^\\n]*(?:fail|error)|expired|not trusted|unknown issuer|mismatch|invalid|cannot be authenticated|does not match|not ok|failed verification)|" +
+        "\\b(?:expired|invalid|untrusted|self[- ]signed)\\s+(?:server\\s+|peer\\s+)?certificate\\b|" +
+        "(?:hostname|host name)[^\\n]*(?:mismatch|does not match|not match)|" +
+        "(?:error in|failed to)[^\\n]*(?:certificate verification|verify (?:the )?(?:server |peer )?certificate)|" +
+        "unable to (?:verify the first certificate|get local issuer certificate)",
+)
+internal fun isMpvCertificateFailure(message: String): Boolean = mpvCertificateFailurePattern.containsMatchIn(message)
+
+/** Error state is partitioned by canonical server identity, never used as a trust decision. */
+internal object ServerCertificateErrors {
+    private val errors = ConcurrentHashMap<String, String>()
+    fun record(serverUrl: String) { canonicalServerKey(serverUrl)?.let { errors[it] = "CERT_INVALID" } }
+    fun get(serverUrl: String): String? = canonicalServerKey(serverUrl)?.let(errors::get)
+}
+
+internal object MpvTlsPolicy {
+    fun options(caFile: File): Map<String, String> = mapOf("tls-verify" to "yes", "tls-ca-file" to caFile.absolutePath)
+
+    /** libmpv/FFmpeg cannot assume an Android system CA path. Export the platform trust anchors. */
+    suspend fun platformCaBundle(cacheDir: File): File = withContext(Dispatchers.IO) {
+        val managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+            init(null as KeyStore?)
+        }.trustManagers.filterIsInstance<X509TrustManager>()
+        val anchors = managers.flatMap { it.acceptedIssuers.toList() }.distinctBy { it.serialNumber to it.issuerX500Principal }
+        check(anchors.isNotEmpty()) { "平台信任库不可用，已停止 HTTPS 播放" }
+        val pem = anchors.joinToString("\n") {
+            "-----BEGIN CERTIFICATE-----\n" + Base64.getMimeEncoder(64, byteArrayOf(10)).encodeToString(it.encoded) +
+                "\n-----END CERTIFICATE-----\n"
+        }
+        // The bundle is immutable for a physical load; no user-controlled trust-all fallback.
+        File.createTempFile("mpv-ca-", ".pem", cacheDir).apply { writeText(pem, Charsets.US_ASCII) }
+    }
+}

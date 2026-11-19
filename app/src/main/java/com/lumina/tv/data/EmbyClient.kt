@@ -72,6 +72,7 @@ class EmbyClient(
     @Volatile var lastApiFailure: String? = null
         private set
     private val http: OkHttpClient = OkHttpClient.Builder()
+        .originAuthentication { OriginCredentials(baseUrl, authHeader()) }
         .addInterceptor { chain ->
             val started = System.currentTimeMillis()
             val request = chain.request()
@@ -132,7 +133,16 @@ class EmbyClient(
         OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
-            .addNetworkInterceptor(PreviewOriginInterceptor({ baseUrl }, { authHeader() }))
+            .originAuthentication { OriginCredentials(baseUrl, authHeader()) }
+            .build()
+    }
+
+    /** Main playback, HLS children and diagnostics share the same per-hop credential boundary. */
+    val playbackHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .originAuthentication { OriginCredentials(baseUrl, authHeader()) }
             .build()
     }
 
@@ -176,7 +186,8 @@ class EmbyClient(
         decode: (String) -> T,
     ): T =
         withRequestBudget((timeoutSeconds?.toLong() ?: 20L) * 1_000L) {
-            val request = Request.Builder().url(target).header("X-Emby-Authorization", authHeader(withToken)).build()
+            val request = Request.Builder().url(target).header("X-Emby-Authorization", authHeader(withToken))
+                .tag(OriginCredentials::class.java, OriginCredentials(baseUrl, authHeader(withToken))).build()
             requestJson(request, retryIo = timeoutSeconds != null, retryRateLimit = true, decode = decode)
         }
 

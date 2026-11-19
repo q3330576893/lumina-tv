@@ -200,5 +200,13 @@ val e5Checks = tasks.register<JavaExec>("e5Checks") {
     mainClass.set("com.lumina.tv.E5Checks")
 }
 verifyOffline.configure { dependsOn(e5Checks) }
+val b1Checks = tasks.register<JavaExec>("b1Checks") {
+    group = "verification"
+    description = "B1 security boundaries, asynchronous subtitles, resume and hidden controls assertions."
+    dependsOn(samples)
+    classpath = samples.get().classpath + files("src/test/resources")
+    mainClass.set("com.lumina.tv.B1Checks")
+}
+verifyOffline.configure { dependsOn(b1Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }
