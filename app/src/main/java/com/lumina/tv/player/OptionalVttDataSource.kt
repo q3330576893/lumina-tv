@@ -11,6 +11,35 @@ import androidx.media3.extractor.text.webvtt.WebvttParser
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 
+internal const val OPTIONAL_VTT_MAX_BYTES = 16 * 1024 * 1024
+
+internal fun readOptionalVttBytes(read: (ByteArray, Int, Int) -> Int): ByteArray {
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(8192)
+    while (true) {
+        val size = read(buffer, 0, buffer.size)
+        if (size == C.RESULT_END_OF_INPUT) break
+        if (output.size() + size > OPTIONAL_VTT_MAX_BYTES) throw IOException("VTT size limit")
+        output.write(buffer, 0, size)
+    }
+    return output.toByteArray()
+}
+
+internal fun loadOptionalVttBytes(
+    read: () -> ByteArray,
+    onUnavailable: (Exception) -> Unit,
+    parse: (ByteArray) -> Unit = ::parseOptionalVtt,
+): ByteArray = try {
+    read().also(parse)
+} catch (failure: Exception) {
+    onUnavailable(failure)
+    "WEBVTT\n\n".toByteArray(Charsets.UTF_8)
+}
+
+private fun parseOptionalVtt(bytes: ByteArray) {
+    WebvttParser().parse(bytes, 0, bytes.size, SubtitleParser.OutputOptions.allCues()) { }
+}
+
 /** Video uses its own cache/headers; optional VTT uses the subtitle connection only. */
 internal class OptionalVttDataSourceFactory(
     private val videoFactory: DataSource.Factory,
@@ -35,21 +64,10 @@ internal class OptionalVttDataSourceFactory(
                 // degrades to an empty subtitle, never a fatal video-source exception.
                 val upstream = subtitleFactory.createDataSource()
                 val bytes = try {
-                    upstream.open(dataSpec.buildUpon().setPosition(0).setLength(C.LENGTH_UNSET.toLong()).build())
-                    val output = ByteArrayOutputStream()
-                    val buffer = ByteArray(8192)
-                    while (true) {
-                        val size = upstream.read(buffer, 0, buffer.size)
-                        if (size == C.RESULT_END_OF_INPUT) break
-                        if (output.size() + size > 16 * 1024 * 1024) throw IOException("VTT size limit")
-                        output.write(buffer, 0, size)
-                    }
-                    output.toByteArray().also { data ->
-                        WebvttParser().parse(data, 0, data.size, SubtitleParser.OutputOptions.allCues()) { }
-                    }
-                } catch (e: Exception) {
-                    onUnavailable(subtitleId, e.javaClass.simpleName)
-                    "WEBVTT\n\n".toByteArray(Charsets.UTF_8)
+                    loadOptionalVttBytes(read = {
+                        upstream.open(dataSpec.buildUpon().setPosition(0).setLength(C.LENGTH_UNSET.toLong()).build())
+                        readOptionalVttBytes { buffer, offset, length -> upstream.read(buffer, offset, length) }
+                    }, onUnavailable = { failure -> onUnavailable(subtitleId, failure.javaClass.simpleName) })
                 } finally {
                     runCatching { upstream.close() }
                 }

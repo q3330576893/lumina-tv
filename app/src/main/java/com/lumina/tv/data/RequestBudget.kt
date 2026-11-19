@@ -26,6 +26,9 @@ internal class RequestDeadline(val expiresAtNanos: Long) : AbstractCoroutineCont
     fun remainingNanos(): Long = (expiresAtNanos - System.nanoTime()).coerceAtLeast(1L)
 }
 
+internal fun remainingBudgetMillis(deadlineNanos: Long, nowNanos: Long = System.nanoTime()): Long =
+    TimeUnit.NANOSECONDS.toMillis((deadlineNanos - nowNanos).coerceAtLeast(0L))
+
 suspend fun <T> withRequestBudget(timeoutMs: Long = 20_000L, block: suspend CoroutineScope.() -> T): T {
     val context = currentCoroutineContext()
     context.ensureActive()

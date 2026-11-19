@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.BuildConfig
 import com.lumina.tv.CrashHandler
+import com.lumina.tv.data.UpdateCheckHttp
+import com.lumina.tv.data.readCancellable
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.ui.components.DiagExportDialog
 import com.lumina.tv.ui.theme.TextMain
@@ -39,7 +41,6 @@ import com.lumina.tv.ui.theme.ThemeRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 
@@ -88,7 +89,7 @@ fun SettingsAbout(
                                     .header("Accept", "application/vnd.github+json")
                                     .header("User-Agent", "LuminaTV/${BuildConfig.VERSION_NAME}")
                                     .build()
-                                OkHttpClient().newCall(request).execute().use { response ->
+                                UpdateCheckHttp.client.readCancellable(request) { response ->
                                     if (!response.isSuccessful) error("HTTP ${response.code}")
                                     val json = JSONObject(response.body?.string().orEmpty())
                                     val tag = json.optString("tag_name")

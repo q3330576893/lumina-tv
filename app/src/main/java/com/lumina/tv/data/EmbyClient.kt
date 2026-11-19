@@ -1736,7 +1736,7 @@ class EmbyClient(
         cleared
     }
 
-    suspend fun testConnection(server: String): String = withMetadataContext {
+    suspend fun testConnection(server: String, timeoutMs: Long = 20_000L): String = withMetadataContext(timeoutMs) {
         baseUrl = normalize(server)
         val info = getJson(url("/System/Info/Public"), withToken = false)
         info.optString("ServerName", "Emby")

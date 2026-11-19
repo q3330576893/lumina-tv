@@ -91,11 +91,15 @@ import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.SavedServer
 import com.lumina.tv.data.ServerAddress
 import com.lumina.tv.data.parseServerAddress
+import com.lumina.tv.data.remainingBudgetMillis
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.QrCode
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 private val Ink = Color(0xFFF7F5FF)
 private val InkSub = Color(0xFFB7B0C9)
@@ -260,19 +264,24 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                 if (!onlyPrimary) add(address.withEndpoint("http", 80).baseUrl)
 
             }.distinct()
-            val deadline = System.currentTimeMillis() + 26_000L
+            val deadlineNanos = System.nanoTime() + 26_000_000_000L
             var found: String? = null
             for (candidate in candidates) {
-                if (System.currentTimeMillis() >= deadline) break
+                val remainingMs = remainingBudgetMillis(deadlineNanos)
+                if (remainingMs <= 0L) break
                 try {
-                    EmbyClient(candidate, deviceId = prefs?.deviceId ?: "lumina-tv").testConnection(candidate)
+                    EmbyClient(candidate, deviceId = prefs?.deviceId ?: "lumina-tv")
+                        .testConnection(candidate, timeoutMs = remainingMs)
+                    if (remainingBudgetMillis(deadlineNanos) <= 0L) break
                     found = candidate
                     break
+                } catch (_: CancellationException) {
+                    currentCoroutineContext().ensureActive()
                 } catch (_: Exception) { }
             }
             if (found == null) {
                 probing = false
-                val message = if (System.currentTimeMillis() >= deadline) "连接超时：请检查服务器响应和网络。" else "服务器连接失败：未找到可用的 Emby 服务，请检查地址、端口和网络。"
+                val message = if (remainingBudgetMillis(deadlineNanos) == 0L) "连接超时：请检查服务器响应和网络。" else "服务器连接失败：未找到可用的 Emby 服务，请检查地址、端口和网络。"
                 error = message
                 loginErrorDialog = message
             } else {

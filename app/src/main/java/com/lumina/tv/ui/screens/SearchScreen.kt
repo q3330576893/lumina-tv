@@ -89,6 +89,7 @@ fun SearchScreen(
     var hasMore by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
+    var appendError by remember { mutableStateOf<String?>(null) }
     var pageStart by remember { mutableIntStateOf(0) }
     var autoLoadedEmptyPages by remember { mutableIntStateOf(0) }
     var searchNow by remember { mutableIntStateOf(0) }
@@ -127,6 +128,7 @@ fun SearchScreen(
             loadingMore = false
             searched = false
             searchError = null
+            appendError = null
             gridState.requestScrollToItem(0)
             return@LaunchedEffect
         }
@@ -138,6 +140,7 @@ fun SearchScreen(
         hasMore = false
         searched = true
         searchError = null
+        appendError = null
         gridState.requestScrollToItem(0)
         if (searchNow != handledSearchNow) handledSearchNow = searchNow else delay(400)
         val currentClient = client ?: run {
@@ -205,12 +208,13 @@ fun SearchScreen(
                         requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
                     )
                     results = (results + page).distinctBy { it.id }
+                    appendError = null
                     pageStart += page.size
                     hasMore = page.size == 40 && pageStart < 300
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    searchError = searchFailureMessage(e)
+                    appendError = searchFailureMessage(e)
                     hasMore = false
                 } finally {
                     loadingMore = false
@@ -224,13 +228,8 @@ fun SearchScreen(
     }
     val visibleResults = remember(folded, keyword) {
         val query = keyword.trim()
-        val needle = query.filterNot(Char::isWhitespace)
-        fun matchRank(item: MediaItem): Int {
-            val name = item.name.trim()
-            if (name.equals(query, true)) return 0
-            if (name.startsWith(query, true)) return 1
-            if (name.contains(query, true)) return 2
-            val pinyin = runCatching {
+        rankSearchItems(folded, query) { name, needle ->
+            runCatching {
                 val full = Pinyin.toPinyin(name, "").filterNot(Char::isWhitespace)
                 val initials = Pinyin.toPinyin(name, " ").split(' ').mapNotNull { it.firstOrNull() }.joinToString("")
                 when {
@@ -240,13 +239,9 @@ fun SearchScreen(
                     else -> 3
                 }
             }.getOrDefault(3)
-            return pinyin
         }
-        folded.filter { item -> matchRank(item) < 3 }
-            .sortedWith(compareBy<MediaItem> { matchRank(it) }
-            .thenByDescending { it.rating ?: it.communityRating ?: 0.0 }
-            .thenByDescending { it.year ?: 0 })
     }
+    val errorPresentation = searchErrorPresentation(visibleResults.size, searchError, appendError)
     EmptySearchPageEffect(
         searchKey = listOf(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow),
         loadedItemCount = pageStart,
@@ -271,16 +266,22 @@ fun SearchScreen(
                 requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
             )
             results = (results + page).distinctBy { it.id }
+            appendError = null
             pageStart += page.size
             hasMore = page.size == 40 && pageStart < 300
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            searchError = searchFailureMessage(e)
+            appendError = searchFailureMessage(e)
             hasMore = false
         } finally {
             loadingMore = false
         }
+    }
+
+    fun retryAppend() {
+        appendError = null
+        hasMore = true
     }
 
     val filterDescription = buildList {
@@ -342,9 +343,9 @@ fun SearchScreen(
         Spacer(Modifier.height(10.dp))
         when {
             loading && results.isEmpty() -> LoadingView(text = "搜索中…")
-            keyword.isNotBlank() && searched && searchError != null -> {
+            keyword.isNotBlank() && searched && errorPresentation.primary != null -> {
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                    EmptyView(searchError!!)
+                    EmptyView(errorPresentation.primary!!)
                     FocusSurface(Modifier.padding(top = 8.dp).height(42.dp).width(112.dp), corner = 12.dp,
                         onClick = { submitSearch() }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
@@ -377,9 +378,23 @@ fun SearchScreen(
                                 onOpenDetail(item.seriesId ?: item.id)
                             }
                         }
-                        if (hasMore || loadingMore) item(key = "search-load-more") {
-                            if (loadingMore) LoadingView(text = "Loading more…")
-                            else Spacer(Modifier.height(1.dp))
+                        if (hasMore || loadingMore || errorPresentation.append != null) item(key = "search-load-more") {
+                            when {
+                                loadingMore -> LoadingView(text = "Loading more…")
+                                errorPresentation.append != null -> Column(
+                                    Modifier.width(150.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Text(errorPresentation.append.orEmpty(), color = TextSub, fontSize = 11.sp)
+                                    FocusSurface(Modifier.padding(top = 6.dp).height(38.dp).width(112.dp), corner = 12.dp,
+                                        onClick = { retryAppend() }) { focused ->
+                                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                                            Text("重试", color = TextMain, fontSize = 12.sp)
+                                        }
+                                    }
+                                }
+                                else -> Spacer(Modifier.height(1.dp))
+                            }
                         }
                     }
                 }
