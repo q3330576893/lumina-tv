@@ -6,6 +6,30 @@ data class SeasonEpisodeLoadState<T>(
     val error: Throwable? = null,
 )
 
+enum class SeasonDirectoryStatus { LOADING, SUCCESS, EMPTY, FAILURE }
+
+data class SeasonDirectoryLoadState<T>(
+    val seasons: List<T> = emptyList(),
+    val loading: Boolean = false,
+    val error: Throwable? = null,
+) {
+    val status: SeasonDirectoryStatus
+        get() = when {
+            loading -> SeasonDirectoryStatus.LOADING
+            error != null -> SeasonDirectoryStatus.FAILURE
+            seasons.isEmpty() -> SeasonDirectoryStatus.EMPTY
+            else -> SeasonDirectoryStatus.SUCCESS
+        }
+}
+
+fun <T> beginSeasonDirectoryLoad(): SeasonDirectoryLoadState<T> =
+    SeasonDirectoryLoadState(loading = true)
+
+fun <T> completeSeasonDirectoryLoad(result: Result<List<T>>): SeasonDirectoryLoadState<T> = result.fold(
+    onSuccess = { seasons -> SeasonDirectoryLoadState(seasons = seasons) },
+    onFailure = { failure -> SeasonDirectoryLoadState(error = failure) },
+)
+
 fun <T> beginSeasonEpisodeLoad(): SeasonEpisodeLoadState<T> =
     SeasonEpisodeLoadState(loading = true)
 

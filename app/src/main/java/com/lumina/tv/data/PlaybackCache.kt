@@ -107,8 +107,21 @@ object PlaybackCache {
         }
     }
 
-    fun mediaKey(server: String, user: String, itemId: String, sourceId: String?): String =
-        "lumina:" + sha256(listOf(server, user, itemId, sourceId.orEmpty()).joinToString("\u0000"))
+    fun mediaKey(server: String, user: String, itemId: String, source: MediaSource,
+        target: EmbyClient.PlaybackTarget): String? = playbackCacheKey(
+        server = server,
+        user = user,
+        itemId = itemId,
+        sourceId = source.id,
+        contentValidator = source.contentValidator,
+        sourceSize = source.size,
+        mode = target.playMethod,
+        routeIdentity = stablePlaybackRouteIdentity(target.url),
+        audioIndex = target.trackIntent?.audioIndex,
+        subtitleMode = target.trackIntent?.subtitleMode?.name,
+        subtitleIndex = target.trackIntent?.requestedSubtitleIndex,
+        startPositionMs = target.startPositionMs,
+    )
 
     private fun safeKey(spec: DataSpec): String {
         val raw = spec.key ?: spec.uri.toString()

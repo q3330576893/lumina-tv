@@ -39,6 +39,7 @@ object LibraryCache {
     )
 
     private const val DETAIL_TTL = 3 * 60_000L
+    private const val SEASON_EPISODES_TTL = 3 * 60_000L
     private const val DISK_HOME_TTL = 24 * 60 * 60_000L
     private const val HOME_WRITE_INTERVAL = 30_000L
 
@@ -47,7 +48,8 @@ object LibraryCache {
         private set
 
     private val details = LinkedHashMap<String, DetailData>()
-    private val seasonEpisodes = HashMap<String, List<MediaItem>>()
+    private data class SeasonEpisodesEntry(val items: List<MediaItem>, val fetchedAt: Long)
+    private val seasonEpisodes = HashMap<String, SeasonEpisodesEntry>()
     private val homeWriteTimes = HashMap<String, Long>()
 
     private fun homeFile(context: Context, baseUrl: String, userId: String) =
@@ -194,13 +196,21 @@ object LibraryCache {
         }
     }
 
-    fun episodesOf(seriesId: String, seasonId: String?): List<MediaItem>? =
-        synchronized(this) { seasonEpisodes["$seriesId|${seasonId ?: ""}"] }
+    fun episodesOf(seriesId: String, seasonId: String?, nowMs: Long = System.currentTimeMillis()): List<MediaItem>? =
+        synchronized(this) {
+            seasonEpisodes["$seriesId|${seasonId ?: ""}"]
+                ?.takeIf { nowMs >= it.fetchedAt && nowMs - it.fetchedAt < SEASON_EPISODES_TTL }
+                ?.items
+        }
 
-    fun putEpisodes(seriesId: String, seasonId: String?, list: List<MediaItem>, revision: Long = userDataRevision) {
+    fun episodesStaleOf(seriesId: String, seasonId: String?): List<MediaItem>? =
+        synchronized(this) { seasonEpisodes["$seriesId|${seasonId ?: ""}"]?.items }
+
+    fun putEpisodes(seriesId: String, seasonId: String?, list: List<MediaItem>, revision: Long = userDataRevision,
+        nowMs: Long = System.currentTimeMillis()) {
         synchronized(this) {
             if (revision != userDataRevision) return
-            seasonEpisodes["$seriesId|${seasonId ?: ""}"] = list
+            seasonEpisodes["$seriesId|${seasonId ?: ""}"] = SeasonEpisodesEntry(list, nowMs)
             if (seasonEpisodes.size > 24) {
                 seasonEpisodes.keys.firstOrNull()?.let { seasonEpisodes.remove(it) }
             }

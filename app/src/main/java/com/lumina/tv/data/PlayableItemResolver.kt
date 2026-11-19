@@ -22,10 +22,28 @@ internal fun <T> episodeSourceAvailability(result: Result<List<T>>): EpisodeSour
         onFailure = { EpisodeSourceAvailability.PROBE_FAILED },
     )
 
+internal fun <T> recoveredSourceInventory(initial: List<T>, retried: Result<List<T>>): Result<List<T>> =
+    retried.fold(
+        onSuccess = { Result.success(it.ifEmpty { initial }) },
+        onFailure = { failure -> if (initial.isEmpty()) Result.failure(failure) else Result.success(initial) },
+    )
+
 internal suspend fun probeEpisodeSource(
     episode: MediaItem,
     probe: suspend (MediaItem) -> EpisodeSourceAvailability,
 ): EpisodeSourceAvailability = if (episode.sourceCount > 0) EpisodeSourceAvailability.HAS_SOURCE else probe(episode)
+
+internal suspend fun selectNextPlayableEpisode(
+    candidates: List<MediaItem>,
+    probeSource: suspend (MediaItem) -> EpisodeSourceAvailability,
+): MediaItem? {
+    for (episode in candidates.asSequence()
+        .filter { it.type == "Episode" && !it.isMissing }
+        .distinctBy { it.id }) {
+        if (probeEpisodeSource(episode, probeSource) != EpisodeSourceAvailability.NO_SOURCE) return episode
+    }
+    return null
+}
 
 sealed interface PlayableItemResult {
     data class Ready(val item: MediaItem) : PlayableItemResult

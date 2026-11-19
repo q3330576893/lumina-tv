@@ -566,19 +566,27 @@ class EmbyClient(
 
     suspend fun getNextEpisode(item: MediaItem): MediaItem? = withMetadataContext {
         val seriesId = item.seriesId ?: return@withMetadataContext null
-        val current = item.seasonId?.let { catchingRequest { getEpisodes(seriesId, it) }.getOrDefault(emptyList()) }.orEmpty()
+        suspend fun firstPlayable(candidates: List<MediaItem>): MediaItem? = selectNextPlayableEpisode(candidates) { episode ->
+            episodeSourceAvailability(getMediaSourcesResult(episode.id))
+        }
+        val current = item.seasonId?.let { seasonId ->
+            catchingRequest { getEpisodes(seriesId, seasonId) }.getOrElse { return@withMetadataContext null }
+        }.orEmpty()
         val orderedCurrent = current.sortedWith(compareBy<MediaItem> { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
         val currentIndex = orderedCurrent.indexOfFirst { it.id == item.id }
-        if (currentIndex >= 0) orderedCurrent.getOrNull(currentIndex + 1)?.let { return@withMetadataContext it }
+        if (currentIndex >= 0) {
+            firstPlayable(orderedCurrent.drop(currentIndex + 1))?.let { return@withMetadataContext it }
+        }
 
-        val seasons = catchingRequest { getSeasons(seriesId) }.getOrDefault(emptyList())
+        val seasons = catchingRequest { getSeasons(seriesId) }.getOrElse { return@withMetadataContext null }
             .sortedWith(compareBy<MediaItem> { it.indexNumber ?: it.parentIndexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
         val seasonIndex = seasons.indexOfFirst { it.id == item.seasonId }
         if (seasonIndex < 0) return@withMetadataContext null
         for (season in seasons.drop(seasonIndex + 1)) {
-            val seasonEpisodes = catchingRequest { getEpisodes(seriesId, season.id) }.getOrDefault(emptyList())
+            val seasonEpisodes = catchingRequest { getEpisodes(seriesId, season.id) }
+                .getOrElse { return@withMetadataContext null }
                 .sortedWith(compareBy<MediaItem> { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
-            seasonEpisodes.firstOrNull()?.let { return@withMetadataContext it }
+            firstPlayable(seasonEpisodes)?.let { return@withMetadataContext it }
         }
         return@withMetadataContext null
     }
@@ -743,7 +751,7 @@ class EmbyClient(
     suspend fun getEpisodes(seriesId: String, seasonId: String?): List<MediaItem> = withMetadataContext {
         val params = mutableMapOf(
             "UserId" to userId,
-            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,MediaSources",
+            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,MediaSources,IsMissing,LocationType",
         )
         if (seasonId != null) params["SeasonId"] = seasonId
         val arr = getJson(url("/Shows/$seriesId/Episodes", params)).optJSONArray("Items") ?: JSONArray()
@@ -1211,6 +1219,7 @@ class EmbyClient(
             requiredHttpHeaders = o.optJSONObject("RequiredHttpHeaders")?.let { headers ->
                 buildMap { headers.keys().forEach { name -> put(name, headers.optString(name)) } }
             }.orEmpty(),
+            contentValidator = playbackContentValidator(o),
         )
     }
 
@@ -1237,8 +1246,8 @@ class EmbyClient(
             else {
                 val retried = catchingRequest {
                     parseSources(postJson(playbackUrl, playbackInfoBody(true).toString()))
-                }.getOrDefault(emptyList())
-                retried.ifEmpty { initial }
+                }
+                recoveredSourceInventory(initial, retried).getOrThrow()
             }
         }
     }

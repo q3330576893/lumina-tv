@@ -380,9 +380,6 @@ fun PlayerScreen(
     // 同一部片可能有多个版本（不同压制/大小），一个播不了就换下一个
     var mediaSources by remember(item.id) { mutableStateOf<List<MediaSource>>(emptyList()) }
     var triedSources by remember(item.id) { mutableStateOf<Set<String>>(emptySet()) }
-    LaunchedEffect(item.id) {
-        mediaSources = catchingRequest { AppRuntime.client?.getMediaSources(item.id) }.getOrDefault(emptyList()).orEmpty()
-    }
     var reloadForceTranscode by remember(item.id) { mutableStateOf(AppRuntime.prefs?.forceTranscode ?: false) }
     var playbackSource by remember(item.id) { mutableStateOf<MediaSource?>(null) }
     var noAudioRetryTried by remember(item.id) { mutableStateOf(false) }
@@ -448,7 +445,6 @@ fun PlayerScreen(
     var failurePhase by remember(item.id) { mutableStateOf("未知") }
     var currentSourceId by remember(item.id) { mutableStateOf(initialSourceId) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
-    var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var prewarmedEpisodeId by remember(item.id) { mutableStateOf<String?>(null) }
     var prewarmJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var seekHint by remember { mutableStateOf<String?>(null) }
@@ -768,15 +764,6 @@ fun PlayerScreen(
         }
     }
 
-
-    // 当前剧的集列表（切集用），优先缓存
-    LaunchedEffect(item.seriesId) {
-        val sid = item.seriesId ?: return@LaunchedEffect
-        val c = client ?: return@LaunchedEffect
-        LibraryCache.episodesOf(sid, item.seasonId)?.let { episodes = it; return@LaunchedEffect }
-        episodes = catchingRequest { c.getEpisodes(sid, item.seasonId) }.getOrDefault(emptyList())
-        LibraryCache.putEpisodes(sid, item.seasonId, episodes)
-    }
 
     LaunchedEffect(item.id) {
         chapters = catchingRequest { client?.getChapters(item.id) }.getOrNull().orEmpty()
@@ -1309,6 +1296,9 @@ fun PlayerScreen(
                 val preparedTracks = c.preparePlaybackTracks(item.id, sourceId, audioStreamIndex, strategy,
                     playbackSource?.takeIf { it.id == sourceId }?.let { com.lumina.tv.player.trackMemoryIdentity(it, "Audio") })
                 if (!isCurrentLoad(generation) || reloadPending || !loadCoordinator.resolveSource(generation, preparedTracks.source.id)) return@launch
+                if (client === c && AppRuntime.client === c && preparedTracks.availableSources.isNotEmpty()) {
+                    mediaSources = preparedTracks.availableSources
+                }
                 val requestVariant = loadCoordinator.requestVariant
                 val cachedTarget = if (requestVariant.stage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy,
                     loadIntent, resumePosition, manualAudioStreamSelection, trackIntent = preparedTracks.intent)
@@ -1432,12 +1422,14 @@ fun PlayerScreen(
                     .setUserAgent("LuminaTV/1.5 (Android)")
                     .setDefaultRequestProperties(target.headers)
                 val cacheFactory = if (cacheLimit > 0L) PlaybackCache.dataSourceFactory(context, upstreamFactory) else null
-                val customKey = if (targetIsHls) null else PlaybackCache.mediaKey(
+                val customKey = if (targetIsHls) null else target.source?.let { source -> PlaybackCache.mediaKey(
                     AppRuntime.session?.baseUrl ?: AppRuntime.prefs?.baseUrl.orEmpty(),
                     AppRuntime.session?.userId ?: AppRuntime.prefs?.userId.orEmpty(),
                     item.id,
-                    target.source?.id,
-                )
+                    source,
+                    target,
+                ) }
+                val targetCacheFactory = cacheFactory.takeIf { customKey != null }
                 val subs = target.source?.streams
                     ?.filter { it.type == "Subtitle" && it.isExternal }
                     .orEmpty()
@@ -1607,7 +1599,7 @@ fun PlayerScreen(
                         .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS).build())
                         .setUserAgent("LuminaTV/1.5 (Android)")
                     val optionalFactory = OptionalVttDataSourceFactory(
-                        cacheFactory ?: upstreamFactory,
+                        targetCacheFactory ?: upstreamFactory,
                         subtitleHttpFactory,
                         configs.associate { it.uri to it.id.orEmpty() },
                     ) { id, reason ->

@@ -296,9 +296,12 @@ fun DetailScreen(
     var itemNotFound by remember(id, accountScope) { mutableStateOf(false) }
     var detailRetry by remember(id, accountScope) { mutableStateOf(0) }
     var item by remember(id, client) { mutableStateOf<MediaItem?>(null) }
-    var seasons by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var seasonDirectory by remember { mutableStateOf(beginSeasonDirectoryLoad<MediaItem>()) }
+    val seasons = seasonDirectory.seasons
     var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var episodeLoading by remember { mutableStateOf(false) }
     var episodeLoadError by remember { mutableStateOf<String?>(null) }
+    var episodeReloadTick by remember { mutableIntStateOf(0) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
     var mdb by remember(id, accountScope) { mutableStateOf<MdblistClient.Ratings?>(null) }
@@ -429,6 +432,7 @@ fun DetailScreen(
     }
 
     LaunchedEffect(id, accountScope, detailRetry) {
+        seasonDirectory = beginSeasonDirectoryLoad()
         previewMetadataReady = false
         val cacheRevision = LibraryCache.userDataRevision
         synchronized(failedDetailBackgroundKeys) {
@@ -449,12 +453,13 @@ fun DetailScreen(
         val cached = LibraryCache.detail(id)?.takeIf { it.item != null }
         if (cached != null) {
             item = cached.item
-            seasons = cached.seasons
+            seasonDirectory = completeSeasonDirectoryLoad(Result.success(cached.seasons))
             episodes = cached.episodes
             sources = cached.sources
             favoriteAction.syncFromServer(cached.item?.isFavorite ?: false)
             playedAction.syncFromServer(cached.item?.played ?: false)
             selectedSeason = cached.seasons.firstOrNull()
+            episodeLoading = selectedSeason != null
             loading = false
             sourcesLoading = true
             val startedAt = System.currentTimeMillis()
@@ -546,10 +551,13 @@ fun DetailScreen(
         }
         if (it0 != null) {
             val seasonJob = launch {
-                val loadedSeasons = if (it0.type == "Series") catchingRequest { c.getSeasons(id) }.getOrDefault(emptyList()) else emptyList()
-                seasons = loadedSeasons
+                val seasonResult = if (it0.type == "Series") catchingRequest { c.getSeasons(id) }
+                    else Result.success(emptyList())
+                seasonDirectory = completeSeasonDirectoryLoad(seasonResult)
+                val loadedSeasons = seasonDirectory.seasons
                 val first = loadedSeasons.firstOrNull()
-                episodes = first?.let { LibraryCache.episodesOf(id, it.id) }.orEmpty()
+                episodes = first?.let { LibraryCache.episodesOf(id, it.id) ?: LibraryCache.episodesStaleOf(id, it.id) }.orEmpty()
+                episodeLoading = first != null
                 episodeLoadError = null
                 selectedSeason = first
                 PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
@@ -562,7 +570,9 @@ fun DetailScreen(
             launch {
                 joinAll(seasonJob, sourceJob)
                 previewMetadataReady = true
-                LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()), cacheRevision)
+                if (it0.type != "Series" || seasonDirectory.status != SeasonDirectoryStatus.FAILURE) {
+                    LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()), cacheRevision)
+                }
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - loadStartedAt}")
             }
         }
@@ -581,7 +591,7 @@ fun DetailScreen(
         } finally { similarLoading = false }
     }
 
-    LaunchedEffect(id, item?.id, selectedSeason) {
+    LaunchedEffect(id, item?.id, selectedSeason, episodeReloadTick) {
         val cacheRevision = LibraryCache.userDataRevision
         val c = client ?: return@LaunchedEffect
         val it0 = item ?: return@LaunchedEffect
@@ -589,16 +599,20 @@ fun DetailScreen(
             val sid = selectedSeason?.id
             cachedSeasonEpisodeState(LibraryCache.episodesOf(it0.id, sid))?.let { hit ->
                 if (hit.episodes != episodes) episodes = hit.episodes
+                episodeLoading = false
                 episodeLoadError = null
                 return@LaunchedEffect
             }
-            episodes = beginSeasonEpisodeLoad<MediaItem>().episodes
+            val stale = LibraryCache.episodesStaleOf(it0.id, sid)
+            episodes = stale ?: beginSeasonEpisodeLoad<MediaItem>().episodes
+            episodeLoading = true
             episodeLoadError = null
             val result = catchingRequest { c.getEpisodes(it0.id, sid) }
             val loaded = completeSeasonEpisodeLoad(result) { list ->
                 LibraryCache.putEpisodes(it0.id, sid, list, cacheRevision)
             }
-            episodes = loaded.episodes
+            episodeLoading = false
+            if (loaded.error == null) episodes = loaded.episodes
             episodeLoadError = loaded.error?.message ?: if (loaded.error != null) "剧集读取失败，请重试" else null
             if (loaded.error != null) {
                 android.widget.Toast.makeText(context, "剧集读取失败，请重试", android.widget.Toast.LENGTH_SHORT).show()
@@ -1166,7 +1180,12 @@ fun DetailScreen(
                                     if (selectedSeason?.id != s.id) {
                                         episodes = emptyList()
                                         episodeLoadError = null
+                                        episodeLoading = true
                                         selectedSeason = s
+                                    } else if (episodeLoadError != null) {
+                                        episodeLoadError = null
+                                        episodeLoading = true
+                                        episodeReloadTick++
                                     }
                                 },
                             ) { focused ->
@@ -1185,8 +1204,49 @@ fun DetailScreen(
                             }
                         }
                     }
+                } else if (it0?.type == "Series") {
+                    Spacer(Modifier.height(18.dp))
+                    when (seasonDirectory.status) {
+                        SeasonDirectoryStatus.LOADING -> Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            CircularProgressIndicator(Modifier.size(16.dp), color = Accent, strokeWidth = 2.dp)
+                            Text("季目录加载中", color = TextSub, fontSize = 12.sp)
+                        }
+                        SeasonDirectoryStatus.FAILURE -> Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Text("季目录读取失败，请重试", color = TextSub, fontSize = 12.sp)
+                            FocusSurface(
+                                Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = 1.04f,
+                                onClick = {
+                                    seasonDirectory = beginSeasonDirectoryLoad()
+                                    detailRetry++
+                                },
+                            ) { focused ->
+                                Box(
+                                    Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
+                                    contentAlignment = Alignment.Center,
+                                ) { Text("重试", color = TextMain, fontSize = 12.sp) }
+                            }
+                        }
+                        SeasonDirectoryStatus.EMPTY -> Text("暂无季目录", color = TextSub, fontSize = 12.sp)
+                        SeasonDirectoryStatus.SUCCESS -> Unit
+                    }
                 }
 
+                if (episodeLoading) {
+                    Row(
+                        Modifier.padding(top = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CircularProgressIndicator(Modifier.size(16.dp), color = Accent, strokeWidth = 2.dp)
+                        Text("剧集加载中", color = TextSub, fontSize = 12.sp)
+                    }
+                }
                 if (episodes.isNotEmpty()) {
                     Spacer(Modifier.height(14.dp))
                     LazyRow(state = castRowState, modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1194,8 +1254,30 @@ fun DetailScreen(
                             EpisodeCard(ep, client?.imageUrl(ep, 360)) { pickEpisode(ep) }
                         }
                     }
-                } else if (episodeLoadError != null) {
-                    Text("剧集读取失败：${episodeLoadError}", color = TextSub, fontSize = 12.sp)
+                }
+                if (episodeLoadError != null) {
+                    Row(
+                        Modifier.padding(top = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text("剧集读取失败，请重试", color = TextSub, fontSize = 12.sp)
+                        FocusSurface(
+                            Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = 1.04f,
+                            onClick = {
+                                episodeLoadError = null
+                                episodeLoading = true
+                                episodeReloadTick++
+                            },
+                        ) { focused ->
+                            Box(
+                                Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
+                                contentAlignment = Alignment.Center,
+                            ) { Text("重试", color = TextMain, fontSize = 12.sp) }
+                        }
+                    }
+                } else if (!episodeLoading && episodes.isEmpty() && selectedSeason != null) {
+                    Text("本季暂无剧集", color = TextSub, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
                 }
                 val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
                 if (cast.isNotEmpty()) {

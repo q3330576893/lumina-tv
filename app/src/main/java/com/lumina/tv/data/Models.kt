@@ -126,6 +126,7 @@ data class MediaSource(
     val defaultAudioStreamIndex: Int? = null,
     val defaultSubtitleStreamIndex: Int? = null,
     val contentVersion: String = "",
+    val contentValidator: String? = null,
 ) {
     val audioStreams: List<MediaStream> get() = streams.filter { it.type == "Audio" }
     val subtitleStreams: List<MediaStream> get() = streams.filter { it.type == "Subtitle" }
