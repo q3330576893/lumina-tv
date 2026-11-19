@@ -11,9 +11,16 @@ import androidx.media3.exoplayer.text.TextOutput
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import androidx.media3.exoplayer.DefaultRenderersFactory
 
+internal class SubtitleOffsetState(initialOffsetMs: Long = 0L) {
+    @Volatile var offsetMs: Long = initialOffsetMs
+}
+
 @UnstableApi
 class SubtitleRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
-    var subtitleOffsetMs: Long = 0L
+    private val subtitleOffset = SubtitleOffsetState()
+    var subtitleOffsetMs: Long
+        get() = subtitleOffset.offsetMs
+        set(value) { subtitleOffset.offsetMs = value }
 
     override fun createRenderers(
         eventHandler: Handler,
@@ -28,7 +35,7 @@ class SubtitleRenderersFactory(context: Context) : DefaultRenderersFactory(conte
         textRendererOutput,
         metadataRendererOutput,
     ).map { renderer ->
-        if (renderer.trackType == C.TRACK_TYPE_TEXT) OffsetTextRenderer(renderer) { subtitleOffsetMs } else renderer
+        if (renderer.trackType == C.TRACK_TYPE_TEXT) OffsetTextRenderer(renderer) { subtitleOffset.offsetMs } else renderer
     }.toTypedArray()
 }
 

@@ -19,6 +19,18 @@ import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.json.JSONArray
 
+internal fun applyMpvHttpHeaders(
+    headers: Map<String, String>,
+    setOptionString: (String, String) -> Int,
+) {
+    val clearResult = setOptionString("http-header-fields-clr", "")
+    check(clearResult >= 0) { "mpv rejected http-header-fields-clr (code=$clearResult)" }
+    headers.entries.forEachIndexed { index, (name, value) ->
+        val result = setOptionString("http-header-fields-append", "$name: $value")
+        check(result >= 0) { "mpv rejected http-header-fields-append item=$index (code=$result)" }
+    }
+}
+
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
 class MpvPlayerController(
     context: Context,
@@ -482,11 +494,8 @@ class MpvPlayerController(
         mappings.clear()
         applyAspectMode(load)
         pendingSubtitles = subtitleUrls
-        val headerFields = requestHeaders.entries.mapNotNull { (key, value) ->
-            if (',' in key || ',' in value) null else "$key: $value"
-        }
         runCatching {
-            load.engine.setOptionString("http-header-fields", headerFields.joinToString(","))
+            applyMpvHttpHeaders(requestHeaders, load.engine::setOptionString)
             subtitleOptions.forEach { (key, value) -> load.engine.setOptionString(key, value) }
             load.engine.setPropertyDouble("sub-delay", subtitleDelayMs / 1000.0)
             load.engine.setPropertyDouble("speed", playbackSpeed.toDouble())

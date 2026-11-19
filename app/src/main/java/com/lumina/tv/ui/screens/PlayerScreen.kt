@@ -188,6 +188,8 @@ import com.lumina.tv.player.PlaybackFailureReason
 import com.lumina.tv.player.selectPlaybackEngine
 import com.lumina.tv.player.PlaybackRecoveryBudget
 import com.lumina.tv.player.PlayerLifecycle
+import com.lumina.tv.player.PlayerHostLifecycleEvent
+import com.lumina.tv.player.reducePlayerHostLifecycle
 import com.lumina.tv.player.PlaybackSpeedState
 import com.lumina.tv.player.CreditsCountdown
 import com.lumina.tv.player.creditsWindowStartMs
@@ -445,6 +447,7 @@ fun PlayerScreen(
     var dvDecoderPath by remember(item.id) { mutableStateOf<String?>(null) }
     var activeVideoDecoder by remember(item.id) { mutableStateOf<String?>(null) }
     var firstFrameRendered by remember(item.id) { mutableStateOf(false) }
+    var resumedByBackground by remember(item.id) { mutableStateOf(false) }
     var readyWithoutFrameSince by remember(item.id) { mutableLongStateOf(0L) }
     var playbackStatusNotice by remember(item.id) { mutableStateOf<String?>(null) }
     var failurePhase by remember(item.id) { mutableStateOf("未知") }
@@ -2511,9 +2514,47 @@ fun PlayerScreen(
         dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
     }
     val inputLifecycleOwner = LocalLifecycleOwner.current
+    val hostDesiredPlaying by rememberUpdatedState(desiredPlaying)
+    val hostActiveEngine by rememberUpdatedState(activeEngine)
+    val hostMpvState by rememberUpdatedState(mpvState)
+    val hostMpvBackend by rememberUpdatedState(mpvBackend)
+    val hostResumedByBackground by rememberUpdatedState(resumedByBackground)
+    val hostSessionGeneration by rememberUpdatedState(sessionGeneration)
     DisposableEffect(inputLifecycleOwner, exo, item.id) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
+            if (event == Lifecycle.Event.ON_STOP) {
+                val playbackRequested = hostDesiredPlaying && when (hostActiveEngine) {
+                    "mpv" -> hostMpvState.playing || hostMpvState.buffering
+                    else -> exo.playWhenReady && exo.playbackState in setOf(Player.STATE_BUFFERING, Player.STATE_READY)
+                }
+                val transition = reducePlayerHostLifecycle(
+                    hostResumedByBackground,
+                    PlayerHostLifecycleEvent.ON_STOP,
+                    playbackRequested,
+                )
+                resumedByBackground = transition.resumedByBackground
+                if (transition.pausePlayback) {
+                    desiredPlaying = false
+                    cancelCreditsCountdown("host-stop")
+                    if (hostActiveEngine == "mpv") hostMpvBackend?.pause() else exo.pause()
+                    isPlaying = false
+                    PageLog.add("playbackLifecycle event=ON_STOP action=pause engine=$hostActiveEngine generation=$hostSessionGeneration")
+                }
+            } else if (event == Lifecycle.Event.ON_START) {
+                val transition = reducePlayerHostLifecycle(
+                    hostResumedByBackground,
+                    PlayerHostLifecycleEvent.ON_START,
+                    playbackRequested = false,
+                )
+                resumedByBackground = transition.resumedByBackground
+                if (transition.restoreControls) {
+                    controlsVisible = true
+                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+                    showTimelineNotice("已从后台返回，播放保持暂停")
+                    PageLog.add("playbackLifecycle event=ON_START action=show-controls-paused generation=$hostSessionGeneration")
+                }
+            }
         }
         inputLifecycleOwner.lifecycle.addObserver(observer)
         onDispose {

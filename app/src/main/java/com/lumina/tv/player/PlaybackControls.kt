@@ -46,13 +46,17 @@ internal class CreditsCountdown<T>(
     private var job: Job? = null
     val active: Boolean get() = job?.isActive == true
 
-    fun cancel(reason: String, allowRestart: Boolean = true) {
-        job?.cancel()
+    private fun stopInternal(reason: String, allowRestart: Boolean) {
         job = null
         remainingSeconds = 0
         nextItem = null
         triggered = !allowRestart
         log("creditsCountdown cancel reason=$reason restart=$allowRestart")
+    }
+
+    fun cancel(reason: String, allowRestart: Boolean = true) {
+        job?.cancel()
+        stopInternal(reason, allowRestart)
     }
 
     fun start(seconds: Int, next: suspend () -> T?, canContinue: () -> Boolean, onComplete: (T) -> Unit) {
@@ -62,7 +66,7 @@ internal class CreditsCountdown<T>(
             val item = next() ?: return@launch
             currentCoroutineContext().ensureActive()
             if (!canContinue()) {
-                cancel("playback-paused-or-replaced")
+                stopInternal("playback-paused-or-replaced", allowRestart = true)
                 return@launch
             }
             nextItem = item
@@ -71,7 +75,7 @@ internal class CreditsCountdown<T>(
                 awaitTick()
                 currentCoroutineContext().ensureActive()
                 if (!canContinue()) {
-                    cancel("playback-paused-or-replaced")
+                    stopInternal("playback-paused-or-replaced", allowRestart = true)
                     return@launch
                 }
                 remainingSeconds--

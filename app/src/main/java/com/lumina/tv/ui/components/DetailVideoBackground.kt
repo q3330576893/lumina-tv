@@ -16,12 +16,16 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -38,6 +42,7 @@ import com.lumina.tv.data.PreviewCacheRecovery
 import com.lumina.tv.data.previewResourceKey
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.player.PlayerLifecycle
+import com.lumina.tv.player.detailPreviewShouldPlay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -139,6 +144,7 @@ private fun DetailVideoPlayback(
     var staticBitrateEstimate by remember(url) { mutableStateOf(0L) }
     val isStaticFallback = remember(url) { Uri.parse(url).getQueryParameter("static") == "true" }
     val playerState = remember { mutableStateOf<ExoPlayer?>(null) }
+    val hostLifecycleOwner = LocalLifecycleOwner.current
     fun releasePlayer(reason: String) {
         val oldPlayer = playerState.value ?: return
         playerState.value = null
@@ -199,7 +205,25 @@ private fun DetailVideoPlayback(
     }
 
     val player = playerState.value ?: return
+    var hostResumed by remember(hostLifecycleOwner) {
+        mutableStateOf(hostLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    val previewShouldPlay = detailPreviewShouldPlay(playing, hostResumed)
+    val previewShouldPlayCurrent by rememberUpdatedState(previewShouldPlay)
     var videoAspectRatio by remember(player) { mutableFloatStateOf(0f) }
+
+    DisposableEffect(hostLifecycleOwner, player) {
+        val observer = LifecycleEventObserver { _, event ->
+            val resumed = hostLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+            hostResumed = resumed
+            if (!resumed && (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP)) {
+                player.pause()
+                PageLog.add("detailPreview lifecycle event=$event action=pause")
+            }
+        }
+        hostLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { hostLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -280,15 +304,15 @@ private fun DetailVideoPlayback(
         onDispose { player.removeAnalyticsListener(listener) }
     }
 
-    LaunchedEffect(player, playing, failed) {
-        if (playing && !failed) {
+    LaunchedEffect(player, previewShouldPlay, failed) {
+        if (previewShouldPlay && !failed) {
             if (player.playbackState == Player.STATE_IDLE) player.prepare()
             player.play()
         } else player.pause()
     }
 
-    LaunchedEffect(player, playing, firstFrame, failed) {
-        if (stage != "hls" || !playing || firstFrame || failed) return@LaunchedEffect
+    LaunchedEffect(player, previewShouldPlay, firstFrame, failed) {
+        if (stage != "hls" || !previewShouldPlay || firstFrame || failed) return@LaunchedEffect
         delay(HLS_FIRST_FRAME_TIMEOUT_MS)
         if (!firstFrame && !failed) {
             failed = true
@@ -297,12 +321,12 @@ private fun DetailVideoPlayback(
         }
     }
 
-    LaunchedEffect(player, playing, failed) {
+    LaunchedEffect(player, previewShouldPlay, failed) {
         if (failed) return@LaunchedEffect
         if (!firstFrame) onStatus("prep")
         while (true) {
             delay(250)
-            if (playing && player.playbackState == Player.STATE_READY && player.currentPosition >= loopEndMs) {
+            if (previewShouldPlay && player.playbackState == Player.STATE_READY && player.currentPosition >= loopEndMs) {
                 player.seekTo(loopStartMs)
             }
         }
@@ -311,7 +335,7 @@ private fun DetailVideoPlayback(
     if (!failed) {
         BoxWithConstraints(
             modifier = modifier.fillMaxSize().clipToBounds().graphicsLayer {
-                alpha = if (firstFrame && playing) 1f else 0f
+                alpha = if (firstFrame && previewShouldPlay) 1f else 0f
             },
             contentAlignment = Alignment.Center,
         ) {
@@ -337,7 +361,7 @@ private fun DetailVideoPlayback(
                                 height: Int,
                             ) {
                                 player.setVideoTextureView(this@apply)
-                                if (playing) player.play()
+                                if (previewShouldPlayCurrent) player.play() else player.pause()
                             }
 
                             override fun onSurfaceTextureSizeChanged(
