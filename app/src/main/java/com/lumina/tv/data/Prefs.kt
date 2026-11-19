@@ -17,6 +17,7 @@ data class SavedServer(
 /** 极轻量的本地配置存储：服务器、凭证、播放内核偏好。 */
 class Prefs internal constructor(private val sp: SharedPreferences) {
     constructor(context: Context) : this(context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE))
+    private val sessionStore = SessionStore(sp)
 
     init {
         if (sp.contains("end_skip_seconds")) {
@@ -44,32 +45,36 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     }
 
     private fun migrateLegacySecrets() {
-        migrateLegacySecrets(sp, SecureStore::get, SecureStore::put)
+        // SessionStore consumes the five legacy session fields as a single, read-only input.
+        migrateLegacySecrets(sp, SecureStore::get, SecureStore::put, keys = listOf("saved_servers"))
     }
 
     var declareDtsDirectPlay: Boolean
         get() = sp.getBoolean("declare_dts_direct_play", false)
         set(v) = sp.edit().putBoolean("declare_dts_direct_play", v).apply()
 
-    var baseUrl: String
-        get() = getSecret("base_url")
-        set(v) = putSecret("base_url", v)
+    val baseUrl: String
+        get() = sessionStore.read(migrate = false)?.baseUrl ?: if (sessionStore.hasRecord())
+            sp.getString(SessionStore.DRAFT_URL, "").orEmpty() else getSecret("base_url")
 
-    var token: String
-        get() = getSecret("token")
-        set(v) = putSecret("token", v)
+    val token: String
+        get() = sessionStore.read(migrate = false)?.token ?: if (sessionStore.hasRecord()) "" else getSecret("token")
 
-    var userId: String
-        get() = getSecret("user_id")
-        set(v) = putSecret("user_id", v)
+    val userId: String
+        get() = sessionStore.read(migrate = false)?.userId ?: if (sessionStore.hasRecord()) "" else getSecret("user_id")
 
-    var userName: String
-        get() = getSecret("user_name")
-        set(v) = putSecret("user_name", v)
+    val userName: String
+        get() = sessionStore.read(migrate = false)?.userName ?: if (sessionStore.hasRecord())
+            sp.getString(SessionStore.DRAFT_USER, "").orEmpty() else getSecret("user_name")
 
     var serverName: String
-        get() = getSecret("server_name", "Emby")
-        set(v) = putSecret("server_name", v)
+        get() = sessionStore.read(migrate = false)?.serverName ?: if (sessionStore.hasRecord())
+            sp.getString(SessionStore.DRAFT_NAME, "Emby") ?: "Emby" else getSecret("server_name", "Emby")
+        set(v) {
+            val session = sessionStore.read(migrate = false)
+            if (session != null) check(saveSession(session.copy(serverName = v)))
+            else sp.edit().putString(SessionStore.DRAFT_NAME, v).apply()
+        }
 
     var serverNote: String?
         get() = sp.getString("server_note", null)
@@ -171,7 +176,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     fun upsertServer(s: SavedServer) {
         val url = s.url.trim().trimEnd('/')
         if (url.isBlank()) return
-        val servers = savedServerList().filterNot { it.url.trimEnd('/').equals(url, ignoreCase = true) }
+        val servers = savedServerList().filterNot { sameServer(it.url, url) }
         val updated = s.copy(url = url, lastUsed = System.currentTimeMillis())
         savedServersJson = org.json.JSONArray().apply {
             (servers + updated).forEach { server -> put(server.toJson()) }
@@ -179,7 +184,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     }
 
     fun currentSavedServer(): SavedServer? = savedServerList().firstOrNull {
-        it.url.trimEnd('/').equals(baseUrl.trimEnd('/'), ignoreCase = true)
+        sameServer(it.url, baseUrl)
     }
 
     fun saveCurrentServer() {
@@ -189,22 +194,25 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     }
 
     fun removeSavedServer(url: String) {
-        val normalized = url.trimEnd('/')
+        val key = canonicalServerKey(url) ?: return
         savedServersJson = org.json.JSONArray().apply {
-            savedServerList().filterNot { it.url.trimEnd('/').equals(normalized, ignoreCase = true) }
+            savedServerList().filterNot { canonicalServerKey(it.url) == key }
                 .forEach { put(it.toJson()) }
         }.toString()
     }
 
     fun renameSavedServer(url: String, name: String) {
-        val normalized = url.trimEnd('/')
+        val key = canonicalServerKey(url) ?: return
         savedServersJson = org.json.JSONArray().apply {
             savedServerList().forEach { server ->
-                put(server.copy(name = if (server.url.trimEnd('/').equals(normalized, true)) name.trim().ifBlank { server.url } else server.name).toJson())
+                put(server.copy(name = if (canonicalServerKey(server.url) == key) name.trim().ifBlank { server.url } else server.name).toJson())
             }
         }.toString()
-        if (baseUrl.trimEnd('/').equals(normalized, true)) serverName = name.trim().ifBlank { "Emby" }
+        if (canonicalServerKey(baseUrl) == key) serverName = name.trim().ifBlank { "Emby" }
     }
+
+    private fun sameServer(left: String, right: String): Boolean =
+        canonicalServerKey(left)?.let { it == canonicalServerKey(right) } ?: false
 
     private fun SavedServer.toJson() = org.json.JSONObject()
         .put("name", name)
@@ -519,23 +527,17 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     fun visibleResumeItems(items: List<MediaItem>): List<MediaItem> =
         contentState?.visibleResumeItems(items) ?: items
 
-    fun saveSession(s: Session) {
-        baseUrl = s.baseUrl
-        token = s.token
-        userId = s.userId
-        userName = s.userName
-        serverName = s.serverName
-    }
+    fun saveSession(s: Session): Boolean = sessionStore.save(s)
+
+    fun readSession(): Session? = sessionStore.read()
+
+    fun prepareServerLogin(url: String, user: String) { check(sessionStore.clear(url, user)) }
 
     fun clearSession() {
-        val edit = sp.edit()
-        for (key in listOf("base_url", "token", "user_id", "user_name")) {
-            edit.remove(key).remove(SecureStore.PREFIX + key)
-        }
-        edit.apply()
+        check(sessionStore.clear())
     }
 
-    fun hasSession(): Boolean = baseUrl.isNotBlank() && token.isNotBlank() && userId.isNotBlank()
+    fun hasSession(): Boolean = sessionStore.read(migrate = false) != null
 }
 
 /** Callbacks let JVM checks exercise failure/retry without requiring a device Keystore. */
@@ -543,10 +545,10 @@ internal fun migrateLegacySecrets(
     sp: SharedPreferences,
     readEncrypted: (String) -> String?,
     writeEncrypted: (String, String) -> Boolean,
+    keys: List<String> = listOf("base_url", "token", "user_id", "user_name", "server_name", "saved_servers"),
 ) {
     runCatching {
         if (sp.getBoolean("secrets_migrated_v1", false)) return@runCatching
-        val keys = listOf("base_url", "token", "user_id", "user_name", "server_name", "saved_servers")
         val edit = sp.edit()
         for (key in keys) {
             val legacy = sp.getString(key, null) ?: continue

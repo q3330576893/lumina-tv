@@ -32,9 +32,11 @@ data class LibraryAppendProgress(
 fun shouldRetryLibraryAppend(failed: Boolean, requested: Int, handled: Int): Boolean =
     failed && requested > handled
 
-fun libraryAppendProgress(nextIndex: Int, hasMore: Boolean, pageSize: Int?): LibraryAppendProgress =
+const val LIBRARY_PAGE_SIZE = 50
+
+fun libraryAppendProgress(nextIndex: Int, hasMore: Boolean, pageSize: Int?, expectedPageSize: Int = LIBRARY_PAGE_SIZE): LibraryAppendProgress =
     if (pageSize == null) LibraryAppendProgress(nextIndex, hasMore, failed = true)
-    else LibraryAppendProgress(nextIndex + pageSize, pageSize == 50, failed = false)
+    else LibraryAppendProgress(nextIndex + pageSize, pageSize == expectedPageSize, failed = false)
 
 const val SEARCH_EMPTY_AUTO_PAGE_LIMIT = 3
 

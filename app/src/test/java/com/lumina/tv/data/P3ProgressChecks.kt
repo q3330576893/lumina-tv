@@ -127,7 +127,7 @@ object P3ProgressChecks {
         }
     }
 
-    private fun queueIdentityAndMigration() {
+    private suspend fun queueIdentityAndMigration() {
         val file = Files.createTempFile("lumina-p3-progress-", ".json").toFile()
         try {
             file.writeText(JSONArray().put(JSONObject()
@@ -136,12 +136,18 @@ object P3ProgressChecks {
                 .put(JSONObject().put("itemId", "same-item").put("positionMs", 120_000L)
                     .put("eventType", "stop").put("at", 10L).put("mediaSourceId", JSONObject.NULL)).toString())
             val queue = ProgressQueue(file)
+            queue.awaitLoaded()
             val orphans = queue.snapshot()
             check(orphans.size == 2 && orphans.all { it.localSessionId.startsWith("orphan-") && it.sequence == 1L })
             check(orphans.map { it.localSessionId }.distinct().size == 2)
             check(orphans.map { it.positionMs } == listOf(600_000L, 120_000L))
             check(orphans.first().sourceId == "old-source" && orphans.last().sourceId == null)
-            check(ProgressQueue(file).snapshot() == orphans) { "Migration identities changed on restart" }
+            check(queue.flushAndAwait())
+            val migrated = ProgressQueue(file)
+            migrated.awaitLoaded()
+            check(migrated.snapshot() == orphans) { "Migration identities changed on restart" }
+            check(migrated.flushAndAwait())
+            migrated.close()
             val live = orphans.first().copy(localSessionId = "live", eventId = "live-event", sequence = 7L,
                 playSessionId = "emby-live", sourceId = "new-source", positionMs = 10_000L)
             queue.enqueue(live)
@@ -155,7 +161,12 @@ object P3ProgressChecks {
             check(queue.snapshot() == listOf(orphans.last(), live))
             check(queue.acknowledge(checkNotNull(queue.claimNext())))
             check(queue.snapshot() == listOf(live))
-            check(ProgressQueue(file).snapshot() == listOf(live))
+            check(queue.flushAndAwait())
+            val restarted = ProgressQueue(file)
+            restarted.awaitLoaded()
+            check(restarted.snapshot() == listOf(live))
+            check(restarted.flushAndAwait())
+            restarted.close()
             // Capacity protection must leave an in-flight request and the newest event identifiable.
             check(queue.claimNext() == live)
             repeat(ProgressQueue.MAX_ENTRIES + 2) { index ->
@@ -165,6 +176,8 @@ object P3ProgressChecks {
             check(queue.snapshot().size == ProgressQueue.MAX_ENTRIES)
             check(queue.acknowledge(live))
             check(newest in queue.snapshot())
+            queue.close()
+            check(queue.flushAndAwait())
         } finally {
             file.delete()
             java.io.File(file.parentFile, "${file.name}.tmp").delete()

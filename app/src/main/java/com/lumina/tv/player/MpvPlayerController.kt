@@ -26,6 +26,8 @@ class MpvPlayerController(
     private val tlsCaFile: File,
     subtitleHttpClient: OkHttpClient,
     private val onSoftwareRetry: (MpvPlayerController, LoadIdentity, () -> Boolean, () -> Unit) -> Unit,
+    private val desiredPlaying: (() -> Boolean?)? = null,
+    private val onPhysicalLoad: (MpvPlayerController, LoadIdentity, Boolean) -> Unit = { _, _, _ -> },
     private val onState: (MpvPlayerController, LoadIdentity, State) -> Unit,
 ) {
     data class LoadIdentity(val generation: Int, val physicalId: Long, val software: Boolean)
@@ -269,6 +271,7 @@ class MpvPlayerController(
 
     fun attachSurface(surface: Surface, width: Int = 0, height: Int = 0) {
         checkMainThread()
+        if (!refreshPauseIntent()) return
         if (!released && surface.isValid) {
             val resolvedWidth = width.takeIf { it > 0 } ?: fallbackSurfaceWidth
             val resolvedHeight = height.takeIf { it > 0 } ?: fallbackSurfaceHeight
@@ -439,6 +442,7 @@ class MpvPlayerController(
 
     private fun startPhysicalLoad(load: NativeLoad) {
         if (!isActive(load)) return
+        if (!refreshPauseIntent()) return
         audioSilentCodec = null
         subtitleMappingNotice = null
         subtitleFallbackToAuto = false
@@ -460,6 +464,9 @@ class MpvPlayerController(
             subtitleOptions.forEach { (key, value) -> load.engine.setOptionString(key, value) }
             load.engine.setPropertyDouble("sub-delay", subtitleDelayMs / 1000.0)
             load.engine.setPropertyDouble("speed", playbackSpeed.toDouble())
+            // Apply pause before loadfile as well, so a paused load cannot briefly start audio.
+            load.engine.setPropertyBoolean("pause", pauseIntent)
+            onPhysicalLoad(this, load.identity, pauseIntent)
             load.started = true
             load.engine.command(loadCommand(checkNotNull(pendingUrl), pendingPositionMs))
             playing = !pauseIntent
@@ -494,8 +501,8 @@ class MpvPlayerController(
 
     fun play() {
         checkMainThread()
-        val load = activeLoad?.takeIf(::isActive) ?: return
         pauseIntent = false
+        val load = activeLoad?.takeIf(::isActive) ?: return
         playing = true
         mpv?.setPropertyBoolean("pause", pauseIntent)
         emit(load)
@@ -503,11 +510,17 @@ class MpvPlayerController(
 
     fun pause() {
         checkMainThread()
-        val load = activeLoad?.takeIf(::isActive) ?: return
         pauseIntent = true
+        val load = activeLoad?.takeIf(::isActive) ?: return
         playing = false
         mpv?.setPropertyBoolean("pause", true)
         emit(load)
+    }
+
+    private fun refreshPauseIntent(): Boolean {
+        val provider = desiredPlaying ?: return true
+        pauseIntent = !(provider() ?: return false)
+        return true
     }
 
     fun seekTo(ms: Long) {
@@ -925,6 +938,8 @@ class MpvPlayerController(
     private fun handleEvent(load: NativeLoad, eventId: Int) {
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
+                if (!refreshPauseIntent()) return
+                load.engine.setPropertyBoolean("pause", pauseIntent)
                 fileLoaded = true
                 applyAspectMode(load)
                 buffering = false

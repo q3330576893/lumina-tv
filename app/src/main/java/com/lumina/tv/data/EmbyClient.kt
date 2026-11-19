@@ -1366,7 +1366,8 @@ class EmbyClient(
                 if (!negotiatedSources.add(negotiationSource.id) || negotiatedSources.size > 3) {
                     throw EmbyException("服务器反复变更播放版本，请重新选择片源")
                 }
-                trackIntent.applyToPlaybackInfo(infoBody, disableSubtitles = removeSubtitleParams)
+                trackIntent.applyToPlaybackInfo(infoBody,
+                    disableSubtitles = removeSubtitleParams && negotiationSource.id == prepared.source.id)
                 info = postJson(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
                     .also { if (recordDiagnostics) lastPlaybackInfoJson = it.toString() }
                 val sources = info.optJSONArray("MediaSources")
@@ -1421,7 +1422,7 @@ class EmbyClient(
                 isStrmItem -> Triple(directLinkUrl ?: throw EmbyException("STRM has no usable HTTP URL"),
                     PlaybackMode.DirectPlay, TimelineOrigin.UNKNOWN)
                 forceDirect -> Triple(directUrl, PlaybackMode.DirectPlay, TimelineOrigin.CONTENT)
-                preferDirectStreamUrl && serverDirectUrl != null && source.supportsDirectStream ->
+                preferDirectStreamUrl && source.id == prepared.source.id && serverDirectUrl != null && source.supportsDirectStream ->
                     Triple(serverDirectUrl, PlaybackMode.DirectStream, TimelineOrigin.UNKNOWN)
                 source.supportsDirectPlay -> Triple(directUrl, PlaybackMode.DirectPlay, TimelineOrigin.CONTENT)
                 source.supportsDirectStream && serverDirectUrl != null ->
@@ -1432,7 +1433,8 @@ class EmbyClient(
                 else -> throw EmbyException("The selected source has no usable negotiated playback route")
             }
             val finalUrl = if (route.third == TimelineOrigin.CONTENT || isStrmItem && !forceTranscode) route.first
-                else negotiatedUrl(route.first, resolvedStartPositionMs, selectedAudioIndex, playSessionId, removeSubtitleParams)
+                else negotiatedUrl(route.first, resolvedStartPositionMs, selectedAudioIndex, playSessionId,
+                    removeSubtitleParams && source.id == prepared.source.id)
             val finalPath = android.net.Uri.parse(finalUrl).path.orEmpty()
             android.util.Log.d("EmbyClient", "playback: isStrmItem=$isStrmItem hasDirectLink=${directLinkUrl != null} final=$finalPath")
             // 请求头：#EXTVLCOPT / #EXTHTTP 既可能来自 MediaSources.AdditionalOptions，也可能在 .strm 文本里
@@ -1613,7 +1615,14 @@ class EmbyClient(
     fun reportStop(session: PlaybackProgressSession, positionMs: Long, paused: Boolean = true,
         timelineUnverified: Boolean = false, playerPositionMs: Long? = null): Boolean {
         val admitted = progressSender.stop(session, positionMs, paused)
-        if (admitted) recordProgressDiagnostics("Stop", positionMs, timelineUnverified, playerPositionMs)
+        if (admitted) {
+            recordProgressDiagnostics("Stop", positionMs, timelineUnverified, playerPositionMs)
+            // Survives screen disposal and client/network cancellation; waiting is bounded, off UI.
+            ProgressPersistence.scope.launch {
+                val persisted = progressSender.awaitStopPersisted(session)
+                PageLog.add("progress Stop barrier persisted=$persisted")
+            }
+        }
         return admitted
     }
 
@@ -1649,8 +1658,11 @@ class EmbyClient(
 
     fun clearPendingProgress() = progressOutbox.clear()
 
+    suspend fun awaitProgressPersistence(): Boolean = progressOutbox.flushAndAwait()
+
     fun close() {
         progressSender.close()
+        progressOutbox.close()
         progressScope.cancel()
     }
 

@@ -290,11 +290,11 @@ object E1Checks {
                 when (name) {
                     "remove" -> { changes[args[0] as String] = null; edit }
                     "putString", "putInt", "putBoolean" -> { changes[args[0] as String] = args[1]; edit }
-                    "apply" -> {
+                    "apply", "commit" -> {
                         check(!failApply)
                         writes++
                         changes.forEach { (key, value) -> if (value == null) values.remove(key) else values[key] = value }
-                        null
+                        if (name == "commit") true else null
                     }
                     else -> error(name)
                 }

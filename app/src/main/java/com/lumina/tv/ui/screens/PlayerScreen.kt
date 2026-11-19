@@ -373,7 +373,8 @@ fun PlayerScreen(
     // 转码流（HLS）解析失败时改拉原文件直连
     var forceDirectNext by remember(item.id) { mutableStateOf(false) }
     var directFallbackTried by remember(item.id) { mutableStateOf(false) }
-    var badHttpFallbackStage by remember(item.id) { mutableIntStateOf(0) }
+    val loadCoordinator = remember(item.id) { com.lumina.tv.player.PlaybackLoadCoordinator(initialSourceId) }
+    val badHttpFallbackStage by loadCoordinator::badHttpFallbackStage
     var manualAudioStreamSelection by remember(item.id) { mutableStateOf(false) }
     var transcodeFallbackTried by remember(item.id) { mutableStateOf(false) }
     // 同一部片可能有多个版本（不同压制/大小），一个播不了就换下一个
@@ -396,7 +397,7 @@ fun PlayerScreen(
     var rangeProbeDiagnostics by remember(item.id) { mutableStateOf(JSONObject()) }
     var rangeProbeJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var networkRetryCount by remember(item.id) { mutableIntStateOf(0) }
-    var sessionGeneration by remember(item.id) { mutableIntStateOf(0) }
+    var sessionGeneration by loadCoordinator::generation
     val playbackDiagnostics = remember(item.id) { com.lumina.tv.player.PlaybackDiagnostics { PageLog.add(it) } }
     val watchdog = remember(item.id) { PlaybackWatchdog() }
     var recoveryBudget by remember(item.id) { mutableStateOf(PlaybackRecoveryBudget()) }
@@ -420,8 +421,7 @@ fun PlayerScreen(
     val initialStartIntent = remember(item.id) { startIntent }
     var recoveryStartIntent by remember(item.id) { mutableStateOf(initialStartIntent) }
     var pendingStartIntent by remember(item.id) { mutableStateOf<PlaybackStartIntent?>(initialStartIntent) }
-    var desiredPlaying by remember(item.id) { mutableStateOf(true) }
-    var pendingPaused by remember(item.id) { mutableStateOf<Boolean?>(null) }
+    var desiredPlaying by loadCoordinator::desiredPlaying
     var currentTarget by remember(item.id) { mutableStateOf<EmbyClient.PlaybackTarget?>(null) }
     var lastPlayerPositionMs by remember(item.id) { mutableStateOf<Long?>(null) }
     var media3PositionAvailable by remember(item.id) { mutableStateOf(false) }
@@ -495,6 +495,7 @@ fun PlayerScreen(
     var audioSelectionApplied by remember(item.id) { mutableStateOf(false) }
     var selectedAudioStreamIndex by remember(item.id) { mutableStateOf<Int?>(null) }
     var progressSession by remember(item.id, client) { mutableStateOf<PlaybackProgressSession?>(null) }
+    var exitPending by remember(item.id) { mutableStateOf(false) }
 
     val introSeconds = playbackMarkers?.introEndMs?.takeIf { it > 0L && (duration <= 0L || it < duration) }
         ?.div(1000L)?.toInt()
@@ -637,7 +638,7 @@ fun PlayerScreen(
     val creditsCountdown = remember(exo, item.id) { CreditsCountdown<MediaItem>(instanceScope, { PageLog.add(it) }) }
     var media3LoadGeneration by remember(exo, item.id) { mutableIntStateOf(-1) }
     fun isCurrentLoad(generation: Int): Boolean =
-        instanceJob.isActive && currentExo === exo && generation == sessionGeneration
+        instanceJob.isActive && currentExo === exo && loadCoordinator.accepts(generation)
     fun isCurrentMedia3(): Boolean = !reloadPending && activeEngine == "media3" &&
         isCurrentLoad(media3LoadGeneration) && exo.currentMediaItem?.mediaId == "${item.id}:$media3LoadGeneration"
     fun isCurrentMedia3Event(eventTime: AnalyticsListener.EventTime): Boolean {
@@ -887,7 +888,6 @@ fun PlayerScreen(
         media3LoadGeneration = -1
         pendingStartIntent = retryIntent
         recoveryStartIntent = retryIntent
-        pendingPaused = !desiredPlaying
         reloadKey++
     }
 
@@ -1255,8 +1255,6 @@ fun PlayerScreen(
         // Snapshot before releasing either engine. Zero is a valid restoration point.
         val loadIntent = pendingStartIntent ?: recoveryStartIntent
         val resumePosition = loadIntent.positionMs(item.positionTicks / 10_000L)
-        val restorePaused = pendingPaused ?: !desiredPlaying
-        pendingPaused = null
         lastRequestedStartMs = resumePosition
         audioRecoveryJob?.cancel()
         audioRecoveryJob = null
@@ -1264,7 +1262,7 @@ fun PlayerScreen(
         speedState = speedState.forNewLoad()
         loadJob?.cancel()
         rangeProbeJob?.cancel()
-        val generation = ++sessionGeneration
+        val generation = loadCoordinator.beginLoad(sourceId)
         seekConfirmationJob?.cancel()
         seekConfirmation = null
         pendingSeekTarget = null
@@ -1304,21 +1302,23 @@ fun PlayerScreen(
             failurePhase = "解析"
             try {
                 MpvRetirementFence.await()
-                if (!isCurrentLoad(generation)) return@launch
+                if (!isCurrentLoad(generation) || reloadPending) return@launch
                 if (forceTranscode) transcodeFallbackTried = true
                 val maxStreamingBitrate = AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
                 val strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy()
                 val preparedTracks = c.preparePlaybackTracks(item.id, sourceId, audioStreamIndex, strategy,
                     playbackSource?.takeIf { it.id == sourceId }?.let { com.lumina.tv.player.trackMemoryIdentity(it, "Audio") })
-                val cachedTarget = if (badHttpFallbackStage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy,
+                if (!isCurrentLoad(generation) || reloadPending || !loadCoordinator.resolveSource(generation, preparedTracks.source.id)) return@launch
+                val requestVariant = loadCoordinator.requestVariant
+                val cachedTarget = if (requestVariant.stage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy,
                     loadIntent, resumePosition, manualAudioStreamSelection, trackIntent = preparedTracks.intent)
                     else null
-                if (badHttpFallbackStage != 0) PageLog.add("prewarm miss nextId=${item.id} reason=fallback_request")
+                if (requestVariant.stage != 0) PageLog.add("prewarm miss nextId=${item.id} reason=fallback_request")
                 val resolvedTarget = cachedTarget ?: c.resolvePlayback(
                         item, forceTranscode, sourceId, loadIntent, audioStreamIndex,
                         forceDirect = forceDirectNext,
-                        removeSubtitleParams = badHttpFallbackStage == 1,
-                        preferDirectStreamUrl = badHttpFallbackStage == 2,
+                        removeSubtitleParams = requestVariant.removeSubtitleParams,
+                        preferDirectStreamUrl = requestVariant.preferDirectStreamUrl,
                         manualAudioStreamSelection = manualAudioStreamSelection,
                         maxStreamingBitrate = maxStreamingBitrate,
                         strategy = strategy,
@@ -1327,6 +1327,7 @@ fun PlayerScreen(
                 // Cached negotiation is reusable; runtime measurements belong to this load only.
                 val target = resolvedTarget.copy(negotiationDiagnostics = JSONObject(resolvedTarget.negotiationDiagnostics.toString()))
                 if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
+                if (reloadPending || !loadCoordinator.resolveSource(generation, target.source.id)) return@launch
                 httpFactory.setDefaultRequestProperties(target.headers)
                 phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
                 negotiationDiagnostics = target.negotiationDiagnostics
@@ -1441,8 +1442,6 @@ fun PlayerScreen(
                     ?.filter { it.type == "Subtitle" && it.isExternal }
                     .orEmpty()
                 val srcId = target.source?.id
-                progressSession = c.reportStart(item.id, target.startPositionMs, srcId, target.playMethod,
-                    target.playSessionId, paused = restorePaused)
                 if (activeEngine == "mpv") {
                     mpvBackend?.release("new-external-load")
                     mpvState = MpvPlayerController.State()
@@ -1454,8 +1453,6 @@ fun PlayerScreen(
                                 if (needed()) {
                                     playbackDiagnostics.retry(load, android.os.SystemClock.elapsedRealtime())
                                     reportStopInAppScope()
-                                    progressSession = c.reportStart(item.id, target.startPositionMs, srcId, target.playMethod,
-                                        target.playSessionId, paused = !desiredPlaying)
                                     speedState = speedState.forNewLoad()
                                     owner.setSpeed(speedState.userSpeed)
                                     retry()
@@ -1469,6 +1466,13 @@ fun PlayerScreen(
                             } else {
                                 recoverAutomatically("mpv-software-retry", generation, stillNeeded = needed, action = retryWithProgressSession)
                             }
+                        }
+                    }, desiredPlaying = {
+                        loadCoordinator.playingFor(generation)?.takeIf { isCurrentLoad(generation) && !reloadPending }
+                    }, onPhysicalLoad = { owner, load, paused ->
+                        if (mpvBackend === owner && isCurrentLoad(load.generation) && !reloadPending) {
+                            progressSession = c.reportStart(item.id, target.startPositionMs, srcId, target.playMethod,
+                                target.playSessionId, paused = paused)
                         }
                     }) { owner, load, state ->
                         if (!isCurrentLoad(load.generation) || reloadPending || mpvBackend !== owner || activeEngine != "mpv") {
@@ -1584,7 +1588,7 @@ fun PlayerScreen(
                     backend.setSpeed(speedState.effectiveSpeed)
                     backend.setAspectMode(resizeMode)
                     if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
-                    backend.load(target.url, target.playerStartPositionMs, externalSubtitles, target.headers, paused = restorePaused)
+                    backend.load(target.url, target.playerStartPositionMs, externalSubtitles, target.headers, paused = !desiredPlaying)
                     pendingStartIntent = null
                 } else {
                     val configs = if (srcId == null) emptyList() else subs.map { st ->
@@ -1631,11 +1635,15 @@ fun PlayerScreen(
                         .build()
                     if (!isCurrentLoad(generation)) return@launch
                     media3LoadGeneration = generation
+                    if (!loadCoordinator.commit(generation) { playing ->
+                        exo.playWhenReady = playing
+                        progressSession = c.reportStart(item.id, target.startPositionMs, srcId, target.playMethod,
+                            target.playSessionId, paused = !playing)
+                    }) return@launch
                     exo.setMediaSource(videoSource)
                     exo.prepare()
                     pendingStartIntent = null
                     target.playerStartPositionMs?.let(exo::seekTo)
-                    exo.playWhenReady = !restorePaused
                     exo.setPlaybackSpeed(speedState.effectiveSpeed)
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1748,6 +1756,7 @@ fun PlayerScreen(
     }
 
     fun togglePlayback() {
+        if (exitPending) return
         desiredPlaying = !desiredPlaying
         if (!desiredPlaying) cancelCreditsCountdown("pause")
         when (activeEngine) {
@@ -1900,8 +1909,7 @@ fun PlayerScreen(
                 } else if (errorClass.category == PlaybackErrorCategory.HTTP_PERMISSION) {
                     updateStalled(false)
                     error = "媒体服务器拒绝了播放请求（权限或认证失败）"
-                } else if (isBadHttpStatus && badHttpFallbackStage < 2) {
-                    badHttpFallbackStage++
+                } else if (isBadHttpStatus && loadCoordinator.advanceHttp400(sessionGeneration)) {
                     updateStalled(true)
                     error = null
                     audioDecodeNotice = if (badHttpFallbackStage == 1) "HTTP 400，正在尝试移除字幕转码参数" else "字幕参数回退失败，正在尝试服务器直连地址"
@@ -2468,7 +2476,6 @@ fun PlayerScreen(
                     triedSources = triedSources + listOfNotNull(currentSourceId)
                     currentSourceId = next.id
                     enginePinned = null
-                    badHttpFallbackStage = 0
                     directFallbackTried = false
                     transcodeFallbackTried = false
                 }
@@ -2661,6 +2668,8 @@ fun PlayerScreen(
     }
 
     fun exitPlayback() {
+        if (exitPending) return
+        exitPending = true
         sessionGeneration++
         instanceJob.cancel()
         cancelCreditsCountdown("player-exit")
@@ -2668,7 +2677,11 @@ fun PlayerScreen(
         exitPromptAt = 0L
         reportStopInAppScope()
         if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
-        onBack()
+        scope.launch {
+            // Graceful exit gives the Stop disk barrier at most 2s without blocking the UI.
+            client?.awaitProgressPersistence()
+            onBack()
+        }
     }
 
     fun closeOptionMenu() {
@@ -3290,8 +3303,8 @@ fun PlayerScreen(
                         .then(centerFocusProps),
                 ) {
                     CtrlButton(
-                        if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        if (isPlaying) "暂停" else "播放",
+                        if (desiredPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        if (desiredPlaying) "暂停" else "播放",
                         primary = true,
                         focusRequester = playFocus,
                     ) { togglePlayback() }

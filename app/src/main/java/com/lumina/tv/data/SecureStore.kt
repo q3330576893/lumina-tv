@@ -36,13 +36,7 @@ object SecureStore {
     @Synchronized
     fun put(key: String, value: String): Boolean = try {
         val sp = checkNotNull(preferences)
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        // AndroidKeyStore generates a fresh random IV; explicitly supplying one is forbidden.
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey(create = true))
-        val iv = cipher.iv
-        check(iv.size == IV_BYTES)
-        val ciphertext = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-        val encoded = Base64.encodeToString(iv + ciphertext, Base64.NO_WRAP)
+        val encoded = checkNotNull(encrypt(value))
         // Confirm persistence before Prefs removes the only legacy plaintext copy.
         check(sp.edit().putString(PREFIX + key, encoded).commit())
         true
@@ -51,10 +45,36 @@ object SecureStore {
         false
     }
 
+    /** Prepare ciphertext without committing; a caller may atomically commit an entire record. */
+    @Synchronized
+    internal fun encrypt(value: String): String? = try {
+        checkNotNull(preferences)
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        // AndroidKeyStore generates a fresh random IV; explicitly supplying one is forbidden.
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey(create = true))
+        val iv = cipher.iv
+        check(iv.size == IV_BYTES)
+        val ciphertext = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+        Base64.encodeToString(iv + ciphertext, Base64.NO_WRAP)
+    } catch (e: Exception) {
+        failed("encrypt", e)
+        null
+    }
+
     @Synchronized
     fun get(key: String): String? {
         return try {
             val encoded = checkNotNull(preferences).getString(PREFIX + key, null) ?: return null
+            decrypt(encoded)
+        } catch (e: Exception) {
+            failed("get", e)
+            null
+        }
+    }
+
+    @Synchronized
+    internal fun decrypt(encoded: String): String? {
+        return try {
             val bytes = Base64.decode(encoded, Base64.NO_WRAP)
             require(bytes.size >= IV_BYTES + TAG_BITS / 8)
             val iv = bytes.copyOfRange(0, IV_BYTES)
@@ -62,7 +82,7 @@ object SecureStore {
             cipher.init(Cipher.DECRYPT_MODE, secretKey(create = false), GCMParameterSpec(TAG_BITS, iv))
             String(cipher.doFinal(bytes, IV_BYTES, bytes.size - IV_BYTES), Charsets.UTF_8)
         } catch (e: Exception) {
-            failed("get", e)
+            failed("decrypt", e)
             null
         }
     }

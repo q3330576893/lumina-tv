@@ -96,19 +96,18 @@ object AppRuntime {
 
     fun restore(): Session? {
         val p = prefs ?: return null
-        if (!p.hasSession()) return null
-        val s = Session(
-            baseUrl = p.baseUrl,
-            token = p.token,
-            userId = p.userId,
-            userName = p.userName,
-            serverName = p.serverName,
-        )
-        applySession(s)
+        val s = p.readSession() ?: return null
+        activateSession(s)
         return s
     }
 
     fun applySession(s: Session) {
+        require(com.lumina.tv.data.SessionStore.complete(s)) { "Incomplete session" }
+        check(prefs?.saveSession(s) != false) { "无法保存登录会话，请检查设备存储后重试" }
+        activateSession(s)
+    }
+
+    private fun activateSession(s: Session) {
         val previous = session
         val identityChanged = previous != null &&
             com.lumina.tv.data.identityScope(previous.baseUrl, previous.userId) != com.lumina.tv.data.identityScope(s.baseUrl, s.userId)
@@ -128,7 +127,6 @@ object AppRuntime {
             serverName = s.serverName,
             progressQueue = applicationContext?.let { ProgressQueue(it, s.baseUrl, s.userId) },
         )
-        prefs?.saveSession(s)
     }
 
     fun switchToServer(url: String): Boolean {
@@ -145,12 +143,9 @@ object AppRuntime {
             userName = saved.userName,
             serverName = saved.name,
         )
-        applySession(switched)
-        p.baseUrl = switched.baseUrl
-        p.token = switched.token
-        p.userId = switched.userId
-        p.userName = switched.userName
-        p.serverName = switched.serverName
+        if (!com.lumina.tv.data.SessionStore.complete(switched)) return false
+        if (!p.saveSession(switched)) return false
+        activateSession(switched)
         p.upsertServer(saved)
         return true
     }

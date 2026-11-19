@@ -38,6 +38,7 @@ class PlaybackProgressSession internal constructor(
     internal var sequence = 0L
     @Volatile var isClosed = false
         internal set
+    @Volatile internal var stopBarrier: ProgressBarrier? = null
 }
 
 /** One application-owned worker handles both new reports and persisted retries. */
@@ -51,11 +52,12 @@ internal class ProgressSender(
     private val wakeups = Channel<Unit>(Channel.CONFLATED)
     private var closed = false
     private val worker = scope.launch {
+        queue.awaitLoaded()
         for (ignored in wakeups) {
             while (true) {
                 val event = queue.claimNext() ?: break
                 val sent = try {
-                    val success = try {
+                    val success = if (!queue.flushAndAwait()) false else try {
                         send(event)
                     } catch (cancelled: CancellationException) {
                         // A single request's deadline must not retire the application sender.
@@ -78,6 +80,8 @@ internal class ProgressSender(
             }
         }
     }
+
+    init { requestFlush() }
 
     fun start(
         itemId: String,
@@ -107,7 +111,7 @@ internal class ProgressSender(
             // Close synchronously, before enqueueing: exit/dispose and late heartbeats share this gate.
             // Retries retain this Stop's identity; this is local submission deduplication.
             session.isClosed = true
-            enqueue(session, ProgressEventType.Stop, positionMs, paused)
+            session.stopBarrier = enqueue(session, ProgressEventType.Stop, positionMs, paused)
             true
         }
 
@@ -115,8 +119,8 @@ internal class ProgressSender(
         !closed && session.owner === this && !session.isClosed
 
     // Admission, sequence allocation and enqueueing share a lock, including across caller threads.
-    private fun enqueue(session: PlaybackProgressSession, type: ProgressEventType, positionMs: Long, paused: Boolean) {
-        queue.enqueue(PendingProgress(
+    private fun enqueue(session: PlaybackProgressSession, type: ProgressEventType, positionMs: Long, paused: Boolean): ProgressBarrier {
+        val barrier = queue.enqueue(PendingProgress(
             localSessionId = session.localSessionId,
             sequence = ++session.sequence,
             eventId = UUID.randomUUID().toString(),
@@ -130,6 +134,12 @@ internal class ProgressSender(
             at = System.currentTimeMillis(),
         ))
         requestFlush()
+        return barrier
+    }
+
+    suspend fun awaitStopPersisted(session: PlaybackProgressSession): Boolean {
+        require(session.owner === this)
+        return session.stopBarrier?.let { queue.flushAndAwait(it) } ?: false
     }
 
     fun requestFlush() {

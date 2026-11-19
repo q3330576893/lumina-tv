@@ -331,10 +331,10 @@ fun HomeScreen(
                 val (sb, so) = sortParams(librarySort, librarySortOrder)
                 gridAppending = true
                 try {
-                    PageLog.add("libraryQuery path=restore SortBy=$sb SortOrder=$so start=$gridNextIndex limit=50")
+                    PageLog.add("libraryQuery path=restore SortBy=$sb SortOrder=$so start=$gridNextIndex limit=$LIBRARY_PAGE_SIZE")
                     val page = client.getItems(
                         parentId = lib.id, types = collectionTypeToItemTypes(lib.type),
-                        sortBy = sb, sortOrder = so, limit = 50, startIndex = gridNextIndex,
+                        sortBy = sb, sortOrder = so, limit = LIBRARY_PAGE_SIZE, startIndex = gridNextIndex,
                     )
                     currentCoroutineContext().ensureActive()
                     if (page.isNotEmpty()) {
@@ -596,7 +596,7 @@ fun HomeScreen(
             if (requestTab == HomeTab.Media) {
                 libraryTotalCount = requestLibrary?.let { libraryCounts[it.id] }
                 gridNextIndex = it.size
-                gridHasMore = requestSort != "random" && it.size == 50
+                gridHasMore = requestSort != "random" && it.size == LIBRARY_PAGE_SIZE
                 gridAppendFailed = false
             }
             gridLoading = false
@@ -612,9 +612,9 @@ fun HomeScreen(
                     HomeTab.Series -> c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
                     HomeTab.Media -> requestLibrary?.let {
                         val (sb, so) = sortParams(requestSort, requestOrder)
-                        PageLog.add("libraryQuery path=initial SortBy=$sb SortOrder=$so start=0 limit=50")
+                        PageLog.add("libraryQuery path=initial SortBy=$sb SortOrder=$so start=0 limit=$LIBRARY_PAGE_SIZE")
                         c.getItems(parentId = it.id, types = collectionTypeToItemTypes(it.type),
-                            sortBy = sb, sortOrder = so, limit = 50, startIndex = 0)
+                            sortBy = sb, sortOrder = so, limit = LIBRARY_PAGE_SIZE, startIndex = 0)
                     }.orEmpty()
                     else -> emptyList()
                 }
@@ -628,7 +628,7 @@ fun HomeScreen(
                     gridItems = list
                     libraryTotalCount = AppRuntime.client?.lastTotalRecordCount
                     gridNextIndex = list.size
-                    gridHasMore = requestSort != "random" && list.size == 50
+                    gridHasMore = requestSort != "random" && list.size == LIBRARY_PAGE_SIZE
                     gridAppendFailed = false
                 } else {
                     gridItems = list
@@ -663,10 +663,10 @@ fun HomeScreen(
                 gridAppending = true
                 gridRetryHandled = gridRetryRequested
                 try {
-                    PageLog.add("libraryQuery path=append SortBy=$sortBy SortOrder=$sortOrder start=$gridNextIndex limit=50")
+                    PageLog.add("libraryQuery path=append SortBy=$sortBy SortOrder=$sortOrder start=$gridNextIndex limit=$LIBRARY_PAGE_SIZE")
                     val page = c.getItems(parentId = library.id, types = collectionTypeToItemTypes(library.type),
                         sortBy = sortBy, sortOrder = sortOrder,
-                        limit = 50, startIndex = gridNextIndex)
+                        limit = LIBRARY_PAGE_SIZE, startIndex = gridNextIndex)
                     currentCoroutineContext().ensureActive()
                     if (selectedLibrary == library && librarySort == activeSort && librarySortOrder == activeOrder) {
                         gridItems = (gridItems + page).distinctBy { it.id }
@@ -1357,10 +1357,7 @@ private fun ServerCapsule(
                                                 onServerSwitched()
                                             } else {
                                                 AppRuntime.prefs?.let { prefs ->
-                                                    prefs.baseUrl = server.url
-                                                    prefs.userName = server.userName
-                                                    prefs.token = ""
-                                                    prefs.userId = ""
+                                                    prefs.prepareServerLogin(server.url, server.userName)
                                                 }
                                                 serverMenuOpen = false
                                                 android.widget.Toast.makeText(
