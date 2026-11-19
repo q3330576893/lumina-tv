@@ -280,5 +280,13 @@ val b11Checks = tasks.register<JavaExec>("b11Checks") {
     mainClass.set("com.lumina.tv.B11Checks")
 }
 verifyOffline.configure { dependsOn(b11Checks) }
+val b12Checks = tasks.register<JavaExec>("b12Checks") {
+    group = "verification"
+    description = "B12 extracted playback policy and legacy adapter boundary assertions."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.player.B12Checks")
+}
+verifyOffline.configure { dependsOn(b12Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }

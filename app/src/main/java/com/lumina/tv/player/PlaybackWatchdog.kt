@@ -84,18 +84,25 @@ class PlaybackWatchdog {
         if (bytesLoaded != lastBytes) { lastBytes = bytesLoaded; byteAt = now }
         if (positionMs != lastPositionMs) { lastPositionMs = positionMs; lastPositionAt = now }
         updateBuffered(now, bufferedMs)
-        if (now < suppressedUntil || now - loadingAt < 8_000L) return null
         val bufferedAge = lastBufferedAt?.let { now - it }
-        val reason = when {
-            durationMs > 0 && durationMs - positionMs in 0..10_000L && now - lastPositionAt >= 60_000L &&
-                !downloadInProgress -> WatchdogReason.NO_END
-            state == 2 && !loading && !downloadInProgress && now - stateSince >= 4_000L && now - byteAt >= 4_000L &&
-                (mpvLoadId == null || bufferedAge != null && bufferedAge >= 4_000L) -> WatchdogReason.BUFFERING_NO_LOAD
-            state == 2 && loading && !downloadInProgress && bufferedAge != null && bufferedAge >= 4_000L ->
-                WatchdogReason.BUFFERING_NO_PROGRESS
-            state == 3 && now - lastPositionAt >= 4_000L && !downloadInProgress -> WatchdogReason.PLAYING_NO_PROGRESS
-            else -> null
-        } ?: return null
+        val reason = playbackWatchdogReason(PlaybackWatchdogInput(
+            positionMs = positionMs,
+            durationMs = durationMs,
+            positionAgeMs = now - lastPositionAt,
+            bufferedAgeMs = bufferedAge,
+            stateAgeMs = now - stateSince,
+            bytesUnchangedForMs = now - byteAt,
+            loadingAgeMs = now - loadingAt,
+            buffering = state == 2,
+            ready = state == 3,
+            loading = loading,
+            downloadInProgress = downloadInProgress,
+            mpvLoad = mpvLoadId != null,
+            playWhenReady = playWhenReady,
+            seeking = isSeeking,
+            startupComplete = now - generationAt >= 3_000L,
+            suppressed = now < suppressedUntil,
+        )) ?: return null
         PageLog.add("watchdog hit=${reason.name} pos=$positionMs buffered=${bufferedMs ?: "unknown"} state=$state gen=$sessionGeneration")
         StabilityMetrics.watchdogHits++
         suppressedUntil = now + 30_000L
