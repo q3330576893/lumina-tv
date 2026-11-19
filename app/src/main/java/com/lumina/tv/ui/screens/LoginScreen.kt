@@ -302,7 +302,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
             true
         }
-        AppRuntime.onPairRequest = { config -> pendingPairConfig = config }
+        AppRuntime.onPairRequest = { config -> pendingPairConfig = config; true }
         onDispose {
             AppRuntime.resolvePairRequest("cancelled")
             AppRuntime.onPairConfig = null

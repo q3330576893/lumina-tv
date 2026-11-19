@@ -3972,7 +3972,7 @@ fun PlayerScreen(
         }
     }
     DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
-        val payload = buildDiagPayload(outcome).copy(appLog = withContext(Dispatchers.IO) { DiagExporter.appLogTail() })
+        val payload = buildDiagPayload(outcome)
         withContext(Dispatchers.IO) { DiagExporter.export(context, payload, "playback") }
     }
 }

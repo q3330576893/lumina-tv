@@ -137,7 +137,7 @@ fun SettingsAbout(
                     }
                 }, requesters.getValue(rowKeys[1]), railRequester, onFocused,
                     upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[2]))
-                ActionRow("about:exportDiagnostics", "导出诊断包", "选择现象并保存到本机", if (showDiagExport) "进行中" else "导出", {
+                ActionRow("about:exportDiagnostics", "导出诊断包", "选择现象并保存或分享", if (showDiagExport) "进行中" else "导出", {
                     showDiagExport = true
                 }, requesters.getValue(rowKeys[2]), railRequester, onFocused,
                     upRequester = requesters.getValue(rowKeys[1]), downRequester = requesters.getValue(rowKeys[3]))

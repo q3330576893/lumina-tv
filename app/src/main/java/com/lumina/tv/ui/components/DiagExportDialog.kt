@@ -1,6 +1,10 @@
 package com.lumina.tv.ui.components
 
 import android.widget.Toast
+import android.content.ClipData
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,7 +26,10 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 private val DIAG_OUTCOMES = listOf("黑屏", "卡缓冲", "没声音", "花屏", "报错退出", "环境日志")
@@ -41,6 +48,25 @@ fun DiagExportDialog(
     var expanded by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var resultPath by remember { mutableStateOf<String?>(null) }
+    var exportedFile by remember { mutableStateOf<File?>(null) }
+    val saveZipLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        val source = exportedFile
+        if (uri != null && source != null) scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val output = context.contentResolver.openOutputStream(uri)
+                        ?: error("无法打开目标文件")
+                    source.inputStream().use { input -> output.use { input.copyTo(it) } }
+                }
+            }.onSuccess {
+                Toast.makeText(context, "诊断包已保存到所选位置", Toast.LENGTH_LONG).show()
+            }.onFailure {
+                Toast.makeText(context, "保存失败：${it.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         title = { Text(if (resultPath == null) "导出播放诊断包" else "诊断包已保存") },
@@ -58,7 +84,33 @@ fun DiagExportDialog(
                 } else {
                     Text(resultPath.orEmpty())
                     Spacer(Modifier.height(8.dp))
-                    Text("用 U 盘或局域网把这个文件发给开发者。")
+                    Text("可以保存到所选位置，或通过已安装应用分享。")
+                    TextButton(onClick = {
+                        exportedFile?.let { file ->
+                            runCatching { saveZipLauncher.launch(file.name) }
+                                .onFailure { Toast.makeText(context, "无法打开保存位置：${it.message}", Toast.LENGTH_LONG).show() }
+                        }
+                    }) { Text("保存到其他位置…") }
+                    TextButton(onClick = {
+                        exportedFile?.let { file ->
+                            runCatching {
+                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "application/zip"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    clipData = ClipData.newUri(context.contentResolver, "LuminaTV诊断包", uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(send, "分享诊断包"))
+                            }.onFailure { Toast.makeText(context, "分享失败：${it.message}", Toast.LENGTH_LONG).show() }
+                        }
+                    }) { Text("分享") }
+                    TextButton(onClick = {
+                        resultPath?.let { path ->
+                            runCatching { clipboard.setText(AnnotatedString(path)) }
+                            Toast.makeText(context, "已保存：$path", Toast.LENGTH_LONG).show()
+                        }
+                    }) { Text("复制路径") }
                 }
             }
         },
@@ -67,18 +119,13 @@ fun DiagExportDialog(
                 busy = true
                 scope.launch {
                     runCatching { export(outcome) }
-                        .onSuccess { resultPath = it.absolutePath }
+                        .onSuccess { exportedFile = it; resultPath = it.absolutePath }
                         .onFailure { Toast.makeText(context, "导出失败：${it.message}", Toast.LENGTH_LONG).show() }
                     busy = false
                 }
             }) { Text(if (busy) "正在导出" else "导出") }
-            else TextButton(onClick = {
-                resultPath?.let { path ->
-                    runCatching { clipboard.setText(AnnotatedString(path)) }
-                    Toast.makeText(context, "已保存：$path", Toast.LENGTH_LONG).show()
-                }
-            }) { Text("复制路径") }
+            else TextButton(onClick = onDismiss) { Text("关闭") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(if (resultPath == null) "取消" else "关闭") } },
+        dismissButton = if (resultPath == null) ({ TextButton(onClick = onDismiss) { Text("取消") } }) else null,
     )
 }

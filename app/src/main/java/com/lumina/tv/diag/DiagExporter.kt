@@ -2,6 +2,7 @@ package com.lumina.tv.diag
 
 import android.content.Context
 import android.os.Build
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.lumina.tv.AppRuntime
@@ -45,7 +46,7 @@ object DiagExporter {
             errorsJson = JSONObject().put("reason", prefs?.lastPlaybackAudioFailure?.ifBlank { null } ?: "No playback error recorded").toString(2),
             mpvLog = runCatching { File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.readText(Charsets.UTF_8) }
                 .getOrNull()?.ifBlank { "No mpv log messages captured" } ?: "mpv log unavailable: no session log file",
-            appLog = appLogTail(),
+            appLog = "",
             uiText = "screen=${AppRuntime.screenLabel}\nplaying=${AppRuntime.nowPlaying}\nactiveEngine=unknown\nbuffering=unknown\ndegraded=unknown\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}",
         )
     }
@@ -70,12 +71,17 @@ object DiagExporter {
             .put("outcome", outcome)
     }
 
-    fun appLogTail(): String = runCatching {
+    fun appLogTail(): String {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return "app.log unavailable: logcat capture requires a background thread"
+        }
+        return runCatching {
         val process: Process = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-v", "epoch", "-t", "800", "--pid=${android.os.Process.myPid()}"))
         val lines: List<String> = process.inputStream.bufferedReader(Charsets.UTF_8).useLines { it.toList() }
         process.waitFor()
         lines.takeLast(800).joinToString("\n")
-    }.getOrElse { "app.log unavailable: ${it.message ?: it::class.java.simpleName}" }
+        }.getOrElse { "app.log unavailable: ${it.message ?: it::class.java.simpleName}" }
+    }
 
     fun export(context: Context, payload: DiagPayload, kind: String = "playback"): File {
         val root = context.getExternalFilesDir(null) ?: context.filesDir
@@ -89,7 +95,7 @@ object DiagExporter {
             "tracks.json" to payload.tracksJson,
             "errors.json" to payload.errorsJson,
             "mpv.log" to payload.mpvLog,
-            "app.log" to (AppLog.snapshot() + "\n[logcat]\n" + payload.appLog),
+            "app.log" to (AppLog.snapshot() + "\n[logcat]\n" + appLogTail()),
             "mpv-audio.jsonl" to File(context.filesDir, "mpv-audio.jsonl").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty(),
             "mpv-audio-system.log" to File(context.filesDir, "mpv-audio-system.log").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty(),
             "ui.txt" to (payload.uiText + "\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}"),
@@ -114,9 +120,14 @@ object DiagExporter {
                     "mpv-audio.jsonl", "mpv-audio-system.log" -> 384 * 1024
                     else -> 120 * 1024
                 }
-                val sanitized = sanitize(original).take(limit)
+                val sanitized = sanitize(original)
+                val bounded = if (name.endsWith(".json", ignoreCase = true)) {
+                    boundedDiagnosticJson(sanitized, limit)
+                } else {
+                    sanitized.take(limit)
+                }
                 zip.putNextEntry(ZipEntry(name))
-                zip.write(sanitized.toByteArray(Charsets.UTF_8))
+                zip.write(bounded.toByteArray(Charsets.UTF_8))
                 zip.closeEntry()
             }
         }
@@ -136,7 +147,7 @@ object DiagExporter {
 /** One redaction policy for both log ingestion and diagnostic export. No Android dependencies. */
 object LogRedactor {
     private const val SECRET_KEYS =
-        "api_key|apikey|x-emby-token|x-emby-authorization|x-mediabrowser-token|access_token|authorization|password|passwd|pw|token"
+        "api_key|apikey|x-emby-token|x-emby-authorization|x-mediabrowser-token|access_token|authorization|password|passwd|pw|token|cookie|set-cookie"
     private val encodedKeys = SECRET_KEYS.replace("-", "(?:-|%2d)").replace("_", "(?:_|%5f)")
     private const val QUOTED_VALUE = """"(?:\\.|[^"\\])*+"|'(?:\\.|[^'\\])*+'"""
     private val keyValue = Regex(

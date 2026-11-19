@@ -205,7 +205,7 @@ internal fun buildPlayerDiagPayload(
                 listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
             }.getOrNull()?.ifBlank { "No mpv log messages captured" }
             ?: "mpv log unavailable: no session log file",
-        appLog = DiagExporter.appLogTail(),
+        appLog = "",
         uiText = buildString {
             appendLine("screen=${AppRuntime.screenLabel}")
             appendLine("media=${item.name} / ${item.seriesName ?: "no series"}")

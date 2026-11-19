@@ -15,6 +15,7 @@ import com.lumina.tv.data.Session
 import com.lumina.tv.data.canonicalServerKey
 import com.lumina.tv.pair.PairConfig
 import com.lumina.tv.pair.PairingServer
+import com.lumina.tv.pair.deliverPairRequest
 import com.lumina.tv.diag.PageLog
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -48,7 +49,7 @@ object AppRuntime {
     var onRemoteKey: ((String) -> Unit)? = null
     var onSearch: ((String) -> Unit)? = null
     var onPairConfig: ((String, String, String) -> Boolean)? = null
-    var onPairRequest: ((PairConfig) -> Unit)? = null
+    var onPairRequest: ((PairConfig) -> Boolean)? = null
 
     fun resolvePairRequest(state: String): Boolean = pairing?.resolvePending(state) == true
     fun pairRequestIsPending(): Boolean = pairing?.hasPendingRequest() == true
@@ -170,7 +171,9 @@ object AppRuntime {
             onConfig = { token, server, user, pass ->
                 if (consumePairingToken(token)) onPairConfig?.invoke(server, user, pass) == true else false
             },
-            onPairRequest = { config -> onPairRequest?.invoke(config) },
+            onPairRequest = { config ->
+                deliverPairRequest(onPairRequest, config) == com.lumina.tv.pair.PairRequestDeliveryResult.DELIVERED
+            },
             authorize = { token -> validatePairingAccess(token) },
             onRemote = { action -> onRemoteKey?.invoke(action) },
             onSearch = { keyword -> onSearch?.invoke(keyword) },

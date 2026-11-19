@@ -29,7 +29,7 @@ class PairingServer(
     port: Int,
     private val stateProvider: () -> String,
     private val onConfig: (token: String, server: String, user: String, pass: String) -> Boolean,
-    private val onPairRequest: (PairConfig) -> Unit,
+    private val onPairRequest: (PairConfig) -> Boolean,
     private val authorize: (token: String) -> Boolean,
     private val onRemote: (action: String) -> Unit,
     private val onSearch: (keyword: String) -> Unit,
@@ -123,13 +123,51 @@ class PairingServer(
         if (parseServerAddress(config.host, config.scheme, config.port, config.path) == null) {
             return json(JSONObject().put("ok", false).put("msg", "地址或端口无效").toString())
         }
-        synchronized(this) {
+        val pending = synchronized(this) {
             expirePending()
             if (pendingRequest?.state == "pending") return json(JSONObject().put("ok", false).put("msg", "电视上已有待确认请求").toString())
-            pendingRequest = PendingRequest(token, config, System.currentTimeMillis())
+            PendingRequest(token, config, System.currentTimeMillis()).also { pendingRequest = it }
         }
-        mainThread { onPairRequest(config) }
+        if (!deliverPairRequestToUi(pending)) {
+            return json(JSONObject().put("ok", false).put("state", "unavailable")
+                .put("msg", "电视暂未准备好接收配对请求，请保持登录界面打开后重试").toString())
+        }
         return json(JSONObject().put("ok", true).put("state", "pending").toString())
+    }
+
+    private fun deliverPairRequestToUi(request: PendingRequest): Boolean {
+        fun deliver(): Boolean = synchronized(this) {
+            if (pendingRequest !== request || request.state != "pending") return@synchronized false
+            deliverPairRequest(onPairRequest, request.config) {
+                if (pendingRequest === request && request.state == "pending") request.state = "unavailable"
+            } == PairRequestDeliveryResult.DELIVERED
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            val delivered = deliver()
+            if (!delivered) revokePending(request)
+            return delivered
+        }
+        val accepted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val completed = java.util.concurrent.CountDownLatch(1)
+        if (!main.post {
+                try { accepted.set(deliver()) } finally { completed.countDown() }
+            }) {
+            revokePending(request)
+            return false
+        }
+        val delivered = try {
+            completed.await(3, java.util.concurrent.TimeUnit.SECONDS) && accepted.get()
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+        if (!delivered) revokePending(request)
+        return delivered
+    }
+
+    @Synchronized
+    private fun revokePending(request: PendingRequest) {
+        if (pendingRequest === request && request.state == "pending") request.state = "unavailable"
     }
 
     private fun handlePairPending(session: IHTTPSession): Response {
@@ -140,6 +178,7 @@ class PairingServer(
             "pending" -> "已发送到电视，请在电视上确认…"
             "confirmed" -> "已同步并登录"
             "cancelled" -> "已在电视上取消"
+            "unavailable" -> "电视暂未准备好接收请求，请保持登录界面打开后重试"
             else -> "请求已过期"
         }
         return json(JSONObject().put("state", state).put("msg", msg).toString())
@@ -214,7 +253,7 @@ class PairingServer(
         fun start(
             stateProvider: () -> String,
             onConfig: (String, String, String, String) -> Boolean,
-            onPairRequest: (PairConfig) -> Unit,
+            onPairRequest: (PairConfig) -> Boolean,
             authorize: (String) -> Boolean,
             onRemote: (String) -> Unit,
             onSearch: (String) -> Unit,
