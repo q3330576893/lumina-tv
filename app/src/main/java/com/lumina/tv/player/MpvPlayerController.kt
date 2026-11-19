@@ -52,7 +52,14 @@ class MpvPlayerController(
         var stableSamplePending = false
         var sampledAid: Int? = null
         val observer = object : MPVLib.EventObserver {
-            override fun eventProperty(property: String) = Unit
+            override fun eventProperty(property: String) {
+                if (property != "demuxer-cache-time" && property != "cache-speed") return
+                enqueue(this@NativeLoad) {
+                    if (property == "demuxer-cache-time") bufferedPositionMs = null
+                    else cacheSpeedBytesPerSecond = 0L
+                    emit(this@NativeLoad)
+                }
+            }
             override fun eventProperty(property: String, value: String) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
             override fun eventProperty(property: String, value: Long) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
             override fun eventProperty(property: String, value: Double) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
@@ -122,6 +129,7 @@ class MpvPlayerController(
         val subtitleNotice: String? = null,
         val failureKind: FailureKind? = null,
         val subtitleFallbackToAuto: Boolean = false,
+        val bufferedPositionMs: Long? = null,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -134,6 +142,7 @@ class MpvPlayerController(
     private val diagnosticLines = ArrayDeque<String>()
     private val observedProperties = linkedMapOf<String, String>()
     private val audioDiagnostics = MpvAudioDiagnostics(context)
+    private val audioFocus = MpvAudioFocusController(context)
     private var softwareRetryCount = 0
     var unavailableReason: String? = null
         private set
@@ -147,6 +156,8 @@ class MpvPlayerController(
     private var pendingUrl: String? = null
     private var pendingPositionMs: Long? = null
     private var pauseIntent = false
+    private var audioFocusHold = false
+    private var duckedVolume: Double? = null
     private var attachedSurface: Surface? = null
     private var lastSurfaceWidth = -1
     private var lastSurfaceHeight = -1
@@ -163,6 +174,7 @@ class MpvPlayerController(
     private var lastRetirement: CompletableDeferred<Unit>? = null
     private var audioSilentCodec: String? = null
     private var cacheSpeedBytesPerSecond = 0L
+    private var bufferedPositionMs: Long? = null
 
     // Constructor is side-effect free. The caller installs ownership before initialization.
     fun initialize(): InitializationResult {
@@ -211,6 +223,8 @@ class MpvPlayerController(
             engine.addLogObserver(load.logObserver)
             engine.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
             engine.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+            // The demuxer's last buffered timestamp is independent of the playback head.
+            engine.observeProperty("demuxer-cache-time", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
             engine.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
             engine.observeProperty("cache-speed", MPVLib.MpvFormat.MPV_FORMAT_INT64)
             engine.observeProperty("video-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
@@ -236,8 +250,11 @@ class MpvPlayerController(
 
     private fun destroyNativeLoad(load: NativeLoad): CompletableDeferred<Unit> {
         checkMainThread()
+        restoreDuckedVolume(load)
         loadGate.retire(load)
         handler.removeCallbacksAndMessages(load)
+        audioFocus.pauseByUser()
+        audioFocusHold = false
         val retirement = load.subtitleIo.retire {
             runCatching { load.engine.removeObserver(load.observer) }
             runCatching { load.engine.removeLogObserver(load.logObserver) }
@@ -443,6 +460,14 @@ class MpvPlayerController(
     private fun startPhysicalLoad(load: NativeLoad) {
         if (!isActive(load)) return
         if (!refreshPauseIntent()) return
+        if (pauseIntent) {
+            audioFocus.pauseByUser()
+            restoreDuckedVolume()
+        } else {
+            audioFocusHold = !audioFocus.acquire(audioFocusTarget(load))
+        }
+        if (!refreshPauseIntent()) return
+        val pauseForLoad = pauseIntent || audioFocusHold
         audioSilentCodec = null
         subtitleMappingNotice = null
         subtitleFallbackToAuto = false
@@ -452,6 +477,7 @@ class MpvPlayerController(
         positionAvailable = false
         durationMs = 0L
         cacheSpeedBytesPerSecond = 0L
+        bufferedPositionMs = null
         observedProperties.clear()
         mappings.clear()
         applyAspectMode(load)
@@ -465,13 +491,13 @@ class MpvPlayerController(
             load.engine.setPropertyDouble("sub-delay", subtitleDelayMs / 1000.0)
             load.engine.setPropertyDouble("speed", playbackSpeed.toDouble())
             // Apply pause before loadfile as well, so a paused load cannot briefly start audio.
-            load.engine.setPropertyBoolean("pause", pauseIntent)
-            onPhysicalLoad(this, load.identity, pauseIntent)
+            load.engine.setPropertyBoolean("pause", pauseForLoad)
+            onPhysicalLoad(this, load.identity, pauseForLoad)
             load.started = true
             load.engine.command(loadCommand(checkNotNull(pendingUrl), pendingPositionMs))
-            playing = !pauseIntent
+            playing = !pauseForLoad
             buffering = true
-            load.engine.setPropertyBoolean("pause", pauseIntent)
+            load.engine.setPropertyBoolean("pause", pauseForLoad)
         }.onFailure {
             emit(load, buffering = false, error = "mpv 加载失败：${it.message ?: "未知错误"}", failureKind = FailureKind.LOAD)
             return
@@ -503,6 +529,13 @@ class MpvPlayerController(
         checkMainThread()
         pauseIntent = false
         val load = activeLoad?.takeIf(::isActive) ?: return
+        audioFocusHold = !audioFocus.play(audioFocusTarget(load))
+        if (audioFocusHold) {
+            playing = false
+            mpv?.setPropertyBoolean("pause", true)
+            emit(load)
+            return
+        }
         playing = true
         mpv?.setPropertyBoolean("pause", pauseIntent)
         emit(load)
@@ -511,6 +544,9 @@ class MpvPlayerController(
     fun pause() {
         checkMainThread()
         pauseIntent = true
+        audioFocus.pauseByUser()
+        audioFocusHold = false
+        restoreDuckedVolume()
         val load = activeLoad?.takeIf(::isActive) ?: return
         playing = false
         mpv?.setPropertyBoolean("pause", true)
@@ -523,10 +559,51 @@ class MpvPlayerController(
         return true
     }
 
+    private fun audioFocusTarget(load: NativeLoad) = MpvAudioFocusController.PlaybackTarget(
+        isCurrent = { isActive(load) },
+        isPlaying = { playing && !pauseIntent && !audioFocusHold },
+        userWantsPlayback = { desiredPlaying?.invoke() ?: !pauseIntent },
+        pause = {
+            if (isActive(load)) {
+                audioFocusHold = true
+                playing = false
+                load.engine.setPropertyBoolean("pause", true)
+                emit(load)
+            }
+        },
+        resume = {
+            if (isActive(load) && (desiredPlaying?.invoke() ?: !pauseIntent)) {
+                audioFocusHold = false
+                playing = true
+                load.engine.setPropertyBoolean("pause", false)
+                emit(load)
+            }
+        },
+        duck = { duck ->
+            if (!isActive(load)) return@PlaybackTarget false
+            if (duck) {
+                if (duckedVolume == null) duckedVolume = runCatching { load.engine.getPropertyDouble("volume") }
+                    .getOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
+                val current = duckedVolume ?: return@PlaybackTarget false
+                runCatching { load.engine.setPropertyDouble("volume", current * 0.2) }.isSuccess
+            } else {
+                restoreDuckedVolume(load)
+                true
+            }
+        },
+    )
+
+    private fun restoreDuckedVolume(load: NativeLoad? = activeLoad) {
+        val volume = duckedVolume ?: return
+        duckedVolume = null
+        load?.takeIf(::isActive)?.let { owner -> runCatching { owner.engine.setPropertyDouble("volume", volume) } }
+    }
+
     fun seekTo(ms: Long) {
         checkMainThread()
         val load = activeLoad?.takeIf(::isActive) ?: return
         load.ended = false
+        bufferedPositionMs = null
         val requestedMs = ms.coerceAtLeast(0L)
         mpv?.command(arrayOf("seek", (requestedMs / 1000.0).toString(), "absolute+exact"))
         emit(load)
@@ -785,6 +862,8 @@ class MpvPlayerController(
     fun release(reason: String = "unspecified") {
         checkMainThread()
         if (released) return
+        restoreDuckedVolume()
+        audioFocus.release()
         released = true
         handler.removeCallbacksAndMessages(null)
         audioDiagnostics.close()
@@ -910,6 +989,8 @@ class MpvPlayerController(
                 positionAvailable = true
             }
             "duration" -> durationMs = (value * 1000.0).toLong().coerceAtLeast(0L)
+            "demuxer-cache-time" -> bufferedPositionMs =
+                value.takeIf { it.isFinite() && it >= 0.0 }?.let { (it * 1000.0).toLong() }
         }
         emit(load)
     }
@@ -939,7 +1020,8 @@ class MpvPlayerController(
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
                 if (!refreshPauseIntent()) return
-                load.engine.setPropertyBoolean("pause", pauseIntent)
+                val pauseForLoad = pauseIntent || audioFocusHold
+                load.engine.setPropertyBoolean("pause", pauseForLoad)
                 fileLoaded = true
                 applyAspectMode(load)
                 buffering = false
@@ -994,7 +1076,8 @@ class MpvPlayerController(
         checkMainThread()
         if (!isActive(load) || load.terminal) return
         if (error != null) load.terminal = true
-        onState(this, load.identity, State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec, cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind, subtitleFallbackToAuto))
+        onState(this, load.identity, State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec,
+            cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind, subtitleFallbackToAuto, bufferedPositionMs))
     }
 
     private companion object {

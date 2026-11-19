@@ -13,7 +13,9 @@ object P4TrackChecks {
         val original = TrackMappingContext(originalFile = true,
             orderEvidence = media3OrderEvidence(true, "mkv"))
         val ordered = buildTrackMapping(streams, tracks, original)
-        check(ordered.playerFor(1) == "g1:0" && ordered.playerFor(2) == "g2:0")
+        check(ordered.playerFor(1) == "g1:0" && ordered.playerFor(2) == "g2:0") {
+            "Expected verified Matroska track order, actual=${ordered.summary()}"
+        }
         check(ordered.embyFor("g2:0") == 2)
         check(ordered.entries.all { it.basis == TrackMatchBasis.VERIFIED_CONTAINER_ORDER })
         val ambiguous = buildTrackMapping(streams, tracks, TrackMappingContext(originalFile = true))
@@ -51,6 +53,67 @@ object P4TrackChecks {
         val source = MediaSource("v1", "version", "mkv", true, true, streams)
         check(trackMemoryIdentity(source, "Audio") != trackMemoryIdentity(source.copy(id = "v2"), "Audio"))
         check(trackMemoryIdentity(source, "Audio") != trackMemoryIdentity(source.copy(streams = streams.take(1)), "Audio"))
-        println("P4 B04 PASS: DTS bijection, ambiguity, languages, reduced output, mpv conflicts, version identity")
+        codecAliasesAndCues()
+        audioProfiles()
+        println("P4 B04 PASS: DTS bijection, codec aliases/cues, ambiguity, languages, reduced output, mpv conflicts, paired audio profiles")
+    }
+
+    private fun codecAliasesAndCues() {
+        check(media3TrackCodec("application/x-media3-cues", "application/x-subrip") == "application/x-subrip")
+        check(media3TrackCodec("application/x-media3-cues", "text/x-ssa") == "text/x-ssa")
+        check(media3TrackCodec("application/x-media3-cues", "application/pgs") == "application/pgs")
+        check(media3TrackCodec("application/x-media3-cues", null) == "application/x-media3-cues")
+        check(codecFamily("SubRip") == codecFamily("application/x-subrip"))
+        check(codecFamily("ass") == codecFamily("text/x-ssa"))
+        check(codecFamily("PGS") == codecFamily("application/pgs"))
+        check(codecFamily("truehd") == codecFamily("audio/true-hd"))
+        check(codecFamily("DTS") == codecFamily("audio/vnd.dts.hd"))
+        check(codecFamily("DTS") == codecFamily("audio/vnd.dts"))
+        check(codecFamily("S_TEXT/UTF8") == codecFamily("application/x-subrip"))
+        check(codecFamily("unknown-audio-format") != codecFamily("aac"))
+
+        // The local JVM harness uses Android stubs, so Format.Builder requires a device/Robolectric.
+        // Exercise the exact adapter inputs here; verify a real Format on an Android TV device.
+        val emby = listOf(
+            MediaStream(1, "Subtitle", "subrip", "eng", "Main", true, false, null),
+            MediaStream(2, "Subtitle", "ass", "jpn", "Signs", false, false, null),
+            MediaStream(3, "Subtitle", "pgs", "chi", "SDH", false, false, null),
+        )
+        val media3 = listOf(
+            PlayerTrack("subrip", language = "eng", codec = media3TrackCodec("application/x-media3-cues", "application/x-subrip"), title = "Main"),
+            PlayerTrack("ssa", language = "jpn", codec = "text/x-ssa", title = "Signs"),
+            PlayerTrack("pgs", language = "zh", codec = "application/pgs", title = "SDH"),
+        )
+        val aliased = buildTrackMapping(emby, media3, TrackMappingContext())
+        check(aliased.playerFor(1) == "subrip" && aliased.playerFor(2) == "ssa" && aliased.playerFor(3) == "pgs")
+        val ambiguousSubs = listOf(
+            emby[0].copy(index = 1, title = null),
+            emby[0].copy(index = 2, isDefault = false, title = null),
+        )
+        val ambiguousTracks = listOf(
+            media3[0].copy(key = "a", title = null),
+            media3[0].copy(key = "b", title = null),
+        )
+        check(buildTrackMapping(ambiguousSubs, ambiguousTracks, TrackMappingContext())
+            .entries.all { it.confidence == TrackConfidence.UNCERTAIN })
+    }
+
+    private fun audioProfiles() {
+        val stereo = AudioCapabilities(
+            mapOf(14 to listOf(AudioProfileInfo(2, setOf(12), setOf(192_000))))
+        )
+        val surround = AudioCapabilities(
+            mapOf(14 to listOf(AudioProfileInfo(6, setOf(252), setOf(48_000))))
+        )
+        val paired = AudioCapabilities(mapOf(14 to listOf(
+            AudioProfileInfo(2, setOf(12), setOf(192_000)),
+            AudioProfileInfo(6, setOf(252), setOf(48_000)),
+        )))
+        check(AudioCodecMatrix.canPassthrough(14, 2, 192_000, stereo))
+        check(!AudioCodecMatrix.canPassthrough(14, 6, 192_000, stereo))
+        check(AudioCodecMatrix.canPassthrough(14, 6, 48_000, surround))
+        check(AudioCodecMatrix.canPassthrough(14, 2, 192_000, paired))
+        check(AudioCodecMatrix.canPassthrough(14, 6, 48_000, paired))
+        check(!AudioCodecMatrix.canPassthrough(14, 6, 192_000, paired))
     }
 }

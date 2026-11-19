@@ -11,6 +11,10 @@ data class Media3TrackKey(val group: TrackGroup, val index: Int) {
 
 const val EXTERNAL_SUBTITLE_ID_PREFIX = "lumina-external-subtitle:"
 
+internal fun media3TrackCodec(sampleMimeType: String?, codecs: String?): String? =
+    if (sampleMimeType.equals("application/x-media3-cues", ignoreCase = true)) codecs ?: sampleMimeType
+    else sampleMimeType ?: codecs
+
 /** MergingMediaPeriod adds a numeric child-period prefix to both group IDs and format IDs. */
 internal fun progressiveQueueIdentity(groupId: String): Pair<String, Int>? {
     if (!groupId.matches(Regex("[0-9]+(?::[0-9]+)*"))) return null
@@ -37,7 +41,7 @@ fun media3TrackMapping(streams: List<MediaStream>, candidates: List<AudioTrackCa
     return buildTrackMapping(streams, ordered.map {
         val externalIndex = externalSubtitleSourceIndex(it.format.id)
         PlayerTrack(Media3TrackKey(it.group, it.index), language = it.format.language,
-            codec = it.format.sampleMimeType ?: it.format.codecs, title = it.format.label,
+            codec = media3TrackCodec(it.format.sampleMimeType, it.format.codecs), title = it.format.label,
             channels = it.format.channelCount.takeIf { count -> count > 0 },
             externalSourceIndex = externalIndex, external = externalIndex != null)
     }, context.copy(orderEvidence = context.orderEvidence.takeIf { verifiedOrder }))

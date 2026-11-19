@@ -23,6 +23,7 @@ object StabilityMetrics {
 
 class PlaybackWatchdog {
     private var generation = -1
+    private var physicalLoadId: Long? = null
     private var generationAt = 0L
     private var stateSince = 0L
     private var playbackState = 0
@@ -32,12 +33,13 @@ class PlaybackWatchdog {
     private var lastBytes = -1L
     private var lastPositionMs = -1L
     private var lastPositionAt = 0L
-    private var lastBufferedMs = -1L
-    private var lastBufferedAt = 0L
+    private var lastBufferedMs: Long? = null
+    private var lastBufferedAt: Long? = null
     private var suppressedUntil = 0L
 
     fun reset() {
         generation = -1
+        physicalLoadId = null
         generationAt = 0L
         stateSince = 0L
         playbackState = 0
@@ -47,65 +49,83 @@ class PlaybackWatchdog {
         lastBytes = -1L
         lastPositionMs = -1L
         lastPositionAt = 0L
-        lastBufferedMs = -1L
-        lastBufferedAt = 0L
+        lastBufferedMs = null
+        lastBufferedAt = null
         suppressedUntil = 0L
     }
 
     fun onTick(
-        positionMs: Long, bufferedMs: Long, state: Int, playWhenReady: Boolean,
+        positionMs: Long, bufferedMs: Long?, state: Int, playWhenReady: Boolean,
         isSeeking: Boolean, sessionGeneration: Int, durationMs: Long, bytesLoaded: Long, isLoading: Boolean,
+        mpvLoadId: Long? = null, downloadInProgress: Boolean = false,
+        nowMs: Long = SystemClock.elapsedRealtime(),
     ): WatchdogReason? {
-        val now = SystemClock.elapsedRealtime()
-        onPlaybackStateChanged(state)
-        if (generation != sessionGeneration) {
+        val now = nowMs
+        onPlaybackStateChanged(state, now)
+        if (generation != sessionGeneration || physicalLoadId != mpvLoadId) {
             generation = sessionGeneration
+            physicalLoadId = mpvLoadId
             generationAt = now
             stateSince = now
+            onLoadingChanged(isLoading, now)
             lastPositionMs = positionMs
             lastPositionAt = now
-            lastBufferedMs = bufferedMs
-            lastBufferedAt = now
+            updateBuffered(now, bufferedMs, rebase = true)
             lastBytes = bytesLoaded
             byteAt = now
+            suppressedUntil = 0L
             return null
         }
+        if (loading != isLoading) onLoadingChanged(isLoading, now)
         if (!playWhenReady || isSeeking || now - generationAt < 3_000L) {
             updatePositions(now, positionMs, bufferedMs, bytesLoaded)
             return null
         }
         if (bytesLoaded != lastBytes) { lastBytes = bytesLoaded; byteAt = now }
-        loading = isLoading
         if (positionMs != lastPositionMs) { lastPositionMs = positionMs; lastPositionAt = now }
-        if (bufferedMs != lastBufferedMs) { lastBufferedMs = bufferedMs; lastBufferedAt = now }
+        updateBuffered(now, bufferedMs)
         if (now < suppressedUntil || now - loadingAt < 8_000L) return null
+        val bufferedAge = lastBufferedAt?.let { now - it }
         val reason = when {
-            durationMs > 0 && durationMs - positionMs in 0..10_000L && now - lastPositionAt >= 60_000L -> WatchdogReason.NO_END
-            state == 2 && !loading && now - stateSince >= 4_000L && now - byteAt >= 4_000L -> WatchdogReason.BUFFERING_NO_LOAD
-            state == 2 && loading && now - lastBufferedAt >= 4_000L -> WatchdogReason.BUFFERING_NO_PROGRESS
-            state == 3 && now - lastPositionAt >= 4_000L -> WatchdogReason.PLAYING_NO_PROGRESS
+            durationMs > 0 && durationMs - positionMs in 0..10_000L && now - lastPositionAt >= 60_000L &&
+                !downloadInProgress -> WatchdogReason.NO_END
+            state == 2 && !loading && !downloadInProgress && now - stateSince >= 4_000L && now - byteAt >= 4_000L &&
+                (mpvLoadId == null || bufferedAge != null && bufferedAge >= 4_000L) -> WatchdogReason.BUFFERING_NO_LOAD
+            state == 2 && loading && !downloadInProgress && bufferedAge != null && bufferedAge >= 4_000L ->
+                WatchdogReason.BUFFERING_NO_PROGRESS
+            state == 3 && now - lastPositionAt >= 4_000L && !downloadInProgress -> WatchdogReason.PLAYING_NO_PROGRESS
             else -> null
         } ?: return null
-        PageLog.add("watchdog hit=${reason.name} pos=$positionMs buffered=$bufferedMs state=$state gen=$sessionGeneration")
+        PageLog.add("watchdog hit=${reason.name} pos=$positionMs buffered=${bufferedMs ?: "unknown"} state=$state gen=$sessionGeneration")
         StabilityMetrics.watchdogHits++
         suppressedUntil = now + 30_000L
         return reason
     }
 
-    fun onLoadingChanged(loading: Boolean) {
+    fun onLoadingChanged(loading: Boolean, nowMs: Long = SystemClock.elapsedRealtime()) {
         this.loading = loading
-        loadingAt = SystemClock.elapsedRealtime()
+        loadingAt = nowMs
     }
 
-    fun onPlaybackStateChanged(state: Int) {
+    fun onPlaybackStateChanged(state: Int, nowMs: Long = SystemClock.elapsedRealtime()) {
         if (playbackState == state) return
         playbackState = state
-        stateSince = SystemClock.elapsedRealtime()
+        stateSince = nowMs
     }
 
-    private fun updatePositions(now: Long, positionMs: Long, bufferedMs: Long, bytesLoaded: Long) {
+    private fun updatePositions(now: Long, positionMs: Long, bufferedMs: Long?, bytesLoaded: Long) {
         lastPositionMs = positionMs; lastPositionAt = now
-        lastBufferedMs = bufferedMs; lastBufferedAt = now
+        updateBuffered(now, bufferedMs, rebase = true)
         if (bytesLoaded != lastBytes) { lastBytes = bytesLoaded; byteAt = now }
+    }
+
+    private fun updateBuffered(now: Long, bufferedMs: Long?, rebase: Boolean = false) {
+        if (bufferedMs == null) {
+            lastBufferedMs = null
+            lastBufferedAt = null
+        } else if (rebase || bufferedMs != lastBufferedMs) {
+            lastBufferedMs = bufferedMs
+            lastBufferedAt = now
+        }
     }
 }

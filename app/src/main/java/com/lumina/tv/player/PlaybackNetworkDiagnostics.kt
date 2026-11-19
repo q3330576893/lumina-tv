@@ -13,14 +13,32 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 enum class PlaybackErrorCategory { NETWORK_TRANSIENT, HTTP_PERMISSION, HTTP_CONTENT_INVALID, PARSING, DECODING, OTHER, AUDIO_OUTPUT, RESOURCE_RECLAIMED, SOURCE_GONE, AUTH_FAILED, CERT_INVALID }
+enum class PlaybackErrorRoute { CERTIFICATE, AUTHENTICATION, SOURCE_GONE, AUDIO_OUTPUT, NETWORK_RETRY, RESOURCE_RETRY, PERMISSION_DENIED, MEDIA_RECOVERY }
 
 data class PlaybackErrorClassification(val category: PlaybackErrorCategory, val code: Int, val action: String)
+
+internal fun playbackErrorRoute(category: PlaybackErrorCategory): PlaybackErrorRoute = when (category) {
+    PlaybackErrorCategory.CERT_INVALID -> PlaybackErrorRoute.CERTIFICATE
+    PlaybackErrorCategory.AUTH_FAILED -> PlaybackErrorRoute.AUTHENTICATION
+    PlaybackErrorCategory.SOURCE_GONE -> PlaybackErrorRoute.SOURCE_GONE
+    PlaybackErrorCategory.AUDIO_OUTPUT -> PlaybackErrorRoute.AUDIO_OUTPUT
+    PlaybackErrorCategory.NETWORK_TRANSIENT -> PlaybackErrorRoute.NETWORK_RETRY
+    PlaybackErrorCategory.RESOURCE_RECLAIMED -> PlaybackErrorRoute.RESOURCE_RETRY
+    PlaybackErrorCategory.HTTP_PERMISSION -> PlaybackErrorRoute.PERMISSION_DENIED
+    else -> PlaybackErrorRoute.MEDIA_RECOVERY
+}
+
+internal fun shouldRetryNetworkPlayback(category: PlaybackErrorCategory, retriesAlreadyUsed: Int): Boolean =
+    category == PlaybackErrorCategory.NETWORK_TRANSIENT && retriesAlreadyUsed < 2
 
 fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification {
     val causes = generateSequence(error as Throwable?) { it.cause }.toList()
     val statusCodes = causes.mapNotNull { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode }
     val category = when {
         isCertificateFailure(error) -> PlaybackErrorCategory.CERT_INVALID
+        statusCodes.any { it == 401 || it == 403 } -> PlaybackErrorCategory.AUTH_FAILED
+        statusCodes.any { it == 404 || it == 410 } -> PlaybackErrorCategory.SOURCE_GONE
+        statusCodes.any { it in 500..599 } -> PlaybackErrorCategory.NETWORK_TRANSIENT
         error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> PlaybackErrorCategory.AUDIO_OUTPUT
         error.errorCode == PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED -> PlaybackErrorCategory.RESOURCE_RECLAIMED
@@ -28,7 +46,7 @@ fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification
         error.errorCode == PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> PlaybackErrorCategory.HTTP_CONTENT_INVALID
         error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> PlaybackErrorCategory.NETWORK_TRANSIENT
-        error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> if (statusCodes.any { it == 401 || it == 403 }) PlaybackErrorCategory.AUTH_FAILED else PlaybackErrorCategory.OTHER
+        error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> PlaybackErrorCategory.OTHER
         error.errorCode == PlaybackException.ERROR_CODE_IO_NO_PERMISSION ||
             error.errorCode == PlaybackException.ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED -> PlaybackErrorCategory.HTTP_PERMISSION
         error.errorCode in setOf(
