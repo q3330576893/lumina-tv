@@ -118,6 +118,13 @@ object B9Checks {
             store.recordJava("recovered", "fresh scene", 12L)
             check(store.readStats().getJSONObject("recovered").getInt("count") == 1)
             check(latest.readText() == "fresh scene")
+            // Preserve best-effort history rotation: a broken archive cannot keep latest/count stale.
+            val blockedArchive = File(directory, "crash-5.txt")
+            blockedArchive.delete(); blockedArchive.mkdirs()
+            File(blockedArchive, "block").writeText("blocks overwrite")
+            store.recordJava("archive-failure", "new latest despite broken history", 13L)
+            check(latest.readText() == "new latest despite broken history")
+            check(store.readStats().getJSONObject("archive-failure").getInt("count") == 1)
         } finally { directory.deleteRecursively() }
         val handler = source("CrashHandler.kt")
         check("CrashStore(root(context)).recordJava(fingerprint, safe, now)" in handler)
@@ -182,14 +189,17 @@ object B9Checks {
                 check(writer.add("page=Home token=token-secret https://user:password-secret@example.test/path?api_key=query-secret"))
                 check(writer.add("Cookie: SID=cookie-secret; session=other-secret\nSet-Cookie: id=set-cookie-secret\nAuthorization: Bearer auth-secret"))
                 check(writer.add("""{"Cookie":"json-cookie-secret","Set-Cookie":"json-set-cookie-secret"}"""))
+                check(writer.add("error=\"Cookie: SID=quoted-cookie-secret\""))
+                check(writer.add("error='Set-Cookie: SID=quoted-set-cookie-secret'"))
                 check(writer.add("token=\"" + "oversized-secret".repeat(1000) + "\""))
                 check(writer.awaitIdle())
                 val text = current.readText()
                 for (secret in listOf("token-secret", "password-secret", "query-secret", "cookie-secret", "other-secret",
-                    "set-cookie-secret", "auth-secret", "json-cookie-secret", "json-set-cookie-secret", "oversized-secret")) {
+                    "set-cookie-secret", "auth-secret", "json-cookie-secret", "json-set-cookie-secret", "oversized-secret",
+                    "quoted-cookie-secret", "quoted-set-cookie-secret")) {
                     check(secret !in text && secret !in writer.snapshot()) { "Persisted secret: $secret" }
                 }
-                check("event omitted" in text && text.lines().filter(String::isNotBlank).size == 4)
+                check("event omitted" in text && text.lines().filter(String::isNotBlank).size == 6)
                 for (i in 1..100) check(writer.add("event-$i " + "中文😀".repeat(200)))
                 check(writer.awaitIdle())
                 check(current.length() <= 16 * 1024 && "event-100 " in current.readText())
@@ -253,16 +263,20 @@ object B9Checks {
             AppLog.start(directory, "first owner")
             PageLog.add("owner-page token=owner-secret")
             NetLog.add(1L, "GET", "https://example.test/owner-network?token=owner-secret", 2L, 200, null)
+            PageLog.add("owner-cookie " + """{"Cookie":"""" + "cookie-overflow-secret".repeat(100) + "\"}")
+            NetLog.add(2L, "GET", "https://example.test/owner-cookie-network", 2L, 500,
+                """{"Set-Cookie":"""" + "cookie-overflow-secret".repeat(100) + "\"}")
             AppLog.start(File(directory, "must-not-initialize"), "second owner")
             val current = File(directory, "app.log")
             var text = ""
             for (attempt in 1..200) {
                 text = runCatching { current.readText() }.getOrDefault("")
-                if ("owner-network" in text && "owner-page" in text) break
+                if ("owner-cookie-network" in text && "owner-page" in text) break
                 Thread.sleep(5)
             }
             check("process_started first owner" in text && "second owner" !in text)
             check("owner-page" in text && "owner-network" in text && "owner-secret" !in text)
+            check("owner-cookie" in text && "owner-cookie-network" in text && "cookie-overflow-secret" !in text)
             check(!File(directory, "must-not-initialize").exists() && !File(directory, "app-prev.log").exists())
         } finally { directory.deleteRecursively() }
         val application = source("LuminaApp.kt")

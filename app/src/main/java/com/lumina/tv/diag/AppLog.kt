@@ -49,9 +49,10 @@ internal class AppLogWriter(private val sink: AppLogSink, capacity: Int = 128) :
     fun add(event: String): Boolean {
         // Omit an oversized input entirely: cutting inside a quoted credential before redaction is unsafe.
         val bounded = if (event.length <= 8192) event else "event omitted: input exceeds 8192 characters"
+        val at = System.currentTimeMillis()
         return try {
             worker.execute {
-                val safe = "${System.currentTimeMillis()}\tdropped=${dropped.get()}\t" + AppLogPrivacy.redact(bounded)
+                val safe = "$at\tdropped=${dropped.get()}\t" + AppLogPrivacy.redact(bounded)
                     .replace("\r", "\\r").replace("\n", "\\n").take(2048)
                 synchronized(recent) {
                     recent.addLast(safe)
@@ -86,7 +87,7 @@ internal class AppLogWriter(private val sink: AppLogSink, capacity: Int = 128) :
 }
 
 /** Only the writer thread calls these methods. Compaction retains the recent tail of this process. */
-internal class RollingAppLogFile(directory: File, private val limit: Int = 256 * 1024) : AppLogSink {
+internal class RollingAppLogFile(directory: File, private val limit: Int = 120 * 1024) : AppLogSink {
     private val current = File(directory, "app.log")
     private val previous = File(directory, "app-prev.log")
 
@@ -122,10 +123,12 @@ internal class RollingAppLogFile(directory: File, private val limit: Int = 256 *
 
 /** This new disk ingress masks cookie headers too; shared exporter policy is outside B9. */
 internal object AppLogPrivacy {
-    private val cookieHeader = Regex("""(?im)(?<![\w"'-])((?:set-cookie|cookie)\b[ \t]*[:=][ \t]*)[^\r\n]*""")
-    private val cookieJson = Regex("""(?i)(["'](?:set-cookie|cookie)["']\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')""")
+    private val cookieHeader = Regex("""(?im)(?<![\w-])((?:set-cookie|cookie)\b[ \t]*[:=][ \t]*)[^\r\n]*""")
+    // PageLog/NetLog already cap their records; a cookie JSON string may have lost its closing quote.
+    // This text-only sink can safely omit the rest of that line as well.
+    private val cookieJson = Regex("""(?i)(["'](?:set-cookie|cookie)["']\s*:\s*)(["'])[^\r\n]*""")
 
     fun redact(text: String): String = LogRedactor.redact(text)
         .replace(cookieHeader, "$1***")
-        .replace(cookieJson) { it.groupValues[1] + it.groupValues[2].first() + "***" + it.groupValues[2].first() }
+        .replace(cookieJson) { it.groupValues[1] + it.groupValues[2] + "***" + it.groupValues[2] }
 }

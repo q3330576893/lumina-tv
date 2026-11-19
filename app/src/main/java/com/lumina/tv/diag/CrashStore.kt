@@ -31,8 +31,10 @@ internal class CrashStore(private val directory: File) {
         File(directory, "crash-latest.txt").writeText(safe, Charsets.UTF_8)
         if (count == 1) {
             for (n in 5 downTo 2) {
-                File(directory, "crash-${n - 1}.txt").takeIf(File::exists)
-                    ?.copyTo(File(directory, "crash-$n.txt"), overwrite = true)
+                runCatching {
+                    File(directory, "crash-${n - 1}.txt").takeIf(File::exists)
+                        ?.copyTo(File(directory, "crash-$n.txt"), overwrite = true)
+                }
             }
             File(directory, "crash-1.txt").writeText(safe, Charsets.UTF_8)
         }
