@@ -156,6 +156,8 @@ import com.lumina.tv.data.DetailRecommendationCache
 import com.lumina.tv.data.RelatedCacheKey
 import com.lumina.tv.data.previewCacheKey
 import com.lumina.tv.data.previewSourceVersion
+import com.lumina.tv.data.resolveTmdbMetadataItem
+import com.lumina.tv.data.tmdbMediaPath
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
 private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableSetOf<String>())
@@ -198,24 +200,34 @@ internal suspend fun loadDetailRecommendations(
     val result = try {
         withTimeoutOrNull(5_000L) {
         withRequestBudget(5_000L) {
-            val similar = async { catchingRequest { client.getSimilarItems(itemId, 20) }.getOrDefault(emptyList()).also { completedSimilar = it } }
+            val similar = async {
+                catchingRequest { client.getSimilarItems(itemId, 20) }
+                    .also { completedSimilar = it.getOrDefault(emptyList()) }
+            }
             val genreCandidates = mutableListOf<MediaItem>()
             val mainGenre = genres.firstOrNull()
             if (mainGenre != null) {
                 for (page in 0..2) {
-                    val pageItems = catchingRequest {
+                    val pageResult = catchingRequest {
                         client.getItems(
                             types = type, sortBy = "Random", limit = 60, startIndex = page * 60,
                             genre = mainGenre, requestTimeoutSeconds = 5,
                         )
-                    }.getOrDefault(emptyList())
+                    }
+                    if (pageResult.isFailure) {
+                        requestFailed = true
+                        break
+                    }
+                    val pageItems = pageResult.getOrThrow()
                     genreCandidates += pageItems
                     if (pageItems.size < 60) break
                 }
             }
             val queryItems = genreCandidates.distinctBy { it.id }
             val queriedIds = queryItems.mapTo(mutableSetOf()) { it.id }
-            val supplements = similar.await().filterNot { it.id in queriedIds }
+            val similarResult = similar.await()
+            if (similarResult.isFailure) requestFailed = true
+            val supplements = similarResult.getOrDefault(emptyList()).filterNot { it.id in queriedIds }
             val pool = (queryItems + supplements).asSequence()
                 .filter { it.id != itemId && it.type == type }
                 .filterNot { current.seriesId != null && it.seriesId == current.seriesId }
@@ -267,7 +279,9 @@ internal suspend fun loadDetailRecommendations(
         }
         return fallback
     } else result
-    DetailRecommendationCache.put(cacheKey, results, dayIndex, revision)
+    // Partial data is useful now, but must not suppress a retry after recovery.
+    if (!requestFailed) DetailRecommendationCache.put(cacheKey, results, dayIndex, revision)
+    else PageLog.add("detailRelated id=$itemId failed=true fallback=partial count=${results.size} cache=skip")
     PageLog.add("detailRelated id=$itemId top12=${results.joinToString(",") { "${it.id}:${it.name}" }}")
     return results
 }
@@ -303,7 +317,8 @@ fun DetailScreen(
     var episodeLoadError by remember { mutableStateOf<String?>(null) }
     var episodeReloadTick by remember { mutableIntStateOf(0) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
-    var tmdb by remember { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
+    var metadataItem by remember(id, client) { mutableStateOf<MediaItem?>(null) }
+    var tmdb by remember(id, client) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
     var mdb by remember(id, accountScope) { mutableStateOf<MdblistClient.Ratings?>(null) }
     var resolvedExternalLinks by remember(id, accountScope) { mutableStateOf<TmdbClient.ExternalLinks?>(null) }
     var mediaInfoExpanded by rememberSaveable(id) { mutableStateOf(false) }
@@ -545,10 +560,6 @@ fun DetailScreen(
         loadFailed = false
         sourcesLoading = true
         PageLog.add("detailLoad id=$id stage=main-ready ms=${System.currentTimeMillis() - loadStartedAt}")
-        // TMDB 补充：仅当 Emby 自身无评分时异步拉取，失败静默
-        if (it0 != null && it0.rating == null && it0.communityRating == null) {
-            tmdb = catchingRequest { TmdbClient.lookup(it0.type, it0.seriesName ?: it0.name, it0.year) }.getOrNull()
-        }
         if (it0 != null) {
             val seasonJob = launch {
                 val seasonResult = if (it0.type == "Series") catchingRequest { c.getSeasons(id) }
@@ -620,13 +631,31 @@ fun DetailScreen(
         }
     }
 
-    LaunchedEffect(id, item?.id, item?.type, item?.name, item?.seriesName, item?.year, item?.providerIds) {
+    LaunchedEffect(id, client, item) {
+        metadataItem = null
         val current = item ?: return@LaunchedEffect
+        metadataItem = resolveTmdbMetadataItem(current) { seriesId ->
+            LibraryCache.detail(seriesId)?.item ?: client?.getItem(seriesId)
+        }
+    }
+
+    // Optional ratings never delay the main item's season/source jobs, on either cache path.
+    LaunchedEffect(id, client, metadataItem, item?.rating, item?.communityRating) {
+        tmdb = null
+        val current = item ?: return@LaunchedEffect
+        val metadata = metadataItem ?: return@LaunchedEffect
+        if (current.rating == null && current.communityRating == null) {
+            tmdb = catchingRequest { TmdbClient.lookup(metadata.type, metadata.name, metadata.year) }.getOrNull()
+        }
+    }
+
+    LaunchedEffect(id, client, metadataItem) {
         resolvedExternalLinks = null
+        val current = metadataItem ?: return@LaunchedEffect
         resolvedExternalLinks = catchingRequest {
             TmdbClient.externalLinks(
                 type = current.type,
-                title = current.seriesName ?: current.name,
+                title = current.name,
                 year = current.year,
                 embyImdbId = current.providerIds["imdb"],
                 embyTmdbId = current.providerIds["tmdb"],
@@ -635,8 +664,9 @@ fun DetailScreen(
         }.getOrNull()
     }
 
-    LaunchedEffect(id, item?.id, item?.type, item?.providerIds, resolvedExternalLinks) {
-        val current = item ?: return@LaunchedEffect
+    LaunchedEffect(id, client, metadataItem, resolvedExternalLinks) {
+        mdb = null
+        val current = metadataItem ?: return@LaunchedEffect
         val imdbId = current.providerIds["imdb"]?.takeIf(String::isNotBlank)
             ?: resolvedExternalLinks?.imdbId?.takeIf(String::isNotBlank)
         val tmdbId = current.providerIds["tmdb"]?.takeIf(String::isNotBlank)
@@ -649,11 +679,35 @@ fun DetailScreen(
     }
 
     val sourceIdsKey = sources.joinToString(",") { "${it.id}:${previewSourceVersion(it)}" }
-    LaunchedEffect(id, accountScope, item?.contentVersion, previewMetadataReady, selectedSourceId, selectedSeason?.id, episodes.firstOrNull(), sourceIdsKey, detailPreviewRetry) {
+    val backgroundMode = AppRuntime.prefs?.detailBackgroundVideo ?: "auto"
+    LaunchedEffect(id, accountScope, item?.contentVersion, previewMetadataReady, selectedSourceId, selectedSeason?.id, episodes.firstOrNull(), sourceIdsKey, detailPreviewRetry, backgroundMode) {
+        // Gate before cache reuse and every preview-only request (Episodes/trailers/sources/URL).
+        if (backgroundMode == "off") {
+            detailPreviewUrl = null
+            detailPreviewHeaders = emptyMap()
+            detailPreviewKey = ""
+            detailPreviewIsTrailer = false
+            detailPreviewStartMs = null
+            detailVideoPlaying = false
+            detailPreviewFailure = null
+            detailPreviewFailures = emptyList()
+            detailPreviewFromStage = "hls"
+            detailPreviewStage = null
+            detailPreviewRequestKey = ""
+            detailPreviewFailureKey = ""
+            detailPreviewHlsKey = ""
+            detailPreviewRetry = 0
+            previewResults.clear()
+            previewHeaderResults.clear()
+            previewStartTimes.clear()
+            previewStages.clear()
+            PageLog.add("detailPreview stage=skip reason=mode-off")
+            return@LaunchedEffect
+        }
         if (!previewMetadataReady) return@LaunchedEffect
         val c = client ?: run { PageLog.add("detailPreview stage=skip reason=client-null"); return@LaunchedEffect }
         val current = item ?: run { PageLog.add("detailPreview stage=skip reason=item-null"); return@LaunchedEffect }
-        val requestKey = "$accountScope|${current.id}|${current.contentVersion}|$sourceIdsKey|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}|${episodes.firstOrNull()?.contentVersion.orEmpty()}"
+        val requestKey = "$accountScope|${current.id}|${current.contentVersion}|$sourceIdsKey|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}|${episodes.firstOrNull()?.contentVersion.orEmpty()}|$backgroundMode"
         if (detailPreviewRequestKey != requestKey) {
             detailPreviewRequestKey = requestKey
             detailPreviewFromStage = "hls"
@@ -711,7 +765,6 @@ fun DetailScreen(
         val contentKey = previewCacheKey(c.baseUrl, c.userId, sourceItem, resolvedPreviewSource, previewKind) ?: return@LaunchedEffect
         val hlsKey = "$contentKey:hls"
         detailPreviewHlsKey = hlsKey
-        val backgroundMode = AppRuntime.prefs?.detailBackgroundVideo ?: "auto"
         if (backgroundMode != "720p" && hlsKey in hlsUnsupportedItems && detailPreviewFromStage == "hls") {
             detailPreviewFromStage = "direct"
             PageLog.add("detailPreview stage=skip reason=hls-known-broken")
@@ -728,15 +781,11 @@ fun DetailScreen(
             return@LaunchedEffect
         }
         if (failedAt != null) failedDetailBackgroundKeys.remove(detailPreviewFailureKey)
-        if (AppRuntime.prefs?.detailBackgroundVideo == "off") {
-            PageLog.add("detailPreview stage=skip reason=mode-off")
-            return@LaunchedEffect
-        }
         val resolution = catchingRequest {
             c.resolveDetailPreviewUrl(
                 sourceItem.id,
                 resolvedPreviewSource.id,
-                AppRuntime.prefs?.detailBackgroundVideo ?: "auto",
+                backgroundMode,
                 fromStage = detailPreviewFromStage,
             )
         }.getOrNull()
@@ -845,7 +894,7 @@ fun DetailScreen(
                 modifier = Modifier.fillMaxSize(),
             )
             // Navigation animations keep this detail page composed; remove the preview immediately.
-            if (previewActive) DetailVideoBackground(
+            if (previewActive && backgroundMode != "off") DetailVideoBackground(
                 url = detailPreviewUrl,
                 mediaKey = detailPreviewKey,
                 previewStage = detailPreviewStage,
@@ -1333,17 +1382,17 @@ fun DetailScreen(
                     )
                 }
 
-                val providerIds = it0!!.providerIds
+                val providerIds = metadataItem?.providerIds.orEmpty()
                 val resolvedLinks = resolvedExternalLinks
-                val searchTitle = (it0.seriesName?.takeIf(String::isNotBlank) ?: it0.name)
+                val searchTitle = (metadataItem?.name ?: it0!!.seriesName?.takeIf(String::isNotBlank) ?: it0!!.name)
                     .takeIf(String::isNotBlank)
                     ?: sources.firstOrNull()?.name.orEmpty()
                 val encodedTitle = URLEncoder.encode(searchTitle.ifBlank { "文件名" }, "UTF-8")
                 val tmdbId = (providerIds["tmdb"] ?: resolvedLinks?.tmdbId)?.takeIf(String::isNotBlank)
                 val imdbId = (providerIds["imdb"] ?: resolvedLinks?.imdbId)?.takeIf(String::isNotBlank)
-                val mediaType = if (it0.type == "Series") "tv" else "movie"
+                val mediaType = metadataItem?.type?.let(::tmdbMediaPath)
                 val providerLinks = listOf(
-                    "TMDB" to (tmdbId?.let { "https://www.themoviedb.org/$mediaType/$it" }
+                    "TMDB" to (tmdbId?.takeIf { mediaType != null }?.let { "https://www.themoviedb.org/$mediaType/$it" }
                         ?: "https://www.themoviedb.org/search?query=$encodedTitle"),
                     "IMDB" to (imdbId?.let { "https://www.imdb.com/title/$it/" }
                         ?: "https://www.imdb.com/find/?q=$encodedTitle"),
@@ -1443,6 +1492,19 @@ fun DetailScreen(
                     }
                 }
             }
+        }
+
+        if (showSettingsPicker) {
+            PickerDialog(
+                title = pickerTitle,
+                options = pickerOptions,
+                currentKey = pickerCurrentKey,
+                onPick = { key ->
+                    pickerAction(key)
+                    showSettingsPicker = false
+                },
+                onClose = { showSettingsPicker = false },
+            )
         }
 
         // 单集版本选择

@@ -1,0 +1,15 @@
+{
+  "title": "Jaws",
+  "type": "movie",
+  "score": 86,
+  "ratings": [
+    {"source": "imdb", "value": 8.1, "score": 81, "votes": 673852},
+    {"source": "metacritic", "value": 87, "score": 87},
+    {"source": "metacriticuser", "value": null, "score": null},
+    {"source": "trakt", "value": 78, "score": 78},
+    {"source": "tomatoes", "value": 97, "score": 97},
+    {"source": "popcorn", "value": 90, "score": 90},
+    {"source": "tmdb", "value": 76, "score": 76},
+    {"source": "letterboxd", "value": 8, "score": 80}
+  ]
+}

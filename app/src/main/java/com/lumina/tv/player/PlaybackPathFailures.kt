@@ -38,10 +38,12 @@ internal fun selectPlaybackEngine(
     isDolbyVision: Boolean,
     path: PlaybackPath,
     failures: PlaybackPathFailures,
+    preferMpvForUnsupportedHdr: Boolean = false,
 ): String? {
     val preferred = pinned ?: when {
         isDvP7 -> "mpv"
         isDolbyVision -> "media3"
+        preferMpvForUnsupportedHdr -> "mpv"
         path.audioMode == "soft" -> "mpv"
         preference == "mpv" -> "mpv"
         else -> "media3"

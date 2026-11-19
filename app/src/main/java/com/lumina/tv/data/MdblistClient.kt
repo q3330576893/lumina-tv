@@ -2,15 +2,20 @@ package com.lumina.tv.data
 
 import com.lumina.tv.BuildConfig
 import com.lumina.tv.diag.NetLog
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import java.util.Locale
+import kotlin.math.roundToInt
 
 object MdblistClient {
+
+    private const val METADATA_CALL_TIMEOUT_MS = 8_000L
     data class Ratings(
         val imdb: Double?,
         val tomato: Int?,
@@ -32,30 +37,36 @@ object MdblistClient {
     private const val SUCCESS_TTL_MS = 7L * 24 * 60 * 60 * 1000
     private const val NO_HIT_TTL_MS = 15L * 60 * 1000
 
-    suspend fun ratings(type: String, imdbId: String?, tmdbId: String?): Ratings? = withContext(Dispatchers.IO) {
+    suspend fun ratings(type: String, imdbId: String?, tmdbId: String?): Ratings? =
+        withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        val endpointType = when (type) {
+            "Movie" -> "movie"
+            "Series" -> "show"
+            else -> return@withMetadataContext null
+        }
         val imdb = imdbId?.takeIf(String::isNotBlank)
         val tmdb = tmdbId?.takeIf(String::isNotBlank)
         val provider = if (imdb != null) "imdb" else "tmdb"
-        val id = imdb ?: tmdb ?: return@withContext null
-        val key = "$provider|$id|${if (type == "Series") "show" else "movie"}"
+        val id = imdb ?: tmdb ?: return@withMetadataContext null
+        val key = "$provider|$id|$endpointType"
         val now = System.currentTimeMillis()
         synchronized(cache) {
             cache[key]?.let { ratings ->
-                if (now - (cacheTimes[key] ?: 0L) < SUCCESS_TTL_MS) return@withContext ratings
+                if (now - (cacheTimes[key] ?: 0L) < SUCCESS_TTL_MS) return@withMetadataContext ratings
                 cache.remove(key)
                 cacheTimes.remove(key)
             }
             noHit[key]?.let {
-                if (now - it < NO_HIT_TTL_MS) return@withContext null
+                if (now - it < NO_HIT_TTL_MS) return@withMetadataContext null
                 noHit.remove(key)
             }
         }
         val apiKey = BuildConfig.MDBLIST_API_KEY.takeIf(String::isNotBlank)
-            ?: return@withContext null.also { rememberMiss(key, now) }
-        val endpointType = if (type == "Series") "show" else "movie"
+            ?: return@withMetadataContext null.also { rememberMiss(key, now) }
         val encodedId = URLEncoder.encode(id, "UTF-8")
         val url = "https://api.mdblist.com/$provider/$endpointType/$encodedId/?apikey=$apiKey"
-        val result = runCatching { getJson(url)?.let(::parseRatings) }.getOrNull()
+        val result = catchingSuspendRequest { getJson(url)?.let(::parseRatings) }.getOrNull()
+        currentCoroutineContext().ensureActive()
         synchronized(cache) {
             if (result == null) {
                 noHit[key] = now
@@ -77,40 +88,64 @@ object MdblistClient {
         if (noHit.size > 300) noHit.clear()
     }
 
-    private fun parseRatings(json: JSONObject): Ratings {
-        val ratings = json.optJSONObject("ratings")
-        fun rating(name: String): Double? {
-            val raw = ratings?.optJSONObject(name)?.opt("rating") ?: return null
+    internal fun parseRatings(json: JSONObject): Ratings? {
+        // Media Info returns source/value/score entries, not a map of rating objects.
+        val ratings = json.optJSONArray("ratings") ?: return null
+        val bySource = buildMap<String, JSONObject> {
+            for (i in 0 until ratings.length()) {
+                val entry = ratings.optJSONObject(i) ?: continue
+                put(entry.optString("source").lowercase(Locale.ROOT), entry)
+            }
+        }
+        fun number(raw: Any?): Double? {
+            if (raw == null || raw == JSONObject.NULL) return null
             val value = (raw as? Number)?.toDouble() ?: raw.toString().toDoubleOrNull()
             return value?.takeIf(Double::isFinite)
         }
-        fun intRating(name: String): Int? = rating(name)?.toInt()
-        val score = json.opt("score")?.let { raw ->
-            ((raw as? Number)?.toDouble() ?: raw.toString().toDoubleOrNull())?.takeIf(Double::isFinite)?.toInt()
+        fun rating(name: String, scale: Double, vararg aliases: String): Double? {
+            for (source in listOf(name) + aliases) {
+                val entry = bySource[source] ?: continue
+                number(entry.opt("value"))?.takeIf { it in 0.0..scale }?.let { return it }
+                number(entry.opt("score"))?.takeIf { it in 0.0..100.0 }?.let { return it * scale / 100.0 }
+            }
+            return null
         }
+        fun percent(name: String, vararg aliases: String): Int? = rating(name, 100.0, *aliases)?.roundToInt()
+        val score = number(json.opt("score"))?.takeIf { it in 0.0..100.0 }?.roundToInt()
         return Ratings(
-            imdb = rating("imdb"),
-            tomato = intRating("tomato"),
-            popcorn = intRating("popcorn"),
-            metacritic = intRating("metacritic"),
-            trakt = intRating("trakt"),
-            tmdb = intRating("tmdb"),
-            letterboxd = rating("letterboxd"),
+            imdb = rating("imdb", 10.0),
+            tomato = percent("tomatoes", "tomato"),
+            popcorn = percent("popcorn", "tomatoesaudience", "audience", "rtaudience"),
+            metacritic = percent("metacritic"),
+            trakt = percent("trakt"),
+            tmdb = percent("tmdb"),
+            // The Media Info schema uses a /10 value here (e.g. 8, score=80).
+            letterboxd = rating("letterboxd", 10.0),
             score = score,
-        )
+        ).takeIf { it.imdb != null || it.tomato != null || it.popcorn != null || it.metacritic != null ||
+            it.trakt != null || it.tmdb != null || it.letterboxd != null || it.score != null }
     }
 
-    private fun getJson(url: String): JSONObject? {
+    private suspend fun getJson(url: String): JSONObject? {
         val started = System.currentTimeMillis()
-        return runCatching {
-            val request = Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()
-            http.newCall(request).execute().use { response ->
+        val request = try {
+            Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()
+        } catch (failure: Exception) {
+            NetLog.add(started, "GET", url, System.currentTimeMillis() - started, null, failure.javaClass.simpleName)
+            return null
+        }
+        return try {
+            http.readCancellable(request) { response ->
                 NetLog.add(started, request.method, url, System.currentTimeMillis() - started, response.code, if (response.isSuccessful) null else "HTTP")
-                if (!response.isSuccessful) return null
-                JSONObject(response.body?.string() ?: return null)
+                if (!response.isSuccessful) return@readCancellable null
+                JSONObject(response.body?.string() ?: return@readCancellable null)
             }
-        }.onFailure {
-            NetLog.add(started, "GET", url, System.currentTimeMillis() - started, null, it.javaClass.simpleName)
-        }.getOrNull()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            NetLog.add(started, "GET", url, System.currentTimeMillis() - started, null, failure.javaClass.simpleName)
+            null
+        }
     }
 }

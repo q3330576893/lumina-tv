@@ -30,7 +30,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -92,7 +91,6 @@ fun SearchScreen(
     var searchError by remember { mutableStateOf<String?>(null) }
     var pageStart by remember { mutableIntStateOf(0) }
     var autoLoadedEmptyPages by remember { mutableIntStateOf(0) }
-    var visibleResultCount by remember { mutableIntStateOf(0) }
     var searchNow by remember { mutableIntStateOf(0) }
     var handledSearchNow by remember { mutableIntStateOf(0) }
     var history by remember { mutableStateOf(prefs?.searchHistory().orEmpty()) }
@@ -179,40 +177,6 @@ fun SearchScreen(
         }
     }
 
-    LaunchedEffect(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow) {
-        snapshotFlow { Triple(visibleResultCount, hasMore, loading || loadingMore) }
-            .distinctUntilChanged()
-            .collect { (visibleCount, more, isLoading) ->
-                if (!shouldAutoLoadEmptySearchPage(visibleCount, more, isLoading, false, autoLoadedEmptyPages)) return@collect
-                val currentClient = client ?: return@collect
-                val filters = listOfNotNull(
-                    "IsFavorite".takeIf { favoritesOnly },
-                    "IsUnplayed".takeIf { unwatchedOnly },
-                ).joinToString(",").ifBlank { null }
-                val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
-                autoLoadedEmptyPages++
-                loadingMore = true
-                try {
-                    val page = currentClient.getItems(
-                        types = types, sortBy = "SortName", sortOrder = "Ascending",
-                        limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
-                        fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
-                        requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
-                    )
-                    results = (results + page).distinctBy { it.id }
-                    pageStart += page.size
-                    hasMore = page.size == 40 && pageStart < 300
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    searchError = searchFailureMessage(e)
-                    hasMore = false
-                } finally {
-                    loadingMore = false
-                }
-            }
-    }
-
     LaunchedEffect(gridState, results.size, hasMore, loading, keyword, typeFilter, favoritesOnly, unwatchedOnly) {
         snapshotFlow { gridState.layoutInfo.visibleItemsInfo.any { it.key == "search-load-more" } }
             .distinctUntilChanged()
@@ -283,7 +247,39 @@ fun SearchScreen(
             .thenByDescending { it.rating ?: it.communityRating ?: 0.0 }
             .thenByDescending { it.year ?: 0 })
     }
-    SideEffect { visibleResultCount = visibleResults.size }
+    LaunchedEffect(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow, visibleResults.size) {
+        snapshotFlow { Triple(visibleResults.size, hasMore, loading || loadingMore) }
+            .distinctUntilChanged()
+            .collect { (visibleCount, more, isLoading) ->
+                if (!shouldAutoLoadEmptySearchPage(visibleCount, more, isLoading, false, autoLoadedEmptyPages)) return@collect
+                val currentClient = client ?: return@collect
+                val filters = listOfNotNull(
+                    "IsFavorite".takeIf { favoritesOnly },
+                    "IsUnplayed".takeIf { unwatchedOnly },
+                ).joinToString(",").ifBlank { null }
+                val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
+                autoLoadedEmptyPages++
+                loadingMore = true
+                try {
+                    val page = currentClient.getItems(
+                        types = types, sortBy = "SortName", sortOrder = "Ascending",
+                        limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
+                        fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
+                        requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
+                    )
+                    results = (results + page).distinctBy { it.id }
+                    pageStart += page.size
+                    hasMore = page.size == 40 && pageStart < 300
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    searchError = searchFailureMessage(e)
+                    hasMore = false
+                } finally {
+                    loadingMore = false
+                }
+            }
+    }
 
     val filterDescription = buildList {
         add(when (typeFilter) { 1 -> "电影"; 2 -> "剧集"; else -> "全部类型" })

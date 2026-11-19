@@ -157,6 +157,7 @@ import com.lumina.tv.data.PlaybackMarkers
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.TmdbClient
+import com.lumina.tv.data.resolveTmdbMetadataItem
 import com.lumina.tv.data.WideImageCandidate
 import com.lumina.tv.data.wideImageCandidates
 import com.lumina.tv.data.chooseSimilar
@@ -183,6 +184,9 @@ import com.lumina.tv.player.OptionalVttDataSourceFactory
 import com.lumina.tv.player.PlaybackPath
 import com.lumina.tv.player.PlaybackPathFailure
 import com.lumina.tv.player.PlaybackPathFailures
+import com.lumina.tv.player.readDisplayHdrTypes
+import com.lumina.tv.player.supportsContentHdr
+import com.lumina.tv.player.displayHdrDiagnostic
 import com.lumina.tv.player.PlaybackDelivery
 import com.lumina.tv.player.PlaybackFailureReason
 import com.lumina.tv.player.selectPlaybackEngine
@@ -319,10 +323,14 @@ fun PlayerScreen(
     var audioSupport by remember(item.id) { mutableStateOf(AudioSupport.DECODE_ONLY) }
     val client = AppRuntime.client
     var failedBufferingImages by remember(item.id, client) { mutableStateOf<Set<String>>(emptySet()) }
-    var tmdbBackdrop by remember(item.id) { mutableStateOf<String?>(null) }
-    LaunchedEffect(item.id) {
-        tmdbBackdrop = runCatching {
-            TmdbClient.lookup(item.type, item.seriesName ?: item.name, item.year)?.backdropUrl
+    var tmdbBackdrop by remember(item.id, client) { mutableStateOf<String?>(null) }
+    LaunchedEffect(item, client) {
+        tmdbBackdrop = null
+        val metadata = resolveTmdbMetadataItem(item) { seriesId ->
+            LibraryCache.detail(seriesId)?.item ?: client?.getItem(seriesId)
+        } ?: return@LaunchedEffect
+        tmdbBackdrop = catchingRequest {
+            TmdbClient.lookup(metadata.type, metadata.name, metadata.year)?.backdropUrl
         }.getOrNull()
     }
     val playerExceptionHandler = remember { CoroutineExceptionHandler { _, error -> android.util.Log.e("LuminaTV", "Player coroutine failed", error) } }
@@ -1010,8 +1018,8 @@ fun PlayerScreen(
 
     fun audioSourceKey(): String = currentSourceId ?: playbackSource?.id ?: item.id
 
-    fun canTryMpvPath(): Boolean = currentPath?.let { path ->
-        selectPlaybackEngine(AppRuntime.prefs?.playerEngine, "mpv", false, false, path, pathFailures) == "mpv"
+    fun canTryMpvPath(path: PlaybackPath? = currentPath): Boolean = path?.let {
+        selectPlaybackEngine(AppRuntime.prefs?.playerEngine, "mpv", false, false, it, pathFailures) == "mpv"
     } == true
 
     fun audioMpvKey(): PlaybackPath? = currentPath?.copy(engine = "mpv")
@@ -1440,8 +1448,19 @@ fun PlayerScreen(
                     target.playMethod.equals("DirectStream", true) -> PlaybackDelivery.DIRECT_STREAM
                     else -> PlaybackDelivery.DIRECT_PLAY
                 }, plannedAudio, audioDecodeMode, badHttpFallbackStage)
+                val displayHdrTypes = readDisplayHdrTypes(context)
+                val contentHdr = when {
+                    isDolbyVision -> null
+                    rangeType.contains("HDR10PLUS") || rangeType.contains("HDR10+") -> "HDR10+"
+                    rangeType.contains("HDR10") || rangeType.contains("SMPTE2084") || rangeType == "PQ" -> "HDR10"
+                    rangeType.contains("HLG") || rangeType.contains("ARIBSTD-B67") -> "HLG"
+                    else -> null
+                }
+                val preferMpvForUnsupportedHdr = contentHdr != null &&
+                    supportsContentHdr(displayHdrTypes, contentHdr) == false &&
+                    canTryMpvPath(path)
                 val selectedEngine = selectPlaybackEngine(AppRuntime.prefs?.playerEngine, enginePinned,
-                    isDvP7, isDolbyVision, path, pathFailures)
+                    isDvP7, isDolbyVision, path, pathFailures, preferMpvForUnsupportedHdr)
                 if (selectedEngine == null) {
                     updateStalled(false)
                     error = "当前片源的播放路径均已失败，请重试或更换片源、音轨"
@@ -1459,6 +1478,7 @@ fun PlayerScreen(
                     .put("dvProfile", video?.dvProfile ?: JSONObject.NULL)
                     .put("videoRange", video?.videoRangeType ?: JSONObject.NULL)
                     .put("hwDv", DeviceCodecCapabilities.supportsDolbyVision)
+                    .put("displayHdr", displayHdrDiagnostic(displayHdrTypes)?.let(::JSONArray) ?: JSONObject.NULL)
                     .put("engine", selectedEngine))
                 if (isDvP7 && !softDecodeNoticeShown) {
                     audioDecodeNotice = "Dolby Vision Profile 7，已用 mpv 软解"

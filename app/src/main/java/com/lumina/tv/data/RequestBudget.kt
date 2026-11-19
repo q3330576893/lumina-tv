@@ -47,6 +47,14 @@ inline fun <T> catchingRequest(block: () -> T): Result<T> = try {
     Result.failure(failure)
 }
 
+internal suspend fun <T> catchingSuspendRequest(block: suspend () -> T): Result<T> = try {
+    Result.success(block())
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (failure: Exception) {
+    Result.failure(failure)
+}
+
 /** read must only consume the response, without writing UI/cache state. Not for media streams. */
 internal suspend fun <T> OkHttpClient.readCancellable(request: Request, read: (Response) -> T): T {
     val context = currentCoroutineContext()

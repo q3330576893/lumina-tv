@@ -12,6 +12,8 @@ import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.player.PlaybackDiagnostics
 import com.lumina.tv.player.mpvAvailabilityDiagnostic
 import com.lumina.tv.player.PlayerLifecycle
+import com.lumina.tv.player.displayHdrDiagnostic
+import com.lumina.tv.player.readDisplayHdrTypes
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
@@ -69,6 +71,7 @@ internal fun buildPlayerDiagPayload(
     val readback = if (activeEngine == "mpv") mpvBackend?.diagnosticReadback(playbackDiagnostics.identity).orEmpty() else emptyMap()
     val actualDecoder = playbackDiagnostics.actualDecoder(activeEngine, readback)
     val actualOutput = playbackDiagnostics.actualAudioOutput(activeEngine, readback)
+    val displayHdrTypes = readDisplayHdrTypes(context)
     val actualAudioIndex = if (activeEngine == "mpv") mpvBackend?.currentAudioEmbyIndex() else selectedAudioStreamIndex
     val audioStream = playbackSource?.audioStreams?.firstOrNull { it.index == actualAudioIndex }
     if (activeEngine == "mpv") listOf("decoderInitMs", "compatMappingMs", "firstFrameMs", "stableOutputMs").forEach { key ->
@@ -76,6 +79,7 @@ internal fun buildPlayerDiagPayload(
     }
     val meta = DiagExporter.baseMeta(context, outcome)
         .put("load", playbackDiagnostics.identityJson())
+        .put("display", JSONObject().put("hdr", displayHdrDiagnostic(displayHdrTypes)?.let(::JSONArray) ?: JSONObject.NULL))
         .put("engine", JSONObject()
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
             .put("active", activeEngine)

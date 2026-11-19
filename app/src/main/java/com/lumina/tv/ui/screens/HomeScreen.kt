@@ -1863,7 +1863,7 @@ private fun Hero(
     val context = LocalContext.current
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
-    var heroHasFocus by remember(items) { mutableStateOf(false) }
+    var focusedHeroAction by remember(items) { mutableStateOf(HeroActionFocus.NONE) }
     var tmdbBackdrops by remember(items) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var tmdbResolvedIds by remember(items) { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(items) {
@@ -2037,12 +2037,20 @@ private fun Hero(
             .height(heroHeight)
             .clip(RoundedCornerShape(bottomEnd = 24.dp))
             .onPreviewKeyEvent { event ->
-                if (!heroHasFocus || event.type != KeyEventType.KeyDown || items.size < 2) return@onPreviewKeyEvent false
-                when (event.key) {
-                    Key.DirectionLeft -> { lastInteractionAt = System.currentTimeMillis(); playAction.invalidate(); onPrevious(); true }
-                    Key.DirectionRight -> { lastInteractionAt = System.currentTimeMillis(); playAction.invalidate(); onNext(); true }
-                    else -> false
+                if (focusedHeroAction == HeroActionFocus.NONE || event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                val direction = when (event.key) {
+                    Key.DirectionLeft -> HeroDirectionKey.LEFT
+                    Key.DirectionRight -> HeroDirectionKey.RIGHT
+                    else -> return@onPreviewKeyEvent false
                 }
+                if (!shouldHeroConsumeCarouselDirection(focusedHeroAction, direction, items.size)) {
+                    lastInteractionAt = System.currentTimeMillis()
+                    return@onPreviewKeyEvent false
+                }
+                lastInteractionAt = System.currentTimeMillis()
+                playAction.invalidate()
+                if (direction == HeroDirectionKey.LEFT) onPrevious() else onNext()
+                true
             }
     ) {
         Box(
@@ -2138,8 +2146,12 @@ private fun Hero(
                     focusRequester = playFocus,
                     onFocused = onPlayFocused,
                     onFocusChanged = {
-                        heroHasFocus = it
-                        if (it) onHeroFocusChanged(true)
+                        if (it) {
+                            focusedHeroAction = HeroActionFocus.PLAY
+                            onHeroFocusChanged(true)
+                        } else if (focusedHeroAction == HeroActionFocus.PLAY) {
+                            focusedHeroAction = HeroActionFocus.NONE
+                        }
                     },
                     onClick = {
                         lastInteractionAt = System.currentTimeMillis()
@@ -2169,8 +2181,12 @@ private fun Hero(
                     scaleTo = 1.05f,
                     onFocused = onDetailFocused,
                     onFocusChanged = {
-                        heroHasFocus = it
-                        if (it) onHeroFocusChanged(true)
+                        if (it) {
+                            focusedHeroAction = HeroActionFocus.DETAIL
+                            onHeroFocusChanged(true)
+                        } else if (focusedHeroAction == HeroActionFocus.DETAIL) {
+                            focusedHeroAction = HeroActionFocus.NONE
+                        }
                     },
                     onClick = { playAction.invalidate(); onOpenDetail(displayItem.seriesId ?: displayItem.id) },
                 ) { focused ->

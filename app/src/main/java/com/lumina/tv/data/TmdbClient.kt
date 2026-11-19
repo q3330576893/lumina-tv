@@ -1,8 +1,9 @@
 package com.lumina.tv.data
 
 import com.lumina.tv.BuildConfig
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import com.lumina.tv.diag.NetLog
@@ -11,12 +12,33 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
+/** Only top-level Movie/Series IDs belong to these TMDB namespaces. */
+internal fun tmdbMediaPath(type: String): String? = when (type) {
+    "Movie" -> "movie"
+    "Series" -> "tv"
+    else -> null
+}
+
+/** Episode IDs and air years must never be reused as their parent show's identity. */
+internal suspend fun resolveTmdbMetadataItem(
+    item: MediaItem,
+    loadSeries: suspend (String) -> MediaItem?,
+): MediaItem? {
+    if (tmdbMediaPath(item.type) != null) return item
+    if (item.type != "Episode") return null
+    val seriesId = item.seriesId?.takeIf(String::isNotBlank) ?: return null
+    return catchingRequest { loadSeries(seriesId) }.getOrNull()
+        ?.takeIf { it.id == seriesId && it.type == "Series" }
+}
+
 /**
  * TMDB 元数据补充：评分 + 透明标题图（logo）。
  * 主用 api.tmdb.org（国内可达性更好），超时短，任何失败静默返回 null，不影响主流程。
  * 结果按「类型|名字|年份」进程内缓存，避免轮播反复请求。
  */
 object TmdbClient {
+
+    private const val METADATA_CALL_TIMEOUT_MS = 8_000L
 
     data class ExternalIds(val imdbId: String?, val tvdbId: String?)
 
@@ -35,8 +57,7 @@ object TmdbClient {
         .readTimeout(4, TimeUnit.SECONDS)
         .build()
 
-    private val cache = LinkedHashMap<String, TmdbInfo?>()
-    private val noHit = HashMap<String, Long>()
+    private val lookupCache = NullableRequestCache<TmdbInfo>(missTtlMs = 60_000L, maxEntries = 200)
     private val externalIdsCache = LinkedHashMap<String, ExternalIds?>()
     private val externalIdsNoHit = HashMap<String, Long>()
     private val externalLinksCache = LinkedHashMap<String, ExternalLinks>()
@@ -55,11 +76,12 @@ object TmdbClient {
         embyImdbId: String?,
         embyTmdbId: String?,
         embyTvdbId: String?,
-    ): ExternalLinks? = withContext(Dispatchers.IO) {
+    ): ExternalLinks? = withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        if (tmdbMediaPath(type) == null) return@withMetadataContext null
         val key = "$type|$title|${year ?: 0}|${embyImdbId.orEmpty()}|${embyTmdbId.orEmpty()}|${embyTvdbId.orEmpty()}"
         synchronized(externalLinksCache) {
-            externalLinksCache[key]?.let { return@withContext it }
-            if ((externalLinksNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withContext null
+            externalLinksCache[key]?.let { return@withMetadataContext it }
+            if ((externalLinksNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withMetadataContext null
             externalLinksNoHit.remove(key)
         }
 
@@ -97,10 +119,10 @@ object TmdbClient {
         result
     }
 
-    private fun searchTmdbId(type: String, title: String, year: Int?): String? {
+    private suspend fun searchTmdbId(type: String, title: String, year: Int?): String? {
         if (title.isBlank()) return null
-        val isTv = type == "Series"
-        val path = if (isTv) "tv" else "movie"
+        val path = tmdbMediaPath(type) ?: return null
+        val isTv = path == "tv"
         val url = buildString {
             append("https://api.tmdb.org/3/search/").append(path)
             append("?query=").append(URLEncoder.encode(title, "UTF-8"))
@@ -114,13 +136,13 @@ object TmdbClient {
     }
 
     /** Resolve IMDb and TVDB IDs from an Emby-provided TMDB ID without delaying detail rendering. */
-    suspend fun externalIds(type: String, tmdbId: String): ExternalIds? = withContext(Dispatchers.IO) {
-        val numericId = tmdbId.toLongOrNull()?.takeIf { it > 0 } ?: return@withContext null
-        val path = if (type == "Series") "tv" else "movie"
+    suspend fun externalIds(type: String, tmdbId: String): ExternalIds? = withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        val path = tmdbMediaPath(type) ?: return@withMetadataContext null
+        val numericId = tmdbId.toLongOrNull()?.takeIf { it > 0 } ?: return@withMetadataContext null
         val key = "$path|$numericId"
         synchronized(externalIdsCache) {
-            if (externalIdsCache.containsKey(key)) return@withContext externalIdsCache[key]
-            if ((externalIdsNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withContext null
+            if (externalIdsCache.containsKey(key)) return@withMetadataContext externalIdsCache[key]
+            if ((externalIdsNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withMetadataContext null
             externalIdsNoHit.remove(key)
         }
         val result = getJson(
@@ -140,23 +162,15 @@ object TmdbClient {
     }
 
     /** 按名称(+年份)搜索，返回首个匹配；带进程内缓存。 */
-    suspend fun lookup(type: String, name: String, year: Int?): TmdbInfo? = withContext(Dispatchers.IO) {
+    suspend fun lookup(type: String, name: String, year: Int?): TmdbInfo? = withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        if (tmdbMediaPath(type) == null) return@withMetadataContext null
         val key = "$type|$name|${year ?: 0}"
-        synchronized(cache) {
-            if (cache.containsKey(key)) return@withContext cache[key]
-            if ((noHit[key] ?: 0L) > System.currentTimeMillis()) return@withContext null
-            noHit.remove(key)
-        }
-        val result = runCatching { request(type, name, year) }.getOrNull()
-        synchronized(cache) {
-            if (result == null) noHit[key] = System.currentTimeMillis() + 60_000L else cache[key] = result
-            if (cache.size > 200) cache.clear()
-            if (noHit.size > 200) noHit.clear()
-        }
-        result
+        lookupCache.getOrLoad(key) { catchingSuspendRequest { request(type, name, year) }.getOrNull() }
     }
 
-    suspend fun lookupHero(type: String, name: String, year: Int?, originalTitle: String?): TmdbInfo? = withContext(Dispatchers.IO) {
+    suspend fun lookupHero(type: String, name: String, year: Int?, originalTitle: String?): TmdbInfo? =
+        withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        if (tmdbMediaPath(type) == null) return@withMetadataContext null
         val attempts = buildList {
             add(name to year)
             if (year != null) add(name to null)
@@ -167,8 +181,6 @@ object TmdbClient {
         }.distinct()
         var result: TmdbInfo? = null
         for ((query, queryYear) in attempts) {
-            val key = "$type|$query|${queryYear ?: 0}"
-            synchronized(cache) { noHit.remove(key) }
             result = lookup(type, query, queryYear)
             if (result?.backdropUrl != null) break
         }
@@ -176,9 +188,9 @@ object TmdbClient {
         result
     }
 
-    private fun request(type: String, name: String, year: Int?): TmdbInfo? {
-        val isTv = type == "Series"
-        val path = if (isTv) "tv" else "movie"
+    private suspend fun request(type: String, name: String, year: Int?): TmdbInfo? {
+        val path = tmdbMediaPath(type) ?: return null
+        val isTv = path == "tv"
         val sb = StringBuilder("https://api.tmdb.org/3/search/").append(path)
             .append("?query=").append(URLEncoder.encode(name, "UTF-8"))
             .append("&language=zh-CN&api_key=").append(BuildConfig.TMDB_API_KEY)
@@ -202,7 +214,7 @@ object TmdbClient {
     }
 
     /** 取中文优先的透明标题图，其次英文，最后任意。 */
-    private fun fetchLogo(path: String, id: Int): String? {
+    private suspend fun fetchLogo(path: String, id: Int): String? {
         val url = "https://api.tmdb.org/3/$path/$id/images?include_image_language=zh,en,null&api_key=${BuildConfig.TMDB_API_KEY}"
         val json = getJson(url) ?: return null
         val logos = json.optJSONArray("logos") ?: return null
@@ -219,23 +231,33 @@ object TmdbClient {
         return fallback?.let { "https://image.tmdb.org/t/p/w500$it" }
     }
 
-    private fun getJson(url: String): JSONObject? {
+    private suspend fun getJson(url: String): JSONObject? {
         val started = System.currentTimeMillis()
-        return runCatching {
-            val req = Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()
-            http.newCall(req).execute().use { resp ->
+        val req = try {
+            Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()
+        } catch (failure: Exception) {
+            lastRequestFailure = "request_error:${failure.javaClass.simpleName}"
+            NetLog.add(started, "GET", url, System.currentTimeMillis() - started, null, failure.javaClass.simpleName)
+            return null
+        }
+        return try {
+            http.readCancellable(req) { resp ->
                 NetLog.add(started, req.method, url, System.currentTimeMillis() - started, resp.code, if (resp.isSuccessful) null else "HTTP")
                 if (!resp.isSuccessful) {
                     lastRequestFailure = "http_${resp.code}"
-                    return null
+                    return@readCancellable null
                 }
-                val body = resp.body?.string() ?: return null
+                val body = resp.body?.string() ?: return@readCancellable null
                 lastRequestFailure = null
                 JSONObject(body)
             }
-        }.onFailure {
-            lastRequestFailure = if (it is java.net.SocketTimeoutException) "timeout" else "request_error:${it.javaClass.simpleName}"
-            NetLog.add(started, "GET", url, System.currentTimeMillis() - started, null, it.javaClass.simpleName)
-        }.getOrNull()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            lastRequestFailure = if (failure is java.net.SocketTimeoutException) "timeout" else "request_error:${failure.javaClass.simpleName}"
+            NetLog.add(started, "GET", url, System.currentTimeMillis() - started, null, failure.javaClass.simpleName)
+            null
+        }
     }
 }

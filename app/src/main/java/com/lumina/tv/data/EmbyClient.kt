@@ -733,14 +733,12 @@ class EmbyClient(
     /** Emby returns cast/crew in People when requested through Fields=People. */
     suspend fun getSimilarItems(itemId: String, limit: Int = 12): List<MediaItem> =
         withTimeoutOrNull(4_000L) { withMetadataContext(4_000L) {
-            catchingRequest {
             val params = mapOf("UserId" to userId, "Limit" to limit.toString(),
                 "Fields" to "Overview,PrimaryImageAspectRatio,Genres,ProductionYear,UserData,ProductionLocations,OriginalLanguage",
                 "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo")
             val arr = getJson(url("/Items/$itemId/Similar", params)).optJSONArray("Items") ?: JSONArray()
             parseItems(arr).filterNot { it.id == itemId }.take(limit)
-            }.getOrDefault(emptyList())
-        } } ?: emptyList()
+        } } ?: throw EmbyException("Similar items request deadline exceeded")
 
     suspend fun getSeasons(seriesId: String): List<MediaItem> = withMetadataContext {
         val params = mapOf("UserId" to userId, "Fields" to "Overview,PrimaryImageAspectRatio,UserData")
