@@ -247,38 +247,40 @@ fun SearchScreen(
             .thenByDescending { it.rating ?: it.communityRating ?: 0.0 }
             .thenByDescending { it.year ?: 0 })
     }
-    LaunchedEffect(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow, visibleResults.size) {
-        snapshotFlow { Triple(visibleResults.size, hasMore, loading || loadingMore) }
-            .distinctUntilChanged()
-            .collect { (visibleCount, more, isLoading) ->
-                if (!shouldAutoLoadEmptySearchPage(visibleCount, more, isLoading, false, autoLoadedEmptyPages)) return@collect
-                val currentClient = client ?: return@collect
-                val filters = listOfNotNull(
-                    "IsFavorite".takeIf { favoritesOnly },
-                    "IsUnplayed".takeIf { unwatchedOnly },
-                ).joinToString(",").ifBlank { null }
-                val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
-                autoLoadedEmptyPages++
-                loadingMore = true
-                try {
-                    val page = currentClient.getItems(
-                        types = types, sortBy = "SortName", sortOrder = "Ascending",
-                        limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
-                        fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
-                        requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
-                    )
-                    results = (results + page).distinctBy { it.id }
-                    pageStart += page.size
-                    hasMore = page.size == 40 && pageStart < 300
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    searchError = searchFailureMessage(e)
-                    hasMore = false
-                } finally {
-                    loadingMore = false
-                }
-            }
+    EmptySearchPageEffect(
+        searchKey = listOf(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow),
+        loadedItemCount = pageStart,
+        visibleCount = visibleResults.size,
+        hasMore = { hasMore },
+        loading = { loading || loadingMore },
+        automaticallyLoadedPages = { autoLoadedEmptyPages },
+    ) {
+        val currentClient = client ?: return@EmptySearchPageEffect
+        val filters = listOfNotNull(
+            "IsFavorite".takeIf { favoritesOnly },
+            "IsUnplayed".takeIf { unwatchedOnly },
+        ).joinToString(",").ifBlank { null }
+        val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
+        autoLoadedEmptyPages++
+        loadingMore = true
+        try {
+            val page = currentClient.getItems(
+                types = types, sortBy = "SortName", sortOrder = "Ascending",
+                limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
+                fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
+                requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
+            )
+            results = (results + page).distinctBy { it.id }
+            pageStart += page.size
+            hasMore = page.size == 40 && pageStart < 300
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            searchError = searchFailureMessage(e)
+            hasMore = false
+        } finally {
+            loadingMore = false
+        }
     }
 
     val filterDescription = buildList {
@@ -426,6 +428,28 @@ fun SearchScreen(
                 }
             }
         }
+    }
+}
+
+/** Page progress restarts observation even when every appended page is filtered out. */
+@Composable
+internal fun EmptySearchPageEffect(
+    searchKey: List<Any>,
+    loadedItemCount: Int,
+    visibleCount: Int,
+    hasMore: () -> Boolean,
+    loading: () -> Boolean,
+    automaticallyLoadedPages: () -> Int,
+    loadPage: suspend () -> Unit,
+) {
+    LaunchedEffect(searchKey, loadedItemCount, visibleCount) {
+        snapshotFlow { Triple(visibleCount, hasMore(), loading()) }
+            .distinctUntilChanged()
+            .collect { (visibleCount, more, isLoading) ->
+                val autoLoadedEmptyPages = automaticallyLoadedPages()
+                if (!shouldAutoLoadEmptySearchPage(visibleCount, more, isLoading, false, autoLoadedEmptyPages)) return@collect
+                loadPage()
+            }
     }
 }
 

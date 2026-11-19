@@ -34,6 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -43,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.BootReceiver
 import com.lumina.tv.data.DynamicRangePref
 import com.lumina.tv.data.NumericPref
 import com.lumina.tv.ui.components.FocusSurface
@@ -60,6 +62,8 @@ fun SettingsBackend(
     modifier: Modifier = Modifier,
 ) {
     val prefs = AppRuntime.prefs
+    val context = LocalContext.current
+    val bootCapability = remember(context) { BootReceiver.capability(context) }
     var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
     var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
     var matchDisplayFrameRate by remember { mutableStateOf(prefs?.matchDisplayFrameRate ?: false) }
@@ -112,7 +116,7 @@ fun SettingsBackend(
                     declareDtsDirectPlay = it; prefs?.declareDtsDirectPlay = it
                 }, requesters.getValue("compat:declareDtsDirectPlay"), railRequester, onFocused,
                     upRequester = requesters.getValue("compat:matchDisplayFrameRate"), downRequester = requesters.getValue("compat:bootLaunch"))
-                ToggleRow("compat:bootLaunch", "开机自启", "电视盒子开机后自动打开琉璃", bootLaunch, {
+                ToggleRow("compat:bootLaunch", "开机自启", bootCapability.description, bootLaunch, {
                     bootLaunch = it; prefs?.bootLaunch = it
                 }, requesters.getValue("compat:bootLaunch"), railRequester, onFocused,
                     upRequester = requesters.getValue("compat:declareDtsDirectPlay"), downRequester = requesters.getValue("compat:sourcePreferences"))

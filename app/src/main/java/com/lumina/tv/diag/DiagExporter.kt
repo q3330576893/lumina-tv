@@ -89,7 +89,7 @@ object DiagExporter {
             "tracks.json" to payload.tracksJson,
             "errors.json" to payload.errorsJson,
             "mpv.log" to payload.mpvLog,
-            "app.log" to payload.appLog,
+            "app.log" to (AppLog.snapshot() + "\n[logcat]\n" + payload.appLog),
             "mpv-audio.jsonl" to File(context.filesDir, "mpv-audio.jsonl").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty(),
             "mpv-audio-system.log" to File(context.filesDir, "mpv-audio-system.log").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty(),
             "ui.txt" to (payload.uiText + "\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}"),

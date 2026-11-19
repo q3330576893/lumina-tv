@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
 import kotlinx.coroutines.Dispatchers
@@ -90,10 +91,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Lumina phone and TV clients intentionally share the 16:9 landscape layout.
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        initializeAppLog()
-        CrashHandler.install(this)
         startupCrashNotice = CrashHandler.takeStartupNotice(this)
+        com.lumina.tv.diag.PageLog.add("activity_created restored=${savedInstanceState != null}")
         AppRuntime.init(this)
+        if (intent?.getBooleanExtra(BootReceiver.EXTRA_BOOT_LAUNCH, false) == true) {
+            com.lumina.tv.diag.PageLog.add("bootLaunch activity_created")
+        }
         PlaybackCache.initialize(applicationContext)
         AppRuntime.restore()
         lifecycleScope.launch(Dispatchers.IO) {
@@ -143,16 +146,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-    }
-
-    private fun initializeAppLog() {
-        val current = java.io.File(filesDir, "app.log")
-        val previous = java.io.File(filesDir, "app-prev.log")
-        if (current.isFile && current.length() > 0L) {
-            previous.delete()
-            current.renameTo(previous)
-        }
-        current.writeText("")
     }
 
     override fun onDestroy() {
@@ -264,7 +257,7 @@ private fun AppRoot(
     ) {
         if (!crashNotice.isNullOrBlank()) {
             Snackbar(
-                modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(top = 16.dp),
+                modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(top = 16.dp).zIndex(1f),
                 action = {
                     TextButton(onClick = { showCrashLog = true; onConsumeCrashNotice() }) { Text("查看") }
                 },

@@ -1863,13 +1863,14 @@ private fun Hero(
     val context = LocalContext.current
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
-    var focusedHeroAction by remember(items) { mutableStateOf(HeroActionFocus.NONE) }
+    val detailFocus = remember { FocusRequester() }
+    var focusedHeroAction by remember { mutableStateOf(HeroActionFocus.NONE) }
     var tmdbBackdrops by remember(items) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var tmdbResolvedIds by remember(items) { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(items) {
         val pairs = items.map { media ->
             async {
-                media.id to runCatching {
+                media.id to catchingRequest {
                     TmdbClient.lookupHero(
                         media.type,
                         media.seriesName ?: media.name,
@@ -2140,7 +2141,7 @@ private fun Hero(
             Spacer(Modifier.height(14.dp))
             Row {
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(128.dp),
+                    modifier = Modifier.height(42.dp).width(128.dp).focusProperties { right = detailFocus },
                     corner = 21.dp,
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
@@ -2176,9 +2177,10 @@ private fun Hero(
                 }
                 Spacer(Modifier.width(12.dp))
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(108.dp),
+                    modifier = Modifier.height(42.dp).width(108.dp).focusProperties { left = playFocus },
                     corner = 21.dp,
                     scaleTo = 1.05f,
+                    focusRequester = detailFocus,
                     onFocused = onDetailFocused,
                     onFocusChanged = {
                         if (it) {

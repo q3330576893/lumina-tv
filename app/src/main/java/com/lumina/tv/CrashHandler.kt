@@ -9,6 +9,12 @@ import android.app.ApplicationExitInfo
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.NetLog
 import com.lumina.tv.diag.PageLog
+import com.lumina.tv.diag.CrashStore
+import com.lumina.tv.diag.ExitTraceKind
+import com.lumina.tv.diag.ExitTraceReader
+import com.lumina.tv.diag.LogRedactor
+import com.lumina.tv.diag.ProcessCrashHandler
+import com.lumina.tv.diag.AppLog
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -20,16 +26,17 @@ object CrashHandler {
     private fun root(context: Context) = context.getExternalFilesDir(null) ?: context.filesDir
     fun crashFile(context: Context) = File(root(context), "crash-latest.txt")
     fun crashFiles(context: Context) = (1..5).map { File(root(context), "crash-$it.txt") }
-    private fun statsFile(context: Context) = File(root(context), "crash-stats.json")
+    private val installation = ProcessCrashHandler()
 
     fun install(context: Context) {
         val app = context.applicationContext
-        recordPreviousExit(app)
-        val previous = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            try { writeCrash(app, thread, throwable) } catch (_: Throwable) { }
-            try { previous?.uncaughtException(thread, throwable) } catch (_: Throwable) { }
-        }
+        installation.install(
+            write = { thread, throwable -> writeCrash(app, thread, throwable) },
+            collectPreviousExit = {
+                runCatching { recordPreviousExit(app) }
+                    .onFailure { PageLog.add("previous exit collection failed=${it.javaClass.simpleName}") }
+            },
+        )
     }
 
     private fun recordPreviousExit(context: Context) {
@@ -46,48 +53,57 @@ object CrashHandler {
                 ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH"
                 ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_KILLED"
                 else -> "OTHER_${exit.reason}"
-            }).put("description", exit.description ?: "")
+            }).put("description", LogRedactor.redact(exit.description ?: ""))
             .put("timestamp", exit.timestamp).put("importance", exit.importance)
         else JSONObject().put("reason", "legacy-crash-file")
             .put("description", crashFile(context).takeIf(File::exists)?.readLines()?.firstOrNull().orEmpty())
             .put("timestamp", JSONObject.NULL).put("importance", JSONObject.NULL)
+        val kind = when (exit?.reason) {
+            ApplicationExitInfo.REASON_ANR -> ExitTraceKind.ANR
+            ApplicationExitInfo.REASON_CRASH_NATIVE -> ExitTraceKind.NATIVE
+            else -> null
+        }
+        if (kind != null && exit != null) {
+            val trace = ExitTraceReader.read(kind, Build.VERSION.SDK_INT) { exit.traceInputStream }
+            payload.put("trace", JSONObject().put("source", "ApplicationExitInfo.getTraceInputStream")
+                .put("format", kind.format).put("status", trace.status)
+                .put("capturedBytes", trace.bytes.size).put("truncated", trace.truncated))
+            var evidence = trace.report()
+            if (kind == ExitTraceKind.NATIVE) {
+                // A raw tombstone can contain secrets: retain privately, never add it to the shared ZIP.
+                val stored = runCatching {
+                    if (trace.status == "available") File(context.filesDir, trace.nativeFileName).writeBytes(trace.bytes)
+                    listOf("native-trace-latest.pb", "native-trace-latest.pb.partial")
+                        .filter { trace.status != "available" || it != trace.nativeFileName }
+                        .forEach { File(context.filesDir, it).delete() }
+                }.fold(
+                    onSuccess = { if (trace.status == "available") "stored" else "not_available" },
+                    onFailure = { "write_failed:${it.javaClass.simpleName}" },
+                )
+                payload.getJSONObject("trace").put("binaryPersistence", stored)
+                    .put("binaryFile", if (stored == "stored") trace.nativeFileName else JSONObject.NULL)
+                evidence += "\nbinaryPersistence=$stored"
+            }
+            val name = if (kind == ExitTraceKind.ANR) "anr-latest.txt" else "native-latest.txt"
+            runCatching { File(root(context), name).writeText(evidence, Charsets.UTF_8) }
+            PageLog.add("previousExit ${kind.name} ${trace.summary}")
+            writeCrashType(context, kind.name, evidence, exit.timestamp)
+        }
         runCatching { File(root(context), "exit-reason.json").writeText(payload.toString(2), Charsets.UTF_8) }
-        if (exit?.reason == ApplicationExitInfo.REASON_ANR) {
-            val trace = runCatching { File("/data/anr/traces.txt").readText().takeLast(64 * 1024) }.getOrNull()
-            runCatching { File(root(context), "anr-latest.txt").writeText(trace ?: "anr-trace=unavailable", Charsets.UTF_8) }
-            writeCrashType(context, "ANR", trace ?: "anr-trace=unavailable")
-        } else if (exit?.reason == ApplicationExitInfo.REASON_CRASH_NATIVE) {
-            val tombstones = runCatching { File("/data/tombstones").listFiles()?.sortedByDescending(File::lastModified)?.firstOrNull()?.readText()?.takeLast(64 * 1024) }.getOrNull()
-            val evidence = tombstones ?: "native-tombstone=unavailable"
-            runCatching { File(root(context), "native-latest.txt").writeText(evidence, Charsets.UTF_8) }
-            writeCrashType(context, "NATIVE", evidence)
-        }
     }
 
-    private fun writeCrashType(context: Context, type: String, evidence: String) {
+    private fun writeCrashType(context: Context, type: String, evidence: String, at: Long) {
         runCatching {
-            val file = statsFile(context)
-            val stats = JSONObject(file.takeIf(File::exists)?.readText().orEmpty())
-            stats.put("lastCrash", JSONObject().put("type", type).put("at", System.currentTimeMillis()).put("evidence", evidence))
-            file.writeText(stats.toString(2), Charsets.UTF_8)
-        }
+            CrashStore(root(context)).recordExit(type, evidence, at)
+        }.onFailure { PageLog.add("crash stats write failed=${it.javaClass.simpleName}") }
     }
 
-    private fun writeCrash(context: Context, thread: Thread, t: Throwable) {
+    @Synchronized private fun writeCrash(context: Context, thread: Thread, t: Throwable) {
         val frames = generateSequence(t as Throwable?) { it.cause }.toList()
         val fingerprint = MessageDigest.getInstance("SHA-1").digest(
             frames.firstOrNull()?.stackTrace.orEmpty().take(3).joinToString("\n") { "${it.className}.${it.methodName}:${it.lineNumber}" }.toByteArray()
         ).joinToString("") { "%02x".format(it) }
         val now = System.currentTimeMillis()
-        val stats = runCatching { JSONObject(statsFile(context).takeIf(File::exists)?.readText().orEmpty()) }.getOrDefault(JSONObject())
-        val entry = stats.optJSONObject(fingerprint) ?: JSONObject()
-        entry.put("type", "JAVA").put("count", entry.optInt("count", 0) + 1).put("lastAt", now)
-        stats.put(fingerprint, entry)
-        statsFile(context).writeText(stats.toString(2), Charsets.UTF_8)
-        if (entry.optInt("count") > 1) {
-            context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE).edit().putBoolean("notice_pending", true).putString("fingerprint", fingerprint).commit()
-            return
-        }
         val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
         val appLog = runCatching {
             Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-t", "800", "--pid=${android.os.Process.myPid()}"))
@@ -112,7 +128,7 @@ object CrashHandler {
             appendLine("native heap=${Debug.getNativeHeapAllocatedSize()}")
             appendLine("\n[最近页面]\n${PageLog.tail().ifBlank { "(无)" }}")
             appendLine("\n[最近网络]\n${NetLog.tail()}")
-            appendLine("\n[最近日志]\n$appLog")
+            appendLine("\n[最近日志]\n${AppLog.snapshot()}\n[logcat]\n$appLog")
             appendLine("\n[堆栈]")
             frames.forEachIndexed { i, cause ->
                 appendLine("Cause #${i + 1}: ${cause.javaClass.name}: ${cause.message}")
@@ -121,12 +137,7 @@ object CrashHandler {
             appendLine("\n[指纹]\n$fingerprint")
         }
         val safe = DiagExporter.sanitize(report)
-        crashFiles(context).asReversed().forEachIndexed { index, file ->
-            val source = crashFiles(context).asReversed().getOrNull(index + 1)
-            if (source?.exists() == true) runCatching { source.copyTo(file, overwrite = true) }
-        }
-        File(root(context), "crash-1.txt").writeText(safe, Charsets.UTF_8)
-        crashFile(context).writeText(safe, Charsets.UTF_8)
+        CrashStore(root(context)).recordJava(fingerprint, safe, now)
         context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE).edit().putBoolean("notice_pending", true).putString("fingerprint", fingerprint).commit()
     }
 

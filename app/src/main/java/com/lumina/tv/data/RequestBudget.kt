@@ -38,6 +38,17 @@ suspend fun <T> withRequestBudget(timeoutMs: Long = 20_000L, block: suspend Coro
 internal suspend fun <T> withMetadataContext(timeoutMs: Long = 20_000L, block: suspend CoroutineScope.() -> T): T =
     withRequestBudget(timeoutMs) { withContext(Dispatchers.IO, block) }
 
+/** Third-party metadata has its own cap; searches/logos inherit the earliest deadline. */
+internal suspend fun <T> withThirdPartyMetadataContext(timeoutMs: Long = 8_000L, block: suspend CoroutineScope.() -> T): T {
+    val context = currentCoroutineContext()
+    context.ensureActive()
+    val expiresAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+    val deadline = RequestDeadline(minOf(expiresAt, context[RequestDeadline]?.expiresAtNanos ?: expiresAt))
+    return withTimeout(timeoutMs) {
+        withContext(Dispatchers.IO + deadline, block)
+    }
+}
+
 /** Unlike runCatching, this never converts cancellation into a fallback value. */
 inline fun <T> catchingRequest(block: () -> T): Result<T> = try {
     Result.success(block())

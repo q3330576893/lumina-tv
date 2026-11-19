@@ -38,31 +38,31 @@ object MdblistClient {
     private const val NO_HIT_TTL_MS = 15L * 60 * 1000
 
     suspend fun ratings(type: String, imdbId: String?, tmdbId: String?): Ratings? =
-        withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        withThirdPartyMetadataContext(METADATA_CALL_TIMEOUT_MS) {
         val endpointType = when (type) {
             "Movie" -> "movie"
             "Series" -> "show"
-            else -> return@withMetadataContext null
+            else -> return@withThirdPartyMetadataContext null
         }
         val imdb = imdbId?.takeIf(String::isNotBlank)
         val tmdb = tmdbId?.takeIf(String::isNotBlank)
         val provider = if (imdb != null) "imdb" else "tmdb"
-        val id = imdb ?: tmdb ?: return@withMetadataContext null
+        val id = imdb ?: tmdb ?: return@withThirdPartyMetadataContext null
         val key = "$provider|$id|$endpointType"
         val now = System.currentTimeMillis()
         synchronized(cache) {
             cache[key]?.let { ratings ->
-                if (now - (cacheTimes[key] ?: 0L) < SUCCESS_TTL_MS) return@withMetadataContext ratings
+                if (now - (cacheTimes[key] ?: 0L) < SUCCESS_TTL_MS) return@withThirdPartyMetadataContext ratings
                 cache.remove(key)
                 cacheTimes.remove(key)
             }
             noHit[key]?.let {
-                if (now - it < NO_HIT_TTL_MS) return@withMetadataContext null
+                if (now - it < NO_HIT_TTL_MS) return@withThirdPartyMetadataContext null
                 noHit.remove(key)
             }
         }
         val apiKey = BuildConfig.MDBLIST_API_KEY.takeIf(String::isNotBlank)
-            ?: return@withMetadataContext null.also { rememberMiss(key, now) }
+            ?: return@withThirdPartyMetadataContext null.also { rememberMiss(key, now) }
         val encodedId = URLEncoder.encode(id, "UTF-8")
         val url = "https://api.mdblist.com/$provider/$endpointType/$encodedId/?apikey=$apiKey"
         val result = catchingSuspendRequest { getJson(url)?.let(::parseRatings) }.getOrNull()
@@ -127,6 +127,7 @@ object MdblistClient {
     }
 
     private suspend fun getJson(url: String): JSONObject? {
+        currentCoroutineContext().ensureActive()
         val started = System.currentTimeMillis()
         val request = try {
             Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()

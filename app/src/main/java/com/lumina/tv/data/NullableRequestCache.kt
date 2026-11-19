@@ -16,6 +16,7 @@ internal class NullableRequestCache<T : Any>(
 
     suspend fun getOrLoad(key: String, load: suspend () -> T?): T? {
         while (true) {
+            currentCoroutineContext().ensureActive()
             var cached = false
             var value: T? = null
             var owner = false

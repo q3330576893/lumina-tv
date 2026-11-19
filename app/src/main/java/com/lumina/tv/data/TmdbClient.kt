@@ -76,23 +76,25 @@ object TmdbClient {
         embyImdbId: String?,
         embyTmdbId: String?,
         embyTvdbId: String?,
-    ): ExternalLinks? = withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
-        if (tmdbMediaPath(type) == null) return@withMetadataContext null
+    ): ExternalLinks? = withThirdPartyMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        if (tmdbMediaPath(type) == null) return@withThirdPartyMetadataContext null
         val key = "$type|$title|${year ?: 0}|${embyImdbId.orEmpty()}|${embyTmdbId.orEmpty()}|${embyTvdbId.orEmpty()}"
         synchronized(externalLinksCache) {
-            externalLinksCache[key]?.let { return@withMetadataContext it }
-            if ((externalLinksNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withMetadataContext null
+            externalLinksCache[key]?.let { return@withThirdPartyMetadataContext it }
+            if ((externalLinksNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withThirdPartyMetadataContext null
             externalLinksNoHit.remove(key)
         }
 
         val searchResult = if (embyTmdbId.isNullOrBlank()) searchTmdbId(type, title, year) else null
         val tmdbId = embyTmdbId?.takeIf(String::isNotBlank) ?: searchResult
+        currentCoroutineContext().ensureActive()
         val external = tmdbId?.let { externalIds(type, it) }
         val result = ExternalLinks(
             imdbId = embyImdbId?.takeIf(String::isNotBlank) ?: external?.imdbId,
             tmdbId = tmdbId,
             tvdbId = embyTvdbId?.takeIf(String::isNotBlank) ?: external?.tvdbId,
         ).takeIf { it.imdbId != null || it.tmdbId != null || it.tvdbId != null }
+        currentCoroutineContext().ensureActive()
         externalLinkDiagnostic = JSONObject()
             .put("title", title)
             .put("tmdbId", tmdbId ?: JSONObject.NULL)
@@ -136,13 +138,13 @@ object TmdbClient {
     }
 
     /** Resolve IMDb and TVDB IDs from an Emby-provided TMDB ID without delaying detail rendering. */
-    suspend fun externalIds(type: String, tmdbId: String): ExternalIds? = withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
-        val path = tmdbMediaPath(type) ?: return@withMetadataContext null
-        val numericId = tmdbId.toLongOrNull()?.takeIf { it > 0 } ?: return@withMetadataContext null
+    suspend fun externalIds(type: String, tmdbId: String): ExternalIds? = withThirdPartyMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        val path = tmdbMediaPath(type) ?: return@withThirdPartyMetadataContext null
+        val numericId = tmdbId.toLongOrNull()?.takeIf { it > 0 } ?: return@withThirdPartyMetadataContext null
         val key = "$path|$numericId"
         synchronized(externalIdsCache) {
-            if (externalIdsCache.containsKey(key)) return@withMetadataContext externalIdsCache[key]
-            if ((externalIdsNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withMetadataContext null
+            if (externalIdsCache.containsKey(key)) return@withThirdPartyMetadataContext externalIdsCache[key]
+            if ((externalIdsNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withThirdPartyMetadataContext null
             externalIdsNoHit.remove(key)
         }
         val result = getJson(
@@ -153,6 +155,7 @@ object TmdbClient {
                 tvdbId = json.optLong("tvdb_id", 0L).takeIf { it > 0 }?.toString(),
             )
         }?.takeIf { it.imdbId != null || it.tvdbId != null }
+        currentCoroutineContext().ensureActive()
         synchronized(externalIdsCache) {
             if (result == null) externalIdsNoHit[key] = System.currentTimeMillis() + 300_000L else externalIdsCache[key] = result
             if (externalIdsCache.size > 200) externalIdsCache.clear()
@@ -162,15 +165,15 @@ object TmdbClient {
     }
 
     /** 按名称(+年份)搜索，返回首个匹配；带进程内缓存。 */
-    suspend fun lookup(type: String, name: String, year: Int?): TmdbInfo? = withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
-        if (tmdbMediaPath(type) == null) return@withMetadataContext null
+    suspend fun lookup(type: String, name: String, year: Int?): TmdbInfo? = withThirdPartyMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        if (tmdbMediaPath(type) == null) return@withThirdPartyMetadataContext null
         val key = "$type|$name|${year ?: 0}"
         lookupCache.getOrLoad(key) { catchingSuspendRequest { request(type, name, year) }.getOrNull() }
     }
 
     suspend fun lookupHero(type: String, name: String, year: Int?, originalTitle: String?): TmdbInfo? =
-        withMetadataContext(METADATA_CALL_TIMEOUT_MS) {
-        if (tmdbMediaPath(type) == null) return@withMetadataContext null
+        withThirdPartyMetadataContext(METADATA_CALL_TIMEOUT_MS) {
+        if (tmdbMediaPath(type) == null) return@withThirdPartyMetadataContext null
         val attempts = buildList {
             add(name to year)
             if (year != null) add(name to null)
@@ -181,9 +184,11 @@ object TmdbClient {
         }.distinct()
         var result: TmdbInfo? = null
         for ((query, queryYear) in attempts) {
+            currentCoroutineContext().ensureActive()
             result = lookup(type, query, queryYear)
             if (result?.backdropUrl != null) break
         }
+        currentCoroutineContext().ensureActive()
         PageLog.add("tmdbHero name=${name.take(48)} hit=${if (result != null) 1 else 0} backdrop=${if (result?.backdropUrl != null) 1 else 0}")
         result
     }
@@ -205,6 +210,7 @@ object TmdbClient {
         val avg = first.optDouble("vote_average", 0.0)
         val poster = first.optString("poster_path", "")
         val backdrop = first.optString("backdrop_path", "")
+        currentCoroutineContext().ensureActive()
         return TmdbInfo(
             rating = if (avg > 0) avg else null,
             posterUrl = if (poster.isNotBlank()) "https://image.tmdb.org/t/p/w500$poster" else null,
@@ -232,6 +238,7 @@ object TmdbClient {
     }
 
     private suspend fun getJson(url: String): JSONObject? {
+        currentCoroutineContext().ensureActive()
         val started = System.currentTimeMillis()
         val req = try {
             Request.Builder().url(url).header("User-Agent", "LuminaTV/1.3").build()

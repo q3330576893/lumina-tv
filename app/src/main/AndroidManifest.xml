@@ -52,6 +52,7 @@
             android:screenOrientation="unspecified"
             android:windowSoftInputMode="stateAlwaysHidden" />
 
+        <!-- BOOT_COMPLETED only requests a launch; Android background Activity limits still apply. -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"

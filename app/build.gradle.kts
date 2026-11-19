@@ -250,11 +250,19 @@ val b6Checks = tasks.register<JavaExec>("b6Checks") {
 verifyOffline.configure { dependsOn(b6Checks) }
 val b7Checks = tasks.register<JavaExec>("b7Checks") {
     group = "verification"
-    description = "B7 third-party request cancellation/deadline, Home Hero focus, HDR and search assertions."
+    description = "B7 Hero TTL/single-flight, third-party cancel/deadline, focus, HDR and Compose search continuation assertions."
     dependsOn(samples)
     classpath = samples.get().classpath
     mainClass.set("com.lumina.tv.B7Checks")
 }
 verifyOffline.configure { dependsOn(b7Checks) }
+val b9Checks = tasks.register<JavaExec>("b9Checks") {
+    group = "verification"
+    description = "B9 boot capability, exit traces, crash persistence, overlay and bounded process log assertions."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.B9Checks")
+}
+verifyOffline.configure { dependsOn(b9Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }

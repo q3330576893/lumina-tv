@@ -1449,13 +1449,7 @@ fun PlayerScreen(
                     else -> PlaybackDelivery.DIRECT_PLAY
                 }, plannedAudio, audioDecodeMode, badHttpFallbackStage)
                 val displayHdrTypes = readDisplayHdrTypes(context)
-                val contentHdr = when {
-                    isDolbyVision -> null
-                    rangeType.contains("HDR10PLUS") || rangeType.contains("HDR10+") -> "HDR10+"
-                    rangeType.contains("HDR10") || rangeType.contains("SMPTE2084") || rangeType == "PQ" -> "HDR10"
-                    rangeType.contains("HLG") || rangeType.contains("ARIBSTD-B67") -> "HLG"
-                    else -> null
-                }
+                val contentHdr = rangeType.takeUnless { isDolbyVision }
                 val preferMpvForUnsupportedHdr = contentHdr != null &&
                     supportsContentHdr(displayHdrTypes, contentHdr) == false &&
                     canTryMpvPath(path)

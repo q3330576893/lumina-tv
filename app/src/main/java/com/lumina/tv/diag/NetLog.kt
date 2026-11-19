@@ -15,6 +15,8 @@ object NetLog {
         records.addLast(NetRecord(at, LogRedactor.redact(method), LogRedactor.redact(path), ms, code,
             error?.let(LogRedactor::redact)?.take(120)))
         while (records.size > 30) records.removeFirst()
+        val record = records.last
+        AppLog.add("net at=${record.at} ${record.method} ${record.path} ms=${record.ms} code=${record.code} error=${record.error}")
     }
     @Synchronized fun tail(): String = JSONArray().apply {
         records.forEach { put(JSONObject().put("at", it.at).put("method", it.method).put("path", it.path).put("ms", it.ms).put("code", it.code).put("error", it.error)) }
@@ -26,6 +28,7 @@ object PageLog {
     @Synchronized fun add(name: String) {
         records.addLast(PageRecord(System.currentTimeMillis(), LogRedactor.redact(name).take(300)))
         while (records.size > 20) records.removeFirst()
+        AppLog.add("page ${records.last.name}")
     }
     @Synchronized fun tail(): String = records.joinToString("\n") { "${it.at}\t${it.name}" }
 }
