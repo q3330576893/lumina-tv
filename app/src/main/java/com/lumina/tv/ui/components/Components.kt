@@ -2,11 +2,8 @@ package com.lumina.tv.ui.components
 
 import android.graphics.Bitmap
 import android.app.ActivityManager
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -88,14 +85,19 @@ import dev.chrisbanes.haze.hazeEffect
 
 /** 极光背景：深空底 + 两团缓慢漂移的光晕，营造 iOS 玻璃质感的空间感。 */
 @Composable
-fun AuroraBackground(modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
-    val transition = rememberInfiniteTransition(label = "aurora")
-    val drift by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(18000), RepeatMode.Reverse),
-        label = "drift",
-    )
+fun AuroraBackground(
+    modifier: Modifier = Modifier,
+    active: Boolean = true,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val drift = remember { Animatable(0f) }
+    LaunchedEffect(active) {
+        if (!active) return@LaunchedEffect
+        while (true) {
+            drift.animateTo(1f, tween(18000))
+            drift.animateTo(0f, tween(18000))
+        }
+    }
     Box(modifier.fillMaxSize().background(Ink)) {
         Canvas(Modifier.fillMaxSize()) {
             val w = size.width
@@ -107,8 +109,8 @@ fun AuroraBackground(modifier: Modifier = Modifier, content: @Composable BoxScop
                     end = Offset(w, h),
                 )
             )
-            val x1 = w * (0.12f + 0.10f * drift)
-            val y1 = h * (0.10f + 0.06f * drift)
+            val x1 = w * (0.12f + 0.10f * drift.value)
+            val y1 = h * (0.10f + 0.06f * drift.value)
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(Accent.copy(alpha = 0.30f), Color.Transparent),
@@ -118,8 +120,8 @@ fun AuroraBackground(modifier: Modifier = Modifier, content: @Composable BoxScop
                 radius = w * 0.55f,
                 center = Offset(x1, y1),
             )
-            val x2 = w * (0.86f - 0.08f * drift)
-            val y2 = h * (0.16f + 0.10f * drift)
+            val x2 = w * (0.86f - 0.08f * drift.value)
+            val y2 = h * (0.16f + 0.10f * drift.value)
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(Accent2.copy(alpha = 0.26f), Color.Transparent),
@@ -129,8 +131,8 @@ fun AuroraBackground(modifier: Modifier = Modifier, content: @Composable BoxScop
                 radius = w * 0.45f,
                 center = Offset(x2, y2),
             )
-            val x3 = w * (0.55f + 0.12f * drift)
-            val y3 = h * (0.95f - 0.05f * drift)
+            val x3 = w * (0.55f + 0.12f * drift.value)
+            val y3 = h * (0.95f - 0.05f * drift.value)
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(Color(0xFF35E0D0).copy(alpha = 0.14f), Color.Transparent),

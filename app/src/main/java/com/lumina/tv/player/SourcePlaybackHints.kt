@@ -19,7 +19,7 @@ fun sourceHint(source: MediaSource, engine: String, caps: AudioCaps): SourceHint
         isDv && engine != "mpv" && !DeviceCodecCapabilities.supportsDolbyVision -> SourceHint(2, "DV 可能不兼容")
         audio != null -> {
             val codec = listOfNotNull(audio.codec, audio.profile).joinToString(" ").lowercase()
-            val mime = audioMime(codec)
+            val mime = audioMimeForSourceHint(codec)
             val encoding = AudioCodecMatrix.encoding(mime, codec)
             when (AudioCodecMatrix.support(encoding, audio.channels ?: 2, audio.sampleRate ?: 0, caps, mime)) {
                 AudioSupport.UNSUPPORTED -> SourceHint(2, "音轨可能不支持")
@@ -35,7 +35,7 @@ fun sourceHint(source: MediaSource, engine: String, caps: AudioCaps): SourceHint
     return hint
 }
 
-private fun audioMime(codec: String): String? = when {
+internal fun audioMimeForSourceHint(codec: String): String? = when {
     codec.contains("eac3") || codec.contains("e-ac-3") -> if (codec.contains("joc") || codec.contains("atmos")) "audio/eac3-joc" else "audio/eac3"
     codec.contains("truehd") || codec.contains("mlp") -> "audio/true-hd"
     codec.contains("dts") && (codec.contains("uhd") || codec.contains("p2")) -> "audio/vnd.dts.uhd;profile=p2"
@@ -46,6 +46,8 @@ private fun audioMime(codec: String): String? = when {
     codec.contains("aac") || codec.contains("mp4a") -> "audio/mp4a-latm"
     codec.contains("opus") -> "audio/opus"
     codec.contains("mp3") || codec.contains("mpeg") -> "audio/mpeg"
+    codec.contains("flac") -> "audio/flac"
+    codec.contains("vorbis") -> "audio/vorbis"
     codec.contains("pcm") || codec.contains("lpcm") -> "audio/raw"
     else -> null
 }

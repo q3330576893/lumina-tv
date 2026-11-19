@@ -114,19 +114,19 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             LuminaTheme {
-                AuroraBackground {
-                    var bootDone by remember { mutableStateOf(AppRuntime.session == null) }
-                    val serverName = AppRuntime.prefs?.serverName
-                        ?: AppRuntime.session?.serverName
-                        ?: "Emby"
-                    LaunchedEffect(Unit) {
-                        if (!bootDone) {
-                            val startedAt = System.currentTimeMillis()
-                            val elapsed = System.currentTimeMillis() - startedAt
-                            if (elapsed < 600) delay(600 - elapsed)
-                            bootDone = true
-                        }
+                var bootDone by remember { mutableStateOf(AppRuntime.session == null) }
+                val serverName = AppRuntime.prefs?.serverName
+                    ?: AppRuntime.session?.serverName
+                    ?: "Emby"
+                LaunchedEffect(Unit) {
+                    if (!bootDone) {
+                        val startedAt = System.currentTimeMillis()
+                        val elapsed = System.currentTimeMillis() - startedAt
+                        if (elapsed < 600) delay(600 - elapsed)
+                        bootDone = true
                     }
+                }
+                AuroraBackground(active = !bootDone) {
                     Crossfade(
                         targetState = bootDone,
                         animationSpec = tween(260),
@@ -324,6 +324,7 @@ private fun AppRoot(
                         com.lumina.tv.data.LibraryCache.clear()
                         replaceRoot(Screen.Login)
                     },
+                    active = target == screen,
                 )
             }
 

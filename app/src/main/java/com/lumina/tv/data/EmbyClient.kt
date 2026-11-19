@@ -27,12 +27,16 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import android.net.Uri
 import java.util.concurrent.TimeUnit
+
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.lumina.tv.diag.NetLog
 import com.lumina.tv.diag.PageLog
+
+internal fun shouldCacheChapterResult(independentSucceeded: Boolean, userItemSucceeded: Boolean): Boolean =
+    independentSucceeded || userItemSucceeded
 
 class EmbyException(message: String, val httpStatus: Int? = null) : Exception(message)
 
@@ -67,6 +71,7 @@ class EmbyClient(
 ) {
     @Volatile var lastPlaybackInfoJson: String? = null
         private set
+    /** Legacy diagnostic value; UI totals must use ItemsPage.totalRecordCount. */
     @Volatile var lastTotalRecordCount: Int? = null
         private set
     @Volatile var lastApiFailure: String? = null
@@ -99,7 +104,6 @@ class EmbyClient(
     private val trickplayMutex = Mutex()
     private val trickplayFiles = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
     private var trickplayBytes = 0L
-    private val unavailableTrickplay = ConcurrentHashMap.newKeySet<String>()
     private val playbackTargetCache = ConcurrentHashMap<TrackAwarePlaybackKey, Pair<Long, PlaybackTarget>>()
     // Diagnostic state lives with the client so it survives the next-episode screen replacement.
     private class PrewarmAttempt(
@@ -388,11 +392,40 @@ class EmbyClient(
         filters: String? = null,
         fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProductionLocations,OriginalLanguage",
         requestTimeoutSeconds: Int? = null,
-    ): List<MediaItem> = withMetadataContext((requestTimeoutSeconds?.toLong() ?: 20L) * 1_000L) {
+    ): List<MediaItem> = getItemsPage(
+        parentId = parentId,
+        types = types,
+        sortBy = sortBy,
+        sortOrder = sortOrder,
+        limit = limit,
+        startIndex = startIndex,
+        searchTerm = searchTerm,
+        genre = genre,
+        personIds = personIds,
+        filters = filters,
+        fields = fields,
+        requestTimeoutSeconds = requestTimeoutSeconds,
+    ).items
+
+    suspend fun getItemsPage(
+        parentId: String? = null,
+        types: String? = null,
+        sortBy: String = "SortName",
+        sortOrder: String = "Ascending",
+        limit: Int = 40,
+        startIndex: Int = 0,
+        searchTerm: String? = null,
+        genre: String? = null,
+        personIds: String? = null,
+        filters: String? = null,
+        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProductionLocations,OriginalLanguage",
+        requestTimeoutSeconds: Int? = null,
+    ): ItemsPage = withMetadataContext((requestTimeoutSeconds?.toLong() ?: 20L) * 1_000L) {
         val params = mutableMapOf(
             "Recursive" to "true",
             "Limit" to limit.toString(),
             "StartIndex" to startIndex.toString(),
+            "EnableTotalRecordCount" to "true",
             "SortBy" to sortBy,
             "SortOrder" to sortOrder,
             "Fields" to fields,
@@ -406,9 +439,10 @@ class EmbyClient(
         if (personIds != null) params["PersonIds"] = personIds
         if (filters != null) params["Filters"] = filters
         val response = getJson(url("/Users/$userId/Items", params), timeoutSeconds = requestTimeoutSeconds)
-        lastTotalRecordCount = response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
+        val totalRecordCount = response.optInt("TotalRecordCount", -1).takeIf { it >= 0 }
+        lastTotalRecordCount = totalRecordCount
         val arr = response.optJSONArray("Items") ?: JSONArray()
-        parseItems(arr)
+        ItemsPage(parseItems(arr), totalRecordCount)
     }
 
     /** 分页读取指定 Emby 媒体库，避免首页预览的 30 条限制截断完整库。 */
@@ -538,15 +572,19 @@ class EmbyClient(
                 JSONObject(body).optJSONArray("Items") ?: JSONObject(body).optJSONArray("Chapters") ?: JSONArray()
             }
             parseChapters(chapters)
-        }.getOrDefault(emptyList())
-        (independent + catchingRequest {
+        }
+        val userItem = catchingRequest {
             val response = getJson(url("/Users/$userId/Items/$itemId", mapOf(
                 "Fields" to "Chapters",
             )))
             parseChapters(response.optJSONArray("Chapters") ?: JSONArray())
-        }.getOrDefault(emptyList()))
+        }
+        (independent.getOrDefault(emptyList()) + userItem.getOrDefault(emptyList()))
             .distinctBy { it.name to it.startMs }.sortedBy { it.startMs }
-            .also { currentCoroutineContext().ensureActive(); chapterCache[itemId] = it }
+            .also {
+                currentCoroutineContext().ensureActive()
+                if (shouldCacheChapterResult(independent.isSuccess, userItem.isSuccess)) chapterCache[itemId] = it
+            }
     }
 
     suspend fun getPlaybackMarkers(itemId: String): PlaybackMarkers = withMetadataContext {
@@ -654,9 +692,8 @@ class EmbyClient(
     /** Returns a JPEG frame from Emby's optional BIF file; failures are intentionally silent. */
     suspend fun getTrickplayFrame(itemId: String, positionMs: Long): ByteArray? = withMetadataContext {
         try {
-            if (synchronized(trickplayFiles) { itemId in unavailableTrickplay }) return@withMetadataContext null
             val file = trickplayMutex.withLock {
-                synchronized(trickplayFiles) { trickplayFiles[itemId] } ?: if (synchronized(trickplayFiles) { itemId in unavailableTrickplay }) null else run {
+                synchronized(trickplayFiles) { trickplayFiles[itemId] } ?: run {
                     val request = Request.Builder()
                         .url(url("/Videos/$itemId/index.bif"))
                         .header("X-Emby-Authorization", authHeader())
@@ -693,7 +730,6 @@ class EmbyClient(
                             val eldest = trickplayFiles.entries.iterator().let { if (it.hasNext()) it.next() else null } ?: break
                             trickplayBytes -= eldest.value.size
                             trickplayFiles.remove(eldest.key)
-                            unavailableTrickplay.remove(eldest.key)
                         }
                         trickplayFiles[itemId] = bytes
                         trickplayBytes += bytes.size
@@ -717,7 +753,6 @@ class EmbyClient(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            synchronized(trickplayFiles) { unavailableTrickplay.add(itemId) }
             null
         }
     }

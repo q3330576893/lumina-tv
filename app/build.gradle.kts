@@ -272,5 +272,13 @@ val b10Checks = tasks.register<JavaExec>("b10Checks") {
     mainClass.set("com.lumina.tv.B10Checks")
 }
 verifyOffline.configure { dependsOn(b10Checks) }
+val b11Checks = tasks.register<JavaExec>("b11Checks") {
+    group = "verification"
+    description = "B11 Home totals, lifecycle work, retryable caches and playback hint regressions."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.B11Checks")
+}
+verifyOffline.configure { dependsOn(b11Checks) }
 tasks.matching { it.name in setOf("check", "assemble", "assembleDebug", "assembleRelease", "bundle", "bundleDebug", "bundleRelease") }
     .configureEach { dependsOn(verifyOffline) }

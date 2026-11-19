@@ -12,6 +12,9 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
+internal fun tmdbExternalCacheIsFresh(cachedAtMs: Long, nowMs: Long, ttlMs: Long): Boolean =
+    nowMs >= cachedAtMs && nowMs - cachedAtMs < ttlMs
+
 /** Only top-level Movie/Series IDs belong to these TMDB namespaces. */
 internal fun tmdbMediaPath(type: String): String? = when (type) {
     "Movie" -> "movie"
@@ -58,13 +61,16 @@ object TmdbClient {
         .build()
 
     private val lookupCache = NullableRequestCache<TmdbInfo>(missTtlMs = 60_000L, maxEntries = 200)
-    private val externalIdsCache = LinkedHashMap<String, ExternalIds?>()
+    private data class CachedValue<T>(val cachedAtMs: Long, val value: T)
+    private val externalIdsCache = LinkedHashMap<String, CachedValue<ExternalIds>>()
     private val externalIdsNoHit = HashMap<String, Long>()
-    private val externalLinksCache = LinkedHashMap<String, ExternalLinks>()
+    private val externalLinksCache = LinkedHashMap<String, CachedValue<ExternalLinks>>()
     private val externalLinksNoHit = HashMap<String, Long>()
     @Volatile var lastRequestFailure: String? = null
         private set
     @Volatile private var externalLinkDiagnostic = JSONObject().put("status", "not_attempted").toString()
+
+    private const val EXTERNAL_POSITIVE_CACHE_TTL_MS = 300_000L
 
     fun externalLinkDiagnosticSnapshot(): String = externalLinkDiagnostic
 
@@ -80,7 +86,13 @@ object TmdbClient {
         if (tmdbMediaPath(type) == null) return@withThirdPartyMetadataContext null
         val key = "$type|$title|${year ?: 0}|${embyImdbId.orEmpty()}|${embyTmdbId.orEmpty()}|${embyTvdbId.orEmpty()}"
         synchronized(externalLinksCache) {
-            externalLinksCache[key]?.let { return@withThirdPartyMetadataContext it }
+            val cached = externalLinksCache[key]
+            if (cached != null) {
+                if (tmdbExternalCacheIsFresh(cached.cachedAtMs, System.currentTimeMillis(), EXTERNAL_POSITIVE_CACHE_TTL_MS)) {
+                    return@withThirdPartyMetadataContext cached.value
+                }
+                externalLinksCache.remove(key)
+            }
             if ((externalLinksNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withThirdPartyMetadataContext null
             externalLinksNoHit.remove(key)
         }
@@ -114,7 +126,8 @@ object TmdbClient {
             .put("tvdbId", result?.tvdbId ?: JSONObject.NULL)
             .toString()
         synchronized(externalLinksCache) {
-            if (result == null) externalLinksNoHit[key] = System.currentTimeMillis() + 300_000L else externalLinksCache[key] = result
+            if (result == null) externalLinksNoHit[key] = System.currentTimeMillis() + EXTERNAL_POSITIVE_CACHE_TTL_MS
+            else externalLinksCache[key] = CachedValue(System.currentTimeMillis(), result)
             if (externalLinksCache.size > 200) externalLinksCache.clear()
             if (externalLinksNoHit.size > 200) externalLinksNoHit.clear()
         }
@@ -143,7 +156,13 @@ object TmdbClient {
         val numericId = tmdbId.toLongOrNull()?.takeIf { it > 0 } ?: return@withThirdPartyMetadataContext null
         val key = "$path|$numericId"
         synchronized(externalIdsCache) {
-            if (externalIdsCache.containsKey(key)) return@withThirdPartyMetadataContext externalIdsCache[key]
+            val cached = externalIdsCache[key]
+            if (cached != null) {
+                if (tmdbExternalCacheIsFresh(cached.cachedAtMs, System.currentTimeMillis(), EXTERNAL_POSITIVE_CACHE_TTL_MS)) {
+                    return@withThirdPartyMetadataContext cached.value
+                }
+                externalIdsCache.remove(key)
+            }
             if ((externalIdsNoHit[key] ?: 0L) > System.currentTimeMillis()) return@withThirdPartyMetadataContext null
             externalIdsNoHit.remove(key)
         }
@@ -157,7 +176,8 @@ object TmdbClient {
         }?.takeIf { it.imdbId != null || it.tvdbId != null }
         currentCoroutineContext().ensureActive()
         synchronized(externalIdsCache) {
-            if (result == null) externalIdsNoHit[key] = System.currentTimeMillis() + 300_000L else externalIdsCache[key] = result
+            if (result == null) externalIdsNoHit[key] = System.currentTimeMillis() + EXTERNAL_POSITIVE_CACHE_TTL_MS
+            else externalIdsCache[key] = CachedValue(System.currentTimeMillis(), result)
             if (externalIdsCache.size > 200) externalIdsCache.clear()
             if (externalIdsNoHit.size > 200) externalIdsNoHit.clear()
         }

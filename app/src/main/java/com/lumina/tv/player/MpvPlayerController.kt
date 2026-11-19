@@ -19,6 +19,13 @@ import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.json.JSONArray
 
+internal fun shouldSyncMpvAudioTrack(
+    ready: Boolean,
+    becameReady: Boolean,
+    trackListChanged: Boolean,
+    hasPendingManualAudio: Boolean,
+): Boolean = ready && hasPendingManualAudio && (becameReady || trackListChanged)
+
 internal fun applyMpvHttpHeaders(
     headers: Map<String, String>,
     setOptionString: (String, String) -> Int,
@@ -142,6 +149,7 @@ class MpvPlayerController(
         val failureKind: FailureKind? = null,
         val subtitleFallbackToAuto: Boolean = false,
         val bufferedPositionMs: Long? = null,
+        val trackListChanged: Boolean = false,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -968,6 +976,7 @@ class MpvPlayerController(
                     if (subtitleDisabled) disableSubtitle() else applyPreferredSubtitleTrack()
                     if (preferredAudioIndex != null) applyPreferredAudioTrack()
                 }
+                emit(load, trackListChanged = true)
             }
             "end-file" -> Log.w(TAG, "${timestamp()} END_FILE reason: $value")
             "video-out-params" -> {
@@ -1081,12 +1090,14 @@ class MpvPlayerController(
         ended: Boolean = load.ended,
         error: String? = null,
         failureKind: FailureKind? = null,
+        trackListChanged: Boolean = false,
     ) {
         checkMainThread()
         if (!isActive(load) || load.terminal) return
         if (error != null) load.terminal = true
         onState(this, load.identity, State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec,
-            cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind, subtitleFallbackToAuto, bufferedPositionMs))
+            cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind, subtitleFallbackToAuto, bufferedPositionMs,
+            trackListChanged))
     }
 
     private companion object {

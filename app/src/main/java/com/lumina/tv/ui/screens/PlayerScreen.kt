@@ -170,6 +170,8 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.player.SubtitleRenderersFactory
 import com.lumina.tv.player.MpvPlayerController
+import com.lumina.tv.player.shouldSyncMpvAudioTrack
+import com.lumina.tv.player.audioMimeForSourceHint
 import com.lumina.tv.player.MpvAudioDiagnostics
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
@@ -269,25 +271,7 @@ private fun playbackNetworkMessage(error: Throwable): String {
     }
 }
 
-private fun audioMime(codec: String?): String? {
-    val value = codec.orEmpty().lowercase()
-    return when {
-        value.contains("eac3") || value.contains("e-ac-3") -> if (value.contains("joc") || value.contains("atmos")) "audio/eac3-joc" else "audio/eac3"
-        value.contains("truehd") || value.contains("mlp") -> "audio/true-hd"
-        value.contains("dts") && (value.contains("uhd") || value.contains("p2")) -> "audio/vnd.dts.uhd;profile=p2"
-        value.contains("dts") && (value.contains("hd") || value.contains("ma") || value.contains("lbr")) -> "audio/vnd.dts.hd"
-        value.contains("dts") || value.contains("dca") -> "audio/vnd.dts"
-        value.contains("ac3") -> "audio/ac3"
-        value.contains("ac4") -> "audio/ac4"
-        value.contains("aac") || value.contains("mp4a") -> "audio/mp4a-latm"
-        value.contains("opus") -> "audio/opus"
-        value.contains("mp3") || value.contains("mpeg") -> "audio/mpeg"
-        value.contains("pcm") || value.contains("lpcm") -> "audio/raw"
-        value.contains("flac") -> "audio/flac"
-        value.contains("vorbis") -> "audio/vorbis"
-        else -> null
-    }
-}
+private fun audioMime(codec: String?): String? = audioMimeForSourceHint(codec.orEmpty())
 
 
 private fun media3AudioTracks(tracks: Tracks): List<MediaStream> = tracks.groups
@@ -540,11 +524,16 @@ fun PlayerScreen(
     fun matchDisplayFrameRate(surface: Surface?, fps: Float?) {
         if (AppRuntime.prefs?.matchDisplayFrameRate != true || Build.VERSION.SDK_INT < 30 || surface == null || fps == null || fps <= 0f) return
         runCatching {
-            surface.setFrameRate(
-                fps,
-                Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
-                Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS,
-            )
+            if (Build.VERSION.SDK_INT >= 31) {
+                surface.setFrameRate(
+                    fps,
+                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                    Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                surface.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+            }
         }.onFailure { failure ->
             PageLog.add("setFrameRate failed fps=$fps err=${failure.message ?: failure.javaClass.simpleName}")
         }
@@ -1555,8 +1544,20 @@ fun PlayerScreen(
                         }
                         playbackDiagnostics.activate(load, android.os.SystemClock.elapsedRealtime())
                         phaseTimes.put("identity", playbackDiagnostics.identityJson())
+                        val becameReady = state.ready && !mpvState.ready
+                        val pendingAudio = pendingManualAudio
+                        val mappedSource = playbackSource
+                        val hasPendingManualAudio = pendingAudio != null && mappedSource != null &&
+                            pendingAudio.first == com.lumina.tv.player.trackMemoryIdentity(mappedSource, "Audio")
                         mpvState = state
-                        if (state.ready) rememberConfirmedAudio(owner.currentAudioEmbyIndex())
+                        if (shouldSyncMpvAudioTrack(
+                                state.ready,
+                                becameReady,
+                                state.trackListChanged,
+                                hasPendingManualAudio,
+                            )) {
+                            rememberConfirmedAudio(owner.currentAudioEmbyIndex())
+                        }
                         if (state.subtitleNotice != null) {
                             playbackStatusNotice = state.subtitleNotice
                             if (state.subtitleNotice.contains("CERT_INVALID")) ServerCertificateErrors.record(c.baseUrl)

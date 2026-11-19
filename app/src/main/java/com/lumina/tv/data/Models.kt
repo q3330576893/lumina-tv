@@ -74,6 +74,8 @@ data class MediaPerson(
     val imageTag: String? = null,
 )
 
+data class ItemsPage(val items: List<MediaItem>, val totalRecordCount: Int?)
+
 data class MediaChapter(val name: String, val startMs: Long, val imageTag: String? = null)
 
 data class PlaybackMarkers(

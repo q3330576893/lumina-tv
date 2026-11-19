@@ -23,7 +23,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.delay
@@ -93,6 +92,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -134,6 +134,7 @@ import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.EmbyClient
+import com.lumina.tv.data.ItemsPage
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.data.WideImageCandidate
 import com.lumina.tv.data.wideImageCandidates
@@ -171,6 +172,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.withPermit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 
 private enum class HomeTab(val label: String) {
     Recommend("推荐"),
@@ -196,6 +199,7 @@ fun HomeScreen(
     onSettings: () -> Unit,
     onSwitchServer: () -> Unit,
     onLogout: () -> Unit,
+    active: Boolean = true,
 ) {
     val client = AppRuntime.client
     val userDataRevision = LibraryCache.userDataRevision
@@ -608,25 +612,26 @@ fun HomeScreen(
         try {
             val result = runCatching {
                 when (requestTab) {
-                    HomeTab.Movies -> c.getItems(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
-                    HomeTab.Series -> c.getItems(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
-                    HomeTab.Media -> requestLibrary?.let {
+                    HomeTab.Movies -> c.getItemsPage(types = "Movie", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
+                    HomeTab.Series -> c.getItemsPage(types = "Series", sortBy = "DateCreated", sortOrder = "Descending", limit = 120)
+                    HomeTab.Media -> {
+                        val library = checkNotNull(requestLibrary)
                         val (sb, so) = sortParams(requestSort, requestOrder)
                         PageLog.add("libraryQuery path=initial SortBy=$sb SortOrder=$so start=0 limit=$LIBRARY_PAGE_SIZE")
-                        c.getItems(parentId = it.id, types = collectionTypeToItemTypes(it.type),
+                        c.getItemsPage(parentId = library.id, types = collectionTypeToItemTypes(library.type),
                             sortBy = sb, sortOrder = so, limit = LIBRARY_PAGE_SIZE, startIndex = 0)
-                    }.orEmpty()
-                    else -> emptyList()
+                    }
+                    else -> ItemsPage(emptyList(), null)
                 }
             }
             currentCoroutineContext().ensureActive()
             if (userDataRevision != LibraryCache.userDataRevision) return@LaunchedEffect
             if (tab != requestTab || selectedLibrary != requestLibrary || librarySort != requestSort || librarySortOrder != requestOrder) return@LaunchedEffect
-            result.onSuccess { list ->
+            result.onSuccess { (list, totalCount) ->
                 LibraryCache.putBrowse(key, list, userDataRevision, fixedSample = requestTab == HomeTab.Media && requestSort == "random")
                 if (requestTab == HomeTab.Media) {
                     gridItems = list
-                    libraryTotalCount = AppRuntime.client?.lastTotalRecordCount
+                    libraryTotalCount = totalCount
                     gridNextIndex = list.size
                     gridHasMore = requestSort != "random" && list.size == LIBRARY_PAGE_SIZE
                     gridAppendFailed = false
@@ -859,6 +864,7 @@ fun HomeScreen(
                     item {
                         Hero(
                             items = heroItems,
+                            active = active,
                             currentIndex = heroIndex,
                             onPrevious = {
                                 if (heroItems.isNotEmpty()) {
@@ -931,6 +937,7 @@ fun HomeScreen(
                 tab == HomeTab.Media && selectedLibrary == null -> MediaLibrary(
                     views = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) },
                     contents = viewContents,
+                    counts = libraryCounts,
                     focusedLibraryId = focusedLibraryId,
                     onLibraryFocused = { focusedLibraryId = it },
                     onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition(libraryBrowseKey(it.id, librarySort, librarySortOrder)) },
@@ -1666,14 +1673,12 @@ private fun HomeLibraryRow(
                             Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(0.4f)
                                 .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f)))),
                         )
-                        counts[view.id]?.let { count ->
-                            Text(
-                                "$count 部",
-                                color = Color.White.copy(alpha = 0.6f),
-                                fontSize = 11.sp,
-                                modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 12.dp),
-                            )
-                        }
+                        Text(
+                            libraryCategoryCountLabel(counts[view.id], contents[view.id].orEmpty().size),
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 11.sp,
+                            modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 12.dp),
+                        )
                         if (focused) Box(Modifier.fillMaxSize().border(1.5.dp, Accent, shape))
                     }
                 }
@@ -1686,6 +1691,7 @@ private fun HomeLibraryRow(
 private fun MediaLibrary(
     views: List<LibraryView>,
     contents: Map<String, List<MediaItem>>,
+    counts: Map<String, Int?>,
     focusedLibraryId: String?,
     onLibraryFocused: (String) -> Unit,
     onOpenLibrary: (LibraryView) -> Unit,
@@ -1754,7 +1760,7 @@ private fun MediaLibrary(
                             Column(Modifier.align(Alignment.BottomStart).padding(16.dp)) {
                                 Text(v.name, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                 Text(
-                                    if (libraryItems.isEmpty()) "—" else "共 ${libraryItems.size} 部",
+                                    libraryCategoryCountLabel(counts[v.id], libraryItems.size),
                                     color = Color(0xCCFFFFFF),
                                     fontSize = 11.sp,
                                 )
@@ -1767,6 +1773,11 @@ private fun MediaLibrary(
         }
     }
 }
+
+internal fun libraryCategoryCountLabel(totalCount: Int?, sampleCount: Int): String =
+    totalCount?.let { "共 $it 部" }
+        ?: sampleCount.takeIf { it > 0 }?.let { "预览 $it 部" }
+        ?: "数量未知"
 
 @Composable
 private fun TopButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
@@ -1846,6 +1857,7 @@ private fun Hero(
     onItemUnavailable: (String) -> Unit,
     hazeState: HazeState,
     onComposed: (Boolean) -> Unit = {},
+    active: Boolean = true,
 ) {
     val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
@@ -1861,30 +1873,35 @@ private fun Hero(
         onDispose { onComposed(false) }
     }
     val context = LocalContext.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
     val detailFocus = remember { FocusRequester() }
     var focusedHeroAction by remember { mutableStateOf(HeroActionFocus.NONE) }
     var tmdbBackdrops by remember(items) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var tmdbResolvedIds by remember(items) { mutableStateOf<Set<String>>(emptySet()) }
-    LaunchedEffect(items) {
-        val pairs = items.map { media ->
-            async {
-                media.id to catchingRequest {
-                    TmdbClient.lookupHero(
-                        media.type,
-                        media.seriesName ?: media.name,
-                        media.year,
-                        media.providerIds["OriginalTitle"],
-                    )?.backdropUrl
-                }.getOrNull()
-            }
-        }.awaitAll()
-        tmdbBackdrops = pairs.mapNotNull { (id, url) ->
-            url?.takeIf(String::isNotBlank)?.let { id to it }
-        }.toMap()
-        tmdbResolvedIds = pairs.mapTo(mutableSetOf()) { it.first }
-        PageLog.add("heroBackdrop have=${tmdbBackdrops.size}/${items.size}")
+    LaunchedEffect(items, active, lifecycle) {
+        if (!active) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            if (tmdbResolvedIds.isNotEmpty()) return@repeatOnLifecycle
+            val pairs = items.map { media ->
+                async {
+                    media.id to catchingRequest {
+                        TmdbClient.lookupHero(
+                            media.type,
+                            media.seriesName ?: media.name,
+                            media.year,
+                            media.providerIds["OriginalTitle"],
+                        )?.backdropUrl
+                    }.getOrNull()
+                }
+            }.awaitAll()
+            tmdbBackdrops = pairs.mapNotNull { (id, url) ->
+                url?.takeIf(String::isNotBlank)?.let { id to it }
+            }.toMap()
+            tmdbResolvedIds = pairs.mapTo(mutableSetOf()) { it.first }
+            PageLog.add("heroBackdrop have=${tmdbBackdrops.size}/${items.size}")
+        }
     }
 
     fun heroImageCandidates(heroItem: MediaItem?): List<WideImageCandidate> = heroItem?.let { media ->
@@ -1990,21 +2007,29 @@ private fun Hero(
             transitionJob?.cancel()
         }
     }
-    var lastInteractionAt by remember(items) { mutableStateOf(System.currentTimeMillis()) }
+    var lastInteractionAt by remember(items) { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
     val displayItem = if (topImage != null && topLoaded && wipeProgress.value >= 0.5f) {
         items.getOrNull(currentIndex) ?: item
     } else {
         items.firstOrNull { resolveHeroImage(it) == bottomImage } ?: item
     }
     val playAction = rememberPlayableItemAction(listOf(item.id, displayItem.id, currentIndex)) { target, _ -> onPlay(target) }
-    LaunchedEffect(items, playAction.resolving) {
-        if (items.size < 2) return@LaunchedEffect
-        while (true) {
-            delay(500)
-            if (!playAction.resolving && System.currentTimeMillis() - lastInteractionAt >= 10_000L) {
-                playAction.invalidate()
-                onNext()
-                lastInteractionAt = System.currentTimeMillis()
+    val currentPlayAction by rememberUpdatedState(playAction)
+    val advance by rememberUpdatedState(onNext)
+    LaunchedEffect(items, playAction.resolving, active, lifecycle) {
+        if (!active || items.size < 2 || playAction.resolving) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+            while (true) {
+                val remainingMs = 10_000L - (android.os.SystemClock.elapsedRealtime() - lastInteractionAt)
+                if (remainingMs > 0L) {
+                    delay(remainingMs)
+                } else {
+                    if (currentPlayAction.resolving) return@repeatOnLifecycle
+                    currentPlayAction.invalidate()
+                    advance()
+                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+                }
             }
         }
     }
@@ -2013,22 +2038,29 @@ private fun Hero(
         AppRuntime.client?.logoUrl(displayItem)?.takeIf { it.isNotBlank() }
     }
     var tmdbInfo by remember(displayItem.id) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
-    LaunchedEffect(displayItem.id) {
+    LaunchedEffect(displayItem.id, active, lifecycle) {
+        if (!active) return@LaunchedEffect
         if (embyLogo != null && (displayItem.communityRating ?: displayItem.rating) != null) return@LaunchedEffect
-        tmdbInfo = TmdbClient.lookupHero(displayItem.type, displayItem.seriesName ?: displayItem.name, displayItem.year, displayItem.providerIds["OriginalTitle"])
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            if (tmdbInfo == null) {
+                tmdbInfo = TmdbClient.lookupHero(displayItem.type, displayItem.seriesName ?: displayItem.name, displayItem.year, displayItem.providerIds["OriginalTitle"])
+            }
+        }
     }
     val titleLogo = embyLogo ?: tmdbInfo?.logoUrl
-    LaunchedEffect(currentIndex, items, client) {
-        if (items.size < 2) return@LaunchedEffect
-        val next = items[(currentIndex + 1) % items.size]
-        val nextImage = heroCandidatesById[next.id]?.firstOrNull()?.url ?: return@LaunchedEffect
-        if (isRejectedHeroImage(nextImage)) return@LaunchedEffect
-        val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
-        val prefetch = context.imageLoader.enqueue(request)
-        try {
-            prefetch.job.await()
-        } finally {
-            prefetch.dispose()
+    LaunchedEffect(currentIndex, items, client, active, lifecycle) {
+        if (!active || items.size < 2) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val next = items[(currentIndex + 1) % items.size]
+            val nextImage = heroCandidatesById[next.id]?.firstOrNull()?.url ?: return@repeatOnLifecycle
+            if (isRejectedHeroImage(nextImage)) return@repeatOnLifecycle
+            val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
+            val prefetch = context.imageLoader.enqueue(request)
+            try {
+                prefetch.job.await()
+            } finally {
+                prefetch.dispose()
+            }
         }
     }
     Box(
@@ -2045,10 +2077,10 @@ private fun Hero(
                     else -> return@onPreviewKeyEvent false
                 }
                 if (!shouldHeroConsumeCarouselDirection(focusedHeroAction, direction, items.size)) {
-                    lastInteractionAt = System.currentTimeMillis()
+                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
                     return@onPreviewKeyEvent false
                 }
-                lastInteractionAt = System.currentTimeMillis()
+                lastInteractionAt = android.os.SystemClock.elapsedRealtime()
                 playAction.invalidate()
                 if (direction == HeroDirectionKey.LEFT) onPrevious() else onNext()
                 true
@@ -2155,7 +2187,7 @@ private fun Hero(
                         }
                     },
                     onClick = {
-                        lastInteractionAt = System.currentTimeMillis()
+                        lastInteractionAt = android.os.SystemClock.elapsedRealtime()
                         if (displayItem.id == item.id) playAction.play(displayItem)
                     },
                 ) { focused ->
