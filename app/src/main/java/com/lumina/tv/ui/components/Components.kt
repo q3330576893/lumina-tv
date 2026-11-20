@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,6 +28,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -286,6 +290,30 @@ fun FocusSurface(
     ) { content(focused) }
 }
 
+@Composable
+internal fun ResumeRemovalPill(focusRequester: FocusRequester, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(17.dp)
+    FocusSurface(
+        modifier = Modifier.size(width = 84.dp, height = 34.dp),
+        corner = 17.dp,
+        scaleTo = 1.07f,
+        focusRequester = focusRequester,
+        onClick = onClick,
+    ) { focused ->
+        val tint = if (focused) Color(0xFFFFC5BD) else TextMain
+        Row(
+            Modifier.fillMaxSize()
+                .background(Brush.verticalGradient(listOf(Color(0x38FFFFFF), Color(0x0DFFFFFF))), shape)
+                .border(if (focused) 1.5.dp else 0.5.dp, tint.copy(alpha = if (focused) 0.9f else 0.36f), shape),
+            horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Rounded.DeleteOutline, contentDescription = null, tint = tint, modifier = Modifier.size(15.dp))
+            Text("移除", color = tint, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
 /** 海报卡片：竖版封面 + 进度条 + 标题。 */
 @Composable
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
@@ -473,13 +501,15 @@ fun EmptyView(text: String, modifier: Modifier = Modifier) {
 
 @Composable
 fun QrCode(content: String, size: Dp = 200.dp) {
-    val bitmap: ImageBitmap? = remember(content) { runCatching { generateQr(content).asImageBitmap() }.getOrNull() }
+    val pixels = with(androidx.compose.ui.platform.LocalDensity.current) { size.roundToPx() }
+    val bitmap: ImageBitmap? = remember(content, pixels) {
+        runCatching { generateQr(content, pixels).asImageBitmap() }.getOrNull()
+    }
     Box(
         Modifier
             .size(size)
             .clip(RoundedCornerShape(Radius.m))
-            .background(Color.White)
-            .padding(12.dp),
+            .background(Color.White),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {
@@ -493,9 +523,10 @@ fun QrCode(content: String, size: Dp = 200.dp) {
     }
 }
 
-private fun generateQr(text: String, px: Int = 640): Bitmap {
+private fun generateQr(text: String, px: Int): Bitmap {
     val hints = mapOf(
-        EncodeHintType.MARGIN to 1,
+        EncodeHintType.MARGIN to 4,
+        EncodeHintType.ERROR_CORRECTION to com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.M,
         EncodeHintType.CHARACTER_SET to "UTF-8",
     )
     val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, px, px, hints)
@@ -503,7 +534,7 @@ private fun generateQr(text: String, px: Int = 640): Bitmap {
     for (y in 0 until px) {
         val off = y * px
         for (x in 0 until px) {
-            pixels[off + x] = if (matrix[x, y]) 0xFF0B1020.toInt() else 0xFFFFFFFF.toInt()
+            pixels[off + x] = if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
         }
     }
     val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)

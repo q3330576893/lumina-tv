@@ -83,6 +83,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import coil.compose.AsyncImage
 import com.google.zxing.integration.android.IntentIntegrator
 import com.lumina.tv.AppRuntime
@@ -346,7 +349,6 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "登录"
-        if (AppRuntime.pairing == null) AppRuntime.startPairing(context)
     }
 
     if (!loginErrorDialog.isNullOrBlank()) AlertDialog(
@@ -413,7 +415,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                         onLogin = { submit() }, onScan = { launchScan() }, onHelp = { helpOpen = true },
                         pairNotice = pairNotice, onNoticeDismiss = { pairNotice = null },
                         loginFocusRequester = loginFocusRequester,
-                        onRefreshQr = { AppRuntime.refreshPairingUrl() },
+                        onRefreshQr = { scope.launch { AppRuntime.refreshPairingUrl(context, force = true) } },
                         passFocus = passFocusRequester,
                     )
                 }
@@ -433,7 +435,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                     onLogin = { submit() }, onScan = { launchScan() }, onHelp = { helpOpen = true },
                     pairNotice = pairNotice, onNoticeDismiss = { pairNotice = null },
                     loginFocusRequester = loginFocusRequester,
-                    onRefreshQr = { AppRuntime.refreshPairingUrl() },
+                    onRefreshQr = { scope.launch { AppRuntime.refreshPairingUrl(context, force = true) } },
                     passFocus = passFocusRequester,
                 )
                 Spacer(Modifier.height(24.dp))
@@ -623,10 +625,12 @@ private fun LoginCard(
     passFocus: FocusRequester,
 ) {
     var qrOpen by remember { mutableStateOf(false) }
+    var focusManualHost by remember { mutableStateOf(false) }
     var cardFocused by remember { mutableStateOf(false) }
     val hostFocusRequester = remember { FocusRequester() }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     val shape = RoundedCornerShape(28.dp)
     LaunchedEffect(pairArrivalTick) {
         if (pairArrivalTick > 0) qrOpen = false
@@ -635,6 +639,13 @@ private fun LoginCard(
     // Request focus after the Dialog has left composition, including its window focus restoration.
     LaunchedEffect(pairArrivalTick, qrOpen) {
         if (pairArrivalTick > 0 && !qrOpen) loginFocusRequester.requestFocus()
+    }
+    LaunchedEffect(focusManualHost, qrOpen) {
+        if (focusManualHost && !qrOpen) {
+            androidx.compose.runtime.withFrameNanos { }
+            runCatching { hostFocusRequester.requestFocus() }
+            focusManualHost = false
+        }
     }
     Column(
         modifier.shadow(20.dp, shape, clip = false).clip(shape)
@@ -681,56 +692,50 @@ private fun LoginCard(
         }
 
         if (qrOpen) Dialog(onDismissRequest = { qrOpen = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-          Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
-           Column(Modifier.widthIn(max = 520.dp).fillMaxWidth().padding(24.dp).shadow(20.dp, RoundedCornerShape(20.dp)).clip(RoundedCornerShape(20.dp)).background(Color(0xF20C0E16)).border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp)).padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (pairingUrl.isNotBlank()) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.clip(RoundedCornerShape(14.dp)).background(Color.White).padding(8.dp)) {
-                        QrCode(pairingUrl, size = 220.dp)
+            LaunchedEffect(lifecycle) {
+                lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                    while (true) {
+                        AppRuntime.refreshPairingUrl(context)
+                        delay(1_000L)
                     }
-                    Spacer(Modifier.width(14.dp))
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("手机扫码 → 填写 → 同步到电视", color = Ink, fontSize = 11.sp)
-                        Text(
-                            pairingUrl, color = VioletBright, fontSize = 9.sp, maxLines = 3,
-                            modifier = Modifier.clickable {
-                                clipboard.setText(AnnotatedString(pairingUrl))
-                                android.widget.Toast.makeText(context, "配对地址已复制", android.widget.Toast.LENGTH_SHORT).show()
-                            },
-                        )
-                        FocusSurface(Modifier.height(30.dp), corner = 15.dp, onClick = onRefreshQr) { focused ->
-                            Box(
-                                Modifier.height(30.dp)
-                                    .background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(15.dp))
-                                    .padding(horizontal = 12.dp),
-                                contentAlignment = Alignment.Center,
-                            ) { Text("刷新二维码", color = if (focused) VioletBright else Ink, fontSize = 10.sp) }
+                }
+            }
+            BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
+                val panelShape = RoundedCornerShape(20.dp)
+                val qrSize = minOf(220.dp, (maxWidth - 88.dp).coerceAtLeast(1.dp))
+                Column(
+                    Modifier.widthIn(max = 480.dp).fillMaxWidth().padding(20.dp)
+                        .heightIn(max = (maxHeight - 40.dp).coerceAtLeast(1.dp))
+                        .shadow(20.dp, panelShape).clip(panelShape)
+                        .background(Color(0xF20C0E16)).border(1.dp, Color(0x33FFFFFF), panelShape)
+                        .verticalScroll(rememberScrollState()).padding(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    if (pairingUrl.isNotBlank()) {
+                        QrCode(pairingUrl, size = qrSize)
+                        Text("手机与电视连接同一局域网，扫码后填写并同步。", color = Ink, fontSize = 12.sp)
+                        Text(pairingUrl, color = VioletBright, fontSize = 12.sp)
+                        Text("浏览器拦截 HTTP 时，可关闭此窗口，在电视上手动输入服务器地址。", color = InkSub, fontSize = 11.sp)
+                        AppRuntime.pairingRefreshNotice?.let { Text(it, color = VioletBright, fontSize = 12.sp) }
+                        TextButton(onClick = {
+                            clipboard.setText(AnnotatedString(pairingUrl))
+                            android.widget.Toast.makeText(context, "配对地址已复制", android.widget.Toast.LENGTH_SHORT).show()
+                        }) { Text("复制地址", color = VioletBright) }
+                    } else {
+                        Text(AppRuntime.pairingError ?: "正在获取局域网配对地址…", color = InkSub, fontSize = 12.sp)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        TextButton(onClick = onRefreshQr) {
+                            Text(if (pairingUrl.isNotBlank()) "刷新二维码" else "重试", color = VioletBright)
                         }
-                    }
-                }
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        AppRuntime.pairingError ?: "未连接局域网，配对服务暂不可用",
-                        color = InkSub, fontSize = 11.sp, modifier = Modifier.weight(1f),
-                    )
-                    FocusSurface(Modifier.height(30.dp), corner = 15.dp, onClick = onRefreshQr) { focused ->
-                        Box(
-                            Modifier.height(30.dp)
-                                .background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(15.dp))
-                                .padding(horizontal = 12.dp),
-                            contentAlignment = Alignment.Center,
-                        ) { Text("重试", color = if (focused) VioletBright else Ink, fontSize = 10.sp) }
+                        TextButton(onClick = {
+                            qrOpen = false
+                            focusManualHost = true
+                        }) { Text("手动输入", color = Ink) }
                     }
                 }
             }
-            FocusSurface(Modifier.height(34.dp), corner = 17.dp, onClick = { qrOpen = false }) { focused ->
-                Box(Modifier.height(34.dp).background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(17.dp)).padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
-                    Text("关闭", color = if (focused) VioletBright else Ink, fontSize = 11.sp)
-                }
-            }
-           }
-          }
         }
 
         // 协议

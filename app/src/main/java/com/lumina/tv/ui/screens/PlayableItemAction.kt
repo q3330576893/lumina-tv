@@ -1,11 +1,13 @@
 package com.lumina.tv.ui.screens
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -19,6 +21,7 @@ import com.lumina.tv.data.PlayableItemRequestGate
 import com.lumina.tv.data.PlayableItemResult
 import com.lumina.tv.diag.PageLog
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 class PlayableItemAction(val resolving: Boolean, val invalidate: () -> Unit, private val launch: (MediaItem, Boolean) -> Unit) {
@@ -29,26 +32,53 @@ private data class ReplayRequest(val ticket: Long, val result: PlayableItemResul
 
 /** Shared click admission, account/item validation, and explicit empty/completed-series UI. */
 @Composable
-fun rememberPlayableItemAction(contextKey: Any, onResolved: (MediaItem, Boolean) -> Unit): PlayableItemAction {
+fun rememberPlayableItemAction(contextKey: Any, active: Boolean = true, onResolved: (MediaItem, Boolean) -> Unit): PlayableItemAction {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val client = AppRuntime.client
     val account = AppRuntime.session
     val userId = client?.userId
     val server = client?.baseUrl
-    val requestContext = listOf(contextKey, client, account, userId, server)
-    val gate = remember { PlayableItemRequestGate() }
-    gate.updateContext(requestContext)
+    val requestContext = listOf(contextKey, client, account, userId, server, active)
+    val gate = remember(requestContext) { PlayableItemRequestGate().apply { updateContext(requestContext) } }
     var resolving by remember(requestContext) { mutableStateOf(false) }
+    var slow by remember(requestContext) { mutableStateOf(false) }
+    var lookupJob by remember(gate) { mutableStateOf<Job?>(null) }
     var replay by remember(requestContext) { mutableStateOf<ReplayRequest?>(null) }
     val currentOnResolved by rememberUpdatedState(onResolved)
-    DisposableEffect(gate) { onDispose { gate.updateContext(null) } }
+    DisposableEffect(gate) {
+        onDispose {
+            gate.updateContext(null)
+            lookupJob?.cancel()
+        }
+    }
+
+    fun cancelLookup() {
+        gate.cancel()
+        lookupJob?.cancel()
+        lookupJob = null
+        resolving = false
+        slow = false
+        replay = null
+    }
+    LaunchedEffect(active) { if (!active) cancelLookup() }
+    BackHandler(enabled = active && resolving) { cancelLookup() }
 
     fun current(ticket: Long) = gate.accepts(ticket) && AppRuntime.client === client &&
         AppRuntime.session === account && client?.userId == userId && client?.baseUrl == server
     fun dismissReplay() {
         replay?.let { gate.finish(it.ticket) }
         replay = null
+    }
+    if (active && resolving && slow) {
+        AlertDialog(
+            onDismissRequest = ::cancelLookup,
+            title = { Text("正在解析可播单集") },
+            text = { Text("片源响应较慢，仍在尝试。正在读取最新集数与观看进度，并检查候选单集是否有可用片源。") },
+            confirmButton = {
+                TextButton(onClick = ::cancelLookup) { Text("取消查找") }
+            },
+        )
     }
     replay?.let { request ->
         AlertDialog(
@@ -62,18 +92,17 @@ fun rememberPlayableItemAction(contextKey: Any, onResolved: (MediaItem, Boolean)
             dismissButton = { TextButton(onClick = ::dismissReplay) { Text("取消") } },
         )
     }
-    return PlayableItemAction(resolving || replay != null, invalidate = {
-        gate.updateContext(null)
-        resolving = false
-        replay = null
-    }) { item, fromStart ->
-        val ticket = gate.begin()
+    return PlayableItemAction(resolving || replay != null, invalidate = ::cancelLookup) { item, fromStart ->
+        val ticket = if (active) gate.begin() else null
         if (ticket != null) {
             resolving = true
-            scope.launch {
+            slow = false
+            lookupJob = scope.launch {
                 var keepTicket = false
                 try {
-                    val result = client?.resolvePlayableItem(item) ?: PlayableItemResult.Unavailable
+                    val result = resolveWithSlowNotice(onSlow = { if (current(ticket)) slow = true }) {
+                        client?.resolvePlayableItem(item) ?: PlayableItemResult.Unavailable
+                    }
                     if (current(ticket)) {
                         when (result) {
                             is PlayableItemResult.Ready -> {
@@ -94,7 +123,10 @@ fun rememberPlayableItemAction(contextKey: Any, onResolved: (MediaItem, Boolean)
                     PageLog.add("playableItem action=failed type=${failure.javaClass.simpleName}")
                     if (current(ticket)) Toast.makeText(context, "加载单集失败，请重试", Toast.LENGTH_LONG).show()
                 } finally {
-                    if (current(ticket)) resolving = false
+                    if (current(ticket)) {
+                        resolving = false
+                        slow = false
+                    }
                     if (!keepTicket) gate.finish(ticket)
                 }
             }

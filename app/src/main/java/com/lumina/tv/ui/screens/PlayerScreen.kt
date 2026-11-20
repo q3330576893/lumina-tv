@@ -43,6 +43,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -99,6 +100,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -114,6 +116,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
@@ -124,6 +127,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -345,6 +349,9 @@ fun PlayerScreen(
     var selectedSeasonId by remember(item.seriesId, item.seasonId) { mutableStateOf(item.seasonId) }
     var seasonsLoading by remember { mutableStateOf(false) }
     var episodesLoading by remember { mutableStateOf(false) }
+    var episodesLoadFailed by remember { mutableStateOf(false) }
+    var episodeRetry by remember { mutableIntStateOf(0) }
+    val episodePages = remember(item.seriesId, client, LibraryCache.userDataRevision) { EpisodePickerPages<MediaItem>() }
     var degraded by remember { mutableStateOf(false) }
     var audioDecodeMode by remember { mutableStateOf(AppRuntime.prefs?.audioDecodeMode ?: "auto") }
     var audioDecodeNotice by remember { mutableStateOf<String?>(null) }
@@ -361,8 +368,16 @@ fun PlayerScreen(
     }
     var softDecodeNoticeShown by remember(item.id) { mutableStateOf(false) }
     var rebuildRetry by remember(item.id) { mutableStateOf(false) }
-    // 用户手动选过内核、或已确认 media3 解不了时，把内核钉住，后续重载不再强行弹回 media3
+    // 保留用户本次播放明确选择的内核，后续重载不覆盖该选择。
     var enginePinned by remember(item.id) { mutableStateOf<String?>(null) }
+    val mpvInstalled = remember(context) {
+        context.applicationInfo.nativeLibraryDir?.let { directory ->
+            listOf("libmpv.so", "libplayer.so").all { java.io.File(directory, it).isFile }
+        } == true
+    }
+    var mpvInitializationFailed by remember { mutableStateOf(false) }
+    val mpvAvailable = mpvInstalled && !mpvInitializationFailed
+    var mpvMenuTrackRevision by remember { mutableIntStateOf(0) }
     // The resolved path selects the engine before loading; this is only the initial view.
     var activeEngine by remember(item.id) { mutableStateOf("media3") }
     var mpvBackend by remember(item.id) { mutableStateOf<MpvPlayerController?>(null) }
@@ -562,11 +577,13 @@ fun PlayerScreen(
     val seekBarFocus = remember { FocusRequester() }
     val speedFocus = remember { FocusRequester() }
     val episodeFocus = remember { FocusRequester() }
+    val episodeRetryFocus = remember { FocusRequester() }
     val menuFocus = remember { FocusRequester() }
     val speedFirstFocus = remember { FocusRequester() }
     val seasonFocuses = remember(item.seriesId) { mutableMapOf<String, FocusRequester>() }
     val episodeItemFocuses = remember(item.seriesId) { mutableMapOf<String, FocusRequester>() }
     var quickContentHasFocus by remember { mutableStateOf(false) }
+    val inputMode = LocalInputModeManager.current
     var restoreMenuFocusUntil by remember { mutableLongStateOf(0L) }
     var titleLogoFailed by remember(item.id) { mutableStateOf(false) }
 
@@ -1009,7 +1026,9 @@ fun PlayerScreen(
     fun audioSourceKey(): String = currentSourceId ?: playbackSource?.id ?: item.id
 
     fun canTryMpvPath(path: PlaybackPath? = currentPath): Boolean = path?.let {
-        selectPlaybackEngine(AppRuntime.prefs?.playerEngine, "mpv", false, false, it, pathFailures) == "mpv"
+        com.lumina.tv.player.mpvWasExplicitlyRequested(AppRuntime.prefs?.playerEngine, enginePinned) &&
+        selectPlaybackEngine(AppRuntime.prefs?.playerEngine, "mpv", it, pathFailures,
+            mpvInstalled && !mpvInitializationFailed) == "mpv"
     } == true
 
     fun audioMpvKey(): PlaybackPath? = currentPath?.copy(engine = "mpv")
@@ -1188,6 +1207,7 @@ fun PlayerScreen(
 
     fun handleMpvFailure(kind: MpvPlayerController.FailureKind, detail: String, generation: Int) {
         if (!isCurrentLoad(generation) || reloadPending) return
+        if (kind == MpvPlayerController.FailureKind.INITIALIZATION) mpvInitializationFailed = true
         if (kind == MpvPlayerController.FailureKind.CERT_INVALID) {
             showCertificateError("mpv")
             mpvBackend?.release("certificate-invalid")
@@ -1420,8 +1440,7 @@ fun PlayerScreen(
                     context, audioEncoding, defaultAudio?.channels ?: 2, defaultAudio?.sampleRate ?: 0, audioCaps,
                     codecMime,
                 )
-                // 音轨编码的能力判断留给实际播放；显式 soft 模式在 DV 规则之后优先 mpv。
-                // DV Profile 7 是双层封装，media3 解不了基底+增强层，直接交给 mpv
+                // Keep format and display capability in diagnostics; mpv requires an explicit engine choice.
                 val videoStreamForDv = target.source?.streams?.firstOrNull { it.type == "Video" }
                 val rangeType = videoStreamForDv?.videoRangeType.orEmpty().uppercase()
                 val isDolbyVision = rangeType.contains("DOVI") || videoStreamForDv?.dvProfile != null
@@ -1440,11 +1459,8 @@ fun PlayerScreen(
                 }, plannedAudio, audioDecodeMode, badHttpFallbackStage)
                 val displayHdrTypes = readDisplayHdrTypes(context)
                 val contentHdr = rangeType.takeUnless { isDolbyVision }
-                val preferMpvForUnsupportedHdr = contentHdr != null &&
-                    supportsContentHdr(displayHdrTypes, contentHdr) == false &&
-                    canTryMpvPath(path)
                 val selectedEngine = selectPlaybackEngine(AppRuntime.prefs?.playerEngine, enginePinned,
-                    isDvP7, isDolbyVision, path, pathFailures, preferMpvForUnsupportedHdr)
+                    path, pathFailures, mpvInstalled && !mpvInitializationFailed)
                 if (selectedEngine == null) {
                     updateStalled(false)
                     error = "当前片源的播放路径均已失败，请重试或更换片源、音轨"
@@ -1463,9 +1479,12 @@ fun PlayerScreen(
                     .put("videoRange", video?.videoRangeType ?: JSONObject.NULL)
                     .put("hwDv", DeviceCodecCapabilities.supportsDolbyVision)
                     .put("displayHdr", displayHdrDiagnostic(displayHdrTypes)?.let(::JSONArray) ?: JSONObject.NULL)
+                    .put("dvProfile7", isDvP7)
+                    .put("displaySupportsContentHdr", contentHdr?.let { supportsContentHdr(displayHdrTypes, it) } ?: JSONObject.NULL)
                     .put("engine", selectedEngine))
                 if (isDvP7 && !softDecodeNoticeShown) {
-                    audioDecodeNotice = "Dolby Vision Profile 7，已用 mpv 软解"
+                    audioDecodeNotice = if (selectedEngine == "mpv") "Dolby Vision Profile 7，已按你的选择使用 mpv"
+                        else "Dolby Vision Profile 7，先尝试 Media3；如无法播放可手动切换 mpv"
                     softDecodeNoticeShown = true
                 }
                 if (isDolbyVision && !isDvP7 && !DeviceCodecCapabilities.supportsDolbyVision) {
@@ -1546,6 +1565,7 @@ fun PlayerScreen(
                         playbackDiagnostics.activate(load, android.os.SystemClock.elapsedRealtime())
                         phaseTimes.put("identity", playbackDiagnostics.identityJson())
                         val becameReady = state.ready && !mpvState.ready
+                        if (becameReady || state.trackListChanged) mpvMenuTrackRevision++
                         val pendingAudio = pendingManualAudio
                         val mappedSource = playbackSource
                         val hasPendingManualAudio = pendingAudio != null && mappedSource != null &&
@@ -1778,6 +1798,7 @@ fun PlayerScreen(
 
     // One entry point for initial load, rebuild, engine switch and explicit reload.
     LaunchedEffect(exo, item.id, reloadKey) {
+        com.lumina.tv.ui.components.DetailPreviewPlayer.awaitRelease()
         loadSource(forceTranscode = reloadForceTranscode)
     }
 
@@ -2761,32 +2782,40 @@ fun PlayerScreen(
         seasonsLoading = false
     }
     var seasonChangePendingFocus by remember { mutableStateOf(false) }
-    LaunchedEffect(quickPanel, selectedSeasonId, item.seriesId) {
+    LaunchedEffect(quickPanel, selectedSeasonId, item.seriesId, episodePages, episodeRetry) {
         if (quickPanel != QuickPanel.EPISODES) return@LaunchedEffect
         val sid = item.seriesId ?: return@LaunchedEffect
-        episodesLoading = true
-        quickEpisodes = LibraryCache.episodesOf(sid, selectedSeasonId)
-            ?: catchingRequest { client?.getEpisodes(sid, selectedSeasonId) }.getOrDefault(null).orEmpty()
+        val c = client ?: return@LaunchedEffect
+        val seasonId = selectedSeasonId
+        episodesLoadFailed = false
+        val cached = episodePages.cached(seasonId) { LibraryCache.episodesOf(sid, seasonId) }
+        if (cached != null) {
+            quickEpisodes = cached
+            episodesLoading = false
+            return@LaunchedEffect
+        }
+        quickEpisodes = LibraryCache.episodesStaleOf(sid, seasonId).orEmpty()
+        episodesLoading = quickEpisodes.isEmpty()
+        val revision = LibraryCache.userDataRevision
+        val result = episodePages.fetch(seasonId, { c.getEpisodes(sid, seasonId) }) {
+            LibraryCache.putEpisodes(sid, seasonId, it, revision)
+        }
+        if (result.error == null) quickEpisodes = result.episodes
+        episodesLoadFailed = result.error != null
         episodesLoading = false
     }
-    LaunchedEffect(quickPanel, seasons) {
-        if (quickPanel == QuickPanel.NONE) return@LaunchedEffect
-        quickContentHasFocus = false
+    LaunchedEffect(quickPanel, seasons.firstOrNull()?.id, quickEpisodes.firstOrNull()?.id, episodesLoadFailed) {
+        if (quickPanel == QuickPanel.NONE || quickContentHasFocus || inputMode.inputMode != InputMode.Keyboard) return@LaunchedEffect
         val firstFocus = if (quickPanel == QuickPanel.SPEED) {
             speedFirstFocus
         } else {
             seasons.firstOrNull()?.let { seasonFocuses.getOrPut(it.id) { FocusRequester() } }
                 ?: quickEpisodes.firstOrNull()?.let { episodeItemFocuses.getOrPut(it.id) { FocusRequester() } }
+                ?: episodeRetryFocus.takeIf { episodesLoadFailed }
         }
-        val triggerFocus = if (quickPanel == QuickPanel.SPEED) speedFocus else episodeFocus
         if (firstFocus == null) return@LaunchedEffect
-        repeat(15) {
-            delay(50)
-            lastInteractionAt = android.os.SystemClock.elapsedRealtime()
-            runCatching { firstFocus.requestFocus() }
-            if (quickContentHasFocus) return@LaunchedEffect
-        }
-        runCatching { triggerFocus.requestFocus() }
+        withFrameNanos { }
+        if (!quickContentHasFocus) runCatching { firstFocus.requestFocus() }
     }
     LaunchedEffect(quickPanel, selectedSeasonId, quickEpisodes, episodesLoading, seasonChangePendingFocus) {
         if (quickPanel != QuickPanel.EPISODES) {
@@ -2794,18 +2823,17 @@ fun PlayerScreen(
             return@LaunchedEffect
         }
         if (!seasonChangePendingFocus || episodesLoading) return@LaunchedEffect
+        if (inputMode.inputMode != InputMode.Keyboard) {
+            seasonChangePendingFocus = false
+            return@LaunchedEffect
+        }
         val firstEpisode = quickEpisodes.firstOrNull() ?: run {
             seasonChangePendingFocus = false
             return@LaunchedEffect
         }
         val requester = episodeItemFocuses.getOrPut(firstEpisode.id) { FocusRequester() }
-        repeat(15) {
-            delay(50)
-            if (runCatching { requester.requestFocus(); true }.getOrDefault(false)) {
-                seasonChangePendingFocus = false
-                return@LaunchedEffect
-            }
-        }
+        withFrameNanos { }
+        runCatching { requester.requestFocus() }
         seasonChangePendingFocus = false
     }
 
@@ -2848,10 +2876,13 @@ fun PlayerScreen(
     fun closeQuickPanel(triggerFocus: FocusRequester) {
         restoreMenuFocusUntil = android.os.SystemClock.elapsedRealtime() + 300L
         quickPanel = QuickPanel.NONE
-        scope.launch {
-            delay(80)
-            runCatching { triggerFocus.requestFocus() }
-        }
+        runCatching { triggerFocus.requestFocus() }
+    }
+
+    fun dismissSpeedPanel() {
+        if (quickPanel != QuickPanel.SPEED) return
+        restoreMenuFocusUntil = android.os.SystemClock.elapsedRealtime() + 300L
+        quickPanel = QuickPanel.NONE
     }
 
     BackHandler {
@@ -3427,6 +3458,7 @@ fun PlayerScreen(
                         stepMs = seekStepMs,
                         onFocusedChange = { controlHasFocus = it },
                         onSeek = { target ->
+                            dismissSpeedPanel()
                             seekPlayerTo(target)
                         },
                     )
@@ -3459,7 +3491,7 @@ fun PlayerScreen(
                         if (desiredPlaying) "暂停" else "播放",
                         primary = true,
                         focusRequester = playFocus,
-                    ) { togglePlayback() }
+                    ) { dismissSpeedPanel(); togglePlayback() }
                 }
 
                 Box(Modifier.align(Alignment.TopStart).padding(start = 32.dp, top = 24.dp).widthIn(max = 320.dp)) {
@@ -3515,13 +3547,19 @@ fun PlayerScreen(
                     val hasEpisodeButton = item.seriesId != null
                     OsdIconButton(Icons.Rounded.FastForward, "倍速播放", speedFocus, playFocus, if (hasEpisodeButton) episodeFocus else menuFocus, playFocus, { controlHasFocus = it }) {
                         if (quickPanel == QuickPanel.SPEED) closeQuickPanel(speedFocus)
-                        else quickPanel = QuickPanel.SPEED
+                        else {
+                            quickContentHasFocus = false
+                            quickPanel = QuickPanel.SPEED
+                        }
                         optionMenu = false
                     }
                     if (hasEpisodeButton) {
                         OsdIconButton(Icons.Rounded.PlaylistPlay, "选集", episodeFocus, speedFocus, menuFocus, playFocus, { controlHasFocus = it }) {
                             if (quickPanel == QuickPanel.EPISODES) closeQuickPanel(episodeFocus)
-                            else quickPanel = QuickPanel.EPISODES
+                            else {
+                                quickContentHasFocus = false
+                                quickPanel = QuickPanel.EPISODES
+                            }
                             optionMenu = false
                         }
                     }
@@ -3552,7 +3590,12 @@ fun PlayerScreen(
                 )
                 if (quickPanel == QuickPanel.SPEED) {
                     LazyColumn(
-                        Modifier.heightIn(max = 250.dp),
+                        Modifier.heightIn(max = 250.dp)
+                            .onFocusChanged {
+                                if (it.hasFocus) quickContentHasFocus = true
+                                else if (quickContentHasFocus) dismissSpeedPanel()
+                            }
+                            .focusGroup(),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         items(SPEEDS.size) { index ->
@@ -3564,12 +3607,11 @@ fun PlayerScreen(
                                     .focusProperties {
                                         up = if (index == 0) triggerFocus else FocusRequester.Default
                                         down = if (index == SPEEDS.lastIndex) triggerFocus else FocusRequester.Default
-                                        left = speedItemFocuses[index]
-                                        right = speedItemFocuses[index]
+                                        left = playFocus
+                                        right = if (item.seriesId != null) episodeFocus else menuFocus
                                     },
                                 corner = 8.dp,
                                 scaleTo = 1.08f,
-                                onFocusChanged = { if (it) quickContentHasFocus = true },
                                 onClick = {
                                     selectUserSpeed(s)
                                     closeQuickPanel(speedFocus)
@@ -3627,7 +3669,6 @@ fun PlayerScreen(
                                                 episodeItemFocuses.getOrPut(quickEpisodes.first().id) { FocusRequester() }
                                             } else FocusRequester.Default
                                         }
-                                        .focusable()
                                         .onFocusChanged {
                                             seasonFocused = it.isFocused
                                             if (it.isFocused) quickContentHasFocus = true
@@ -3635,6 +3676,13 @@ fun PlayerScreen(
                                         .clickable {
                                             if (selectedSeasonId != season.id) {
                                                 seasonChangePendingFocus = true
+                                                val sid = item.seriesId
+                                                val cached = if (sid == null) null else episodePages.cached(season.id) {
+                                                    LibraryCache.episodesOf(sid, season.id)
+                                                }
+                                                quickEpisodes = cached ?: sid?.let { LibraryCache.episodesStaleOf(it, season.id) }.orEmpty()
+                                                episodesLoading = cached == null && quickEpisodes.isEmpty()
+                                                episodesLoadFailed = false
                                                 selectedSeasonId = season.id
                                             }
                                         },
@@ -3652,21 +3700,33 @@ fun PlayerScreen(
                             }
                         }
                     }
+                    if (episodesLoadFailed) {
+                        FocusSurface(
+                            modifier = Modifier.height(32.dp).fillMaxWidth(),
+                            focusRequester = episodeRetryFocus,
+                            onClick = {
+                                seasonChangePendingFocus = true
+                                episodeRetry++
+                            },
+                        ) {
+                            Text("剧集读取失败 · 点此重试", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = TextMain, fontSize = 12.sp)
+                        }
+                    }
                     Box(Modifier.weight(1f, fill = false)) {
-                        if (seasonsLoading || episodesLoading) {
+                        if (quickEpisodes.isEmpty() && (seasonsLoading || episodesLoading)) {
                             CircularProgressIndicator(
                                 modifier = Modifier.align(Alignment.Center).size(20.dp),
                                 color = Accent,
                                 strokeWidth = 2.dp,
                             )
-                        } else if (quickEpisodes.isEmpty()) {
+                        } else if (quickEpisodes.isEmpty() && !episodesLoadFailed) {
                             Text(
                                 "本季暂无集数",
                                 color = TextSub,
                                 fontSize = 12.sp,
                                 modifier = Modifier.align(Alignment.Center),
                             )
-                        } else {
+                        } else if (quickEpisodes.isNotEmpty()) {
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(5),
                                 modifier = Modifier.heightIn(max = if (seasons.isEmpty()) 250.dp else 205.dp),
@@ -3691,7 +3751,9 @@ fun PlayerScreen(
                                         scaleTo = 1.08f,
                                         onFocusChanged = { if (it) quickContentHasFocus = true },
                                         onClick = {
-                                            if (!active) {
+                                            if (active) {
+                                                closeQuickPanel(triggerFocus)
+                                            } else {
                                                 quickPanel = QuickPanel.NONE
                                                 reportStopInAppScope()
                                                 onPlayNext?.invoke(ep)
@@ -3739,6 +3801,8 @@ fun PlayerScreen(
             enter = fadeIn() + scaleIn(initialScale = 0.96f),
             exit = fadeOut() + scaleOut(targetScale = 0.98f),
         ) {
+            val menuMpv = mpvBackend.takeIf { activeEngine == "mpv" }
+            val mpvTracks = remember(menuMpv, mpvMenuTrackRevision, subtitlePreference) { menuMpv?.menuTracks() }
             OptionMenu(
                 exo = exo,
                 item = item,
@@ -3755,21 +3819,24 @@ fun PlayerScreen(
                     ?: mediaSources.firstOrNull { it.id == currentSourceId }?.subtitleStreams
                     ?: mediaSources.firstOrNull()?.subtitleStreams.orEmpty(),
                 subtitlePreference = subtitlePreference,
-                currentMpvSubtitleIndex = mpvBackend?.currentSubtitleEmbyIndex(),
-                currentMpvSubtitleDisabled = mpvBackend?.isSubtitleDisabled() == true,
+                currentMpvSubtitleIndex = mpvTracks?.subtitleIndex,
+                currentMpvSubtitleDisabled = mpvTracks?.subtitleDisabled == true,
                 audioStreams = playbackSource?.audioStreams
                     ?: mediaSources.firstOrNull { it.id == currentSourceId }?.audioStreams
                     ?: mediaSources.firstOrNull()?.audioStreams.orEmpty(),
-                selectedAudioStreamIndex = if (activeEngine == "mpv") mpvBackend?.currentAudioEmbyIndex() else selectedAudioStreamIndex,
+                selectedAudioStreamIndex = if (activeEngine == "mpv") mpvTracks?.audioIndex else selectedAudioStreamIndex,
                 audioMapping = audioMapping,
                 subtitleMapping = subtitleMapping,
-                mpvUncertainAudio = if (activeEngine == "mpv") mpvBackend?.uncertainAudioTracks().orEmpty() else emptyList(),
-                currentMpvAudioId = if (activeEngine == "mpv") mpvBackend?.currentPlayerAudioId() else null,
+                mpvUncertainAudio = mpvTracks?.uncertainAudio.orEmpty(),
+                currentMpvAudioId = mpvTracks?.playerAudioId,
                 onPlayerAudioSelected = { key, mpvId ->
                     // A real player track is selectable even without an Emby identity; never persist it.
                     pendingManualAudio = null
                     audioSelectionApplied = true
-                    if (activeEngine == "mpv" && mpvId != null) mpvBackend?.selectPlayerAudioTrack(mpvId)
+                    if (activeEngine == "mpv" && mpvId != null) {
+                        mpvBackend?.selectPlayerAudioTrack(mpvId)
+                        mpvMenuTrackRevision++
+                    }
                     if (activeEngine == "media3" && key != null) {
                         val supported = exo.currentTracks.groups.any { it.mediaTrackGroup == key.group &&
                             key.index in 0 until it.length && it.isTrackSupported(key.index) }
@@ -3800,9 +3867,10 @@ fun PlayerScreen(
                             PageLog.add("trackSelection action=unresolved embyIndex=$streamIndex")
                         } else if (activeEngine == "mpv") {
                             mpvBackend?.setAudioTrack(streamIndex)
+                            mpvMenuTrackRevision++
                             rememberConfirmedAudio(mpvBackend?.currentAudioEmbyIndex())
                         } else if (unsupported) {
-                            audioDecodeNotice = "本机不支持所选音轨，正在尝试软解内核"
+                            audioDecodeNotice = "本机不支持所选音轨，正在尝试兼容播放路径"
                             PageLog.add("audioCapability action=manual-unsupported index=$streamIndex")
                             requestAudioRecovery("manual-unsupported")
                         } else if (override != null && exo.currentTracks.groups.any { group ->
@@ -3897,16 +3965,12 @@ fun PlayerScreen(
                     audioDecodeMode = mode
                     AppRuntime.prefs?.audioDecodeMode = mode
                     audioDecodeNotice = when (mode) {
-                        "soft" -> "全部音轨将在本地软解（已切到 mpv）"
+                        "soft" -> if (activeEngine == "mpv") "全部音轨将在 mpv 本地软解"
+                            else "使用本地软解时，请在「播放内核」中选择 mpv"
                         "passthrough" -> "已尝试音频直通（设备报告支持，实际输出以电视/功放为准）"
                         else -> "已切换到自动音频解码"
                     }
-                    // 显式选择才切内核：默认永远是 media3，避免"什么都用 MPV 转圈"
-                    when (mode) {
-                        "soft" -> enginePinned = "mpv"
-                        "passthrough" -> enginePinned = "media3"
-                        else -> enginePinned = null
-                    }
+                    if (mode == "passthrough") enginePinned = "media3"
                     engineSwitchTrace.add("audio-decode-mode=$mode")
                     reloadForceTranscode = false
                     requestPlaybackReload(sessionGeneration)
@@ -3916,16 +3980,17 @@ fun PlayerScreen(
                     AppRuntime.prefs?.seekStepSeconds = it
                 },
                 onSwitchEngine = {
-                    error = "正在切换播放内核…"
-                    val engines = listOf("media3", "mpv")
-                    if (engines.size > 1) {
-                        val next = engines[(engines.indexOf(activeEngine).coerceAtLeast(0) + 1) % engines.size]
+                    val next = if (activeEngine == "mpv") "media3" else "mpv"
+                    if (next == "media3" || mpvAvailable) {
+                        beginManualAttempt()
+                        closeOptionMenu()
                         enginePinned = next
                         reloadForceTranscode = false
+                        error = "正在切换播放内核…"
                         requestPlaybackReload(sessionGeneration)
                     }
                 },
-                onlyMedia3Available = false,
+                onlyMedia3Available = !mpvAvailable,
                 onResizeMode = { resizeMode = it },
                 onSwitchSource = { sid ->
                     closeOptionMenu()

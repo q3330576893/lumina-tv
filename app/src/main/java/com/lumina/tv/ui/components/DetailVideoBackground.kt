@@ -4,7 +4,6 @@ import android.net.Uri
 import android.view.TextureView
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,23 +28,22 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.lumina.tv.data.PreviewVideoCache
 import com.lumina.tv.data.PreviewCacheRecovery
 import com.lumina.tv.data.previewResourceKey
+import com.lumina.tv.data.catchingRequest
+import com.lumina.tv.data.readCancellable
+import com.lumina.tv.data.withRequestBudget
 import com.lumina.tv.diag.PageLog
-import com.lumina.tv.player.PlayerLifecycle
 import com.lumina.tv.player.detailPreviewShouldPlay
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okio.Buffer
@@ -79,7 +77,7 @@ fun DetailVideoBackground(
             return@LaunchedEffect
         }
 
-        delay(1_500)
+        delay(300)
         val scheme = Uri.parse(url).scheme?.lowercase()
         probeResult = when {
             scheme == "file" || scheme == "content" -> "valid"
@@ -132,263 +130,150 @@ private fun DetailVideoPlayback(
     loopWholeItem: Boolean,
     modifier: Modifier,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var firstFrame by remember(url, mediaKey) { mutableStateOf(false) }
-    var failed by remember(url, mediaKey) { mutableStateOf(false) }
-    val recovery = remember(url, mediaKey) { PreviewCacheRecovery() }
-    var bypassCache by remember(url, mediaKey) { mutableStateOf(false) }
-    val cachedBytesRead = remember(url, mediaKey, bypassCache) { java.util.concurrent.atomic.AtomicLong(0L) }
-    var loopStartMs by remember(url) { mutableStateOf(0L) }
-    var loopEndMs by remember(url) { mutableStateOf(0L) }
-    var staticBytesLoaded by remember(url) { mutableStateOf(0L) }
-    var staticBitrateEstimate by remember(url) { mutableStateOf(0L) }
-    val isStaticFallback = remember(url) { Uri.parse(url).getQueryParameter("static") == "true" }
-    val playerState = remember { mutableStateOf<ExoPlayer?>(null) }
+    val context = androidx.compose.ui.platform.LocalContext.current.applicationContext
     val hostLifecycleOwner = LocalLifecycleOwner.current
-    fun releasePlayer(reason: String) {
-        val oldPlayer = playerState.value ?: return
-        playerState.value = null
-        oldPlayer.clearVideoSurface()
-        oldPlayer.release()
-        PlayerLifecycle.registry.released(oldPlayer, reason)
-    }
-    // Install ownership even before the first LaunchedEffect creates a player. Navigation can
-    // remove the preview between creation and the following recomposition.
-    DisposableEffect(playerState) {
-        onDispose { releasePlayer("detail-preview-disposed") }
-    }
-    LaunchedEffect(url, mediaKey, bypassCache) {
-        releasePlayer("detail-preview-replaced")
-        firstFrame = false
-        if (recovery.shouldRemove(freshFrame = false)) PreviewVideoCache.remove(context, mediaKey)
-        val httpClient = requestClient ?: OkHttpClient.Builder()
-            .connectTimeout(4, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .build()
-        val httpFactory = OkHttpDataSource.Factory(httpClient)
-            .setUserAgent(PREVIEW_USER_AGENT)
-            .setDefaultRequestProperties(requestHeaders)
-        val dataSourceFactory = if (cacheAllowed && !bypassCache) {
-            CacheDataSource.Factory()
-                .setCache(PreviewVideoCache.get(context))
-                .setUpstreamDataSourceFactory(httpFactory)
-                .setCacheKeyFactory { mediaKey }
-                .setEventListener(object : CacheDataSource.EventListener {
-                    override fun onCachedBytesRead(cacheSizeBytes: Long, cachedBytes: Long) { cachedBytesRead.addAndGet(cachedBytes) }
-                    override fun onCacheIgnored(reason: Int) = Unit
-                })
-        } else httpFactory
-        val builder = MediaItem.Builder().setUri(url)
-        if (url.contains(".m3u8", true)) builder.setMimeType(MimeTypes.APPLICATION_M3U8)
-        if (cacheAllowed && !bypassCache) builder.setCustomCacheKey(mediaKey)
-        val mediaItem = builder.build()
-        val nextPlayer = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory))
-            .build()
-            .apply {
-                PlayerLifecycle.registry.created(this, "media3", "detail-preview")
-                addAnalyticsListener(object : AnalyticsListener {
-                    override fun onVideoDecoderInitialized(
-                        eventTime: AnalyticsListener.EventTime, decoderName: String,
-                        initializedTimestampMs: Long, initializationDurationMs: Long,
-                    ) { PlayerLifecycle.registry.decoderInitialized(this@apply, decoderName) }
-                    override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
-                        PlayerLifecycle.registry.decoderReleased(this@apply, decoderName)
-                    }
-                })
-                volume = 0f
-                setMediaItem(mediaItem)
-            }
-        playerState.value = nextPlayer
-    }
-
-    val player = playerState.value ?: return
     var hostResumed by remember(hostLifecycleOwner) {
         mutableStateOf(hostLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
     val previewShouldPlay = detailPreviewShouldPlay(playing, hostResumed)
-    val previewShouldPlayCurrent by rememberUpdatedState(previewShouldPlay)
-    var videoAspectRatio by remember(player) { mutableFloatStateOf(0f) }
+    val playingRequested by rememberUpdatedState(playing)
+    val publishStatus by rememberUpdatedState(onStatus)
+    val recovery = remember(url, mediaKey) { PreviewCacheRecovery() }
+    var bypassCache by remember(url, mediaKey) { mutableStateOf(false) }
 
-    DisposableEffect(hostLifecycleOwner, player) {
-        val observer = LifecycleEventObserver { _, event ->
-            val resumed = hostLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
-            hostResumed = resumed
-            if (!resumed && (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP)) {
-                player.pause()
-                PageLog.add("detailPreview lifecycle event=$event action=pause")
-            }
-        }
-        hostLifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { hostLifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-                if (videoSize.width > 0 && videoSize.height > 0) {
-                    videoAspectRatio = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
-                }
-            }
-
-            override fun onRenderedFirstFrame() {
-                firstFrame = true
-                if (recovery.shouldRemove(freshFrame = true)) PreviewVideoCache.remove(context, mediaKey)
-                onStatus("play")
-                if (isStaticFallback) {
-                    PageLog.add("detailPreview stage=static-startup bitrate=${staticBitrateEstimate}bps bytes=${staticBytesLoaded}")
-                }
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_ENDED && loopWholeItem) {
-                    player.seekTo(0L)
-                    return
-                }
-                if (playbackState == Player.STATE_READY) {
-                    val duration = player.duration.takeIf { it > 0L }
-                    loopStartMs = if (loopWholeItem) 0L else
-                        (startAtMs ?: duration?.times(22)?.div(100) ?: 0L)
-                            .coerceAtMost((duration ?: Long.MAX_VALUE).coerceAtLeast(1L) - 1L)
-                    loopEndMs = if (loopWholeItem) duration ?: Long.MAX_VALUE else
-                        minOf(loopStartMs + LOOP_WINDOW_MS, duration ?: Long.MAX_VALUE)
-                    if (player.currentPosition < loopStartMs || player.currentPosition >= loopEndMs) {
-                        player.seekTo(loopStartMs)
-                    }
-                }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                val cacheReadFailure = !bypassCache && generateSequence<Throwable>(error) { it.cause }.any {
-                    it is Cache.CacheException || it is FileDataSource.FileDataSourceException
-                }
-                val malformedCachedInput = cachedBytesRead.get() > 0L && error.errorCode in setOf(
-                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-                    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
-                    PlaybackException.ERROR_CODE_DECODING_FAILED,
-                )
-                if (cacheAllowed && recovery.retry(cacheReadFailure, malformedCachedInput)) {
-                    bypassCache = true
-                    PageLog.add("detailPreview stage=$stage cache-retry=upstream-once")
-                    return
-                }
-                failed = true
-                val cause = (error.cause?.toString() ?: error.message.orEmpty()).lineSequence().firstOrNull().orEmpty().take(120)
-                PageLog.add("detailPreview stage=$stage error=${error.errorCodeName} cause=$cause")
-                onStatus("skip=playback-failed cause=$cause")
-            }
-        }
-        player.addListener(listener)
-        onDispose {
-            player.removeListener(listener)
-        }
-    }
-
-    DisposableEffect(player, isStaticFallback) {
-        val listener = object : AnalyticsListener {
-            override fun onBandwidthEstimate(
-                eventTime: AnalyticsListener.EventTime,
-                totalLoadTimeMs: Int,
-                totalBytesLoaded: Long,
-                bitrateEstimate: Long,
-            ) {
-                if (isStaticFallback) {
-                    staticBytesLoaded = totalBytesLoaded
-                    staticBitrateEstimate = bitrateEstimate
-                }
-            }
-        }
-        player.addAnalyticsListener(listener)
-        onDispose { player.removeAnalyticsListener(listener) }
-    }
-
-    LaunchedEffect(player, previewShouldPlay, failed) {
-        if (previewShouldPlay && !failed) {
-            if (player.playbackState == Player.STATE_IDLE) player.prepare()
-            player.play()
-        } else player.pause()
-    }
-
-    LaunchedEffect(player, previewShouldPlay, firstFrame, failed) {
-        if (stage != "hls" || !previewShouldPlay || firstFrame || failed) return@LaunchedEffect
-        delay(HLS_FIRST_FRAME_TIMEOUT_MS)
-        if (!firstFrame && !failed) {
-            failed = true
-            PageLog.add("detailPreview stage=hls error=STARTUP_TIMEOUT cause=No first frame within ${HLS_FIRST_FRAME_TIMEOUT_MS}ms")
-            onStatus("skip=playback-failed")
-        }
-    }
-
-    LaunchedEffect(player, previewShouldPlay, failed) {
-        if (failed) return@LaunchedEffect
-        if (!firstFrame) onStatus("prep")
-        while (true) {
-            delay(250)
-            if (previewShouldPlay && player.playbackState == Player.STATE_READY && player.currentPosition >= loopEndMs) {
-                player.seekTo(loopStartMs)
-            }
-        }
-    }
-
-    if (!failed) {
-        BoxWithConstraints(
-            modifier = modifier.fillMaxSize().clipToBounds().graphicsLayer {
-                alpha = if (firstFrame && previewShouldPlay) 1f else 0f
-            },
-            contentAlignment = Alignment.Center,
-        ) {
-            val containerAspectRatio = if (maxHeight.value > 0f) maxWidth.value / maxHeight.value else videoAspectRatio
-            val videoModifier = if (videoAspectRatio > 0f && videoAspectRatio > containerAspectRatio) {
-                Modifier.fillMaxWidth().aspectRatio(videoAspectRatio)
-            } else if (videoAspectRatio > 0f) {
-                Modifier.fillMaxHeight().aspectRatio(videoAspectRatio)
-            } else {
-                Modifier.fillMaxSize()
-            }
-            AndroidView(
-                modifier = videoModifier,
-                factory = { ctx ->
-                    TextureView(ctx).apply {
-                        isFocusable = false
-                        isFocusableInTouchMode = false
-                        importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                        surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                            override fun onSurfaceTextureAvailable(
-                                surface: android.graphics.SurfaceTexture,
-                                width: Int,
-                                height: Int,
-                            ) {
-                                player.setVideoTextureView(this@apply)
-                                if (previewShouldPlayCurrent) player.play() else player.pause()
-                            }
-
-                            override fun onSurfaceTextureSizeChanged(
-                                surface: android.graphics.SurfaceTexture,
-                                width: Int,
-                                height: Int,
-                            ) = Unit
-
-                            override fun onSurfaceTextureDestroyed(surface: android.graphics.SurfaceTexture): Boolean {
-                                player.clearVideoTextureView(this@apply)
-                                return true
-                            }
-
-                            override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) = Unit
-                        }
-                    }
+    // A retry owns a new texture and first-frame state along with its player.
+    key(url, mediaKey, bypassCache, startAtMs, loopWholeItem) {
+        var firstFrame by remember { mutableStateOf(false) }
+        var surfaceAttached by remember { mutableStateOf(false) }
+        var failed by remember { mutableStateOf(false) }
+        var videoAspectRatio by remember { mutableFloatStateOf(0f) }
+        val cachedBytesRead = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+        val controller = remember {
+            DetailPreviewPlayer(
+                loopWholeItem, startAtMs,
+                onSurfaceChanged = { attached ->
+                    surfaceAttached = attached
+                    firstFrame = false
+                    if (attached) publishStatus("prep") else publishStatus("paused")
                 },
-                update = { view ->
-                    view.isFocusable = false
-                    view.isFocusableInTouchMode = false
-                    if (view.isAvailable) player.setVideoTextureView(view)
-                },
-                onRelease = { view ->
-                    view.surfaceTextureListener = null
-                    if (playerState.value === player) player.clearVideoTextureView(view)
+                onFirstFrame = { firstFrame = true },
+                onVideoSize = { videoAspectRatio = it },
+                onError = { error ->
+                    val cacheReadFailure = error != null && generateSequence<Throwable>(error) { it.cause }.any {
+                        it is Cache.CacheException || it is FileDataSource.FileDataSourceException
+                    }
+                    val malformedCachedInput = cachedBytesRead.get() > 0L && error?.errorCode in setOf(
+                        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+                        PlaybackException.ERROR_CODE_DECODING_FAILED,
+                    )
+                    if (cacheAllowed && synchronized(recovery) { recovery.retry(cacheReadFailure, malformedCachedInput) }) {
+                        bypassCache = true
+                        publishStatus("prep")
+                        PageLog.add("detailPreview stage=$stage cache-retry=upstream-once")
+                    } else {
+                        failed = true
+                        val cause = (error?.cause?.toString() ?: error?.message.orEmpty())
+                            .lineSequence().firstOrNull().orEmpty().take(120)
+                        PageLog.add("detailPreview stage=$stage error=${error?.errorCodeName} cause=$cause")
+                        publishStatus("skip=playback-failed cause=$cause")
+                    }
                 },
             )
+        }
+        val usingCache = cacheAllowed && !bypassCache
+        DisposableEffect(controller) {
+            controller.start(
+                build = { looper ->
+                    if (!usingCache && synchronized(recovery) { recovery.shouldRemove(freshFrame = false) }) {
+                        PreviewVideoCache.remove(context, mediaKey)
+                    }
+                    val httpClient = requestClient ?: OkHttpClient.Builder()
+                        .connectTimeout(4, TimeUnit.SECONDS)
+                        .readTimeout(30, TimeUnit.SECONDS)
+                        .build()
+                    val httpFactory = OkHttpDataSource.Factory(httpClient)
+                        .setUserAgent(PREVIEW_USER_AGENT)
+                        .setDefaultRequestProperties(requestHeaders)
+                    val upstream = DefaultDataSource.Factory(context, httpFactory)
+                    val dataSourceFactory = if (usingCache) {
+                        CacheDataSource.Factory()
+                            .setCache(PreviewVideoCache.get(context))
+                            .setUpstreamDataSourceFactory(upstream)
+                            .setCacheKeyFactory { mediaKey }
+                            .setEventListener(object : CacheDataSource.EventListener {
+                                override fun onCachedBytesRead(cacheSizeBytes: Long, cachedBytes: Long) {
+                                    cachedBytesRead.addAndGet(cachedBytes)
+                                }
+                                override fun onCacheIgnored(reason: Int) = Unit
+                            })
+                    } else upstream
+                    val media = MediaItem.Builder().setUri(url)
+                    if (stage == "hls") media.setMimeType(MimeTypes.APPLICATION_M3U8)
+                    if (usingCache) media.setCustomCacheKey(mediaKey)
+                    ExoPlayer.Builder(context)
+                        .setLooper(looper)
+                        .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory))
+                        .build().apply { setMediaItem(media.build()) }
+                },
+                onWorkerFirstFrame = {
+                    if (!usingCache && synchronized(recovery) { recovery.shouldRemove(freshFrame = true) }) {
+                        PreviewVideoCache.remove(context, mediaKey)
+                    }
+                },
+            )
+            onDispose { controller.close() }
+        }
+
+        DisposableEffect(hostLifecycleOwner, controller) {
+            val observer = LifecycleEventObserver { _, _ ->
+                hostResumed = hostLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+                controller.setPlaying(!failed && detailPreviewShouldPlay(playingRequested, hostResumed))
+            }
+            hostLifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { hostLifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+
+        LaunchedEffect(controller, previewShouldPlay, failed, firstFrame) {
+            controller.setPlaying(previewShouldPlay && !failed)
+            publishStatus(if (previewShouldPlay && firstFrame && !failed) "play" else "paused")
+        }
+
+        LaunchedEffect(controller, previewShouldPlay, surfaceAttached, firstFrame, failed) {
+            if (stage != "hls" || !previewShouldPlay || !surfaceAttached || firstFrame || failed) return@LaunchedEffect
+            delay(HLS_FIRST_FRAME_TIMEOUT_MS)
+            failed = true
+            PageLog.add("detailPreview stage=hls error=STARTUP_TIMEOUT cause=No first frame within ${HLS_FIRST_FRAME_TIMEOUT_MS}ms")
+            publishStatus("skip=playback-failed")
+        }
+
+        if (!failed) {
+            BoxWithConstraints(
+                modifier = modifier.fillMaxSize().clipToBounds().graphicsLayer {
+                    alpha = if (firstFrame && previewShouldPlay) 1f else 0f
+                },
+                contentAlignment = Alignment.Center,
+            ) {
+                val containerAspectRatio = if (maxHeight.value > 0f) maxWidth.value / maxHeight.value else videoAspectRatio
+                val videoModifier = if (videoAspectRatio > 0f && videoAspectRatio > containerAspectRatio) {
+                    Modifier.fillMaxWidth().aspectRatio(videoAspectRatio)
+                } else if (videoAspectRatio > 0f) {
+                    Modifier.fillMaxHeight().aspectRatio(videoAspectRatio)
+                } else {
+                    Modifier.fillMaxSize()
+                }
+                AndroidView(
+                    modifier = videoModifier,
+                    factory = { ctx ->
+                        TextureView(ctx).apply {
+                            isFocusable = false
+                            isFocusableInTouchMode = false
+                            importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                            surfaceTextureListener = controller
+                        }
+                    },
+                )
+            }
         }
     }
 }
@@ -422,19 +307,17 @@ object VideoSourceProbe {
         return path.endsWith(".m3u8") || !VIDEO_EXTENSION.matches(path)
     }
 
-    suspend fun probe(url: String, mediaKey: String, headers: Map<String, String> = emptyMap(), requestClient: OkHttpClient? = null): VideoSourceProbeResult =
-        withContext(Dispatchers.IO) {
+    suspend fun probe(url: String, mediaKey: String, headers: Map<String, String> = emptyMap(), requestClient: OkHttpClient? = null): VideoSourceProbeResult {
             val now = System.currentTimeMillis()
             val key = "$mediaKey|$url"
-            cache[key]?.takeIf { now - it.atMs < CACHE_TTL_MS }?.let { return@withContext it.result }
-            val result = runCatching {
+            cache[key]?.takeIf { now - it.atMs < CACHE_TTL_MS }?.let { return it.result }
+            val result = catchingRequest {
                 val builder = Request.Builder().url(url)
                     .header("User-Agent", PREVIEW_USER_AGENT)
                 if (!url.contains(".m3u8", true)) builder.header("Range", "bytes=0-511")
                 headers.forEach { (name, value) -> builder.header(name, value) }
-                (requestClient ?: client).newCall(builder.build()).apply {
-                    timeout().timeout(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                }.execute().use { response ->
+                withRequestBudget(PROBE_TIMEOUT_SECONDS * 1000L) {
+                    (requestClient ?: client).readCancellable(builder.build()) { response ->
                     val contentType = response.header("Content-Type").orEmpty()
                     val source = response.body?.source()
                     val buffer = Buffer()
@@ -476,21 +359,21 @@ object VideoSourceProbe {
                             else -> "format"
                         },
                     )
+                    }
                 }
             }.getOrElse { VideoSourceProbeResult(valid = null, reason = "unknown") }
             // Successful entries revalidate their HTTP content version on every page entry (512 bytes).
             // Only failed probes use the short, identity-scoped negative cache.
             if (result.valid == false) cache[key] = Cached(result, now)
             cache.entries.removeAll { now - it.value.atMs >= CACHE_TTL_MS }
-            result
-        }
+            return result
+    }
 
     private val VIDEO_EXTENSION = Regex(".*\\.(mkv|mp4|ts)$", RegexOption.IGNORE_CASE)
 }
 
-private const val LOOP_WINDOW_MS = 20_000L
 private const val PROBE_TIMEOUT_SECONDS = 3L
 private const val PROBE_BYTES = 512L
 private const val CACHE_TTL_MS = 120_000L
-private const val HLS_FIRST_FRAME_TIMEOUT_MS = 2_000L
+private const val HLS_FIRST_FRAME_TIMEOUT_MS = 5_000L
 private const val PREVIEW_USER_AGENT = "LuminaTV/1.5 (Android)"

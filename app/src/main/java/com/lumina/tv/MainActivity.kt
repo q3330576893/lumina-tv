@@ -329,7 +329,7 @@ private fun AppRoot(
             }
 
             is Screen.Detail -> {
-                BackHandler { goBack() }
+                BackHandler(enabled = target == screen) { goBack() }
                 DetailScreen(
                     id = target.id,
                     previewActive = target == screen,

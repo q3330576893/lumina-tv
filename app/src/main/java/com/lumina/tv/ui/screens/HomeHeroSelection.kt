@@ -4,7 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import com.lumina.tv.data.MediaItem
 
-internal enum class HeroActionFocus { NONE, PLAY, DETAIL }
+internal enum class HeroActionFocus { NONE, ARTWORK, PLAY, DETAIL }
 internal enum class HeroDirectionKey { LEFT, RIGHT }
 
 internal fun shouldHeroConsumeCarouselDirection(
@@ -16,6 +16,14 @@ internal fun shouldHeroConsumeCarouselDirection(
     HeroActionFocus.DETAIL to HeroDirectionKey.LEFT -> false
     else -> true
 }
+
+internal fun homeNeedsHeroReset(
+    firstVisibleIndex: Int,
+    firstVisibleOffset: Int,
+    keyboard: Boolean,
+    heroHasFocus: Boolean,
+    resetPending: Boolean,
+): Boolean = resetPending || firstVisibleIndex != 0 || firstVisibleOffset != 0 || (keyboard && !heroHasFocus)
 
 /** Keep allocation, selection and its diagnostic log inside the input-keyed calculation. */
 @Composable

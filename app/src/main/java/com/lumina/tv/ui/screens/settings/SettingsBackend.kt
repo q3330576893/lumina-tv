@@ -99,7 +99,7 @@ fun SettingsBackend(
                     SettingChoiceOption("media3", "Media3"),
                     SettingChoiceOption("mpv", "mpv"),
                 )
-                ChoiceRow("compat:playerEngine", "播放内核", "自动：Media3 → mpv", engineOptions, playerEngine, { key ->
+                ChoiceRow("compat:playerEngine", "播放内核", "自动优先 Media3", engineOptions, playerEngine, { key ->
                     playerEngine = key
                     prefs?.playerEngine = key
                 }, requesters.getValue("compat:playerEngine"), railRequester, onFocused,

@@ -14,6 +14,7 @@ import org.jellycine.mpv.MPVLib
 import java.io.File
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import kotlinx.coroutines.CompletableDeferred
 import okhttp3.OkHttpClient
 import org.json.JSONObject
@@ -76,13 +77,14 @@ class MpvPlayerController(
         var audioReconfigurationPending = false
         var stableSamplePending = false
         var sampledAid: Int? = null
+        var telemetryPending = false
         val observer = object : MPVLib.EventObserver {
             override fun eventProperty(property: String) {
                 if (property != "demuxer-cache-time" && property != "cache-speed") return
                 enqueue(this@NativeLoad) {
                     if (property == "demuxer-cache-time") bufferedPositionMs = null
                     else cacheSpeedBytesPerSecond = 0L
-                    emit(this@NativeLoad)
+                    emitTelemetry(this@NativeLoad)
                 }
             }
             override fun eventProperty(property: String, value: String) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
@@ -102,9 +104,9 @@ class MpvPlayerController(
                         return@enqueue
                     }
                     // Preserve a useful cause when END_FILE cannot expose its reason in this API.
-                    if (Regex("(?i)HTTP[^\n]*(?:4[0-9]{2}|5[0-9]{2})|server returned|connection refused|failed to resolve").containsMatchIn(text)) {
+                    if (HTTP_FAILURE.containsMatchIn(text)) {
                         failureKind = FailureKind.HTTP
-                    } else if (Regex("(?i)failed to (?:decode|open.*decoder)|error while decoding|decoder initialization failed").containsMatchIn(text)) {
+                    } else if (DECODER_FAILURE.containsMatchIn(text)) {
                         failureKind = FailureKind.DECODING
                     }
                 }
@@ -208,7 +210,6 @@ class MpvPlayerController(
         if (released) return InitializationResult.Failed("控制器已释放")
         if (activeLoad != null) return InitializationResult.Ready
         PlayerLifecycle.registry.created(this, "mpv", "playback:$generation")
-        recordPreviousAbnormalSession()
         clearSessionLog()
         return createNativeLoad(software = false)
     }
@@ -647,12 +648,10 @@ class MpvPlayerController(
     fun containerFps(): Float? = runCatching {
         mpv?.getPropertyString("container-fps")?.toFloatOrNull()?.takeIf { it > 0f }
     }.getOrNull()
-    fun diagnosticLog(): String = synchronized(logLock) {
+    fun diagnosticLog(): String {
         val previous = runCatching { previousCrashFile.takeIf(File::exists)?.readText(Charsets.UTF_8) }.getOrNull().orEmpty()
-        val current = runCatching { sessionLogFile.takeIf(File::exists)?.readText(Charsets.UTF_8) }
-            .getOrNull()?.ifBlank { diagnosticLines.joinToString("\n") }
-            ?: ""
-        listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
+        val current = synchronized(logLock) { diagnosticLines.toList() }.joinToString("\n")
+        return listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
     }
     fun softwareRetryCount(): Int = softwareRetryCount
     fun diagnosticLoadIdentity(): LoadIdentity? = activeLoad?.takeIf(::isActive)?.identity
@@ -777,6 +776,25 @@ class MpvPlayerController(
             .map { it.id to listOfNotNull(it.title, it.language, it.codec).joinToString(" · ").ifBlank { "音轨 ${it.id}" } }
     }
 
+    internal data class MenuTracks(
+        val audioIndex: Int?,
+        val playerAudioId: Int?,
+        val uncertainAudio: List<Pair<Int, String>>,
+        val subtitleIndex: Int?,
+        val subtitleDisabled: Boolean,
+    )
+
+    internal fun menuTracks(): MenuTracks {
+        val audioId = currentPlayerAudioId()
+        return MenuTracks(
+            audioId?.let { trackMapping("audio", audioStreams).embyFor(it) },
+            audioId,
+            uncertainAudioTracks(),
+            currentSubtitleEmbyIndex(),
+            isSubtitleDisabled(),
+        )
+    }
+
     fun selectPlayerAudioTrack(id: Int) {
         if (released || readMpvTracks("audio").none { it.id == id }) return
         preferredAudioIndex = null
@@ -808,6 +826,7 @@ class MpvPlayerController(
     private fun checkAudioOutput(load: NativeLoad, point: String, assessSilence: Boolean = false) {
         if (!isActive(load)) return
         val properties = diagnosticProperties()
+        properties["aid"]?.let { observedProperties["aid"] = it }
         audioDiagnostics.sample(load.identity, point, positionMs, properties)
         PageLog.add("mpvAudio sample=$point load=${load.identity.physicalId} pos=$positionMs aid=${properties["aid"]} ao=${properties["current-ao"]} volume=${properties["volume"]} mute=${properties["mute"]}")
         if (!assessSilence || !ready) return
@@ -827,6 +846,9 @@ class MpvPlayerController(
     private fun clearSessionLog() {
         synchronized(logLock) {
             diagnosticLines.clear()
+        }
+        sessionFiles.execute {
+            recordPreviousAbnormalSession()
             runCatching { sessionLogFile.writeText("", Charsets.UTF_8) }
         }
     }
@@ -835,11 +857,14 @@ class MpvPlayerController(
         synchronized(logLock) {
             if (diagnosticLines.size >= MAX_DIAGNOSTIC_LINES) diagnosticLines.removeFirst()
             diagnosticLines.addLast(line)
+        }
+        sessionFiles.execute {
             runCatching {
                 sessionLogFile.appendText("$line\n", Charsets.UTF_8)
                 if (sessionLogFile.length() > MAX_SESSION_LOG_BYTES) {
                     val bytes = sessionLogFile.readBytes()
-                    sessionLogFile.writeBytes(bytes.copyOfRange(bytes.size - MAX_SESSION_LOG_BYTES, bytes.size))
+                    val start = bytes.copyOfRange(bytes.size - MAX_SESSION_LOG_BYTES / 2, bytes.size).indexOf('\n'.code.toByte())
+                    sessionLogFile.writeBytes(bytes.copyOfRange(bytes.size - MAX_SESSION_LOG_BYTES / 2 + start + 1, bytes.size))
                 }
             }.onFailure { Log.w(TAG, "Failed to persist mpv session log", it) }
         }
@@ -856,32 +881,37 @@ class MpvPlayerController(
             append(oldTail)
         }
         runCatching { previousCrashFile.writeText(summary, Charsets.UTF_8) }
-        appendMpvLog("${timestamp()} previous mpv session ended abnormally; hwdec=${prior.optString("hwdec")} vo=${prior.optString("vo")}")
         runCatching { sessionStateFile.writeText(JSONObject().put("active", false).toString(), Charsets.UTF_8) }
     }
 
     private fun persistSessionState() {
-        val runtime = Runtime.getRuntime()
-        val state = JSONObject()
+        val identity = activeLoad?.identity ?: return
+        val properties = observedProperties.toMap()
+        val lastLog = synchronized(logLock) { diagnosticLines.lastOrNull() ?: "none" }
+        val at = timestamp()
+        sessionFiles.execute {
+            val runtime = Runtime.getRuntime()
+            val state = JSONObject()
             .put("active", true)
-            .put("at", timestamp())
+            .put("at", at)
             .put("pid", android.os.Process.myPid())
-            .put("generation", activeLoad?.identity?.generation)
-            .put("physicalLoadId", activeLoad?.identity?.physicalId)
-            .put("hwdec", synchronized(observedProperties) { observedProperties["hwdec-current"] } ?: "pending")
-            .put("vo", synchronized(observedProperties) { observedProperties["current-vo"] } ?: "pending")
+            .put("generation", identity.generation)
+            .put("physicalLoadId", identity.physicalId)
+            .put("hwdec", properties["hwdec-current"] ?: "pending")
+            .put("vo", properties["current-vo"] ?: "pending")
             .put("video", JSONObject()
-                .put("pixelformat", synchronized(observedProperties) { observedProperties["video-params/pixelformat"] } ?: JSONObject.NULL)
-                .put("w", synchronized(observedProperties) { observedProperties["video-params/w"] } ?: JSONObject.NULL)
-                .put("h", synchronized(observedProperties) { observedProperties["video-params/h"] } ?: JSONObject.NULL))
-            .put("audio", JSONObject(diagnosticProperties().filterKeys {
-                it in setOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device")
+                .put("pixelformat", properties["video-params/pixelformat"] ?: JSONObject.NULL)
+                .put("w", properties["video-params/w"] ?: JSONObject.NULL)
+                .put("h", properties["video-params/h"] ?: JSONObject.NULL))
+            .put("audio", JSONObject(properties.filterKeys {
+                it in SESSION_AUDIO_PROPERTIES
             }))
             .put("memory", JSONObject()
                 .put("usedBytes", runtime.totalMemory() - runtime.freeMemory())
                 .put("maxBytes", runtime.maxMemory()))
-            .put("lastLog", synchronized(logLock) { diagnosticLines.lastOrNull() ?: "none" })
-        runCatching { sessionStateFile.writeText(state.toString(), Charsets.UTF_8) }
+            .put("lastLog", lastLog)
+            runCatching { sessionStateFile.writeText(state.toString(), Charsets.UTF_8) }
+        }
     }
 
     fun release(reason: String = "unspecified") {
@@ -900,7 +930,9 @@ class MpvPlayerController(
         if (retirement == null) cleanup() else retirement.invokeOnCompletion { cleanup() }
         loadGate.close()
         attachedSurface = null
-        runCatching { sessionStateFile.writeText(JSONObject().put("active", false).put("endedAt", timestamp()).put("reason", reason).toString(), Charsets.UTF_8) }
+        sessionFiles.execute {
+            runCatching { sessionStateFile.writeText(JSONObject().put("active", false).put("endedAt", timestamp()).put("reason", reason).toString(), Charsets.UTF_8) }
+        }
     }
 
     private fun onLoadTimeout(load: NativeLoad) {
@@ -1000,7 +1032,7 @@ class MpvPlayerController(
     private fun handleProperty(load: NativeLoad, property: String, value: Long) {
         if (property == "cache-speed") {
             cacheSpeedBytesPerSecond = value.coerceAtLeast(0L)
-            emit(load)
+            emitTelemetry(load)
         }
         if (property == "video-params/w" || property == "video-params/h") {
             synchronized(observedProperties) { observedProperties[property] = value.toString() }
@@ -1018,7 +1050,7 @@ class MpvPlayerController(
             "demuxer-cache-time" -> bufferedPositionMs =
                 value.takeIf { it.isFinite() && it >= 0.0 }?.let { (it * 1000.0).toLong() }
         }
-        emit(load)
+        emitTelemetry(load)
     }
 
     private fun handleProperty(load: NativeLoad, property: String, value: Boolean) {
@@ -1108,8 +1140,21 @@ class MpvPlayerController(
             trackListChanged))
     }
 
+    private fun emitTelemetry(load: NativeLoad) {
+        if (load.telemetryPending) return
+        load.telemetryPending = true
+        postForLoad(load, 100L) {
+            load.telemetryPending = false
+            emit(load)
+        }
+    }
+
     private companion object {
         val physicalIds = AtomicLong()
+        val sessionFiles = Executors.newSingleThreadExecutor { task -> Thread(task, "mpv-session-files").apply { isDaemon = true } }
+        val HTTP_FAILURE = Regex("(?i)HTTP[^\n]*(?:4[0-9]{2}|5[0-9]{2})|server returned|connection refused|failed to resolve")
+        val DECODER_FAILURE = Regex("(?i)failed to (?:decode|open.*decoder)|error while decoding|decoder initialization failed")
+        val SESSION_AUDIO_PROPERTIES = setOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device")
         const val TAG = "MpvPlayerController"
         const val SOFTWARE_RETRY_TIMEOUT_MS = 6_000L
         const val MAX_DIAGNOSTIC_LINES = 2_000

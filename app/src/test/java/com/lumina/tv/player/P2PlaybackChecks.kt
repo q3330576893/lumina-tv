@@ -38,14 +38,15 @@ object P2PlaybackChecks {
 
         val failures = PlaybackPathFailures()
         val dts = PlaybackPath("source-a", "mpv", PlaybackDelivery.DIRECT_PLAY, "dts:1", "auto")
-        fun select(path: PlaybackPath = dts, pin: String? = null, dv: Boolean = false) =
-            selectPlaybackEngine("mpv", pin, dv, dv, path, failures)
+        fun select(path: PlaybackPath = dts, pin: String? = null, available: Boolean = true) =
+            selectPlaybackEngine("mpv", pin, path, failures, mpvAvailable = available)
         check(select() == "mpv")
+        check(select(available = false) == "media3")
         for (reason in listOf(PlaybackFailureReason.INITIALIZATION, PlaybackFailureReason.FIRST_FRAME_TIMEOUT, PlaybackFailureReason.SURFACE)) {
             failures.record(PlaybackPathFailure(dts, reason, 1, "injected"))
             check(select() == "media3")
             check(select(pin = "mpv") == "media3")
-            check(select(dv = true) == "media3")
+            check(select(pin = "mpv", available = false) == "media3")
         }
         failures.record(PlaybackPathFailure(dts.copy(engine = "media3"), PlaybackFailureReason.DECODING, 2, "DTS failed"))
         check(select() == null)

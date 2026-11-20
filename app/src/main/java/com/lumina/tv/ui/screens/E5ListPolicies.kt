@@ -1,5 +1,9 @@
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.data.catchingRequest
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+
 data class SeasonEpisodeLoadState<T>(
     val episodes: List<T> = emptyList(),
     val loading: Boolean = false,
@@ -46,6 +50,25 @@ inline fun <T> completeSeasonEpisodeLoad(
     },
     onFailure = { failure -> SeasonEpisodeLoadState(error = failure) },
 )
+
+/** Loaded pages stay selectable for this screen visit, including a successfully empty season. */
+internal class EpisodePickerPages<T> {
+    private val pages = mutableMapOf<String?, List<T>>()
+
+    fun cached(seasonId: String?, readShared: () -> List<T>?): List<T>? =
+        pages[seasonId] ?: readShared()?.also { pages[seasonId] = it }
+
+    suspend fun fetch(seasonId: String?, request: suspend () -> List<T>, saveShared: (List<T>) -> Unit) =
+        completeSeasonEpisodeLoad(catchingRequest {
+            request().also { currentCoroutineContext().ensureActive() }
+        }) { episodes ->
+            pages[seasonId] = episodes
+            saveShared(episodes)
+        }
+}
+
+internal fun pickerNeighbor(index: Int, delta: Int, count: Int): Int? =
+    (index + delta).takeIf { it in 0 until count }
 
 data class LibraryAppendProgress(
     val nextIndex: Int,

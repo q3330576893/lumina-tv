@@ -376,20 +376,20 @@ object B7Checks {
 
         val path = PlaybackPath("hdr", "media3", PlaybackDelivery.DIRECT_PLAY, "1", "auto")
         val failures = PlaybackPathFailures()
-        check(selectPlaybackEngine("media3", null, false, false, path, failures, true) == "mpv")
+        check(selectPlaybackEngine("media3", null, path, failures, mpvAvailable = true) == "media3")
         failures.record(com.lumina.tv.player.PlaybackPathFailure(path.copy(engine = "mpv"),
             com.lumina.tv.player.PlaybackFailureReason.INITIALIZATION, 1, "injected"))
-        check(selectPlaybackEngine("media3", null, false, false, path, failures, true) == "media3")
-        check(selectPlaybackEngine("media3", null, false, false, path, failures) == "media3")
+        check(selectPlaybackEngine("media3", "mpv", path, failures, mpvAvailable = true) == "media3")
+        check(selectPlaybackEngine("media3", null, path, failures, mpvAvailable = false) == "media3")
         check(hdr10Plus != hdr10)
         val clean = PlaybackPathFailures()
-        check(selectPlaybackEngine("media3", null, true, true, path, clean, true) == "mpv")
-        check(selectPlaybackEngine("mpv", null, false, true, path.copy(audioMode = "soft"), clean, true) == "media3")
-        check(selectPlaybackEngine("media3", "media3", false, false, path, clean, true) == "media3")
-        check(selectPlaybackEngine("media3", null, false, false, path.copy(audioMode = "soft"), clean) == "mpv")
+        check(selectPlaybackEngine("media3", "mpv", path, clean, mpvAvailable = true) == "mpv")
+        check(selectPlaybackEngine("mpv", null, path.copy(audioMode = "soft"), clean, mpvAvailable = true) == "mpv")
+        check(selectPlaybackEngine("mpv", "media3", path, clean, mpvAvailable = true) == "media3")
+        check(selectPlaybackEngine("media3", null, path.copy(audioMode = "soft"), clean, mpvAvailable = true) == "media3")
         failures.record(com.lumina.tv.player.PlaybackPathFailure(path,
             com.lumina.tv.player.PlaybackFailureReason.DECODING, 2, "injected"))
-        check(selectPlaybackEngine("media3", null, false, false, path, failures, true) == null)
+        check(selectPlaybackEngine("media3", "mpv", path, failures, mpvAvailable = true) == null)
     }
 
     private suspend fun searchContinuation() = coroutineScope {
@@ -543,8 +543,8 @@ object B7Checks {
         check(hero.contains("var focusedHeroAction by remember { mutableStateOf(HeroActionFocus.NONE) }"))
         check(hero.contains("if (focusedHeroAction == HeroActionFocus.NONE || event.type != KeyEventType.KeyDown)"))
         check(hero.contains("shouldHeroConsumeCarouselDirection(focusedHeroAction, direction, items.size)"))
-        check(hero.contains("focusProperties { right = detailFocus }"))
-        check(hero.contains("focusProperties { left = playFocus }"))
+        check(Regex("focusProperties\\s*\\{\\s*right\\s*=\\s*detailFocus\\b").containsMatchIn(hero))
+        check(Regex("focusProperties\\s*\\{\\s*left\\s*=\\s*playFocus\\b").containsMatchIn(hero))
         check(hero.contains("focusRequester = playFocus") && hero.contains("focusRequester = detailFocus"))
 
         val player = root.resolve("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText().replace("\r\n", "\n")
@@ -553,10 +553,10 @@ object B7Checks {
         check(player.contains("val isDolbyVision = rangeType.contains(\"DOVI\") || videoStreamForDv?.dvProfile != null"))
         check(player.contains("(videoStreamForDv?.dvProfile == 7 || rangeType.contains(\"WITHEL\") || rangeType.contains(\"WITH EL\"))"))
         check(player.contains("val contentHdr = rangeType.takeUnless { isDolbyVision }"))
-        check(player.contains("supportsContentHdr(displayHdrTypes, contentHdr) == false &&\n                    canTryMpvPath(path)"))
-        check(engines.indexOf("isDvP7 ->") < engines.indexOf("isDolbyVision ->"))
-        check(engines.indexOf("isDolbyVision ->") < engines.indexOf("preferMpvForUnsupportedHdr ->"))
-        check(engines.indexOf("preferMpvForUnsupportedHdr ->") < engines.indexOf("path.audioMode == \"soft\" ->"))
+        check(player.contains("contentHdr?.let { supportsContentHdr(displayHdrTypes, it) }"))
+        check(player.contains(".put(\"dvProfile7\", isDvP7)"))
+        check("isDolbyVision" !in engines && "isDvP7" !in engines && "preferMpvForUnsupportedHdr" !in engines)
+        check("path.audioMode ==" !in engines && "mpvRequested && mpvAvailable" in engines)
         check(diagnostics.contains(".put(\"display\", JSONObject().put(\"hdr\", displayHdrDiagnostic(displayHdrTypes)"))
     }
 

@@ -98,4 +98,5 @@ class PlayableItemRequestGate {
 
     fun accepts(ticket: Long): Boolean = active == ticket
     fun finish(ticket: Long) { if (accepts(ticket)) active = null }
+    fun cancel() { generation++; active = null }
 }

@@ -30,24 +30,18 @@ internal class PlaybackPathFailures {
     fun clearForManualRetry() = failures.clear()
 }
 
-/** Every preference is an ordering hint; none can bypass a failed playback path. */
+internal fun mpvWasExplicitlyRequested(preference: String?, pinned: String?): Boolean =
+    (pinned ?: preference) == "mpv"
+
+/** mpv enters the list only after a user choice. */
 internal fun selectPlaybackEngine(
     preference: String?,
     pinned: String?,
-    isDvP7: Boolean,
-    isDolbyVision: Boolean,
     path: PlaybackPath,
     failures: PlaybackPathFailures,
-    preferMpvForUnsupportedHdr: Boolean = false,
+    mpvAvailable: Boolean,
 ): String? {
-    val preferred = pinned ?: when {
-        isDvP7 -> "mpv"
-        isDolbyVision -> "media3"
-        preferMpvForUnsupportedHdr -> "mpv"
-        path.audioMode == "soft" -> "mpv"
-        preference == "mpv" -> "mpv"
-        else -> "media3"
-    }
-    return listOf(preferred, "media3", "mpv").distinct()
-        .firstOrNull { it in setOf("media3", "mpv") && !failures.excludes(path.copy(engine = it)) }
+    val mpvRequested = mpvWasExplicitlyRequested(preference, pinned)
+    if (mpvRequested && mpvAvailable && !failures.excludes(path.copy(engine = "mpv"))) return "mpv"
+    return "media3".takeUnless { failures.excludes(path.copy(engine = it)) }
 }

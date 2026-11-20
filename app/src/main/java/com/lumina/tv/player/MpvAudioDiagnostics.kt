@@ -37,11 +37,32 @@ internal class MpvAudioDiagnostics(context: Context) {
         val at = System.currentTimeMillis()
         val pts = properties["audio-pts"]?.toDoubleOrNull()
         val delta = pts?.let { now -> lastAudioPts?.let { now - it } }
+        val sincePreviousSample = lastSampleAt?.let { at - it }
+        val startedAt = loadStartedAtMs
+        lastAudioPts = pts
+        lastSampleAt = at
+        worker.execute {
+            if (closed || active !== identity) return@execute
+            writeSample(identity, point, positionMs, properties, at, pts, delta, sincePreviousSample)
+            captureSystemAudio(identity, point, at, startedAt)
+        }
+    }
+
+    private fun writeSample(
+        identity: MpvPlayerController.LoadIdentity,
+        point: String,
+        positionMs: Long,
+        properties: Map<String, String>,
+        at: Long,
+        pts: Double?,
+        delta: Double?,
+        sincePreviousSample: Long?,
+    ) {
         val snapshot = JSONObject()
             .put("sample", point).put("atMs", at).put("pid", Process.myPid())
             .put("generation", identity.generation).put("physicalLoadId", identity.physicalId)
             .put("software", identity.software).put("positionMs", positionMs)
-            .put("sincePreviousSampleMs", lastSampleAt?.let { at - it } ?: JSONObject.NULL)
+            .put("sincePreviousSampleMs", sincePreviousSample ?: JSONObject.NULL)
             .put("properties", JSONObject(properties).apply {
                 listOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device").forEach { name ->
                     if (!has(name)) put(name, JSONObject.NULL)
@@ -64,11 +85,7 @@ internal class MpvAudioDiagnostics(context: Context) {
                     .put("role", "candidate route; not proof of this native instance's actual route")
             }))
             .put("nativeAudioTrackSession", "unavailable from MPVLib; correlate PID/time/session in system observations")
-        lastAudioPts = pts
-        lastSampleAt = at
         append(snapshots, snapshot.toString(), 384 * 1024, identity)
-        val startedAt = loadStartedAtMs
-        worker.execute { captureSystemAudio(identity, point, at, startedAt) }
     }
 
     private fun captureSystemAudio(identity: MpvPlayerController.LoadIdentity, point: String, sampleAt: Long, startedAt: Long) {
@@ -111,7 +128,8 @@ internal class MpvAudioDiagnostics(context: Context) {
     }
 
     fun close() {
-        synchronized(fileLock) { closed = true; active = null }
+        closed = true
+        active = null
         captureProcess?.destroy()
         worker.shutdownNow()
     }

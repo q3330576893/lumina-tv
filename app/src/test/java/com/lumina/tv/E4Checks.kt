@@ -40,7 +40,7 @@ object E4Checks {
             val info = JSONObject().put("MediaSources", org.json.JSONArray().put(source)).toString()
             val canTranscode = serverTranscodingAvailable(playbackSourceJson(info, "blurayiso"))
             check(canTranscode == serverSupportsTranscoding)
-            val canMpv = selectPlaybackEngine("media3", "mpv", false, false, path, failures) == "mpv"
+            val canMpv = selectPlaybackEngine("media3", "mpv", path, failures, mpvAvailable = true) == "mpv"
             check(canMpv == !mpvExcluded)
             val result = containerRecovery(canMpv, canTranscode, transcodeTried = false)
             val expected = when {
@@ -272,17 +272,18 @@ object E4Checks {
     private fun audioModeEngineOrder() {
         val path = PlaybackPath("source", "media3", PlaybackDelivery.DIRECT_PLAY, "1", "soft")
         val failures = PlaybackPathFailures()
-        fun select(preference: String? = "media3", pinned: String? = null, dvP7: Boolean = false, dv: Boolean = false) =
-            selectPlaybackEngine(preference, pinned, dvP7, dv, path, failures)
-        check(select() == "mpv")
+        fun select(preference: String? = "media3", pinned: String? = null, available: Boolean = true) =
+            selectPlaybackEngine(preference, pinned, path, failures, mpvAvailable = available)
+        check(select() == "media3")
         check(select(pinned = "media3") == "media3")
-        check(select(dv = true) == "media3")
-        check(select(dvP7 = true, dv = true) == "mpv")
+        check(select(pinned = "mpv", available = false) == "media3")
+        check(select(pinned = "mpv") == "mpv")
         failures.record(PlaybackPathFailure(path.copy(engine = "mpv"), PlaybackFailureReason.INITIALIZATION, 1, "excluded"))
         check(select() == "media3" && select(preference = "mpv") == "media3")
         failures.record(PlaybackPathFailure(path, PlaybackFailureReason.DECODING, 2, "excluded"))
         check(select() == null)
-        check(selectPlaybackEngine("media3", null, false, false, path.copy(sourceId = "other"), failures) == "mpv")
+        check(selectPlaybackEngine("mpv", null, path.copy(sourceId = "other"), failures, mpvAvailable = true) == "mpv")
+        check(selectPlaybackEngine("media3", null, path.copy(sourceId = "other"), failures, mpvAvailable = true) == "media3")
     }
 
     private fun mpvAspectModes() {

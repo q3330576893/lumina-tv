@@ -60,6 +60,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -317,6 +318,15 @@ fun DetailScreen(
     var episodeLoadError by remember { mutableStateOf<String?>(null) }
     var episodeReloadTick by remember { mutableIntStateOf(0) }
     var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
+    val episodePages = remember(id, client, LibraryCache.userDataRevision) { EpisodePickerPages<MediaItem>() }
+    fun selectSeason(seriesId: String, season: MediaItem?) {
+        val sid = season?.id
+        val cached = season?.let { episodePages.cached(sid) { LibraryCache.episodesOf(seriesId, sid) } }
+        episodes = cached ?: season?.let { LibraryCache.episodesStaleOf(seriesId, sid) }.orEmpty()
+        episodeLoading = season != null && cached == null && episodes.isEmpty()
+        episodeLoadError = null
+        selectedSeason = season
+    }
     var metadataItem by remember(id, client) { mutableStateOf<MediaItem?>(null) }
     var tmdb by remember(id, client) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
     var mdb by remember(id, accountScope) { mutableStateOf<MdblistClient.Ratings?>(null) }
@@ -469,12 +479,10 @@ fun DetailScreen(
         if (cached != null) {
             item = cached.item
             seasonDirectory = completeSeasonDirectoryLoad(Result.success(cached.seasons))
-            episodes = cached.episodes
             sources = cached.sources
             favoriteAction.syncFromServer(cached.item?.isFavorite ?: false)
             playedAction.syncFromServer(cached.item?.played ?: false)
-            selectedSeason = cached.seasons.firstOrNull()
-            episodeLoading = selectedSeason != null
+            selectSeason(id, cached.seasons.firstOrNull())
             loading = false
             sourcesLoading = true
             val startedAt = System.currentTimeMillis()
@@ -566,11 +574,7 @@ fun DetailScreen(
                     else Result.success(emptyList())
                 seasonDirectory = completeSeasonDirectoryLoad(seasonResult)
                 val loadedSeasons = seasonDirectory.seasons
-                val first = loadedSeasons.firstOrNull()
-                episodes = first?.let { LibraryCache.episodesOf(id, it.id) ?: LibraryCache.episodesStaleOf(id, it.id) }.orEmpty()
-                episodeLoading = first != null
-                episodeLoadError = null
-                selectedSeason = first
+                selectSeason(id, loadedSeasons.firstOrNull())
                 PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
             }
             val sourceJob = launch {
@@ -602,13 +606,14 @@ fun DetailScreen(
         } finally { similarLoading = false }
     }
 
-    LaunchedEffect(id, item?.id, selectedSeason, episodeReloadTick) {
+    LaunchedEffect(previewActive, id, item?.id, selectedSeason?.id, episodeReloadTick, episodePages) {
+        if (!previewActive) return@LaunchedEffect
         val cacheRevision = LibraryCache.userDataRevision
         val c = client ?: return@LaunchedEffect
         val it0 = item ?: return@LaunchedEffect
         if (it0.type == "Series" && selectedSeason != null) {
             val sid = selectedSeason?.id
-            cachedSeasonEpisodeState(LibraryCache.episodesOf(it0.id, sid))?.let { hit ->
+            cachedSeasonEpisodeState(episodePages.cached(sid) { LibraryCache.episodesOf(it0.id, sid) })?.let { hit ->
                 if (hit.episodes != episodes) episodes = hit.episodes
                 episodeLoading = false
                 episodeLoadError = null
@@ -616,10 +621,9 @@ fun DetailScreen(
             }
             val stale = LibraryCache.episodesStaleOf(it0.id, sid)
             episodes = stale ?: beginSeasonEpisodeLoad<MediaItem>().episodes
-            episodeLoading = true
+            episodeLoading = episodes.isEmpty()
             episodeLoadError = null
-            val result = catchingRequest { c.getEpisodes(it0.id, sid) }
-            val loaded = completeSeasonEpisodeLoad(result) { list ->
+            val loaded = episodePages.fetch(sid, { c.getEpisodes(it0.id, sid) }) { list ->
                 LibraryCache.putEpisodes(it0.id, sid, list, cacheRevision)
             }
             episodeLoading = false
@@ -678,9 +682,18 @@ fun DetailScreen(
         mdb = catchingRequest { MdblistClient.ratings(current.type, imdbId, tmdbId) }.getOrNull()
     }
 
-    val sourceIdsKey = sources.joinToString(",") { "${it.id}:${previewSourceVersion(it)}" }
+    val previewMovieSource = remember(item?.type, sources, selectedSourceId) {
+        if (item?.type == "Series") null else {
+            sources.firstOrNull { it.id == selectedSourceId && it.streams.any { stream -> stream.type == "Video" } }
+                ?: sources.firstOrNull { source -> source.streams.any { it.type == "Video" } }
+        }
+    }
+    val sourceKey = remember(previewMovieSource) { previewMovieSource?.let { it.id to previewSourceVersion(it) } }
+    val firstPreviewEpisode = if (item?.type == "Series") episodes.firstOrNull() else null
+    val episodeKey = firstPreviewEpisode?.let { Triple(it.id, it.contentVersion, it.runtimeTicks) }
+    val seasonKey = selectedSeason?.id?.takeIf { item?.type == "Series" }
     val backgroundMode = AppRuntime.prefs?.detailBackgroundVideo ?: "auto"
-    LaunchedEffect(id, accountScope, item?.contentVersion, previewMetadataReady, selectedSourceId, selectedSeason?.id, episodes.firstOrNull(), sourceIdsKey, detailPreviewRetry, backgroundMode) {
+    LaunchedEffect(previewActive, id, accountScope, item?.contentVersion, item?.runtimeTicks, previewMetadataReady, seasonKey, episodeKey, sourceKey, detailPreviewRetry, backgroundMode) {
         // Gate before cache reuse and every preview-only request (Episodes/trailers/sources/URL).
         if (backgroundMode == "off") {
             detailPreviewUrl = null
@@ -704,10 +717,14 @@ fun DetailScreen(
             PageLog.add("detailPreview stage=skip reason=mode-off")
             return@LaunchedEffect
         }
+        if (!previewActive) {
+            detailVideoPlaying = false
+            return@LaunchedEffect
+        }
         if (!previewMetadataReady) return@LaunchedEffect
         val c = client ?: run { PageLog.add("detailPreview stage=skip reason=client-null"); return@LaunchedEffect }
         val current = item ?: run { PageLog.add("detailPreview stage=skip reason=item-null"); return@LaunchedEffect }
-        val requestKey = "$accountScope|${current.id}|${current.contentVersion}|$sourceIdsKey|${selectedSourceId.orEmpty()}|${selectedSeason?.id.orEmpty()}|${episodes.firstOrNull()?.id.orEmpty()}|${episodes.firstOrNull()?.contentVersion.orEmpty()}|$backgroundMode"
+        val requestKey = "$accountScope|${current.id}|${current.contentVersion}|${current.runtimeTicks}|$sourceKey|$seasonKey|$episodeKey|$backgroundMode"
         if (detailPreviewRequestKey != requestKey) {
             detailPreviewRequestKey = requestKey
             detailPreviewFromStage = "hls"
@@ -726,11 +743,12 @@ fun DetailScreen(
             return@LaunchedEffect
         }
         detailPreviewUrl = null
+        detailVideoPlaying = false
         if (detailPreviewRetry == 0) detailPreviewFailure = null
         val previewItem = when (current.type) {
-            "Series" -> episodes.firstOrNull() ?: catchingRequest {
-                c.getEpisodes(current.id, selectedSeason?.id).firstOrNull()
-            }.getOrNull()
+            "Series" -> firstPreviewEpisode ?: if (seasonKey == null) {
+                catchingRequest { c.getEpisodes(current.id, null).firstOrNull() }.getOrNull()
+            } else null
             else -> current
         } ?: run {
             detailPreviewKey = "$accountScope:${current.id}:unknown"
@@ -745,8 +763,7 @@ fun DetailScreen(
                 PageLog.add("detailPreview stage=skip reason=no-cache-source")
                 return@LaunchedEffect
             }
-            sources.firstOrNull { it.id == selectedSourceId && it.streams.any { stream -> stream.type == "Video" } }
-                ?: sources.firstOrNull { source -> source.streams.any { it.type == "Video" } }
+            previewMovieSource
         } else {
             catchingRequest { c.getMediaSources(sourceItem.id) }.getOrDefault(emptyList())
                 .firstOrNull { source -> source.streams.any { it.type == "Video" } }
@@ -838,7 +855,7 @@ fun DetailScreen(
         }
     }
 
-    val playAction = rememberPlayableItemAction(listOf(id, selectedSourceId, item?.id)) { target, fromStart ->
+    val playAction = rememberPlayableItemAction(listOf(id, selectedSourceId, item?.id), active = previewActive) { target, fromStart ->
         val sourceId = selectedSourceId.takeIf { target.id == id }
         when {
             fromStart -> onPlayFromStart(target, sourceId)
@@ -1075,7 +1092,7 @@ fun DetailScreen(
                                 ) {
                                     Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF06101F), modifier = Modifier.size(22.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text(if (playAction.resolving) "正在查找…" else "播放", color = Color(0xFF06101F), fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                                    Text(if (playAction.resolving) "解析单集…" else "播放", color = Color(0xFF06101F), fontSize = 17.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                             if (it0.positionTicks > 0L) {
@@ -1227,13 +1244,10 @@ fun DetailScreen(
                                 scaleTo = 1.06f,
                                 onClick = {
                                     if (selectedSeason?.id != s.id) {
-                                        episodes = emptyList()
-                                        episodeLoadError = null
-                                        episodeLoading = true
-                                        selectedSeason = s
+                                        selectSeason(id, s)
                                     } else if (episodeLoadError != null) {
                                         episodeLoadError = null
-                                        episodeLoading = true
+                                        episodeLoading = episodes.isEmpty()
                                         episodeReloadTick++
                                     }
                                 },
@@ -1315,7 +1329,7 @@ fun DetailScreen(
                             Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = 1.04f,
                             onClick = {
                                 episodeLoadError = null
-                                episodeLoading = true
+                                episodeLoading = episodes.isEmpty()
                                 episodeReloadTick++
                             },
                         ) { focused ->
@@ -1614,13 +1628,14 @@ private fun PickerDialog(
     onClose: () -> Unit,
     loading: Boolean = false,
 ) {
-    val requesters = remember(options) { options.map { FocusRequester() } }
+    val entries = options.distinctBy { it.first }
+    val requesters = remember { mutableMapOf<String, FocusRequester>() }
+    val entryFocuses = entries.map { (id, _) -> requesters.getOrPut(id) { FocusRequester() } }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        LaunchedEffect(options) {
-            if (options.isNotEmpty()) {
-                delay(120)
-                catchingRequest { requesters.first().requestFocus() }
-            }
+        val initialKey = entries.firstOrNull()?.first
+        LaunchedEffect(initialKey) {
+            withFrameNanos { }
+            initialKey?.let { catchingRequest { requesters.getValue(it).requestFocus() } }
         }
         Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
             GlassPanel(Modifier.width(560.dp), corner = 22.dp) {
@@ -1630,25 +1645,29 @@ private fun PickerDialog(
                     if (loading) Text("正在读取列表…", color = TextSub, fontSize = 12.sp)
                     else if (options.isEmpty()) Text("没有可选项", color = TextSub, fontSize = 12.sp)
                     Column(
-                        Modifier.verticalScroll(rememberScrollState()).heightIn(max = 46.dp * 8 + 40.dp),
+                        Modifier.heightIn(max = 46.dp * 8 + 40.dp).verticalScroll(rememberScrollState()).focusGroup(),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        options.forEachIndexed { index, (key, label) ->
+                        entries.forEachIndexed { index, (id, label) ->
+                          key(id) {
                             FocusSurface(
                                 modifier = Modifier.fillMaxWidth().height(46.dp)
-                                    .focusRequester(requesters[index])
+                                    .focusRequester(entryFocuses[index])
                                     .focusProperties {
-                                        up = requesters.getOrNull(index - 1) ?: FocusRequester.Cancel
-                                        down = requesters.getOrNull(index + 1) ?: FocusRequester.Cancel
+                                        up = pickerNeighbor(index, -1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel
+                                        down = pickerNeighbor(index, 1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel
+                                        left = FocusRequester.Cancel
+                                        right = FocusRequester.Cancel
                                     },
-                                corner = 12.dp, scaleTo = 1f, onClick = { onPick(key) },
+                                corner = 12.dp, scaleTo = 1f, onClick = { onPick(id) },
                             ) { focused ->
                                 Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(if (key == currentKey) Icons.Rounded.CheckCircle else Icons.Rounded.Layers, null, tint = if (key == currentKey) Accent else TextSub, modifier = Modifier.size(16.dp))
+                                    Icon(if (id == currentKey) Icons.Rounded.CheckCircle else Icons.Rounded.Layers, null, tint = if (id == currentKey) Accent else TextSub, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(10.dp))
                                     Text(label, color = TextMain, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
+                          }
                         }
                     }
                 }

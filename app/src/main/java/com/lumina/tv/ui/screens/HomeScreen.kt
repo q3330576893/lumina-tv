@@ -31,6 +31,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -100,6 +101,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.BlendMode
@@ -113,7 +115,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -145,6 +148,7 @@ import com.lumina.tv.ui.components.GlassTone
 import com.lumina.tv.ui.components.glassSurface
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
+import com.lumina.tv.ui.components.ResumeRemovalPill
 import com.lumina.tv.ui.components.SectionTitle
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Ink
@@ -171,7 +175,6 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.withPermit
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 
@@ -278,22 +281,15 @@ fun HomeScreen(
     }
     val scope = rememberCoroutineScope { homeExceptionHandler }
     val heroTopLogTimes = remember { mutableMapOf<String, Long>() }
-    fun ensureHeroAtTop(source: String) {
-        scope.launch {
-            recListState.scroll { recListState.scrollToItem(0) }
-            withFrameNanos { }
-            var tries = 0
-            while ((recListState.firstVisibleItemIndex != 0 || recListState.firstVisibleItemScrollOffset != 0) && tries < 3) {
-                recListState.scroll { recListState.scrollToItem(0) }
-                withFrameNanos { }
-                tries++
-            }
-            val now = android.os.SystemClock.elapsedRealtime()
-            val lastLoggedAt = heroTopLogTimes[source]
-            if (lastLoggedAt == null || now - lastLoggedAt >= 300L) {
-                heroTopLogTimes[source] = now
-                PageLog.add("heroTop source=$source tries=$tries index=${recListState.firstVisibleItemIndex} offset=${recListState.firstVisibleItemScrollOffset}")
-            }
+    fun heroIsAtTop() = recListState.firstVisibleItemIndex == 0 && recListState.firstVisibleItemScrollOffset == 0
+    suspend fun ensureHeroAtTop(source: String) {
+        // scrollToItem already owns the list's scroll mutation.
+        recListState.scrollToItem(0)
+        val now = android.os.SystemClock.elapsedRealtime()
+        val lastLoggedAt = heroTopLogTimes[source]
+        if (lastLoggedAt == null || now - lastLoggedAt >= 300L) {
+            heroTopLogTimes[source] = now
+            PageLog.add("heroTop source=$source index=${recListState.firstVisibleItemIndex} offset=${recListState.firstVisibleItemScrollOffset}")
         }
     }
     fun closeSortMenu() {
@@ -382,24 +378,25 @@ fun HomeScreen(
     var focusedLibraryId by rememberSaveable { mutableStateOf<String?>(null) }
     var heroIndex by rememberSaveable { mutableStateOf(0) }
     var unavailableHeroIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var heroFocusExpected by rememberSaveable { mutableStateOf(false) }
+    var heroHasFocus by remember { mutableStateOf(false) }
+    var restoreHeroFocus by rememberSaveable { mutableStateOf(false) }
+    var heroResetPending by remember { mutableStateOf(false) }
     var lastExitBackAt by remember { mutableStateOf(0L) }
+    val inputModeManager = LocalInputModeManager.current
 
     LaunchedEffect(resume.isEmpty()) {
         if (resume.isEmpty()) resumeRowFocused = false
     }
 
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && heroFocusExpected) ensureHeroAtTop("resume")
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    fun resetToHero() {
+        focusedMediaId = null
+        focusedMediaSection = null
+        heroResetPending = true
+        lastExitBackAt = 0L
     }
 
     // A genre is an in-page route: Android/TV Back returns to the genre list, then home.
-    BackHandler(enabled = true) {
+    BackHandler(enabled = active) {
         when {
             sortMenuOpen -> closeSortMenu()
             libraryServerMenuOpen -> libraryServerMenuOpen = false
@@ -411,13 +408,18 @@ fun HomeScreen(
                 tab = HomeTab.Recommend
                 selectedLibraryId = null
                 gridItems = emptyList()
+                if (!loading && error == null) resetToHero()
             }
-            recListState.firstVisibleItemIndex > 0 || recListState.firstVisibleItemScrollOffset > 0 -> {
-                ensureHeroAtTop("back")
-            }
+            !loading && error == null && homeNeedsHeroReset(
+                recListState.firstVisibleItemIndex,
+                recListState.firstVisibleItemScrollOffset,
+                inputModeManager.inputMode == InputMode.Keyboard,
+                heroHasFocus,
+                heroResetPending,
+            ) -> resetToHero()
             else -> {
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (now - lastExitBackAt <= 2_000L) {
+                if (lastExitBackAt != 0L && now - lastExitBackAt <= 2_000L) {
                     (context as? Activity)?.finish()
                 } else {
                     lastExitBackAt = now
@@ -706,7 +708,6 @@ fun HomeScreen(
     }
 
     val heroItems = rememberHomeHeroItems(latest, movies, series, favorites, unavailableHeroIds, ::pickHeroItems)
-    val hero = heroItems.getOrNull(heroIndex.coerceAtMost((heroItems.size - 1).coerceAtLeast(0)))
     LaunchedEffect(heroItems.size) {
         if (heroItems.isEmpty()) heroIndex = 0
         else if (heroIndex > heroItems.lastIndex) heroIndex = heroItems.lastIndex
@@ -716,6 +717,7 @@ fun HomeScreen(
         views.filterNot { it.id in hiddenHomeViewIds }
     }
     val firstSectionKey: String? = when {
+        resume.isEmpty() && favorites.isEmpty() -> "empty"
         resume.isNotEmpty() -> "resume"
         homeLibraries.isNotEmpty() -> "library-${homeLibraries.first().id}"
         favorites.isNotEmpty() -> "favorites"
@@ -723,14 +725,6 @@ fun HomeScreen(
             viewContents[view.id]?.takeIf { it.isNotEmpty() }?.let { "view-${view.id}" }
         }
     }
-    val topRenderedRow = when {
-        resume.isNotEmpty() -> "resume" to resume
-        favorites.isNotEmpty() -> "favorites" to favorites
-        else -> homeLibraries.firstNotNullOfOrNull { view ->
-            viewContents[view.id]?.takeIf { it.isNotEmpty() }?.let { "view-${view.id}" to it }
-        }
-    }
-    val topRenderedRowKey = topRenderedRow?.first
     val navFocus = remember { FocusRequester() }
     val libraryBackFocus = remember { FocusRequester() }
     val librarySortFocus = remember { FocusRequester() }
@@ -738,12 +732,12 @@ fun HomeScreen(
     val mediaLibraryContentFocus = remember { FocusRequester() }
     val libraryGridColumns = ((LocalConfiguration.current.screenWidthDp - 80 + 20) / 150).coerceAtLeast(1)
 
-    val heroPlayFocus = remember { FocusRequester() }
+    val heroArtworkFocus = remember { FocusRequester() }
     val firstContentFocus = remember { FocusRequester() }
     val firstContentListIndex = remember(resume, homeLibraries, favorites, viewContents, views) {
         var index = 1 // Hero
-        if (resume.isEmpty() && favorites.isEmpty()) index++ // Empty-state action
         when {
+            resume.isEmpty() && favorites.isEmpty() -> index // Empty-state action
             resume.isNotEmpty() -> index
             homeLibraries.isNotEmpty() -> index
             favorites.isNotEmpty() -> index
@@ -792,7 +786,7 @@ fun HomeScreen(
                             delay(40)
                         }
                     }
-                    runCatching { heroPlayFocus.requestFocus() }
+                    resetToHero()
                 }
                 HomeTab.Favorites -> {
                     favoritesGridState.scrollToItem(0)
@@ -811,18 +805,23 @@ fun HomeScreen(
         return true
     }
     val navContentFocus = when (tab) {
-        HomeTab.Recommend -> if (hasContentTarget) firstContentFocus else FocusRequester.Default
+        HomeTab.Recommend -> heroArtworkFocus
         HomeTab.Favorites -> if (hasContentTarget) favoritesContentFocus else FocusRequester.Default
         HomeTab.Media -> if (selectedLibraryId == null && views.any { !(AppRuntime.prefs?.isViewHidden(it.id) ?: false) }) mediaLibraryContentFocus else FocusRequester.Default
         else -> FocusRequester.Default
     }
 
-    LaunchedEffect(loading, initialFocusPending, hero?.id, tab) {
-        if (!loading && initialFocusPending && tab == HomeTab.Recommend) {
-            recListState.scrollToItem(0)
+    LaunchedEffect(active, loading, error, tab, initialFocusPending, restoreHeroFocus, heroResetPending) {
+        if (active && !loading && error == null && tab == HomeTab.Recommend &&
+            (initialFocusPending || restoreHeroFocus || heroResetPending)
+        ) {
+            val source = if (heroResetPending) "back" else if (restoreHeroFocus) "return" else "initial"
+            ensureHeroAtTop(source)
             withFrameNanos { }
-            runCatching { heroPlayFocus.requestFocus() }
+            if (inputModeManager.inputMode == InputMode.Keyboard) runCatching { heroArtworkFocus.requestFocus() }
             initialFocusPending = false
+            restoreHeroFocus = false
+            heroResetPending = false
         }
     }
 
@@ -856,15 +855,19 @@ fun HomeScreen(
                         Text("诊断：$failure", color = TextSub.copy(alpha = 0.6f), fontSize = 10.sp, maxLines = 2)
                     }
                 }
-                tab == HomeTab.Recommend -> Box(Modifier.fillMaxSize().background(Ink)) {
+                tab == HomeTab.Recommend -> BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
+                    val heroWidth = maxWidth
+                    val heroHeight = maxHeight
                     LazyColumn(
                         state = recListState,
                         modifier = Modifier.fillMaxSize().background(Ink),
                     ) {
-                    item {
+                    item(key = "home-hero") {
                         Hero(
                             items = heroItems,
                             active = active,
+                            heroWidth = heroWidth,
+                            heroHeight = heroHeight,
                             currentIndex = heroIndex,
                             onPrevious = {
                                 if (heroItems.isNotEmpty()) {
@@ -876,12 +879,17 @@ fun HomeScreen(
                                     heroIndex = (heroIndex + 1) % heroItems.size
                                 }
                             },
-                            onPlay = onPlay,
-                            onOpenDetail = onOpenDetail,
-                            playFocus = heroPlayFocus,
-                            onPlayFocused = { ensureHeroAtTop("play") },
-                            onDetailFocused = { ensureHeroAtTop("detail") },
-                            onHeroFocusChanged = { heroFocusExpected = it },
+                            onPlay = { restoreHeroFocus = true; onPlay(it) },
+                            onOpenDetail = { restoreHeroFocus = true; onOpenDetail(it) },
+                            artworkFocus = heroArtworkFocus,
+                            navFocus = navFocus,
+                            onNavigateDown = ::navigateToFirstContent,
+                            onHeroFocusChanged = {
+                                heroHasFocus = it
+                                if (it && !heroIsAtTop() && !heroResetPending) {
+                                    scope.launch { ensureHeroAtTop("focus") }
+                                }
+                            },
                             onItemUnavailable = { itemId -> unavailableHeroIds = unavailableHeroIds + itemId },
                             hazeState = hazeState,
                         )
@@ -890,10 +898,10 @@ fun HomeScreen(
                         item {
                             FocusSurface(
                                 modifier = Modifier.padding(horizontal = 34.dp, vertical = 12.dp)
-                                    .fillMaxWidth().height(56.dp),
+                                    .fillMaxWidth().height(56.dp).focusProperties { up = heroArtworkFocus },
+                                focusRequester = if (firstSectionKey == "empty") firstContentFocus else null,
                                 corner = 28.dp,
                                 scaleTo = 1.02f,
-                                requestFocus = initialFocusPending,
                                 onClick = { tab = HomeTab.Media; selectedLibraryId = null },
                             ) { focused ->
                                 Box(
@@ -906,7 +914,7 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, titleOverlay = true, topPadding = 12.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "resume") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }, onRowFocusChanged = { resumeRowFocused = it }, onItemMenu = { pendingResumeRemoval = it }) { onOpenDetail(it.seriesId ?: it.id) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, titleOverlay = true, topPadding = 12.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "resume", focusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "resume" }, onRowFocusChanged = { resumeRowFocused = it }, onItemMenu = { pendingResumeRemoval = it }) { onOpenDetail(it.seriesId ?: it.id) } }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
@@ -916,7 +924,7 @@ fun HomeScreen(
                             onOpenLibrary = { tab = HomeTab.Media; selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; LibraryCache.clearGridPosition(libraryBrowseKey(it.id, librarySort, librarySortOrder)) },
                         )
                     }
-                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, width = 130.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "favorites") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "favorites") heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
+                    if (favorites.isNotEmpty()) item { RowSection("我的收藏", favorites, width = 130.dp, requestInitialFocus = focusedMediaId != null && firstSectionKey == "favorites", focusItemId = focusedMediaId, sectionKey = "favorites", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "favorites") firstContentFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "favorites" }) { onOpenDetail(it.id) } }
                     // 媒体库全分类直接融入首页推荐流，支持无限往下滑
                     val enabledViews = views.filter { v -> !(AppRuntime.prefs?.isViewHidden(v.id) ?: false) }
                     enabledViews.forEach { v ->
@@ -927,7 +935,7 @@ fun HomeScreen(
                             }
                         } else if (items.isNotEmpty()) {
                             item(key = "home-view-${v.id}") {
-                            RowSection(v.name, items, requestInitialFocus = focusedMediaId != null && firstSectionKey == "view-" + v.id, focusItemId = focusedMediaId, sectionKey = "view-" + v.id, focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "view-${v.id}") firstContentFocus else null, upFocus = if (hero != null && topRenderedRowKey == "view-" + v.id) heroPlayFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "view-" + v.id }) { onOpenDetail(it.id) }
+                                RowSection(v.name, items, requestInitialFocus = focusedMediaId != null && firstSectionKey == "view-" + v.id, focusItemId = focusedMediaId, sectionKey = "view-" + v.id, focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "view-${v.id}") firstContentFocus else null, onItemFocused = { focusedMediaId = it; focusedMediaSection = "view-" + v.id }) { onOpenDetail(it.id) }
                             }
                         }
                     }
@@ -1167,7 +1175,12 @@ fun HomeScreen(
                 },
                 navFocus = navFocus,
                 contentFocus = navContentFocus,
-                onNavigateDown = ::navigateToFirstContent,
+                onNavigateDown = {
+                    if (tab == HomeTab.Recommend && !loading && error == null) {
+                        resetToHero()
+                        true
+                    } else navigateToFirstContent()
+                },
                 hazeState = hazeState,
             )
         LaunchedEffect(pendingResumeRemoval?.id) {
@@ -1187,8 +1200,8 @@ fun HomeScreen(
                     }
                 },
                 confirmButton = {
-                    TextButton(
-                        modifier = Modifier.focusRequester(removeFocus),
+                    ResumeRemovalPill(
+                        focusRequester = removeFocus,
                         onClick = {
                             val oldIndex = resume.indexOfFirst { it.id == item.id }
                             AppRuntime.prefs?.hideResumeItem(item)
@@ -1199,10 +1212,10 @@ fun HomeScreen(
                             resumeFilterVersion++
                             scope.launch {
                                 withFrameNanos { }
-                                if (nextFocus == null) runCatching { heroPlayFocus.requestFocus() }
+                                if (nextFocus == null) resetToHero()
                             }
                         }
-                    ) { Text("移除") }
+                    )
                 },
                 dismissButton = { TextButton(onClick = { pendingResumeRemoval = null }) { Text("取消") } },
             )
@@ -1839,44 +1852,49 @@ internal fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: 
     return picked
 }
 
-private fun calculateHeroHeight(screenHeight: Dp): Dp =
-    (screenHeight * 0.75f).coerceAtLeast(400.dp)
-
 @Composable
 private fun Hero(
     items: List<MediaItem>,
+    heroWidth: Dp,
+    heroHeight: Dp,
     currentIndex: Int,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onPlay: (MediaItem) -> Unit,
     onOpenDetail: (String) -> Unit,
-    playFocus: FocusRequester,
-    onPlayFocused: () -> Unit,
-    onDetailFocused: () -> Unit,
+    artworkFocus: FocusRequester,
+    navFocus: FocusRequester,
+    onNavigateDown: () -> Boolean,
     onHeroFocusChanged: (Boolean) -> Unit,
     onItemUnavailable: (String) -> Unit,
     hazeState: HazeState,
-    onComposed: (Boolean) -> Unit = {},
     active: Boolean = true,
 ) {
-    val heroHeight = calculateHeroHeight(LocalConfiguration.current.screenHeightDp.dp)
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
     if (item == null) {
-        Box(Modifier.fillMaxWidth().height(heroHeight).background(Ink)) {
+        Box(Modifier.fillMaxWidth().height(heroHeight).background(Ink)
+            .focusRequester(artworkFocus)
+            .focusProperties { up = navFocus }
+            .onFocusChanged { onHeroFocusChanged(it.hasFocus) }
+            .onPreviewKeyEvent { it.type == KeyEventType.KeyDown && it.key == Key.DirectionDown && onNavigateDown() }
+            .focusable()) {
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
             Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = 13.sp)
         }
         return
     }
-    DisposableEffect(Unit) {
-        onComposed(true)
-        onDispose { onComposed(false) }
-    }
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val transitionScope = rememberCoroutineScope()
     val client = AppRuntime.client
+    val playFocus = remember { FocusRequester() }
     val detailFocus = remember { FocusRequester() }
+    val compact = heroWidth < 720.dp
+    val horizontalInset = if (compact) 20.dp else 40.dp
+    val bottomInset = if (compact) 20.dp else 28.dp
+    val titleWidth = if (compact) (heroWidth - horizontalInset * 2).coerceAtLeast(0.dp) else heroWidth * 0.42f
+    val actionWidth = ((titleWidth - 12.dp) / 2).coerceAtLeast(0.dp)
+    val thumbnailWidth = if (compact) minOf(64.dp, heroWidth * 0.21f) else minOf(112.dp, heroWidth * 0.14f)
     var focusedHeroAction by remember { mutableStateOf(HeroActionFocus.NONE) }
     var tmdbBackdrops by remember(items) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var tmdbResolvedIds by remember(items) { mutableStateOf<Set<String>>(emptySet()) }
@@ -2013,7 +2031,7 @@ private fun Hero(
     } else {
         items.firstOrNull { resolveHeroImage(it) == bottomImage } ?: item
     }
-    val playAction = rememberPlayableItemAction(listOf(item.id, displayItem.id, currentIndex)) { target, _ -> onPlay(target) }
+    val playAction = rememberPlayableItemAction(listOf(item.id, displayItem.id, currentIndex), active = active) { target, _ -> onPlay(target) }
     val currentPlayAction by rememberUpdatedState(playAction)
     val advance by rememberUpdatedState(onNext)
     LaunchedEffect(items, playAction.resolving, active, lifecycle) {
@@ -2068,9 +2086,13 @@ private fun Hero(
             .hazeSource(hazeState)
             .fillMaxWidth()
             .height(heroHeight)
-            .clip(RoundedCornerShape(bottomEnd = 24.dp))
+            .clipToBounds()
+            .onFocusChanged { onHeroFocusChanged(it.hasFocus) }
             .onPreviewKeyEvent { event ->
                 if (focusedHeroAction == HeroActionFocus.NONE || event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (event.key == Key.DirectionDown && focusedHeroAction != HeroActionFocus.ARTWORK) {
+                    return@onPreviewKeyEvent onNavigateDown()
+                }
                 val direction = when (event.key) {
                     Key.DirectionLeft -> HeroDirectionKey.LEFT
                     Key.DirectionRight -> HeroDirectionKey.RIGHT
@@ -2085,6 +2107,7 @@ private fun Hero(
                 if (direction == HeroDirectionKey.LEFT) onPrevious() else onNext()
                 true
             }
+            .focusGroup()
     ) {
         Box(
             Modifier
@@ -2121,6 +2144,23 @@ private fun Hero(
                 )
             }
         Box(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().fillMaxHeight(0.62f)
+                .focusRequester(artworkFocus)
+                .focusProperties { up = navFocus; down = playFocus }
+                .onFocusChanged {
+                    if (it.isFocused) focusedHeroAction = HeroActionFocus.ARTWORK
+                    else if (focusedHeroAction == HeroActionFocus.ARTWORK) focusedHeroAction = HeroActionFocus.NONE
+                }
+                .onKeyEvent {
+                    if (it.key != Key.DirectionCenter && it.key != Key.Enter && it.key != Key.NumPadEnter) false
+                    else {
+                        if (it.type == KeyEventType.KeyUp) playFocus.requestFocus()
+                        true
+                    }
+                }
+                .focusable()
+        )
+        Box(
             Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
                     0.55f to Ink.copy(alpha = 0f),
@@ -2129,9 +2169,9 @@ private fun Hero(
             )
         )
         Column(
-            Modifier.align(Alignment.BottomStart).heightIn(max = heroHeight - 96.dp)
-                .padding(start = 40.dp, bottom = 28.dp)
-                .widthIn(max = (LocalConfiguration.current.screenWidthDp * 0.42f).dp),
+            Modifier.align(Alignment.BottomStart).heightIn(max = (heroHeight - 64.dp).coerceAtLeast(0.dp))
+                .padding(start = horizontalInset, bottom = bottomInset)
+                .widthIn(max = titleWidth),
             verticalArrangement = Arrangement.Bottom,
         ) {
             Text("为你推荐", color = TextSub, fontSize = 11.sp, letterSpacing = 2.sp)
@@ -2173,15 +2213,16 @@ private fun Hero(
             Spacer(Modifier.height(14.dp))
             Row {
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(128.dp).focusProperties { right = detailFocus },
+                    modifier = Modifier.height(42.dp).width(minOf(128.dp, actionWidth)).focusProperties {
+                        right = detailFocus
+                        up = artworkFocus
+                    },
                     corner = 21.dp,
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
-                    onFocused = onPlayFocused,
                     onFocusChanged = {
                         if (it) {
                             focusedHeroAction = HeroActionFocus.PLAY
-                            onHeroFocusChanged(true)
                         } else if (focusedHeroAction == HeroActionFocus.PLAY) {
                             focusedHeroAction = HeroActionFocus.NONE
                         }
@@ -2201,7 +2242,7 @@ private fun Hero(
                         Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF0B1018), modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            if (playAction.resolving) "正在查找…" else if (displayItem.id != item.id) "切换中…"
+                            if (playAction.resolving) "解析单集…" else if (displayItem.id != item.id) "切换中…"
                             else if (displayItem.positionTicks > 0) "继续播放" else "立即播放",
                             color = Color(0xFF0B1018), fontSize = 16.sp, fontWeight = FontWeight.Bold,
                         )
@@ -2209,15 +2250,16 @@ private fun Hero(
                 }
                 Spacer(Modifier.width(12.dp))
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(108.dp).focusProperties { left = playFocus },
+                    modifier = Modifier.height(42.dp).width(minOf(108.dp, actionWidth)).focusProperties {
+                        left = playFocus
+                        up = artworkFocus
+                    },
                     corner = 21.dp,
                     scaleTo = 1.05f,
                     focusRequester = detailFocus,
-                    onFocused = onDetailFocused,
                     onFocusChanged = {
                         if (it) {
                             focusedHeroAction = HeroActionFocus.DETAIL
-                            onHeroFocusChanged(true)
                         } else if (focusedHeroAction == HeroActionFocus.DETAIL) {
                             focusedHeroAction = HeroActionFocus.NONE
                         }
@@ -2232,14 +2274,18 @@ private fun Hero(
             }
         }
             Column(
-                Modifier.align(Alignment.BottomEnd).padding(end = 40.dp, bottom = 28.dp),
+                Modifier.align(if (compact) Alignment.TopEnd else Alignment.BottomEnd).padding(
+                    end = horizontalInset,
+                    top = if (compact) 64.dp else 0.dp,
+                    bottom = if (compact) 0.dp else bottomInset,
+                ),
                 horizontalAlignment = Alignment.End,
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items.take(3).forEachIndexed { slot, _ ->
                         val thumbnailItem = items[(currentIndex + slot) % items.size]
                         Box(
-                            Modifier.size(width = 112.dp, height = 63.dp)
+                            Modifier.size(width = thumbnailWidth, height = thumbnailWidth * 9 / 16)
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(InkSoft)
                         ) {
@@ -2262,6 +2308,9 @@ private fun Hero(
                     }
                 }
             }
+        }
+        if (focusedHeroAction == HeroActionFocus.ARTWORK) {
+            Box(Modifier.matchParentSize().padding(4.dp).border(1.5.dp, Accent.copy(alpha = 0.76f), RoundedCornerShape(8.dp)))
         }
     }
 }
@@ -2348,8 +2397,8 @@ private fun HeroBackdropImage(
         AsyncImage(
             model = request,
             contentDescription = null,
-            contentScale = ContentScale.Crop,
-            alignment = Alignment.TopCenter,
+            contentScale = ContentScale.Fit,
+            alignment = Alignment.Center,
             onSuccess = {
                 val width = it.result.drawable.intrinsicWidth
                 val height = it.result.drawable.intrinsicHeight

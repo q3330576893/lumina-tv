@@ -1,5 +1,8 @@
 package com.lumina.tv.pair
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Handler
 import android.os.Looper
 import fi.iki.elonen.NanoHTTPD
@@ -271,25 +274,33 @@ class PairingServer(
             return null
         }
 
-        /** 取本机局域网 IPv4，优先 192.168 / 10 / 172 段。 */
-        fun localIp(): String? {
-            val candidates = mutableListOf<String>()
-            try {
-                for (nif in NetworkInterface.getNetworkInterfaces()) {
-                    if (!nif.isUp || nif.isLoopback) continue
-                    for (addr in nif.inetAddresses) {
-                        if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                            val ip = addr.hostAddress ?: continue
-                            if (ip.startsWith("169.254")) continue
-                            candidates += ip
-                        }
-                    }
+        /** Prefer the TV's active Wi-Fi/Ethernet path, even during local-only connectivity. */
+        fun localIp(context: Context): String? {
+            fun addresses(values: Sequence<java.net.InetAddress>) =
+                values.filterIsInstance<Inet4Address>()
+                    .filterNot { it.isAnyLocalAddress || it.isLoopbackAddress || it.isLinkLocalAddress }
+                    .mapNotNull { it.hostAddress }
+
+            val manager = context.getSystemService(ConnectivityManager::class.java)
+            val lanAddress = runCatching {
+                val active = manager?.activeNetwork
+                manager?.allNetworks.orEmpty().sortedBy { it != active }.firstNotNullOfOrNull { network ->
+                    val caps = manager?.getNetworkCapabilities(network)
+                    val isLan = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ||
+                        caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
+                    if (!isLan || caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) null
+                    else addresses(manager?.getLinkProperties(network)?.linkAddresses.orEmpty().asSequence().map { it.address })
+                        .firstOrNull()
                 }
-            } catch (_: Exception) { }
-            return candidates.firstOrNull { it.startsWith("192.168.") }
-                ?: candidates.firstOrNull { it.startsWith("10.") }
-                ?: candidates.firstOrNull { it.startsWith("172.") }
-                ?: candidates.firstOrNull()
+            }.getOrNull()
+            if (lanAddress != null) return lanAddress
+            return runCatching {
+                NetworkInterface.getNetworkInterfaces().toList().firstNotNullOfOrNull { nif ->
+                    val lanInterface = listOf("eth", "wlan", "en", "ap", "swlan").any(nif.name::startsWith)
+                    if (!lanInterface || !nif.isUp || nif.isLoopback) null
+                    else addresses(nif.inetAddresses.toList().asSequence()).firstOrNull()
+                }
+            }.getOrNull()
         }
     }
 
