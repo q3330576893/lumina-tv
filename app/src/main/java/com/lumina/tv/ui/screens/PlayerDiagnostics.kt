@@ -187,6 +187,8 @@ internal fun buildPlayerDiagPayload(
         .put("finalReason", error ?: playbackStatusNotice ?: JSONObject.NULL)
         .put("mpv", mpvState.error ?: "No mpv error recorded")
         .put("mpvErrorPresent", mpvState.error != null)
+        .put("mpvHttpHeaders", mpvState.httpHeadersStatus ?: JSONObject.NULL)
+        .put("mpvHttpHeadersNotice", mpvState.httpHeadersNotice ?: JSONObject.NULL)
         .put("mpvSoftwareRetryCount", mpvBackend?.softwareRetryCount() ?: 0)
         .put("audioDecodeFailure", AppRuntime.prefs?.lastPlaybackAudioFailure ?: "")
         .put("metrics", playbackDiagnostics.snapshot(android.os.SystemClock.elapsedRealtime())
@@ -222,6 +224,7 @@ internal fun buildPlayerDiagPayload(
             appendLine("error=${error ?: "none"}")
             appendLine("status=${playbackStatusNotice ?: "none"}")
             appendLine("mpvError=${mpvState.error ?: "none"}")
+            appendLine("mpvHttpHeaders=${mpvState.httpHeadersStatus ?: "not-applied"}")
             appendLine("mpvUnavailableReason=${mpvBackend?.unavailableReason ?: "none"}")
         },
     )

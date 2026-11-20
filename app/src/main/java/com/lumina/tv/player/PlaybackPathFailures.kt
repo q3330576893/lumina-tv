@@ -24,14 +24,39 @@ internal data class PlaybackPathFailure(
 
 internal class PlaybackPathFailures {
     private val failures = linkedSetOf<PlaybackPathFailure>()
+    private val engineFailures = linkedSetOf<Triple<String, String, PlaybackFailureReason>>()
+    private val engineWideFailureReasons = setOf(
+        PlaybackFailureReason.LOAD,
+        PlaybackFailureReason.HTTP,
+        PlaybackFailureReason.INITIALIZATION,
+        PlaybackFailureReason.DECODING,
+    )
     fun record(failure: PlaybackPathFailure) { failures += failure }
-    fun excludes(path: PlaybackPath): Boolean = failures.any { it.path == path }
+    fun recordEngineFailure(failure: PlaybackPathFailure) {
+        require(failure.reason in engineWideFailureReasons)
+        failures += failure
+        engineFailures += Triple(failure.path.sourceId, failure.path.engine, failure.reason)
+    }
+    fun excludes(path: PlaybackPath): Boolean = failures.any { failure ->
+        failure.path == path
+    } || engineFailures.any { (sourceId, engine, _) -> sourceId == path.sourceId && engine == path.engine }
     fun snapshot(): List<PlaybackPathFailure> = failures.toList()
-    fun clearForManualRetry() = failures.clear()
+    fun clearForManualRetry() { failures.clear(); engineFailures.clear() }
 }
 
 internal fun mpvWasExplicitlyRequested(preference: String?, pinned: String?): Boolean =
     (pinned ?: preference) == "mpv"
+
+/** A Media3 audio-output failure may trigger one automatic mpv recovery attempt. */
+internal fun shouldAutomaticallyTryMpvAudioFallback(
+    failure: PlaybackFailureReason,
+    path: PlaybackPath,
+    failures: PlaybackPathFailures,
+    mpvAvailable: Boolean,
+    mpvExplicitlyRequested: Boolean,
+): Boolean = failure == PlaybackFailureReason.AUDIO_OUTPUT && path.engine == "media3" &&
+    mpvAvailable && mpvExplicitlyRequested &&
+    !failures.excludes(path.copy(engine = "mpv"))
 
 /** mpv enters the list only after a user choice. */
 internal fun selectPlaybackEngine(

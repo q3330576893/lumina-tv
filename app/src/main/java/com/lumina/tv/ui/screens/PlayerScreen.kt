@@ -196,7 +196,9 @@ import com.lumina.tv.player.supportsContentHdr
 import com.lumina.tv.player.displayHdrDiagnostic
 import com.lumina.tv.player.PlaybackDelivery
 import com.lumina.tv.player.PlaybackFailureReason
+import com.lumina.tv.player.mpvWasExplicitlyRequested
 import com.lumina.tv.player.selectPlaybackEngine
+import com.lumina.tv.player.shouldAutomaticallyTryMpvAudioFallback
 import com.lumina.tv.player.PlaybackRecoveryBudget
 import com.lumina.tv.player.PlayerLifecycle
 import com.lumina.tv.player.PlayerHostLifecycleEvent
@@ -937,7 +939,14 @@ fun PlayerScreen(
 
     fun recordPathFailure(reason: PlaybackFailureReason, detail: String) {
         val path = currentPath ?: return
-        pathFailures.record(PlaybackPathFailure(path, reason, sessionGeneration, detail))
+        val failure = PlaybackPathFailure(path, reason, sessionGeneration, detail)
+        if (path.engine == "mpv" && reason in setOf(
+                PlaybackFailureReason.LOAD, PlaybackFailureReason.HTTP,
+                PlaybackFailureReason.INITIALIZATION, PlaybackFailureReason.DECODING)) {
+            pathFailures.recordEngineFailure(failure)
+        } else {
+            pathFailures.record(failure)
+        }
         PageLog.add("pathFailed source=${path.sourceId} engine=${path.engine} path=${path.delivery} audio=${path.audioTrack} reason=$reason")
     }
 
@@ -1128,8 +1137,13 @@ fun PlayerScreen(
         val mpvKey = audioMpvKey() ?: return
         if (activeEngine == "mpv" && mpvKey !in audioMpvFailures) return
         recordPathFailure(PlaybackFailureReason.AUDIO_OUTPUT, reason)
+        val automaticMpvFallback = currentPath?.let { path ->
+            shouldAutomaticallyTryMpvAudioFallback(PlaybackFailureReason.AUDIO_OUTPUT, path, pathFailures,
+                mpvInstalled && !mpvInitializationFailed,
+                mpvWasExplicitlyRequested(AppRuntime.prefs?.playerEngine, enginePinned))
+        } == true
         val tryMpv = activeEngine != "mpv" && mpvKey !in audioMpvAttempts && mpvKey !in audioMpvFailures &&
-            canTryMpvPath()
+            (canTryMpvPath() || automaticMpvFallback)
         if (tryMpv && reason != "manual-unsupported") {
             // Exclude the track that actually failed. A manual unsupported choice must
             // still be able to return to the previously playing, supported track.
@@ -1227,6 +1241,7 @@ fun PlayerScreen(
         if (recordAudioMpvFailure()) return
         mpvBackend?.release("mpv-failed:$reason")
         mpvBackend = null
+        enginePinned = "media3"
         updateStalled(false)
         failurePhase = when (kind) {
             MpvPlayerController.FailureKind.HTTP -> "连接"
@@ -1235,7 +1250,7 @@ fun PlayerScreen(
             MpvPlayerController.FailureKind.FIRST_FRAME_TIMEOUT -> "首帧"
             else -> "解码"
         }
-        audioDecodeNotice = "$detail，正在尝试可用播放路径"
+        audioDecodeNotice = "mpv 播放失败（$reason），已切回内置内核 Media3"
         reloadForceTranscode = currentPath?.delivery == PlaybackDelivery.TRANSCODE
         requestAutomaticReload(generation, "mpv:$reason")
     }
@@ -1584,6 +1599,7 @@ fun PlayerScreen(
                             if (state.subtitleNotice.contains("CERT_INVALID")) ServerCertificateErrors.record(c.baseUrl)
                             if (state.subtitleFallbackToAuto) subtitlePreference = "auto"
                         }
+                        state.httpHeadersNotice?.let { playbackStatusNotice = it }
                         if (state.ready && !state.buffering) {
                             onTimelineFirstFrame(target, android.os.SystemClock.elapsedRealtime())
                             playbackDiagnostics.firstFrame(load, android.os.SystemClock.elapsedRealtime(), "mpv.ready (no rendered-frame callback)")

@@ -120,8 +120,9 @@ object DiagExporter {
                     "mpv-audio.jsonl", "mpv-audio-system.log" -> 384 * 1024
                     else -> 120 * 1024
                 }
-                val sanitized = sanitize(original)
-                val bounded = if (name.endsWith(".json", ignoreCase = true)) {
+                val isJson = name.endsWith(".json", ignoreCase = true)
+                val sanitized = if (isJson) LogRedactor.redactJson(original) else sanitize(original)
+                val bounded = if (isJson) {
                     boundedDiagnosticJson(sanitized, limit)
                 } else {
                     sanitized.take(limit)
@@ -165,6 +166,33 @@ object LogRedactor {
         """(?i)((?<![\w-])["']?(?:baseUrl|base_url)["']?\s*[:=]\s*)($QUOTED_VALUE|[^,}\s]+)"""
     )
     private val urlUserInfo = Regex("""(?i)(https?://)[^\s/?#<>"']*@""")
+    private val secretField = Regex("""(?i)^(?:$SECRET_KEYS)$""")
+
+    /** Redact JSON values structurally so punctuation in a string cannot damage the document. */
+    fun redactJson(text: String): String = try {
+        val tokener = org.json.JSONTokener(text)
+        val value = tokener.nextValue()
+        require(tokener.nextClean() == '\u0000') { "Trailing data after JSON value" }
+        redactJsonValue(value).toString()
+    } catch (_: Exception) {
+        redact(text)
+    }
+
+    private fun redactJsonValue(value: Any?): Any = when (value) {
+        is JSONObject -> JSONObject().apply {
+            val keys = value.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                put(key, if (secretField.matches(key)) "***" else redactJsonValue(value.opt(key)))
+            }
+        }
+        is JSONArray -> JSONArray().apply {
+            for (index in 0 until value.length()) put(redactJsonValue(value.opt(index)))
+        }
+        is String -> redact(value)
+        null -> JSONObject.NULL
+        else -> value
+    }
 
     fun redact(s: String): String {
         // Also applies to nested baseUrl fields in meta.json and last-session.json.

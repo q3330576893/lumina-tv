@@ -17,7 +17,7 @@ internal fun boundedDiagnosticJson(text: String, maxBytes: Int): String {
         }
     }
         .getOrElse {
-            return JSONObject().put("truncated", true).put("reason", "invalid_json").toString()
+            return JSONObject().put("invalid", true).put("reason", "invalid_json").toString()
         }
     val originalBytes = normalized.toByteArray(Charsets.UTF_8).size
     if (originalBytes <= maxBytes) return normalized

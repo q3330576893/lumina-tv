@@ -142,7 +142,7 @@ object UChecks {
         check("mpvWasExplicitlyRequested(AppRuntime.prefs?.playerEngine, enginePinned)" in player)
         check("audioDecodeNotice = if (selectedEngine == \"mpv\")" in player && "先尝试 Media3" in player)
         check("已用 mpv 软解" !in player && "正在尝试软解内核" !in player)
-        println("B14 PASS U10: Media3 default, user-selected mpv only, path exclusions and paced mpv diagnostics")
+        println("B14 PASS U10: Media3 default, explicit engine selection plus targeted audio-output recovery, path exclusions and paced mpv diagnostics")
     }
 
     private fun pairingQr() {

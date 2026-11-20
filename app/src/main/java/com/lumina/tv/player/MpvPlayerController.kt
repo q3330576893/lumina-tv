@@ -27,22 +27,53 @@ internal fun shouldSyncMpvAudioTrack(
     hasPendingManualAudio: Boolean,
 ): Boolean = ready && hasPendingManualAudio && (becameReady || trackListChanged)
 
-/**
- * Request headers are optional. Some libmpv builds do not expose the `-clr` modifier, and no
- * header is worth failing a load over: every physical load owns a fresh MPVLib, so there is
- * nothing to clear, and a rejected header is reported instead of thrown.
- * Returns a warning for the log, or null when every header was accepted.
- */
+internal data class MpvHttpHeadersResult(val mode: String, val accepted: Int, val total: Int) {
+    val diagnostic: String get() = "mpv headers mode=$mode accepted=$accepted/$total"
+    val complete: Boolean get() = accepted == total
+    val notice: String? get() = if (complete) null else
+        "mpv 缺少 ${total - accepted}/$total 个请求头，需要 Referer 或鉴权头的片源可能无法播放"
+}
+
+/** Probe supported mpv APIs in order without allowing a rejected optional header to block loadfile. */
 internal fun applyMpvHttpHeaders(
     headers: Map<String, String>,
+    setPropertyString: (String, String) -> Unit,
+    getPropertyString: (String) -> String?,
     setOptionString: (String, String) -> Int,
-): String? {
-    if (headers.isEmpty()) return null
-    var rejected = 0
-    headers.entries.forEach { (name, value) ->
-        if (setOptionString("http-header-fields-append", "$name: $value") < 0) rejected++
+): MpvHttpHeadersResult {
+    if (headers.isEmpty()) return MpvHttpHeadersResult("none", 0, 0)
+    val list = headers.entries.joinToString(",") { (name, value) -> "$name: $value" }
+    if (mpvHeaderPropertyAccepted(
+            set = { setPropertyString("http-header-fields", list) },
+            readBack = { getPropertyString("http-header-fields") },
+            expected = list,
+        )) {
+        return MpvHttpHeadersResult("property", headers.size, headers.size)
     }
-    return if (rejected == 0) null else "mpv 未接受 $rejected/${headers.size} 个请求头，已忽略并继续加载"
+    if (mpvHeaderApiAccepted { setOptionString("http-header-fields", list) }) {
+        return MpvHttpHeadersResult("option", headers.size, headers.size)
+    }
+    val accepted = headers.count { (name, value) ->
+        mpvHeaderApiAccepted { setOptionString("http-header-fields-append", "$name: $value") }
+    }
+    return MpvHttpHeadersResult("append", accepted, headers.size)
+}
+
+private inline fun mpvHeaderApiAccepted(call: () -> Int): Boolean = try {
+    call() >= 0
+} catch (_: Exception) {
+    false
+} catch (_: LinkageError) {
+    false
+}
+
+private inline fun mpvHeaderPropertyAccepted(set: () -> Unit, readBack: () -> String?, expected: String): Boolean = try {
+    set()
+    readBack() == expected
+} catch (_: Exception) {
+    false
+} catch (_: LinkageError) {
+    false
 }
 
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
@@ -71,6 +102,8 @@ class MpvPlayerController(
         var subtitlePending = 0
         @Volatile var started = false
         var failureKind: FailureKind? = null
+        var httpHeadersStatus: String? = null
+        var httpHeadersNotice: String? = null
         var retryPending = false
         var terminal = false
         var ended = false
@@ -98,13 +131,14 @@ class MpvPlayerController(
                 val at = timestamp()
                 enqueue(this@NativeLoad, requireStarted = false) {
                     appendMpvLog("$at load=${identity.physicalId} $prefix/$level $text")
+                    if (!isMpvErrorLogLevel(level)) return@enqueue
                     if (isMpvCertificateFailure(text)) {
                         failureKind = FailureKind.CERT_INVALID
                         emit(this@NativeLoad, buffering = false, error = CERTIFICATE_ERROR_MESSAGE, failureKind = FailureKind.CERT_INVALID)
                         return@enqueue
                     }
                     // Preserve a useful cause when END_FILE cannot expose its reason in this API.
-                    if (HTTP_FAILURE.containsMatchIn(text)) {
+                    if (isMpvHttpFailureLog(level, text)) {
                         failureKind = FailureKind.HTTP
                     } else if (DECODER_FAILURE.containsMatchIn(text)) {
                         failureKind = FailureKind.DECODING
@@ -158,6 +192,8 @@ class MpvPlayerController(
         val subtitleFallbackToAuto: Boolean = false,
         val bufferedPositionMs: Long? = null,
         val trackListChanged: Boolean = false,
+        val httpHeadersStatus: String? = null,
+        val httpHeadersNotice: String? = null,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -510,8 +546,12 @@ class MpvPlayerController(
         applyAspectMode(load)
         pendingSubtitles = subtitleUrls
         runCatching {
-            applyMpvHttpHeaders(requestHeaders, load.engine::setOptionString)?.let { warning ->
-                PageLog.add("mpv headers ${load.identity.physicalId}: $warning")
+            val headerResult = applyMpvHttpHeaders(requestHeaders, load.engine::setPropertyString,
+                load.engine::getPropertyString, load.engine::setOptionString)
+            load.httpHeadersStatus = headerResult.diagnostic
+            load.httpHeadersNotice = headerResult.notice
+            if (headerResult.total > 0) {
+                PageLog.add("${headerResult.diagnostic} load=${load.identity.physicalId}")
             }
             subtitleOptions.forEach { (key, value) -> load.engine.setOptionString(key, value) }
             load.engine.setPropertyDouble("sub-delay", subtitleDelayMs / 1000.0)
@@ -1137,7 +1177,7 @@ class MpvPlayerController(
         if (error != null) load.terminal = true
         onState(this, load.identity, State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec,
             cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind, subtitleFallbackToAuto, bufferedPositionMs,
-            trackListChanged))
+            trackListChanged, load.httpHeadersStatus, load.httpHeadersNotice))
     }
 
     private fun emitTelemetry(load: NativeLoad) {
@@ -1152,7 +1192,6 @@ class MpvPlayerController(
     private companion object {
         val physicalIds = AtomicLong()
         val sessionFiles = Executors.newSingleThreadExecutor { task -> Thread(task, "mpv-session-files").apply { isDaemon = true } }
-        val HTTP_FAILURE = Regex("(?i)HTTP[^\n]*(?:4[0-9]{2}|5[0-9]{2})|server returned|connection refused|failed to resolve")
         val DECODER_FAILURE = Regex("(?i)failed to (?:decode|open.*decoder)|error while decoding|decoder initialization failed")
         val SESSION_AUDIO_PROPERTIES = setOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device")
         const val TAG = "MpvPlayerController"

@@ -168,6 +168,14 @@ val p6Checks = tasks.register<JavaExec>("p6Checks") {
     mainClass.set("com.lumina.tv.P6Checks")
 }
 verifyOffline.configure { dependsOn(p6Checks) }
+val b15Checks = tasks.register<JavaExec>("b15Checks") {
+    group = "verification"
+    description = "B15 playback failure classification and recovery regression assertions."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.player.B15Checks")
+}
+verifyOffline.configure { dependsOn(b15Checks) }
 val e1Checks = tasks.register<JavaExec>("e1Checks") {
     group = "verification"
     description = "Check pairing authorization, Latest response shapes and canonical server identity migration."

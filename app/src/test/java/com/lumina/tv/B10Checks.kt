@@ -50,10 +50,10 @@ object B10Checks {
         check(smallArray.length() == 3)
         check(boundedDiagnosticJson("\"scalar\"", cap) == "\"scalar\"")
         val malformed = JSONObject(boundedDiagnosticJson("{broken", cap))
-        check(malformed.getBoolean("truncated") && malformed.getString("reason") == "invalid_json")
+        check(malformed.getBoolean("invalid") && !malformed.has("truncated") && malformed.getString("reason") == "invalid_json")
 
         val privateCookie = "session=must-not-escape"
-        val sanitized = LogRedactor.redact(
+        val sanitized = LogRedactor.redactJson(
             "{\"RequiredHttpHeaders\":{\"Cookie\":\"$privateCookie\",\"Set-Cookie\":\"$privateCookie; Secure\"}}",
         )
         val headers = JSONObject(sanitized).getJSONObject("RequiredHttpHeaders")
@@ -65,7 +65,7 @@ object B10Checks {
         val exporter = source("diag/DiagExporter.kt")
         check("Looper.myLooper() == Looper.getMainLooper()" in exporter)
         check("\"app.log\" to (AppLog.snapshot() + \"\\n[logcat]\\n\" + appLogTail())" in exporter)
-        check("if (name.endsWith(\".json\", ignoreCase = true))" in exporter)
+        check("val isJson = name.endsWith(\".json\", ignoreCase = true)" in exporter)
 
         val dialog = source("ui/components/DiagExportDialog.kt")
         check("ActivityResultContracts.CreateDocument(\"application/zip\")" in dialog)
