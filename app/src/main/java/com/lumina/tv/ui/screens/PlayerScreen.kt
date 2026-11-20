@@ -2188,8 +2188,12 @@ fun PlayerScreen(
                 if (audioCandidates.isNotEmpty() && audioCandidates.none { it.supported }) {
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .clearOverridesOfType(C.TRACK_TYPE_AUDIO).build()
-                    PageLog.add("audioCapability action=no-override supported=0 total=${audioCandidates.size}")
-                    requestAudioRecovery("no-supported-track")
+                    // isTrackSupported() reflects the renderer's sink configuration at this instant and
+                    // can report false for a track that then plays fine. Clearing overrides and letting
+                    // ExoPlayer select is enough; real audio failures still arrive on onPlayerError and
+                    // route to AUDIO_OUTPUT recovery. Declaring the path failed here costs a working
+                    // engine switch (and used to cascade into a dead end when mpv was also unavailable).
+                    PageLog.add("audioCapability action=no-override-deferred supported=0 total=${audioCandidates.size}")
                 }
                 val hasAudioTrack = audioCandidates.isNotEmpty()
                 if (!hasAudioTrack && playbackSource?.audioStreams?.isNotEmpty() == true && !noAudioRetryTried) {
@@ -2529,9 +2533,7 @@ fun PlayerScreen(
         dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
     }
     val inputLifecycleOwner = LocalLifecycleOwner.current
-    val hostDesiredPlaying by rememberUpdatedState(desiredPlaying)
     val hostActiveEngine by rememberUpdatedState(activeEngine)
-    val hostMpvState by rememberUpdatedState(mpvState)
     val hostMpvBackend by rememberUpdatedState(mpvBackend)
     val hostResumedByBackground by rememberUpdatedState(resumedByBackground)
     val hostSessionGeneration by rememberUpdatedState(sessionGeneration)
@@ -2539,10 +2541,8 @@ fun PlayerScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
             if (event == Lifecycle.Event.ON_STOP) {
-                val playbackRequested = hostDesiredPlaying && when (hostActiveEngine) {
-                    "mpv" -> hostMpvState.playing || hostMpvState.buffering
-                    else -> exo.playWhenReady && exo.playbackState in setOf(Player.STATE_BUFFERING, Player.STATE_READY)
-                }
+                // Intent also covers negotiation, Surface waits and temporary audio-focus holds.
+                val playbackRequested = loadCoordinator.desiredPlaying
                 val transition = reducePlayerHostLifecycle(
                     hostResumedByBackground,
                     PlayerHostLifecycleEvent.ON_STOP,

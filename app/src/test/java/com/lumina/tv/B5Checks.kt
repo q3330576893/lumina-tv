@@ -34,23 +34,25 @@ object B5Checks {
             "X-Empty" to "",
         )
         val options = mutableListOf<Pair<String, String>>()
-        applyMpvHttpHeaders(headers) { name, value -> options += name to value; 0 }
+        val clean = applyMpvHttpHeaders(headers) { name, value -> options += name to value; 0 }
         check(options == listOf(
-            "http-header-fields-clr" to "",
             "http-header-fields-append" to "Referer: https://example.invalid/path?a=1,b=2",
             "http-header-fields-append" to "Cookie: token=first\\second",
             "http-header-fields-append" to "X-Note: 字幕, 中文",
             "http-header-fields-append" to "X-Empty: ",
         )) { "mpv option sequence did not preserve header values: $options" }
+        check(clean == null) { "accepted headers must not produce a warning: $clean" }
 
+        // A build that rejects the list must not fail the load; the caller logs the warning instead.
         val failedOptions = mutableListOf<String>()
-        val failure = runCatching {
-            applyMpvHttpHeaders(headers) { name, _ ->
-                failedOptions += name
-                if (name.endsWith("-append")) -1 else 0
-            }
-        }.exceptionOrNull()
-        check(failure is IllegalStateException && failedOptions == listOf("http-header-fields-clr", "http-header-fields-append"))
+        val failure = applyMpvHttpHeaders(headers) { name, _ ->
+            failedOptions += name
+            -1
+        }
+        check(failure != null && failure.contains("4/4")) { "rejected headers must degrade, not throw: $failure" }
+        check(failedOptions.all { it == "http-header-fields-append" }) { "unexpected option: $failedOptions" }
+        check(failedOptions.size == headers.size) { "every header must be attempted: $failedOptions" }
+        check(applyMpvHttpHeaders(emptyMap()) { _, _ -> -1 } == null) { "no headers means nothing to report" }
     }
 
     private suspend fun subtitleOffsetPublication() {

@@ -40,17 +40,29 @@ internal object MpvTlsPolicy {
     fun options(caFile: File): Map<String, String> = mapOf("tls-verify" to "yes", "tls-ca-file" to caFile.absolutePath)
 
     /** libmpv/FFmpeg cannot assume an Android system CA path. Export the platform trust anchors. */
-    suspend fun platformCaBundle(cacheDir: File): File = withContext(Dispatchers.IO) {
-        val managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
-            init(null as KeyStore?)
-        }.trustManagers.filterIsInstance<X509TrustManager>()
-        val anchors = managers.flatMap { it.acceptedIssuers.toList() }.distinctBy { it.serialNumber to it.issuerX500Principal }
-        check(anchors.isNotEmpty()) { "平台信任库不可用，已停止 HTTPS 播放" }
-        val pem = anchors.joinToString("\n") {
-            "-----BEGIN CERTIFICATE-----\n" + Base64.getMimeEncoder(64, byteArrayOf(10)).encodeToString(it.encoded) +
-                "\n-----END CERTIFICATE-----\n"
+    suspend fun platformCaBundle(cacheDir: File): File {
+        var created: File? = null
+        try {
+            return withContext(Dispatchers.IO) {
+                val managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+                    init(null as KeyStore?)
+                }.trustManagers.filterIsInstance<X509TrustManager>()
+                val anchors = managers.flatMap { it.acceptedIssuers.toList() }.distinctBy { it.serialNumber to it.issuerX500Principal }
+                check(anchors.isNotEmpty()) { "平台信任库不可用，已停止 HTTPS 播放" }
+                val pem = anchors.joinToString("\n") {
+                    "-----BEGIN CERTIFICATE-----\n" + Base64.getMimeEncoder(64, byteArrayOf(10)).encodeToString(it.encoded) +
+                        "\n-----END CERTIFICATE-----\n"
+                }
+                // The bundle is immutable for a controller; physical retries reuse it.
+                File.createTempFile("mpv-ca-", ".pem", cacheDir).also { file ->
+                    created = file
+                    file.writeText(pem, Charsets.US_ASCII)
+                }
+            }
+        } catch (failure: Throwable) {
+            // Also owns cleanup if prompt cancellation discards the IO result before delivery.
+            created?.delete()
+            throw failure
         }
-        // The bundle is immutable for a physical load; no user-controlled trust-all fallback.
-        File.createTempFile("mpv-ca-", ".pem", cacheDir).apply { writeText(pem, Charsets.US_ASCII) }
     }
 }

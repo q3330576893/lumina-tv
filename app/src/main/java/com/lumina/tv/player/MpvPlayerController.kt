@@ -26,16 +26,22 @@ internal fun shouldSyncMpvAudioTrack(
     hasPendingManualAudio: Boolean,
 ): Boolean = ready && hasPendingManualAudio && (becameReady || trackListChanged)
 
+/**
+ * Request headers are optional. Some libmpv builds do not expose the `-clr` modifier, and no
+ * header is worth failing a load over: every physical load owns a fresh MPVLib, so there is
+ * nothing to clear, and a rejected header is reported instead of thrown.
+ * Returns a warning for the log, or null when every header was accepted.
+ */
 internal fun applyMpvHttpHeaders(
     headers: Map<String, String>,
     setOptionString: (String, String) -> Int,
-) {
-    val clearResult = setOptionString("http-header-fields-clr", "")
-    check(clearResult >= 0) { "mpv rejected http-header-fields-clr (code=$clearResult)" }
-    headers.entries.forEachIndexed { index, (name, value) ->
-        val result = setOptionString("http-header-fields-append", "$name: $value")
-        check(result >= 0) { "mpv rejected http-header-fields-append item=$index (code=$result)" }
+): String? {
+    if (headers.isEmpty()) return null
+    var rejected = 0
+    headers.entries.forEach { (name, value) ->
+        if (setOptionString("http-header-fields-append", "$name: $value") < 0) rejected++
     }
+    return if (rejected == 0) null else "mpv 未接受 $rejected/${headers.size} 个请求头，已忽略并继续加载"
 }
 
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
@@ -503,7 +509,9 @@ class MpvPlayerController(
         applyAspectMode(load)
         pendingSubtitles = subtitleUrls
         runCatching {
-            applyMpvHttpHeaders(requestHeaders, load.engine::setOptionString)
+            applyMpvHttpHeaders(requestHeaders, load.engine::setOptionString)?.let { warning ->
+                PageLog.add("mpv headers ${load.identity.physicalId}: $warning")
+            }
             subtitleOptions.forEach { (key, value) -> load.engine.setOptionString(key, value) }
             load.engine.setPropertyDouble("sub-delay", subtitleDelayMs / 1000.0)
             load.engine.setPropertyDouble("speed", playbackSpeed.toDouble())

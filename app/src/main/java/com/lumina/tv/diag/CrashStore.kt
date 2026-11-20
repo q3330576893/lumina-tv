@@ -36,7 +36,7 @@ internal class CrashStore(private val directory: File) {
                         ?.copyTo(File(directory, "crash-$n.txt"), overwrite = true)
                 }
             }
-            File(directory, "crash-1.txt").writeText(safe, Charsets.UTF_8)
+            runCatching { File(directory, "crash-1.txt").writeText(safe, Charsets.UTF_8) }
         }
         statsFile.writeText(stats.toString(2), Charsets.UTF_8)
     }
