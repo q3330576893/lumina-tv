@@ -192,19 +192,23 @@ class ProgressQueue internal constructor(
         if (writeScheduled) return
         writeScheduled = true
         io.submit {
-            val (version, snapshot) = synchronized(this) {
+            val (version, snapshot, failedWaiters) = synchronized(this) {
                 writeScheduled = false
-                revision to entries.toList()
+                val version = revision
+                Triple(version, entries.toList(), waiters.filter { it.first <= version })
             }
             val success = runCatching { persist(snapshot) }.onFailure {
                 runCatching { PageLog.add("progress persistence failed=${it.javaClass.simpleName}") }
             }.isSuccess
             synchronized(this) {
                 if (success) persistedRevision = version
-                val completed = waiters.filter { it.first <= version }
+                // A failed snapshot only fails callers that were waiting when that attempt
+                // began. Callers that arrived during the filesystem write must observe a
+                // subsequent retry, even when it writes the same queue revision.
+                val completed = if (success) waiters.filter { it.first <= version } else failedWaiters
                 waiters.removeAll(completed.toSet())
                 completed.forEach { it.second.complete(success) }
-                if (closed && version >= closingRevision) closedPersistence.complete(success)
+                if (closed && version >= closingRevision && !writeScheduled) closedPersistence.complete(success)
             }
         }
     }

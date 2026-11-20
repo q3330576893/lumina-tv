@@ -1,6 +1,7 @@
 package com.lumina.tv.data
 
 import kotlinx.coroutines.*
+import org.json.JSONArray
 import java.io.IOException
 import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
@@ -12,6 +13,7 @@ internal object B2ProgressChecks {
     suspend fun run() {
         for (delayMs in listOf(100L, 1_000L)) slowStorage(delayMs)
         failureAndReopen()
+        overlappingFailureAndRetry()
         senderStopBarrier()
         println("B2 PASS Q-006: serial IO; 100ms/1s slow storage; exact ACK; bounded Stop barrier; failure/retry; clear/close/reopen")
     }
@@ -130,6 +132,79 @@ internal object B2ProgressChecks {
             dir.listFiles()?.forEach { it.delete() }
             dir.delete()
         }
+    }
+
+    private suspend fun overlappingFailureAndRetry() = coroutineScope {
+        run {
+            val dir = Files.createTempDirectory("lumina-b13-progress-").toFile()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val io = SerialProgressIo(scope)
+            val file = java.io.File(dir, "queue.json")
+            val delegate = FileProgressStorage(file)
+            val allowFirstStart = CountDownLatch(1)
+            val allowFailure = List(2) { CountDownLatch(1) }
+            val writeEntered = List(2) { CompletableDeferred<Unit>() }
+            var attempts = 0
+            val stopEvent = event(2, ProgressEventType.Stop)
+            val storage = object : ProgressStorage {
+                override fun read() = delegate.read()
+
+                override fun write(json: String) {
+                    val events = JSONArray(json)
+                    if (events.length() > 0 &&
+                        events.getJSONObject(events.length() - 1).getString("eventId") == stopEvent.eventId
+                    ) {
+                        val attempt = attempts++
+                        if (attempt < allowFailure.size) {
+                            writeEntered[attempt].complete(Unit)
+                            check(allowFailure[attempt].await(10, TimeUnit.SECONDS))
+                            throw IOException("injected failure for write ${attempt + 1}")
+                        }
+                    }
+                    delegate.write(json)
+                }
+            }
+            try {
+                val queue = ProgressQueue(storage = storage, io = io)
+                queue.awaitLoaded()
+                check(queue.flushAndAwait(queue.enqueue(event(1, ProgressEventType.Start))))
+                val old = file.readText()
+
+                io.submit { check(allowFirstStart.await(10, TimeUnit.SECONDS)) }
+                val stop = queue.enqueue(stopEvent)
+                val first = async(start = CoroutineStart.UNDISPATCHED) { queue.flushAndAwait(stop) }
+                allowFirstStart.countDown()
+                withTimeout(5_000L) { writeEntered[0].await() }
+                val second = async(start = CoroutineStart.UNDISPATCHED) { queue.flushAndAwait(stop) }
+                allowFailure[0].countDown()
+                check(!first.await())
+                withTimeout(5_000L) { writeEntered[1].await() }
+                check(file.readText() == old)
+
+                // This attempt is already failing. A retry (or final close) must wait for the
+                // next write, even though the next write will persist exactly the same revision.
+                val retry = async(start = CoroutineStart.UNDISPATCHED) { queue.flushAndAwait(stop) }
+                allowFailure[1].countDown()
+                check(!second.await())
+                check(retry.await()) { "An older write failure completed the Stop retry" }
+                val saved = JSONArray(file.readText())
+                check(saved.length() == 2 && saved.getJSONObject(1).let {
+                    it.getString("eventId") == stopEvent.eventId &&
+                        it.getLong("sequence") == stopEvent.sequence &&
+                        it.getString("eventType") == "Stop" && it.getLong("positionMs") == stopEvent.positionMs
+                })
+                queue.close()
+                check(queue.flushAndAwait())
+            } finally {
+                allowFirstStart.countDown()
+                allowFailure.forEach { it.countDown() }
+                io.closeAndAwait()
+                scope.cancel()
+                dir.listFiles()?.forEach { it.delete() }
+                dir.delete()
+            }
+        }
+        println("B13 PASS progress retry isolation")
     }
 
     private suspend fun senderStopBarrier() = coroutineScope {

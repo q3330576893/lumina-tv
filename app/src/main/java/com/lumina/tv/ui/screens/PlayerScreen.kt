@@ -180,6 +180,7 @@ import com.lumina.tv.player.PlaybackErrorCategory
 import com.lumina.tv.player.PlaybackErrorRoute
 import com.lumina.tv.player.playbackErrorRoute
 import com.lumina.tv.player.shouldRetryNetworkPlayback
+import com.lumina.tv.player.shouldRecoverAudioWithoutSelection
 import com.lumina.tv.player.PlaybackRangeProbe
 import com.lumina.tv.player.classifyPlaybackError
 import com.lumina.tv.player.OptionalVttDataSourceFactory
@@ -2195,17 +2196,30 @@ fun PlayerScreen(
                     // engine switch (and used to cascade into a dead end when mpv was also unavailable).
                     PageLog.add("audioCapability action=no-override-deferred supported=0 total=${audioCandidates.size}")
                 }
-                val hasAudioTrack = audioCandidates.isNotEmpty()
-                if (!hasAudioTrack && playbackSource?.audioStreams?.isNotEmpty() == true && !noAudioRetryTried) {
+                val sourceHasAudio = playbackSource?.audioStreams?.isNotEmpty() == true
+                val selectedMediaAudio = mediaAudio.any { (group, index) -> group.isTrackSelected(index) }
+                if (shouldRecoverAudioWithoutSelection(sourceHasAudio, selectedMediaAudio, noAudioRetryTried)) {
                     val generation = sessionGeneration
+                    PageLog.add("audioCapability action=deferred-selection-check candidates=${audioCandidates.size}")
                     instanceScope.launch {
                         delay(3_000)
+                        val selectedAudioAfterWait = exo.currentTracks.groups
+                            .filter { it.type == C.TRACK_TYPE_AUDIO }
+                            .any { group -> (0 until group.length).any(group::isTrackSelected) }
                         if (isCurrentLoad(generation) && activeEngine == "media3" &&
                             exo.playbackState == Player.STATE_READY &&
-                            exo.currentTracks.groups.none { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 } && !noAudioRetryTried
+                            shouldRecoverAudioWithoutSelection(
+                                sourceHasAudio = playbackSource?.audioStreams?.isNotEmpty() == true,
+                                selectedAudioTrack = selectedAudioAfterWait,
+                                recoveryAlreadyTried = noAudioRetryTried,
+                            )
                         ) {
                             noAudioRetryTried = true
-                            requestAudioRecovery("missing-audio-track")
+                            val audioGroupsExist = exo.currentTracks.groups
+                                .any { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
+                            val reason = if (audioGroupsExist) "audio-track-not-selected" else "missing-audio-track"
+                            PageLog.add("audioCapability action=recover-after-selection-wait reason=$reason")
+                            requestAudioRecovery(reason)
                         }
                     }
                 }

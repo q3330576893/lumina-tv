@@ -6,6 +6,12 @@ import com.lumina.tv.player.MpvFocusPolicyState
 import com.lumina.tv.player.MpvFocusSignal
 import com.lumina.tv.player.PlaybackLoadCoordinator
 import com.lumina.tv.player.MpvTlsPolicy
+import com.lumina.tv.player.PlaybackErrorCategory
+import com.lumina.tv.player.PlaybackErrorRoute
+import com.lumina.tv.player.classifyPlaybackError
+import com.lumina.tv.player.playbackErrorRoute
+import com.lumina.tv.player.playbackErrorSample
+import com.lumina.tv.player.shouldRecoverAudioWithoutSelection
 import com.lumina.tv.player.PlayerHostLifecycleEvent
 import com.lumina.tv.player.reduceMpvFocus
 import com.lumina.tv.player.reducePlayerHostLifecycle
@@ -34,6 +40,7 @@ object B13Checks {
             "crash" to { crashArchiveFailure() },
             "background" to { backgroundDuringLoad() },
             "tls" to { caBundleOwnership() },
+            "audio" to { deferredAudioRecovery() },
         )
         val selected = if (args.isEmpty()) checks.keys else args.toList()
         require(selected.all { it in checks }) { "Unknown B13 check: ${args.toList()}" }
@@ -41,6 +48,32 @@ object B13Checks {
             checks.getValue(name)()
             println("B13 PASS $name")
         }
+    }
+
+    private fun deferredAudioRecovery() {
+        check(shouldRecoverAudioWithoutSelection(sourceHasAudio = true, selectedAudioTrack = false, recoveryAlreadyTried = false))
+        check(!shouldRecoverAudioWithoutSelection(sourceHasAudio = false, selectedAudioTrack = false, recoveryAlreadyTried = false))
+        check(!shouldRecoverAudioWithoutSelection(sourceHasAudio = true, selectedAudioTrack = true, recoveryAlreadyTried = false))
+        check(!shouldRecoverAudioWithoutSelection(sourceHasAudio = true, selectedAudioTrack = false, recoveryAlreadyTried = true))
+
+        for (code in listOf(
+            androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+            androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
+        )) {
+            val category = classifyPlaybackError(playbackErrorSample(code)).category
+            check(category == PlaybackErrorCategory.AUDIO_OUTPUT && playbackErrorRoute(category) == PlaybackErrorRoute.AUDIO_OUTPUT) {
+                "Real Media3 audio error no longer reaches AUDIO_OUTPUT: code=$code category=$category"
+            }
+        }
+
+        val player = File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText()
+        val selectionRecovery = player.substringAfter("if (shouldRecoverAudioWithoutSelection(")
+            .substringBefore("if (subtitleSelectionApplied)")
+        check("delay(3_000)" in selectionRecovery)
+        check("exo.playbackState == Player.STATE_READY" in selectionRecovery)
+        check("selectedAudioAfterWait" in selectionRecovery)
+        check("audio-track-not-selected" in selectionRecovery)
+        check("requestAudioRecovery(reason)" in selectionRecovery)
     }
 
     private suspend fun caBundleOwnership() {

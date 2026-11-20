@@ -37,3 +37,10 @@ internal fun playbackErrorAction(category: PlaybackErrorCategory): String = when
 
 internal fun shouldRetryNetworkPlayback(category: PlaybackErrorCategory, retriesAlreadyUsed: Int): Boolean =
     category == PlaybackErrorCategory.NETWORK_TRANSIENT && retriesAlreadyUsed < 2
+
+/** Wait for ExoPlayer's automatic selector before recovering a source that has audio tracks. */
+internal fun shouldRecoverAudioWithoutSelection(
+    sourceHasAudio: Boolean,
+    selectedAudioTrack: Boolean,
+    recoveryAlreadyTried: Boolean,
+): Boolean = sourceHasAudio && !selectedAudioTrack && !recoveryAlreadyTried
