@@ -76,7 +76,12 @@ object AppRuntime {
         pairingStatus = message.take(240)
     }
 
-    fun consumePairingToken(token: String): Boolean = validatePairingAccess(token)
+    @Synchronized
+    fun consumePairingToken(token: String): Boolean {
+        if (!validatePairingAccess(token)) return false
+        pairingAdvertisement = null
+        return true
+    }
 
     fun validatePairingAccess(token: String): Boolean =
         pairingAdvertisement?.accepts(token, SystemClock.elapsedRealtime()) == true

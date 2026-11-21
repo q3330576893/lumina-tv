@@ -56,7 +56,7 @@ class PairingServer(
                 uri == "/api/state" && authorized(request, authorize) -> newFixedLengthResponse(
                     Response.Status.OK, "application/json; charset=utf-8", stateProvider()
                 )
-                uri == "/api/config" -> handleConfig(request)
+                uri == "/api/config" && authorized(request, authorize) -> handleConfig(request)
                 uri == "/api/pair/request" -> handlePairRequest(request)
                 uri == "/api/pair/pending" -> handlePairPending(request)
                 uri == "/api/pair/confirm" -> handlePairResolution(request, "confirmed")
@@ -79,16 +79,16 @@ class PairingServer(
 
     private fun handleConfig(session: IHTTPSession): Response {
         if (session.method != Method.POST) return json("{\"ok\":false,\"msg\":\"仅支持 POST\"}")
+        val token = session.parameters["token"]?.firstOrNull().orEmpty()
+        if (token.isBlank() || !authorize(token)) return json("{\"ok\":false,\"msg\":\"配对二维码无效，请重新扫码\"}")
         val files = HashMap<String, String>()
         session.parseBody(files)
-        val token = session.parameters["token"]?.firstOrNull().orEmpty()
         val server = session.parameters["server"]?.firstOrNull().orEmpty().trim()
         val user = session.parameters["user"]?.firstOrNull().orEmpty().trim()
         val pass = session.parameters["pass"]?.firstOrNull().orEmpty()
         if (server.isEmpty() || user.isEmpty()) {
             return json("{\"ok\":false,\"msg\":\"服务器地址和用户名不能为空\"}")
         }
-        if (token.isBlank()) return json("{\"ok\":false,\"msg\":\"配对二维码无效，请重新扫码\"}")
         val accepted = java.util.concurrent.atomic.AtomicBoolean(false)
         val completed = java.util.concurrent.CountDownLatch(1)
         mainThread { try { accepted.set(onConfig(token, server, user, pass)) } finally { completed.countDown() } }

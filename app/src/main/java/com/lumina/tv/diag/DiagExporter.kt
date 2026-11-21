@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Looper
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.WindowManager
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.BuildConfig
@@ -45,7 +46,7 @@ object DiagExporter {
             streamsJson = JSONObject().put("reason", "No playback in progress").toString(2),
             tracksJson = JSONObject().put("reason", "No playback in progress").toString(2),
             errorsJson = JSONObject().put("reason", prefs?.lastPlaybackAudioFailure?.ifBlank { null } ?: "No playback error recorded").toString(2),
-            mpvLog = runCatching { File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.readText(Charsets.UTF_8) }
+            mpvLog = runCatching { File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.let { readPrefix(it, 512 * 1024) } }
                 .getOrNull()?.ifBlank { "No mpv log messages captured" } ?: "mpv log unavailable: no session log file",
             appLog = "",
             uiText = "screen=${AppRuntime.screenLabel}\nplaying=${AppRuntime.nowPlaying}\nactiveEngine=unknown\nbuffering=unknown\ndegraded=unknown\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}",
@@ -97,48 +98,72 @@ object DiagExporter {
             "errors.json" to payload.errorsJson,
             "mpv.log" to payload.mpvLog,
             "app.log" to (AppLog.snapshot() + "\n[logcat]\n" + appLogTail()),
-            "mpv-audio.jsonl" to File(context.filesDir, "mpv-audio.jsonl").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty(),
-            "mpv-audio-system.log" to File(context.filesDir, "mpv-audio-system.log").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty(),
+            "mpv-audio.jsonl" to File(context.filesDir, "mpv-audio.jsonl").takeIf(File::exists)?.let { readPrefix(it, 384 * 1024) }.orEmpty(),
+            "mpv-audio-system.log" to File(context.filesDir, "mpv-audio-system.log").takeIf(File::exists)?.let { readPrefix(it, 384 * 1024) }.orEmpty(),
             "ui.txt" to (payload.uiText + "\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}"),
             "net.json" to NetLog.tail(),
             "pages.txt" to PageLog.tail(),
-            "crash-stats.json" to File(root, "crash-stats.json").takeIf(File::exists)?.readText().orEmpty(),
-            "lastSession.json" to File(root, "last-session.json").takeIf(File::exists)?.readText().orEmpty(),
-            "exitReason.json" to File(root, "exit-reason.json").takeIf(File::exists)?.readText().orEmpty(),
-            "anr-latest.txt" to File(root, "anr-latest.txt").takeIf(File::exists)?.readText().orEmpty(),
-            "native-latest.txt" to File(root, "native-latest.txt").takeIf(File::exists)?.readText().orEmpty(),
+            "crash-stats.json" to File(root, "crash-stats.json").takeIf(File::exists)?.let { readPrefix(it) }.orEmpty(),
+            "lastSession.json" to File(root, "last-session.json").takeIf(File::exists)?.let { readPrefix(it) }.orEmpty(),
+            "exitReason.json" to File(root, "exit-reason.json").takeIf(File::exists)?.let { readPrefix(it) }.orEmpty(),
+            "anr-latest.txt" to File(root, "anr-latest.txt").takeIf(File::exists)?.let { readPrefix(it) }.orEmpty(),
+            "native-latest.txt" to File(root, "native-latest.txt").takeIf(File::exists)?.let { readPrefix(it) }.orEmpty(),
         )
         File(context.filesDir, "app-prev.log").takeIf(File::exists)?.let {
-            files["app-prev.log"] = it.readText(Charsets.UTF_8)
+            files["app-prev.log"] = readPrefix(it)
         }
-        (1..5).forEach { n -> File(root, "crash-$n.txt").takeIf(File::exists)?.let { files["crash-$n.txt"] = it.readText() } }
-        File(root, "crash-latest.txt").takeIf(File::exists)?.let { files["crash-latest.txt"] = it.readText() }
+        (1..5).forEach { n -> File(root, "crash-$n.txt").takeIf(File::exists)?.let { files["crash-$n.txt"] = readPrefix(it) } }
+        File(root, "crash-latest.txt").takeIf(File::exists)?.let { files["crash-latest.txt"] = readPrefix(it) }
         return writeArchive(out, files)
     }
 
-    internal fun writeArchive(out: File, files: Map<String, String>): File {
-        ZipOutputStream(out.outputStream().buffered()).use { zip ->
-            files.forEach { (name, original) ->
-                val limit = when (name) {
-                    "app.log", "app-prev.log" -> 120 * 1024
-                    "mpv.log" -> 512 * 1024
-                    "mpv-audio.jsonl", "mpv-audio-system.log" -> 384 * 1024
-                    else -> 120 * 1024
+    private fun readPrefix(file: File, limit: Int = 120 * 1024): String {
+        val readLimit = file.length().coerceAtMost(limit.toLong()).toInt()
+        val buffer = ByteArray(readLimit)
+        var bytesRead = 0
+        try {
+            file.inputStream().use { input ->
+                while (bytesRead < readLimit) {
+                    val count = input.read(buffer, bytesRead, readLimit - bytesRead)
+                    if (count < 0) break
+                    bytesRead += count
                 }
-                val isJson = name.endsWith(".json", ignoreCase = true)
-                val sanitized = if (isJson) LogRedactor.redactJson(original) else sanitize(original)
-                val bounded = if (isJson) {
-                    boundedDiagnosticJson(sanitized, limit)
-                } else {
-                    sanitized.take(limit)
-                }
-                zip.putNextEntry(ZipEntry(name))
-                zip.write(bounded.toByteArray(Charsets.UTF_8))
-                zip.closeEntry()
             }
+        } finally {
+            Log.i("DiagExporter", "diagExport size=$bytesRead file=${file.name}")
         }
-        if (out.length() > MAX_ARCHIVE_BYTES) throw IllegalStateException("诊断包超过 2MB")
-        return out
+        return String(buffer, 0, bytesRead, Charsets.UTF_8)
+    }
+
+    internal fun writeArchive(out: File, files: Map<String, String>): File {
+        var completed = false
+        try {
+            ZipOutputStream(out.outputStream().buffered()).use { zip ->
+                files.forEach { (name, original) ->
+                    val limit = when (name) {
+                        "app.log", "app-prev.log" -> 120 * 1024
+                        "mpv.log" -> 512 * 1024
+                        "mpv-audio.jsonl", "mpv-audio-system.log" -> 384 * 1024
+                        else -> 120 * 1024
+                    }
+                    val isJson = name.endsWith(".json", ignoreCase = true)
+                    val sanitized = if (isJson) LogRedactor.redactJson(original) else sanitize(original)
+                    val bounded = if (isJson) {
+                        boundedDiagnosticJson(sanitized, limit)
+                    } else {
+                        sanitized.take(limit)
+                    }
+                    zip.putNextEntry(ZipEntry(name))
+                    zip.write(bounded.toByteArray(Charsets.UTF_8))
+                    zip.closeEntry()
+                }
+            }
+            if (out.length() > MAX_ARCHIVE_BYTES) throw IllegalStateException("诊断包超过 2MB")
+            completed = true
+            return out
+        } finally {
+            if (!completed) out.delete()
+        }
     }
 
     fun sanitize(text: String): String {
@@ -153,15 +178,15 @@ object DiagExporter {
 /** One redaction policy for both log ingestion and diagnostic export. No Android dependencies. */
 object LogRedactor {
     private const val SECRET_KEYS =
-        "api_key|apikey|x-emby-token|x-emby-authorization|x-mediabrowser-token|access_token|authorization|password|passwd|pw|token|cookie|set-cookie"
+        "api_key|apikey|x-emby-token|x-emby-authorization|x-mediabrowser-token|access_token|authorization|password|passwd|pw|token|cookie|set-cookie|pass|pwd|secret|jsessionid"
     private val encodedKeys = SECRET_KEYS.replace("-", "(?:-|%2d)").replace("_", "(?:_|%5f)")
     private const val QUOTED_VALUE = """"(?:\\.|[^"\\])*+"|'(?:\\.|[^'\\])*+'"""
     private val keyValue = Regex(
         """(?i)((?<![\w-])["']?(?:$SECRET_KEYS)["']?\s*[:=]\s*)($QUOTED_VALUE|(?:(?:Bearer|Basic)[ \t]+)?[^,}\s&"'<>]+)"""
     )
-    private val query = Regex("""(?i)((?:$SECRET_KEYS)=)([^&\s#"'<>\\]+)""")
+    private val query = Regex("""(?i)(?<![\w-])((?:$SECRET_KEYS)=)([^&\s#"'<>\\]+)""")
     private val encodedQuery = Regex(
-        """(?i)((?:$encodedKeys)%3d)(%22[^\r\n]*?%22|%27[^\r\n]*?%27|[^&\s#"'<>\\]+?(?=%26|%23|%22|%27|%0[ad]|[&\s#"'<>\\]|$))"""
+        """(?i)(?<![\w-])((?:$encodedKeys)%3d)(%22[^\r\n]*?%22|%27[^\r\n]*?%27|[^&\s#"'<>\\]+?(?=%26|%23|%22|%27|%0[ad]|[&\s#"'<>\\]|$))"""
     )
     // Unquoted headers can contain schemes, spaces and commas. Quoted JSON keys use keyValue.
     private val header = Regex(

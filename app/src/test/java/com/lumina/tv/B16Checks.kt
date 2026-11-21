@@ -24,11 +24,11 @@ import com.lumina.tv.ui.screens.searchFailureMessage
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.Call
@@ -122,15 +122,24 @@ object B16Checks {
     }
 
     private suspend fun budgetOwnership() {
-        check(withRequestBudget<String?> { null } == null)
+        check(withRequestBudget<String?>(Long.MAX_VALUE) { null } == null)
+        val pending = CompletableDeferred<Unit>()
         val inner = runCatching {
-            withRequestBudget(1_000) { withTimeout(20) { delay(30_000) } }
+            withRequestBudget(Long.MAX_VALUE) { withTimeout(0) { pending.await() } }
         }.exceptionOrNull()
         check(inner is TimeoutCancellationException)
         val inherited = runCatching {
-            withRequestBudget(40) { withRequestBudget(1_000) { delay(30_000) } }
+            withRequestBudget(1) { withRequestBudget(0) { pending.await() } }
         }.exceptionOrNull()
-        check(inherited is RequestTimeoutException && inherited.budgetMs == 40L)
+        check(inherited is RequestTimeoutException && inherited.budgetMs == 1L)
+        coroutineScope {
+            val parentCancellation = CancellationException("parent request cancelled")
+            val request = async(start = CoroutineStart.UNDISPATCHED) {
+                withRequestBudget(Long.MAX_VALUE) { pending.await() }
+            }
+            request.cancel(parentCancellation)
+            check(runCatching { request.await() }.exceptionOrNull() === parentCancellation)
+        }
 
         var cleanup = false
         check(!finishPlaybackLoadFailure(EmbyException("retired request"), { false },

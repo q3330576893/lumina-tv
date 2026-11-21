@@ -2404,7 +2404,7 @@ private fun HeroThumb(
     onFailed: (String) -> Unit,
 ) {
     val candidates = remember(item, tmdbBackdrop, client) {
-        client?.wideImageCandidates(item, maxWidth = 480, quality = 80, tmdbUrl = tmdbBackdrop).orEmpty()
+        client?.wideImageCandidates(item, maxWidth = 960, quality = 80, tmdbUrl = tmdbBackdrop).orEmpty()
     }
     val candidateIndex = candidates.indexOfFirst { it.url !in failedImages }
     val candidate = candidates.getOrNull(candidateIndex)

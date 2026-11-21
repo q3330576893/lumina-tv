@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -125,7 +126,7 @@ fun SettingsBackend(
                 val disclosureRequester = requesters.getValue("compat:sourcePreferences")
                 val disclosureShape = RoundedCornerShape(12.dp)
                 Box(
-                    Modifier.fillMaxWidth().height(44.dp)
+                    Modifier.fillMaxWidth().heightIn(min = 44.dp)
                         .focusRequester(disclosureRequester)
                         .focusProperties {
                             left = railRequester
@@ -138,10 +139,11 @@ fun SettingsBackend(
                             sourcePreferencesExpanded = !sourcePreferencesExpanded
                         },
                 ) {
-                    Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("高级选项", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Spacer(Modifier.width(12.dp))
                         val summary = buildList {
+                            if (sourceReleaseGroups.isBlank()) add("未设置（不按发布组排序）")
                             if (sourceDynamicRange != DynamicRangePref.UNSET) add(when (sourceDynamicRange) {
                                 DynamicRangePref.DOLBY_VISION -> "DV优先"
                                 DynamicRangePref.HDR -> "HDR优先"
@@ -213,7 +215,7 @@ fun SettingsBackend(
                     value = sourceReleaseGroups,
                     onValueChange = { sourceReleaseGroups = it; prefs?.sourceReleaseGroups = it },
                     label = { Text("发布组关键词") },
-                    placeholder = { Text("SPARKS,FGT") },
+                    placeholder = { Text("示例：SPARKS,FGT（留空则不按发布组排序）") },
                     singleLine = true,
                 )
             },

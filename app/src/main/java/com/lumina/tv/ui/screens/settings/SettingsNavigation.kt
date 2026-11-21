@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -114,7 +115,7 @@ private fun SideRailItem(
     var focused by remember(category.key) { mutableStateOf(false) }
     val shape = RoundedCornerShape(12.dp)
     val itemModifier = Modifier
-        .height(44.dp)
+        .heightIn(min = 44.dp)
         .fillMaxWidth()
         .alpha(if (enabled) 1f else 0.4f)
         .then(if (requester != null) Modifier.focusRequester(requester) else Modifier)

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -378,7 +379,7 @@ fun ActionRow(
         val pressScale = LocalSettingsPressScale.current
         Box(
             Modifier
-                .height(30.dp)
+                .heightIn(min = 32.dp)
                 .widthIn(min = 72.dp)
                 .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
                 .background(
@@ -445,7 +446,7 @@ private fun SettingsRowFrame(
     Box(
         modifier
             .fillMaxWidth()
-            .height(SettingsTokens.RowHeight)
+            .heightIn(min = SettingsTokens.RowHeight)
             .focusRequester(focusRequester)
             .focusProperties {
                 left = leftRequester

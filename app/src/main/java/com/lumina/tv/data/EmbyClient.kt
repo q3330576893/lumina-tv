@@ -717,9 +717,9 @@ class EmbyClient(
                     if (bytes.size < 72 || !bytes.copyOfRange(0, 8).contentEquals(BIF_MAGIC)) {
                         throw IOException("Invalid BIF header")
                     }
-                    val count = readLeInt(bytes, 12)
-                    val interval = readLeInt(bytes, 16)
-                    if (count <= 0 || count > MAX_TRICKPLAY_FRAMES || interval <= 0 || 64L + (count + 1L) * 8L > bytes.size) {
+                    val count = readLeInt(bytes, 8)
+                    val multiplier = readLeInt(bytes, 16).let { if (it == 0) 1000 else it }
+                    if (count <= 0 || count > MAX_TRICKPLAY_FRAMES || multiplier <= 0 || 64L + count * 8L > bytes.size) {
                         throw IOException("Invalid BIF index")
                     }
                     currentCoroutineContext().ensureActive()
@@ -735,13 +735,24 @@ class EmbyClient(
                     bytes
                 }
             } ?: return@withMetadataContext null
-            val interval = readLeInt(file, 16)
-            val frameIndex = (positionMs.coerceAtLeast(0L) / interval).toInt()
-                .coerceAtMost(readLeInt(file, 12) - 1)
+            val count = readLeInt(file, 8)
+            val multiplier = readLeInt(file, 16).let { if (it == 0) 1000 else it }
+            var low = 0
+            var high = count
+            while (low < high) {
+                val middle = low + (high - low) / 2
+                val timestampMs = (readLeInt(file, 64 + middle * 8).toLong() and 0xFFFFFFFFL) * multiplier
+                if (timestampMs <= positionMs) {
+                    low = middle + 1
+                } else {
+                    high = middle
+                }
+            }
+            val frameIndex = (low - 1).coerceAtLeast(0)
             synchronized(trickplayFrames) { trickplayFrames[itemId to frameIndex]?.let { return@withMetadataContext it } }
             val entryOffset = 64 + frameIndex * 8
             val start = readLeInt(file, entryOffset + 4)
-            val end = if (frameIndex == readLeInt(file, 12) - 1) file.size else readLeInt(file, entryOffset + 12)
+            val end = if (frameIndex == count - 1) file.size else readLeInt(file, entryOffset + 12)
             if (start < 0 || end <= start || end > file.size) return@withMetadataContext null
             val jpeg = file.copyOfRange(start, end)
             if (jpeg.size < 4 || jpeg[0] != 0xFF.toByte() || jpeg[1] != 0xD8.toByte()) return@withMetadataContext null
