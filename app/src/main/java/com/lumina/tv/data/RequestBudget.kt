@@ -8,12 +8,14 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
@@ -29,13 +31,22 @@ internal class RequestDeadline(val expiresAtNanos: Long) : AbstractCoroutineCont
 internal fun remainingBudgetMillis(deadlineNanos: Long, nowNanos: Long = System.nanoTime()): Long =
     TimeUnit.NANOSECONDS.toMillis((deadlineNanos - nowNanos).coerceAtLeast(0L))
 
+/** A request-owned deadline is an ordinary retryable network failure, not caller cancellation. */
+internal class RequestTimeoutException(val budgetMs: Long) :
+    SocketTimeoutException("Request timed out after ${budgetMs}ms")
+
 suspend fun <T> withRequestBudget(timeoutMs: Long = 20_000L, block: suspend CoroutineScope.() -> T): T {
     val context = currentCoroutineContext()
     context.ensureActive()
     if (context[RequestDeadline] != null) return kotlinx.coroutines.coroutineScope(block)
-    return withTimeout(timeoutMs) {
-        withContext(RequestDeadline(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)), block)
+    // withTimeoutOrNull only handles its own timeout. Box the result so a successful
+    // null return can be distinguished from an elapsed request budget.
+    val result = withTimeoutOrNull(timeoutMs) {
+        Result.success(withContext(RequestDeadline(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)), block))
     }
+    if (result != null) return result.getOrThrow()
+    context.ensureActive()
+    throw RequestTimeoutException(timeoutMs)
 }
 
 internal suspend fun <T> withMetadataContext(timeoutMs: Long = 20_000L, block: suspend CoroutineScope.() -> T): T =

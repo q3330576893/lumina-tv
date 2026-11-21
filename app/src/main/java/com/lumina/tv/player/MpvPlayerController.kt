@@ -302,9 +302,11 @@ class MpvPlayerController(
                 .forEach { engine.observeProperty(it, MPVLib.MpvFormat.MPV_FORMAT_INT64) }
             engine.observeProperty("vo-drop-frame-count", MPVLib.MpvFormat.MPV_FORMAT_INT64)
             appendMpvLog("${timestamp()} load=${load.identity} initialized")
+            MpvAvailabilityProbe.process.recordInitialization()
             InitializationResult.Ready
         } catch (failure: Throwable) {
             unavailableReason = failure.message ?: "libmpv 初始化失败"
+            MpvAvailabilityProbe.process.recordInitialization(unavailableReason)
             created?.let { destroyNativeLoad(it) }
             Log.e(TAG, "mpv initialization failed: $unavailableReason", failure)
             InitializationResult.Failed(checkNotNull(unavailableReason), identity)

@@ -62,13 +62,15 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.distinctUntilChanged
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 
-private const val SEARCH_REQUEST_TIMEOUT_SECONDS = 8
+internal const val SEARCH_REQUEST_TIMEOUT_SECONDS = 8
 
 @Composable
 fun SearchScreen(
@@ -158,7 +160,10 @@ fun SearchScreen(
             2 -> "Series"
             else -> null
         }
-        try {
+        runSearchPageRequest(onFailure = { e ->
+            searchError = searchFailureMessage(e)
+            hasMore = false
+        }, onFinished = { loading = false }) {
             val page = currentClient.getItems(
                 types = types, sortBy = "SortName", sortOrder = "Ascending",
                 limit = 40, startIndex = 0, searchTerm = query, filters = filters,
@@ -170,13 +175,6 @@ fun SearchScreen(
             hasMore = page.size == 40 && pageStart < 300
             prefs?.rememberSearch(query)
             history = prefs?.searchHistory().orEmpty()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            searchError = searchFailureMessage(e)
-            hasMore = false
-        } finally {
-            loading = false
         }
     }
 
@@ -200,7 +198,10 @@ fun SearchScreen(
                     "IsUnplayed".takeIf { unwatchedOnly },
                 ).joinToString(",").ifBlank { null }
                 val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
-                try {
+                runSearchPageRequest(onFailure = { e ->
+                    appendError = searchFailureMessage(e)
+                    hasMore = false
+                }, onFinished = { loadingMore = false }) {
                     val page = currentClient.getItems(
                         types = types, sortBy = "SortName", sortOrder = "Ascending",
                         limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
@@ -211,13 +212,6 @@ fun SearchScreen(
                     appendError = null
                     pageStart += page.size
                     hasMore = page.size == 40 && pageStart < 300
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    appendError = searchFailureMessage(e)
-                    hasMore = false
-                } finally {
-                    loadingMore = false
                 }
             }
     }
@@ -258,7 +252,10 @@ fun SearchScreen(
         val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
         autoLoadedEmptyPages++
         loadingMore = true
-        try {
+        runSearchPageRequest(onFailure = { e ->
+            appendError = searchFailureMessage(e)
+            hasMore = false
+        }, onFinished = { loadingMore = false }) {
             val page = currentClient.getItems(
                 types = types, sortBy = "SortName", sortOrder = "Ascending",
                 limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
@@ -269,13 +266,6 @@ fun SearchScreen(
             appendError = null
             pageStart += page.size
             hasMore = page.size == 40 && pageStart < 300
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            appendError = searchFailureMessage(e)
-            hasMore = false
-        } finally {
-            loadingMore = false
         }
     }
 
@@ -468,7 +458,24 @@ internal fun EmptySearchPageEffect(
     }
 }
 
-private fun searchFailureMessage(error: Throwable): String {
+internal suspend inline fun runSearchPageRequest(
+    onFailure: (Exception) -> Unit,
+    onFinished: () -> Unit,
+    request: () -> Unit,
+) {
+    try {
+        request()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Exception) {
+        currentCoroutineContext().ensureActive()
+        onFailure(failure)
+    } finally {
+        onFinished()
+    }
+}
+
+internal fun searchFailureMessage(error: Throwable): String {
     val message = error.message.orEmpty().trim()
     return when (error) {
         is SocketTimeoutException -> "搜索超时，请检查服务器响应后重试。"

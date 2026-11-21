@@ -11,7 +11,8 @@ internal class PlaybackLoadCoordinator(initialSourceId: String? = null) {
     var desiredPlaying by mutableStateOf(true)
     var badHttpFallbackStage by mutableIntStateOf(0)
         private set
-    private var sourceId: String? = initialSourceId
+    var sourceId: String? = initialSourceId
+        private set
     val requestVariant: Http400RequestVariant get() = Http400RequestVariant(badHttpFallbackStage)
 
     fun beginLoad(source: String?): Int {

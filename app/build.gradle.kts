@@ -1,3 +1,4 @@
+import java.time.Duration
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
@@ -176,6 +177,15 @@ val b15Checks = tasks.register<JavaExec>("b15Checks") {
     mainClass.set("com.lumina.tv.player.B15Checks")
 }
 verifyOffline.configure { dependsOn(b15Checks) }
+val b16Checks = tasks.register<JavaExec>("b16Checks") {
+    group = "verification"
+    description = "B16 request timeout attribution and playback diagnostic ownership assertions."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.B16Checks")
+    timeout.set(Duration.ofMinutes(2))
+}
+verifyOffline.configure { dependsOn(b16Checks) }
 val e1Checks = tasks.register<JavaExec>("e1Checks") {
     group = "verification"
     description = "Check pairing authorization, Latest response shapes and canonical server identity migration."

@@ -7,6 +7,7 @@ import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.BuildConfig
+import com.lumina.tv.player.MpvAvailabilityProbe
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -33,11 +34,11 @@ object DiagExporter {
 
     fun environmentPayload(context: Context, outcome: String): DiagPayload {
         val prefs = AppRuntime.prefs
-        val meta = baseMeta(context, outcome).put("engine", JSONObject()
+        val engine = MpvAvailabilityProbe.process.snapshot(context).addTo(JSONObject()
             .put("prefs", prefs?.playerEngine ?: "unknown")
             .put("active", "unknown")
-            .put("mpvAvailable", "not_probed")
             .put("kernels", JSONArray().put("media3").put("mpv")))
+        val meta = baseMeta(context, outcome).put("engine", engine)
         return DiagPayload(
             metaJson = meta.toString(2),
             playbackInfoJson = JSONObject().put("reason", "No playback in progress; playback-info unavailable").toString(2),
@@ -112,6 +113,10 @@ object DiagExporter {
         }
         (1..5).forEach { n -> File(root, "crash-$n.txt").takeIf(File::exists)?.let { files["crash-$n.txt"] = it.readText() } }
         File(root, "crash-latest.txt").takeIf(File::exists)?.let { files["crash-latest.txt"] = it.readText() }
+        return writeArchive(out, files)
+    }
+
+    internal fun writeArchive(out: File, files: Map<String, String>): File {
         ZipOutputStream(out.outputStream().buffered()).use { zip ->
             files.forEach { (name, original) ->
                 val limit = when (name) {

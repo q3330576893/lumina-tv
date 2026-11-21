@@ -5,6 +5,8 @@ import com.lumina.tv.data.PlaybackStartIntent
 import com.lumina.tv.data.playbackReloadIntent
 import com.lumina.tv.data.PlaybackProgressSession
 import com.lumina.tv.data.EmbyClient
+import com.lumina.tv.data.EmbyException
+import com.lumina.tv.data.RequestTimeoutException
 import com.lumina.tv.data.TimelineOrigin
 import com.lumina.tv.data.TimelinePosition
 import com.lumina.tv.player.PendingSeekConfirmation
@@ -174,6 +176,10 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.player.SubtitleRenderersFactory
 import com.lumina.tv.player.MpvPlayerController
+import com.lumina.tv.player.MpvAvailabilityProbe
+import com.lumina.tv.player.mpvLibrariesInstalled
+import com.lumina.tv.player.PlaybackLoadDetails
+import com.lumina.tv.player.PlaybackLoadKey
 import com.lumina.tv.player.shouldSyncMpvAudioTrack
 import com.lumina.tv.player.audioMimeForSourceHint
 import com.lumina.tv.player.MpvAudioDiagnostics
@@ -242,6 +248,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -270,12 +279,30 @@ private fun playbackNetworkMessage(error: Throwable): String {
     val status = causeChain.filterIsInstance<com.lumina.tv.data.EmbyException>().firstNotNullOfOrNull { it.httpStatus }
     return when {
         isCertificateFailure(error) -> CERTIFICATE_ERROR_MESSAGE
+        causeChain.any { it is RequestTimeoutException } -> "播放请求超时，请重试"
         status == 401 || status == 403 || message.contains("HTTP 401") || message.contains("HTTP 403") -> "登录已失效，请重新登录"
         status != null && status >= 500 -> "服务器错误（$status）"
         causeChain.any { it is java.net.SocketException || it is java.net.SocketTimeoutException || it is java.io.InterruptedIOException } ||
             message.contains("connection reset", true) || message.contains("timeout", true) || message.contains("timed out", true) -> "网络中断，请检查连接后重试"
         else -> error.message?.takeIf { it.isNotBlank() } ?: "播放请求失败，请重试"
     }
+}
+
+/** Complete a failed preparation only while its load still owns the screen. */
+internal suspend fun finishPlaybackLoadFailure(
+    failure: Exception,
+    ownsLoad: () -> Boolean,
+    updateStalled: (Boolean) -> Unit,
+    clearTarget: () -> Unit,
+    publishError: (String) -> Unit,
+): Boolean {
+    if (failure is CancellationException) throw failure
+    currentCoroutineContext().ensureActive()
+    if (!ownsLoad()) return false
+    clearTarget()
+    updateStalled(false)
+    publishError(playbackNetworkMessage(failure))
+    return true
 }
 
 private fun audioMime(codec: String?): String? = audioMimeForSourceHint(codec.orEmpty())
@@ -340,7 +367,7 @@ fun PlayerScreen(
     var duration by remember { mutableLongStateOf(0L) }
     var estimatedBitrate by remember { mutableLongStateOf(0L) }
     var seekStepSeconds by remember { mutableIntStateOf(AppRuntime.prefs?.seekStepSeconds ?: 10) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember(item.id) { mutableStateOf<String?>(null) }
     var speedState by remember { mutableStateOf(PlaybackSpeedState(AppRuntime.prefs?.defaultSpeed ?: 1.0f)) }
     var optionMenu by remember { mutableStateOf(false) }
     var quickPanel by remember { mutableStateOf(QuickPanel.NONE) }
@@ -372,11 +399,7 @@ fun PlayerScreen(
     var rebuildRetry by remember(item.id) { mutableStateOf(false) }
     // 保留用户本次播放明确选择的内核，后续重载不覆盖该选择。
     var enginePinned by remember(item.id) { mutableStateOf<String?>(null) }
-    val mpvInstalled = remember(context) {
-        context.applicationInfo.nativeLibraryDir?.let { directory ->
-            listOf("libmpv.so", "libplayer.so").all { java.io.File(directory, it).isFile }
-        } == true
-    }
+    val mpvInstalled = remember(context) { mpvLibrariesInstalled(context) }
     var mpvInitializationFailed by remember { mutableStateOf(false) }
     val mpvAvailable = mpvInstalled && !mpvInitializationFailed
     var mpvMenuTrackRevision by remember { mutableIntStateOf(0) }
@@ -405,10 +428,9 @@ fun PlayerScreen(
     var showMpvConfirm by remember { mutableStateOf(false) }
     var playStartAt by remember(item.id) { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
     var engineSwitchTrace by remember(item.id) { mutableStateOf(mutableListOf<String>()) }
-    var currentPlaybackUrl by remember(item.id) { mutableStateOf<String?>(null) }
-    var currentPlayMethod by remember(item.id) { mutableStateOf("DirectPlay") }
-    var negotiationDiagnostics by remember(item.id) { mutableStateOf(JSONObject()) }
-    var rangeProbeDiagnostics by remember(item.id) { mutableStateOf(JSONObject()) }
+    var loadDetails by remember(item.id) {
+        mutableStateOf(PlaybackLoadDetails(PlaybackLoadKey(0, item.id, initialSourceId)))
+    }
     var rangeProbeJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var networkRetryCount by remember(item.id) { mutableIntStateOf(0) }
     var sessionGeneration by loadCoordinator::generation
@@ -453,7 +475,6 @@ fun PlayerScreen(
     var loadingStartedAt by remember(item.id) { mutableLongStateOf(0L) }
     var loadingCount by remember(item.id) { mutableIntStateOf(0) }
     var loadingDurationMs by remember(item.id) { mutableLongStateOf(0L) }
-    var lastPlaybackErrorJson by remember(item.id) { mutableStateOf<String?>(null) }
     var dvDecoderPath by remember(item.id) { mutableStateOf<String?>(null) }
     var activeVideoDecoder by remember(item.id) { mutableStateOf<String?>(null) }
     var firstFrameRendered by remember(item.id) { mutableStateOf(false) }
@@ -750,7 +771,7 @@ fun PlayerScreen(
         if (target.timeline.sample(playerMs, playerDur, now)) {
             val calibration = target.timeline.calibration
             target.streamStartOffsetMs = calibration.offsetMs
-            negotiationDiagnostics.put("streamStartOffsetMs", calibration.offsetMs ?: JSONObject.NULL)
+            loadDetails.negotiationDiagnostics.put("streamStartOffsetMs", calibration.offsetMs ?: JSONObject.NULL)
             PageLog.add("timeline: origin=${target.timelineOrigin} offset=${calibration.offsetMs} confidence=${calibration.confidence} evidence=${calibration.evidence}")
         }
         if (playerMs != null) {
@@ -1023,7 +1044,7 @@ fun PlayerScreen(
         audioRecoveryJob = null
         recovering = false
         client?.baseUrl?.let(ServerCertificateErrors::record)
-        lastPlaybackErrorJson = JSONObject().put("engine", engine).put("category", "CERT_INVALID").put("action", "check_certificate").toString()
+        loadDetails.lastPlaybackErrorJson = JSONObject().put("engine", engine).put("category", "CERT_INVALID").put("action", "check_certificate").toString()
         PageLog.add("playbackError category=CERT_INVALID engine=$engine action=check_certificate")
         updateStalled(false)
         playbackStatusNotice = null
@@ -1033,6 +1054,11 @@ fun PlayerScreen(
     }
 
     fun audioSourceKey(): String = currentSourceId ?: playbackSource?.id ?: item.id
+
+    fun currentLoadKey() = PlaybackLoadKey(sessionGeneration, item.id, currentSourceId ?: loadCoordinator.sourceId)
+
+    fun currentPlaybackSourceJson() =
+        playbackSourceJson(loadDetails.playbackInfoJson(currentLoadKey()), currentSourceId)
 
     fun canTryMpvPath(path: PlaybackPath? = currentPath): Boolean = path?.let {
         com.lumina.tv.player.mpvWasExplicitlyRequested(AppRuntime.prefs?.playerEngine, enginePinned) &&
@@ -1046,7 +1072,7 @@ fun PlayerScreen(
         val codec = playbackSource?.audioStreams?.let { streams ->
             streams.firstOrNull { it.index == selectedAudioStreamIndex } ?: streams.firstOrNull()
         }?.codec?.uppercase() ?: "未知编码"
-        val sourceJson = playbackSourceJson(client?.lastPlaybackInfoJson, currentSourceId)
+        val sourceJson = currentPlaybackSourceJson()
         val serverMessage = when {
             sourceJson == null -> "未取得可用的服务器转码信息"
             !serverTranscodingAvailable(sourceJson) -> "服务器也未提供转码"
@@ -1087,7 +1113,7 @@ fun PlayerScreen(
     }
 
     fun recoverUnsupportedContainer(errorCodeName: String, generation: Int) {
-        val canTranscode = serverTranscodingAvailable(playbackSourceJson(client?.lastPlaybackInfoJson, currentSourceId))
+        val canTranscode = serverTranscodingAvailable(currentPlaybackSourceJson())
         // Recheck mpv even after a transcode attempt, before declaring a terminal container failure.
         when (containerRecovery(canTryMpvPath(), canTranscode, transcodeFallbackTried)) {
             ContainerRecovery.MPV -> {
@@ -1160,11 +1186,7 @@ fun PlayerScreen(
                         group.mediaTrackGroup == candidate.group && group.isTrackSupported(candidate.index)
                     }
             }
-        val sourceJson = runCatching {
-            val sources = JSONObject(client?.lastPlaybackInfoJson.orEmpty()).optJSONArray("MediaSources")
-            (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }
-                .firstOrNull { it.optString("Id") == currentSourceId }
-        }.getOrNull()
+        val sourceJson = currentPlaybackSourceJson()
         val canTranscode = sourceJson?.optBoolean("SupportsTranscoding", false) == true &&
             !sourceJson.optString("TranscodingUrl").isNullOrBlank() && !transcodeFallbackTried
         if (recoveryBudget.exhausted || (!tryMpv && alternative == null && !canTranscode)) {
@@ -1221,7 +1243,10 @@ fun PlayerScreen(
 
     fun handleMpvFailure(kind: MpvPlayerController.FailureKind, detail: String, generation: Int) {
         if (!isCurrentLoad(generation) || reloadPending) return
-        if (kind == MpvPlayerController.FailureKind.INITIALIZATION) mpvInitializationFailed = true
+        if (kind == MpvPlayerController.FailureKind.INITIALIZATION) {
+            mpvInitializationFailed = true
+            loadDetails.mpvInitializationError = detail
+        }
         if (kind == MpvPlayerController.FailureKind.CERT_INVALID) {
             showCertificateError("mpv")
             mpvBackend?.release("certificate-invalid")
@@ -1349,6 +1374,13 @@ fun PlayerScreen(
         lastPlayerPositionMs = null
         media3PositionAvailable = false
         currentTarget = null
+        val details = PlaybackLoadDetails(PlaybackLoadKey(generation, item.id, sourceId))
+        loadDetails = details
+        error = null
+        playbackStatusNotice = null
+        activeVideoDecoder = null
+        dvDecoderPath = null
+        failurePhase = "解析"
         playbackDiagnostics.begin(generation, loadStartedAt)
         mpvBackend?.release("external-load-replaced")
         mpvBackend = null
@@ -1367,17 +1399,12 @@ fun PlayerScreen(
             .put("readyToFirstFrameMs", JSONObject.NULL)
             .put("firstFrameMs", JSONObject.NULL)
         loadJob = instanceScope.launch {
-            error = null
             updateStalled(false)
             firstFrameRendered = false
             updateLoading(false)
             updateStalled(true)
             readyWithoutFrameSince = 0L
-            playbackStatusNotice = null
             bufferingTimedOut = false
-            activeVideoDecoder = null
-            dvDecoderPath = null
-            failurePhase = "解析"
             try {
                 MpvRetirementFence.await()
                 if (!isCurrentLoad(generation) || reloadPending) return@launch
@@ -1387,6 +1414,7 @@ fun PlayerScreen(
                 val preparedTracks = c.preparePlaybackTracks(item.id, sourceId, audioStreamIndex, strategy,
                     playbackSource?.takeIf { it.id == sourceId }?.let { com.lumina.tv.player.trackMemoryIdentity(it, "Audio") })
                 if (!isCurrentLoad(generation) || reloadPending || !loadCoordinator.resolveSource(generation, preparedTracks.source.id)) return@launch
+                details.bindSource(preparedTracks.source.id)
                 if (client === c && AppRuntime.client === c && preparedTracks.availableSources.isNotEmpty()) {
                     mediaSources = preparedTracks.availableSources
                 }
@@ -1404,6 +1432,7 @@ fun PlayerScreen(
                         maxStreamingBitrate = maxStreamingBitrate,
                         strategy = strategy,
                         preparedTracks = preparedTracks,
+                        playbackInfoCapture = details.playbackInfoCapture,
                     )
                 // Cached negotiation is reusable; runtime measurements belong to this load only.
                 val target = resolvedTarget.copy(negotiationDiagnostics = JSONObject(resolvedTarget.negotiationDiagnostics.toString()))
@@ -1411,11 +1440,10 @@ fun PlayerScreen(
                 if (reloadPending || !loadCoordinator.resolveSource(generation, target.source.id)) return@launch
                 httpFactory.setDefaultRequestProperties(target.headers)
                 phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
-                negotiationDiagnostics = target.negotiationDiagnostics
+                details.acceptTarget(target)
                 currentTarget = target
                 recordTimelineDiagnostics(target.timeline.position(null))
                 lastRequestedStartMs = target.startPositionMs
-                currentPlayMethod = target.playMethod
                 PageLog.add("timeline requestStartMs=$resumePosition playMethod=${target.playMethod} direct=${target.direct} sourceId=${target.source?.id} url=${target.url.substringBefore('?').take(120)}")
                 phaseTimes.put("requestedStartMs", resumePosition)
                     .put("playMethod", target.playMethod)
@@ -1433,15 +1461,13 @@ fun PlayerScreen(
                     sourceVideoRange.contains("HDR10") || sourceVideoRange.contains("HDR") -> "HDR10"
                     else -> "SDR"
                 }
-                currentPlaybackUrl = target.url
-                rangeProbeDiagnostics = JSONObject().put("state", "pending")
                 val targetIsHls = target.url.contains("master.m3u8", true) || target.url.contains(".m3u8", true)
                 if (targetIsHls) transcodeFallbackTried = true
                 rangeProbeJob = instanceScope.launch {
                     val probeResult = runCatching { PlaybackRangeProbe.probe(target.url, target.headers, c.playbackHttpClient) }
                         .getOrElse { JSONObject().put("error", it.javaClass.simpleName) }
-                    if (isCurrentLoad(generation)) {
-                        rangeProbeDiagnostics = probeResult
+                    if (isCurrentLoad(generation) && currentTarget === target) {
+                        details.rangeProbeDiagnostics = probeResult
                         phaseTimes.put("rangeProbe", probeResult)
                     }
                 }
@@ -1477,9 +1503,7 @@ fun PlayerScreen(
                 val selectedEngine = selectPlaybackEngine(AppRuntime.prefs?.playerEngine, enginePinned,
                     path, pathFailures, mpvInstalled && !mpvInitializationFailed)
                 if (selectedEngine == null) {
-                    updateStalled(false)
-                    error = "当前片源的播放路径均已失败，请重试或更换片源、音轨"
-                    return@launch
+                    throw EmbyException("当前片源的播放路径均已失败，请重试或更换片源、音轨")
                 }
                 currentPath = path.copy(engine = selectedEngine)
                 val video = target.source?.streams?.firstOrNull { it.type == "Video" }
@@ -1752,33 +1776,40 @@ fun PlayerScreen(
                     target.playerStartPositionMs?.let(exo::seekTo)
                     exo.setPlaybackSpeed(speedState.effectiveSpeed)
                 }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
             } catch (e: Exception) {
-                if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
-                updateStalled(false)
-                if (failurePhase == "未知") failurePhase = "解析"
-                val reason = playbackNetworkMessage(e)
-                if (isCertificateFailure(e)) {
-                    showCertificateError(activeEngine)
+                val handled = finishPlaybackLoadFailure(e,
+                    ownsLoad = { isCurrentLoad(generation) && !reloadPending },
+                    updateStalled = ::updateStalled,
+                    clearTarget = {
+                        currentTarget = null
+                        media3LoadGeneration = -1
+                        rangeProbeJob?.cancel()
+                    },
+                ) { message ->
+                    details.recordFailure(e)
+                    if (failurePhase == "未知") failurePhase = "解析"
+                    // PlaybackInfo/HTTP negotiation is shared by both engines.
+                    if (isCertificateFailure(e)) showCertificateError(activeEngine)
+                    error = message
                 }
-                // PlaybackInfo/HTTP negotiation is shared by both engines.
-                // A request failure is not evidence that mpv initialization failed.
-                error = reason
-
+                if (!handled) PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration")
             }
         }
     }
 
     fun buildDiagPayload(outcome: String): DiagPayload {
         phaseTimes.put("failedPaths", failureDiagnostics()).put("recoveryAttempts", recoveryBudget.attempts)
+        val load = loadDetails.snapshot(currentLoadKey())
+        val source = playbackSource?.takeIf { load.current && load.urlType in setOf("static", "hls") && it.id == load.key.sourceId }
         return buildPlayerDiagPayload(
-            context, outcome, activeEngine, mpvBackend, item, playbackSource, currentPlaybackUrl,
-            audioDecodeMode, audioSupport.name, degraded, engineSwitchTrace, exo, failurePhase, lastPlaybackErrorJson,
-            mpvState, client?.lastPlaybackInfoJson, controlsVisible, isActuallyStalled, error, position,
-            activeVideoDecoder, dvDecoderPath, playbackStatusNotice,
-            negotiationDiagnostics, rangeProbeDiagnostics, phaseTimes, droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
-            currentSourceId, currentPlayMethod, duration, playbackDiagnostics, selectedAudioStreamIndex,
+            context, outcome, activeEngine, MpvAvailabilityProbe.process.snapshot(context),
+            mpvBackend.takeIf { load.current }, item, source, load,
+            audioDecodeMode, audioSupport.name, degraded, engineSwitchTrace, exo,
+            if (load.current) failurePhase else "stale", mpvState.takeIf { load.current } ?: MpvPlayerController.State(),
+            controlsVisible, isActuallyStalled, error.takeIf { load.current }, position,
+            activeVideoDecoder.takeIf { load.current }, dvDecoderPath.takeIf { load.current }, playbackStatusNotice.takeIf { load.current },
+            phaseTimes.takeIf { load.current } ?: JSONObject(), droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
+            duration, playbackDiagnostics, selectedAudioStreamIndex,
         )
     }
 
@@ -1903,7 +1934,7 @@ fun PlayerScreen(
                     errorClass.category == PlaybackErrorCategory.DECODING -> "解码"
                     else -> "未知"
                 }
-                lastPlaybackErrorJson = JSONObject()
+                loadDetails.lastPlaybackErrorJson = JSONObject()
                     .put("engine", activeEngine)
                     .put("errorCodeName", err.errorCodeName)
                     .put("errorCode", err.errorCode)
@@ -1953,12 +1984,14 @@ fun PlayerScreen(
                     (errorClass.category == PlaybackErrorCategory.NETWORK_TRANSIENT && networkRetryCount >= 2)) {
                     recordPathFailure(PlaybackFailureReason.HTTP, err.errorCodeName)
                 }
+                val currentPlaybackUrl = loadDetails.currentPlaybackUrl
                 val currentIsHls = currentPlaybackUrl?.let {
                     it.contains("master.m3u8", true) || it.contains(".m3u8", true)
                 } == true
                 val isBadHttpStatus = err.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS &&
                     generateSequence(err as Throwable?) { it.cause }
                         .any { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode == 400 }
+                val rangeProbeDiagnostics = loadDetails.rangeProbeDiagnostics
                 val probeContentType = (rangeProbeDiagnostics.opt("contentType") as? String)
                     .orEmpty().substringBefore(';').trim().lowercase()
                 val directProbePending = containerUnsupported &&
@@ -1975,6 +2008,7 @@ fun PlayerScreen(
                     instanceScope.launch {
                         rangeProbeJob?.join()
                         if (!isCurrentLoad(generation) || activeEngine != "media3") return@launch
+                        val rangeProbeDiagnostics = loadDetails.rangeProbeDiagnostics
                         val contentType = (rangeProbeDiagnostics.opt("contentType") as? String)
                             .orEmpty().substringBefore(';').trim().lowercase()
                         if (contentType.isNotBlank() && contentType != "application/octet-stream" && !contentType.startsWith("video/")) {
@@ -1986,7 +2020,7 @@ fun PlayerScreen(
                             failurePhase = "直链校验"
                             error = "片源直链失效：服务器返回了$typeLabel（网盘链接可能已过期）"
                             rangeProbeDiagnostics.put("nonVideoResponse", true)
-                            lastPlaybackErrorJson = JSONObject(lastPlaybackErrorJson.orEmpty())
+                            loadDetails.lastPlaybackErrorJson = JSONObject(loadDetails.lastPlaybackErrorJson.orEmpty())
                                 .put("contentType", contentType)
                                 .put("statusCode", rangeProbeDiagnostics.opt("status") ?: JSONObject.NULL)
                                 .put("finalUrlHost", (rangeProbeDiagnostics.opt("finalUrlHost") as? String) ?: JSONObject.NULL)
@@ -2006,7 +2040,7 @@ fun PlayerScreen(
                     failurePhase = "直链校验"
                     error = "片源直链失效：服务器返回了$typeLabel（网盘链接可能已过期）"
                     rangeProbeDiagnostics.put("nonVideoResponse", true)
-                    lastPlaybackErrorJson = JSONObject(lastPlaybackErrorJson.orEmpty())
+                    loadDetails.lastPlaybackErrorJson = JSONObject(loadDetails.lastPlaybackErrorJson.orEmpty())
                         .put("contentType", probeContentType)
                         .put("statusCode", rangeProbeDiagnostics.opt("status") ?: JSONObject.NULL)
                         .put("finalUrlHost", (rangeProbeDiagnostics.opt("finalUrlHost") as? String) ?: JSONObject.NULL)

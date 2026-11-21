@@ -69,8 +69,6 @@ class EmbyClient(
     val serverName: String = "Emby",
     progressQueue: ProgressQueue? = null,
 ) {
-    @Volatile var lastPlaybackInfoJson: String? = null
-        private set
     /** Legacy diagnostic value; UI totals must use ItemsPage.totalRecordCount. */
     @Volatile var lastTotalRecordCount: Int? = null
         private set
@@ -677,7 +675,7 @@ class EmbyClient(
         try {
             resolvePlayback(item, forceTranscode = forceTranscode, maxStreamingBitrate = maxBitrate,
                 mediaSourceId = sourceId, startIntent = PlaybackStartIntent.Resume,
-                audioStreamIndex = audioStreamIndex, recordDiagnostics = false, cacheResult = true, strategy = strategy,
+                audioStreamIndex = audioStreamIndex, cacheResult = true, strategy = strategy,
                 preparedTracks = prepared)
             attempt.state = "done"
         } catch (cancelled: CancellationException) {
@@ -1176,6 +1174,7 @@ class EmbyClient(
         val originalFile: Boolean = false,
         val trackIntent: PlaybackTrackIntent? = null,
         val isStrmDirectLink: Boolean = false,
+        val playbackInfo: PlaybackInfoSnapshot? = null,
     ) {
         val direct: Boolean get() = mode == PlaybackMode.DirectPlay
         val playMethod: String get() = mode.name
@@ -1351,7 +1350,7 @@ class EmbyClient(
 
     suspend fun preparePlaybackTracks(itemId: String, sourceId: String?, audioIndex: Int?,
         strategy: SourceStrategy = SourceStrategy(), audioIdentity: String? = null): PreparedPlaybackTracks {
-        val sources = getMediaSources(itemId)
+        val sources = getMediaSourcesResult(itemId).getOrThrow()
         if (sources.isEmpty()) throw EmbyException("没有可用片源")
         val preferredSourceId = sourceId ?: com.lumina.tv.AppRuntime.prefs?.lastSourceFor(itemId)
         val selected = sources.firstOrNull { it.id == preferredSourceId }
@@ -1373,11 +1372,11 @@ class EmbyClient(
         preferDirectStreamUrl: Boolean = false,
         manualAudioStreamSelection: Boolean = false,
         maxStreamingBitrate: Long = 120_000_000L,
-        recordDiagnostics: Boolean = true,
         cacheResult: Boolean = false,
         strategy: SourceStrategy = SourceStrategy(),
         preparedTracks: PreparedPlaybackTracks? = null,
         audioIdentity: String? = null,
+        playbackInfoCapture: PlaybackInfoCapture? = null,
     ): PlaybackTarget =
         withMetadataContext {
             val startPositionMs = startIntent.positionMs(item.positionTicks / 10_000L)
@@ -1403,6 +1402,7 @@ class EmbyClient(
             val playbackInfoParams = mapOf("UserId" to userId)
             var info = JSONObject()
             var first: JSONObject? = null
+            var capturedInfo: PlaybackInfoSnapshot? = null
             val negotiatedSources = mutableSetOf<String>()
             while (true) {
                 if (!negotiatedSources.add(negotiationSource.id) || negotiatedSources.size > 3) {
@@ -1411,16 +1411,19 @@ class EmbyClient(
                 trackIntent.applyToPlaybackInfo(infoBody,
                     disableSubtitles = removeSubtitleParams && negotiationSource.id == prepared.source.id)
                 info = postJson(url("/Items/${item.id}/PlaybackInfo", playbackInfoParams), infoBody.toString())
-                    .also { if (recordDiagnostics) lastPlaybackInfoJson = it.toString() }
                 val sources = info.optJSONArray("MediaSources")
                 val responseSources = (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }
                 first = responseSources.firstOrNull { it.optString("Id") == negotiationSource.id }
-                    ?: responseSources.firstOrNull() ?: throw EmbyException("PlaybackInfo returned no usable sources")
-                val returnedId = first.optString("Id").takeIf { it.isNotBlank() }
+                    ?: responseSources.firstOrNull()
+                val responseSourceId = first?.optString("Id")?.takeIf { it.isNotBlank() }
+                capturedInfo = PlaybackInfoSnapshot(item.id, responseSourceId ?: negotiationSource.id, info.toString())
+                playbackInfoCapture?.latest = capturedInfo
+                if (first == null) throw EmbyException("PlaybackInfo returned no usable sources")
+                val returnedId = responseSourceId
                     ?: throw EmbyException("PlaybackInfo source is missing its identity")
                 if (returnedId == negotiationSource.id) break
                 // A source change invalidates numeric choices; re-resolve from that source's inventory.
-                negotiationSource = getMediaSources(item.id).firstOrNull { it.id == returnedId }
+                negotiationSource = getMediaSourcesResult(item.id).getOrThrow().firstOrNull { it.id == returnedId }
                     ?: throw EmbyException("服务器返回的新版本已不可用")
                 trackIntent = trackIntentFor(item.id, negotiationSource)
                 PageLog.add("trackNegotiation action=source-changed retry=${negotiatedSources.size}")
@@ -1512,6 +1515,7 @@ class EmbyClient(
                 timelineOrigin = route.third,
                 headers = previewHeaders(finalUrl, headers).toMap(),
                 durationMs = first.optLong("RunTimeTicks", item.runtimeTicks ?: 0L).takeIf { it > 0L }?.div(10_000L),
+                playbackInfo = capturedInfo,
                 negotiationDiagnostics = JSONObject()
                     .put("request", JSONObject().apply {
                         // 如实记录：这 5 个布尔当前没发给服务器，就记 null，不假装 true
