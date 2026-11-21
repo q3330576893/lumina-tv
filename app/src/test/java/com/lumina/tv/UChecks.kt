@@ -55,12 +55,12 @@ object UChecks {
         }
 
         val home = source("ui/screens/HomeScreen.kt")
-        check("val heroHeight = maxHeight" in home)
+        check("maxHeight * 0.86f" in home && "maxHeight - 172.dp" in home)
         check("heroHeight = heroHeight" in home && "item(key = \"home-hero\")" in home)
         check("heroArtworkFocus.requestFocus()" in home && ".focusRequester(artworkFocus)" in home)
         check("recListState.scroll {" !in home && "recListState.scrollToItem(0)" in home)
         val backdrop = home.substringAfter("private fun HeroBackdropImage(").substringBefore("@Composable")
-        check("contentScale = ContentScale.Fit" in backdrop && "ContentScale.Crop" !in backdrop)
+        check("ContentScale.Crop" in backdrop)
         val fit = ContentScale.Fit.computeScaleFactor(Size(2560f, 1080f), Size(1920f, 1080f))
         check(fit.scaleX == 0.75f && fit.scaleY == 0.75f)
         println("B14 PASS U2/U3/U12: viewport geometry, artwork focus, carousel keys and return-to-top routing")

@@ -107,107 +107,113 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
         )
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val railWidth = if (maxWidth < 1100.dp) 192.dp else SettingsTokens.RailWidth
-            Row(
+            Box(
                 Modifier
                     .fillMaxSize()
                     .padding(
                         horizontal = SettingsTokens.PagePaddingH,
                         vertical = SettingsTokens.PagePaddingV,
                     ),
+                contentAlignment = Alignment.TopCenter,
             ) {
-                SettingsCategoryRail(
-                    selectedCategory = selectedCategory,
-                    railWidth = railWidth,
-                    hazeState = hazeState,
-                    selectedRequester = railRequester,
-                    contentRequester = contentFirstRequester,
-                    onCategorySelected = {
-                        if (selectedCategory != it) {
-                            previousCategory = selectedCategory
-                            selectedCategory = it
-                            SettingsFocusMemory.category = it
-                        }
-                    },
-                    onRailFocusChanged = { if (it) focusEpoch++ },
-                )
-                Spacer(Modifier.width(SettingsTokens.RailContentGap))
-                Column(
+                Row(
                     Modifier
-                        .fillMaxHeight()
-                        .widthIn(max = SettingsTokens.ContentMaxWidth)
-                        .weight(1f)
-                        .focusGroup()
-                        .padding(top = 12.dp),
+                        .widthIn(max = railWidth + SettingsTokens.RailContentGap + SettingsTokens.ContentMaxWidth)
+                        .fillMaxSize(),
                 ) {
-                    val direction = if (selectedCategory.ordinal >= previousCategory.ordinal) 1f else -1f
-                    CompositionLocalProvider(
-                        LocalSettingsFocusKeys provides focusRequesters,
-                        LocalSettingsListStates provides listStates,
-                    ) {
-                    AnimatedContent(
-                        targetState = selectedCategory,
-                        transitionSpec = {
-                            (slideInHorizontally(
-                                animationSpec = tween(Motion.CATEGORY, easing = Motion.enterEasing),
-                                initialOffsetX = { (it * Motion.SHIFT_CATEGORY * direction).toInt() },
-                            ) + fadeIn(tween(Motion.CATEGORY, easing = Motion.enterEasing))) togetherWith
-                                (slideOutHorizontally(
-                                    animationSpec = tween(Motion.CATEGORY, easing = Motion.exitEasing),
-                                    targetOffsetX = { (-it * Motion.SHIFT_CATEGORY * direction).toInt() },
-                                ) + fadeOut(tween(Motion.CATEGORY, easing = Motion.exitEasing))) using
-                                SizeTransform(clip = false)
+                    SettingsCategoryRail(
+                        selectedCategory = selectedCategory,
+                        railWidth = railWidth,
+                        hazeState = hazeState,
+                        selectedRequester = railRequester,
+                        contentRequester = contentFirstRequester,
+                        onCategorySelected = {
+                            if (selectedCategory != it) {
+                                previousCategory = selectedCategory
+                                selectedCategory = it
+                                SettingsFocusMemory.category = it
+                            }
                         },
-                        contentKey = { it.key },
-                        label = "settingsCategory",
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                    ) { category ->
-                        when (category) {
-                            SettingsCategory.Account -> SettingsAccount(
-                                firstFocusRequester = contentFirstRequester,
-                                railRequester = railRequester,
-                                onFocused = { key -> rememberRowFocus(category, key) },
-                                onLogout = onLogout,
-                                onServerSwitched = onBack,
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                            SettingsCategory.Appearance -> SettingsAppearance(
-                                firstFocusRequester = contentFirstRequester,
-                                railRequester = railRequester,
-                                onFocused = { key -> rememberRowFocus(category, key) },
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                            SettingsCategory.Playback -> SettingsPlayback(
-                                firstFocusRequester = contentFirstRequester,
-                                railRequester = railRequester,
-                                onFocused = { key -> rememberRowFocus(category, key) },
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                            SettingsCategory.Subtitles -> SettingsSubtitles(
-                                firstFocusRequester = contentFirstRequester,
-                                railRequester = railRequester,
-                                onFocused = { key -> rememberRowFocus(category, key) },
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                            SettingsCategory.Compatibility -> SettingsBackend(
-                                firstFocusRequester = contentFirstRequester,
-                                railRequester = railRequester,
-                                onFocused = { key -> rememberRowFocus(category, key) },
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                            SettingsCategory.About -> SettingsAbout(
-                                firstFocusRequester = contentFirstRequester,
-                                railRequester = railRequester,
-                                onFocused = { key -> rememberRowFocus(category, key) },
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                            SettingsCategory.Home -> SettingsHome(
-                                firstFocusRequester = contentFirstRequester,
-                                railRequester = railRequester,
-                                onFocused = { key -> rememberRowFocus(category, key) },
-                                modifier = Modifier.fillMaxSize(),
-                            )
+                        onRailFocusChanged = { if (it) focusEpoch++ },
+                    )
+                    Spacer(Modifier.width(SettingsTokens.RailContentGap))
+                    Column(
+                        Modifier
+                            .fillMaxHeight()
+                            .weight(1f)
+                            .focusGroup()
+                            .padding(top = 12.dp),
+                    ) {
+                        val direction = if (selectedCategory.ordinal >= previousCategory.ordinal) 1f else -1f
+                        CompositionLocalProvider(
+                            LocalSettingsFocusKeys provides focusRequesters,
+                            LocalSettingsListStates provides listStates,
+                        ) {
+                        AnimatedContent(
+                            targetState = selectedCategory,
+                            transitionSpec = {
+                                (slideInHorizontally(
+                                    animationSpec = tween(Motion.CATEGORY, easing = Motion.enterEasing),
+                                    initialOffsetX = { (it * Motion.SHIFT_CATEGORY * direction).toInt() },
+                                ) + fadeIn(tween(Motion.CATEGORY, easing = Motion.enterEasing))) togetherWith
+                                    (slideOutHorizontally(
+                                        animationSpec = tween(Motion.CATEGORY, easing = Motion.exitEasing),
+                                        targetOffsetX = { (-it * Motion.SHIFT_CATEGORY * direction).toInt() },
+                                    ) + fadeOut(tween(Motion.CATEGORY, easing = Motion.exitEasing))) using
+                                    SizeTransform(clip = false)
+                            },
+                            contentKey = { it.key },
+                            label = "settingsCategory",
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                        ) { category ->
+                            when (category) {
+                                SettingsCategory.Account -> SettingsAccount(
+                                    firstFocusRequester = contentFirstRequester,
+                                    railRequester = railRequester,
+                                    onFocused = { key -> rememberRowFocus(category, key) },
+                                    onLogout = onLogout,
+                                    onServerSwitched = onBack,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                SettingsCategory.Appearance -> SettingsAppearance(
+                                    firstFocusRequester = contentFirstRequester,
+                                    railRequester = railRequester,
+                                    onFocused = { key -> rememberRowFocus(category, key) },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                SettingsCategory.Playback -> SettingsPlayback(
+                                    firstFocusRequester = contentFirstRequester,
+                                    railRequester = railRequester,
+                                    onFocused = { key -> rememberRowFocus(category, key) },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                SettingsCategory.Subtitles -> SettingsSubtitles(
+                                    firstFocusRequester = contentFirstRequester,
+                                    railRequester = railRequester,
+                                    onFocused = { key -> rememberRowFocus(category, key) },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                SettingsCategory.Compatibility -> SettingsBackend(
+                                    firstFocusRequester = contentFirstRequester,
+                                    railRequester = railRequester,
+                                    onFocused = { key -> rememberRowFocus(category, key) },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                SettingsCategory.About -> SettingsAbout(
+                                    firstFocusRequester = contentFirstRequester,
+                                    railRequester = railRequester,
+                                    onFocused = { key -> rememberRowFocus(category, key) },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                SettingsCategory.Home -> SettingsHome(
+                                    firstFocusRequester = contentFirstRequester,
+                                    railRequester = railRequester,
+                                    onFocused = { key -> rememberRowFocus(category, key) },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
                         }
-                    }
+                        }
                     }
                 }
             }

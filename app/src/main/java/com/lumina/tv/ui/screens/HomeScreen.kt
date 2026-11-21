@@ -22,7 +22,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.delay
@@ -117,6 +116,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -730,7 +730,6 @@ fun HomeScreen(
     val librarySortFocus = remember { FocusRequester() }
     val favoritesContentFocus = remember { FocusRequester() }
     val mediaLibraryContentFocus = remember { FocusRequester() }
-    val libraryGridColumns = ((LocalConfiguration.current.screenWidthDp - 80 + 20) / 150).coerceAtLeast(1)
 
     val heroArtworkFocus = remember { FocusRequester() }
     val firstContentFocus = remember { FocusRequester() }
@@ -857,7 +856,7 @@ fun HomeScreen(
                 }
                 tab == HomeTab.Recommend -> BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
                     val heroWidth = maxWidth
-                    val heroHeight = maxHeight
+                    val heroHeight = minOf(maxHeight * 0.86f, maxHeight - 172.dp).coerceAtLeast(320.dp)
                     LazyColumn(
                         state = recListState,
                         modifier = Modifier.fillMaxSize().background(Ink),
@@ -1087,27 +1086,43 @@ fun HomeScreen(
                     else if (gridItems.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("此媒体库暂无内容", color = TextSub, fontSize = 13.sp)
                     }
-                    else LazyVerticalGrid(
-                        state = gridState,
-                        columns = GridCells.Adaptive(minSize = 130.dp),
-                        contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 12.dp, bottom = 160.dp),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(32.dp),
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                        itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
-                            PosterCard(item = media, imageUrl = client?.imageUrl(media), requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0), upFocus = if (index < libraryGridColumns) librarySortFocus else null, onFocused = { focusedMediaId = media.id }, onClick = { onOpenDetail(media.id) })
+                    else BoxWithConstraints {
+                        val libraryGridColumns = when {
+                            maxWidth < 1400.dp -> 5
+                            maxWidth < 2400.dp -> 7
+                            else -> 9
                         }
-                        if (gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
-                            androidx.compose.material3.CircularProgressIndicator(Modifier.padding(20.dp).size(24.dp), color = Accent, strokeWidth = 2.dp)
-                        }
-                        if (gridAppendFailed && gridHasMore && !gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
-                            FocusSurface(
-                                modifier = Modifier.fillMaxWidth().height(48.dp),
-                                onClick = { gridRetryRequested++ },
-                            ) { focused ->
-                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
-                                    Text("加载失败，按 OK 重试", color = TextMain, fontSize = 13.sp)
+                        val cardWidth = (maxWidth - 40.dp * 2 - 20.dp * (libraryGridColumns - 1)) / libraryGridColumns
+                        LazyVerticalGrid(
+                            state = gridState,
+                            columns = GridCells.Fixed(libraryGridColumns),
+                            contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 12.dp, bottom = 160.dp),
+                            horizontalArrangement = Arrangement.spacedBy(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(32.dp),
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
+                                PosterCard(
+                                    item = media,
+                                    imageUrl = client?.imageUrl(media),
+                                    width = cardWidth,
+                                    requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0),
+                                    upFocus = if (index < libraryGridColumns) librarySortFocus else null,
+                                    onFocused = { focusedMediaId = media.id },
+                                    onClick = { onOpenDetail(media.id) },
+                                )
+                            }
+                            if (gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
+                                androidx.compose.material3.CircularProgressIndicator(Modifier.padding(20.dp).size(24.dp), color = Accent, strokeWidth = 2.dp)
+                            }
+                            if (gridAppendFailed && gridHasMore && !gridAppending) item(span = { GridItemSpan(maxLineSpan) }) {
+                                FocusSurface(
+                                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                                    onClick = { gridRetryRequested++ },
+                                ) { focused ->
+                                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
+                                        Text("加载失败，按 OK 重试", color = TextMain, fontSize = 13.sp)
+                                    }
                                 }
                             }
                         }
@@ -1117,23 +1132,32 @@ fun HomeScreen(
                 gridItems.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("这里还没有内容", color = TextSub, fontSize = 13.sp)
                 }
-                else -> LazyVerticalGrid(
-                    state = gridState,
-                            columns = GridCells.Adaptive(minSize = 130.dp),
-                    contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 76.dp, bottom = 160.dp),
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(32.dp),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    itemsIndexed(gridItems, key = { _, item -> item.id }) { index, it ->
-                        PosterCard(
-                            item = it,
-                            imageUrl = client?.imageUrl(it),
-                            requestInitialFocus = focusedMediaId == it.id || (initialFocusPending && focusedMediaId == null && it == gridItems.firstOrNull()),
-                            focusRequester = if (tab == HomeTab.Favorites && index == 0) favoritesContentFocus else null,
-                            onFocused = { focusedMediaId = it.id },
-                            onClick = { onOpenDetail(it.id) },
-                        )
+                else -> BoxWithConstraints {
+                    val gridColumns = when {
+                        maxWidth < 1400.dp -> 5
+                        maxWidth < 2400.dp -> 7
+                        else -> 9
+                    }
+                    val cardWidth = (maxWidth - 40.dp * 2 - 20.dp * (gridColumns - 1)) / gridColumns
+                    LazyVerticalGrid(
+                        state = gridState,
+                        columns = GridCells.Fixed(gridColumns),
+                        contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 76.dp, bottom = 160.dp),
+                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(32.dp),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        itemsIndexed(gridItems, key = { _, item -> item.id }) { index, it ->
+                            PosterCard(
+                                item = it,
+                                imageUrl = client?.imageUrl(it),
+                                width = cardWidth,
+                                requestInitialFocus = focusedMediaId == it.id || (initialFocusPending && focusedMediaId == null && it == gridItems.firstOrNull()),
+                                focusRequester = if (tab == HomeTab.Favorites && index == 0) favoritesContentFocus else null,
+                                onFocused = { focusedMediaId = it.id },
+                                onClick = { onOpenDetail(it.id) },
+                            )
+                        }
                     }
                 }
             }
@@ -1470,17 +1494,17 @@ private fun TopNavBar(
         Triple("首页", Icons.Rounded.Home, tab == HomeTab.Recommend),
         Triple("收藏", Icons.Rounded.Favorite, tab == HomeTab.Favorites),
         Triple("媒体库", Icons.Rounded.Movie, tab == HomeTab.Media),
-        Triple("设置", Icons.Rounded.Settings, false),
         Triple("搜索", Icons.Rounded.Search, false),
+        Triple("设置", Icons.Rounded.Settings, false),
     )
     Row(
         modifier
-            .height(48.dp)
-            .padding(horizontal = 8.dp),
+            .height(60.dp)
+            .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         entries.forEachIndexed { index, (label, icon, active) ->
-            Box(Modifier.width(44.dp).height(40.dp)) {
+            Box(Modifier.width(56.dp).height(48.dp)) {
             var focusedState by remember { mutableStateOf(false) }
             var labelVisible by remember { mutableStateOf(false) }
             LaunchedEffect(focusedState) {
@@ -1498,15 +1522,15 @@ private fun TopNavBar(
                             onNavigateDown()
                         } else false
                     },
-                corner = 20.dp,
+                corner = 24.dp,
                 scaleTo = 1.08f,
                 onClick = {
                     when (index) {
                         0 -> onSelect(HomeTab.Recommend, null)
                         1 -> onSelect(HomeTab.Favorites, null)
                         2 -> onSelect(HomeTab.Media, null)
-                        3 -> onSettings()
-                        else -> onSearch()
+                        3 -> onSearch()
+                        4 -> onSettings()
                     }
                 },
             ) { focused ->
@@ -1514,21 +1538,21 @@ private fun TopNavBar(
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .background(if (focused) Color(0x1FFFFFFF) else Color.Transparent, RoundedCornerShape(20.dp))
-                        .then(if (focused) Modifier.border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(20.dp)) else Modifier),
+                        .background(if (focused) Color(0x1FFFFFFF) else Color.Transparent, RoundedCornerShape(24.dp))
+                        .then(if (focused) Modifier.border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(24.dp)) else Modifier),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Icon(icon, contentDescription = label, tint = if (active || focused) Accent else Color(0xFFD6DEEB), modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.height(4.dp))
-                        Box(Modifier.width(12.dp).height(3.dp).background(if (active) Accent.copy(alpha = 0.9f) else Color.Transparent, RoundedCornerShape(2.dp)))
+                        Icon(icon, contentDescription = label, tint = if (active || focused) Accent else Color(0xFFD6DEEB), modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Box(Modifier.width(16.dp).height(3.dp).background(if (active) Accent.copy(alpha = 0.9f) else Color.Transparent, RoundedCornerShape(2.dp)))
                     }
                 }
             }
             if (labelVisible) {
                 Popup(
                     alignment = Alignment.TopCenter,
-                    offset = IntOffset(0, with(LocalDensity.current) { 66.dp.roundToPx() }),
+                    offset = IntOffset(0, with(LocalDensity.current) { 84.dp.roundToPx() }),
                     properties = PopupProperties(focusable = false, dismissOnBackPress = false, dismissOnClickOutside = false),
                 ) {
                     Text(
@@ -1537,7 +1561,7 @@ private fun TopNavBar(
                             .background(Color(0xE610141D), RoundedCornerShape(8.dp))
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         color = Color.White,
-                        fontSize = 12.sp,
+                        fontSize = 14.sp,
                         maxLines = 1,
                     )
                 }
@@ -1547,7 +1571,7 @@ private fun TopNavBar(
                 Spacer(Modifier.width(6.dp))
                 Spacer(Modifier.width(1.dp).height(16.dp).background(Color(0x26FFFFFF)))
                 Spacer(Modifier.width(6.dp))
-            } else if (index < entries.lastIndex) Spacer(Modifier.width(4.dp))
+            } else if (index < entries.lastIndex) Spacer(Modifier.width(8.dp))
         }
     }
 }
@@ -1892,7 +1916,7 @@ private fun Hero(
     val compact = heroWidth < 720.dp
     val horizontalInset = if (compact) 20.dp else 40.dp
     val bottomInset = if (compact) 20.dp else 28.dp
-    val titleWidth = if (compact) (heroWidth - horizontalInset * 2).coerceAtLeast(0.dp) else heroWidth * 0.42f
+    val titleWidth = if (compact) (heroWidth - horizontalInset * 2).coerceAtLeast(0.dp) else heroWidth * 0.36f
     val actionWidth = ((titleWidth - 12.dp) / 2).coerceAtLeast(0.dp)
     val thumbnailWidth = if (compact) minOf(64.dp, heroWidth * 0.21f) else minOf(112.dp, heroWidth * 0.14f)
     var focusedHeroAction by remember { mutableStateOf(HeroActionFocus.NONE) }
@@ -2122,6 +2146,9 @@ private fun Hero(
                 val imageOwner = items.firstOrNull { media -> heroCandidatesById[media.id].orEmpty().any { it.url == image } } ?: item
                 HeroBackdropImage(
                     imageUrl = image,
+                    isPoster = heroCandidatesById[imageOwner.id].orEmpty().any {
+                        it.url == image && it.source == "poster"
+                    },
                     onSuccess = { width, height ->
                         heroImageLoaded(imageOwner, image, width, height)
                     },
@@ -2132,6 +2159,9 @@ private fun Hero(
                 val imageOwner = items.firstOrNull { media -> heroCandidatesById[media.id].orEmpty().any { it.url == image } } ?: item
                 HeroBackdropImage(
                     imageUrl = image,
+                    isPoster = heroCandidatesById[imageOwner.id].orEmpty().any {
+                        it.url == image && it.source == "poster"
+                    },
                     wipeProgress = wipeProgress.value,
                     isForward = isForward,
                     onLoaded = {
@@ -2163,18 +2193,18 @@ private fun Hero(
         Box(
             Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
-                    0.55f to Ink.copy(alpha = 0f),
+                    0.45f to Ink.copy(alpha = 0f),
                     1.00f to Ink.copy(alpha = 0.92f),
                 )
             )
         )
         Column(
-            Modifier.align(Alignment.BottomStart).heightIn(max = (heroHeight - 64.dp).coerceAtLeast(0.dp))
+            Modifier.align(Alignment.BottomStart).heightIn(max = (heroHeight - 40.dp).coerceAtLeast(0.dp))
                 .padding(start = horizontalInset, bottom = bottomInset)
                 .widthIn(max = titleWidth),
             verticalArrangement = Arrangement.Bottom,
         ) {
-            Text("为你推荐", color = TextSub, fontSize = 11.sp, letterSpacing = 2.sp)
+            Text("为你推荐", color = TextSub, fontSize = 14.sp, letterSpacing = 3.sp)
             Spacer(Modifier.height(8.dp))
             if (!titleLogo.isNullOrBlank()) {
                 AsyncImage(
@@ -2182,12 +2212,12 @@ private fun Hero(
                     contentDescription = displayItem.seriesName ?: displayItem.name,
                     contentScale = ContentScale.Fit,
                     alignment = Alignment.BottomStart,
-                    modifier = Modifier.heightIn(max = 66.dp).widthIn(max = 430.dp),
+                    modifier = Modifier.heightIn(max = 96.dp).widthIn(max = 345.dp),
                 )
             } else {
                 Text(
                     displayItem.seriesName ?: displayItem.name,
-                    color = TextMain, style = TypeScale.display,
+                    color = TextMain, style = TextStyle(fontSize = 40.sp, lineHeight = 48.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.2.sp),
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -2200,12 +2230,12 @@ private fun Hero(
             ).joinToString("   ")
             if (sub.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
-                Text(sub, color = TextSub, style = TypeScale.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(sub, color = TextSub, style = TextStyle(fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.Normal), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             displayItem.overview?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    it, color = Color(0xFFC9D5E8), fontSize = 12.sp, lineHeight = 19.sp,
+                    it, color = Color(0xFFC9D5E8), fontSize = 14.sp, lineHeight = 21.sp,
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -2213,11 +2243,11 @@ private fun Hero(
             Spacer(Modifier.height(14.dp))
             Row {
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(minOf(128.dp, actionWidth)).focusProperties {
+                    modifier = Modifier.height(52.dp).width(minOf(160.dp, actionWidth)).focusProperties {
                         right = detailFocus
                         up = artworkFocus
                     },
-                    corner = 21.dp,
+                    corner = 26.dp,
                     scaleTo = 1.05f,
                     focusRequester = playFocus,
                     onFocusChanged = {
@@ -2239,22 +2269,22 @@ private fun Hero(
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF0B1018), modifier = Modifier.size(20.dp))
+                        Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF0B1018), modifier = Modifier.size(22.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
                             if (playAction.resolving) "解析单集…" else if (displayItem.id != item.id) "切换中…"
                             else if (displayItem.positionTicks > 0) "继续播放" else "立即播放",
-                            color = Color(0xFF0B1018), fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                            color = Color(0xFF0B1018), fontSize = 17.sp, fontWeight = FontWeight.Bold,
                         )
                     }
                 }
                 Spacer(Modifier.width(12.dp))
                 FocusSurface(
-                    modifier = Modifier.height(42.dp).width(minOf(108.dp, actionWidth)).focusProperties {
+                    modifier = Modifier.height(52.dp).width(minOf(136.dp, actionWidth)).focusProperties {
                         left = playFocus
                         up = artworkFocus
                     },
-                    corner = 21.dp,
+                    corner = 26.dp,
                     scaleTo = 1.05f,
                     focusRequester = detailFocus,
                     onFocusChanged = {
@@ -2269,7 +2299,7 @@ private fun Hero(
                     Box(
                         Modifier.fillMaxSize().background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF)),
                         contentAlignment = Alignment.Center,
-                    ) { Text("查看详情", color = Color(0xFFE8ECF2), fontSize = 13.sp) }
+                    ) { Text("查看详情", color = Color(0xFFE8ECF2), fontSize = 15.sp) }
                 }
             }
         }
@@ -2356,6 +2386,7 @@ private fun HeroThumb(
 @Composable
 private fun HeroBackdropImage(
     imageUrl: String,
+    isPoster: Boolean,
     wipeProgress: Float = 1f,
     isForward: Boolean = true,
     onLoaded: () -> Unit = {},
@@ -2397,7 +2428,7 @@ private fun HeroBackdropImage(
         AsyncImage(
             model = request,
             contentDescription = null,
-            contentScale = ContentScale.Fit,
+            contentScale = if (isPoster) ContentScale.Fit else ContentScale.Crop,
             alignment = Alignment.Center,
             onSuccess = {
                 val width = it.result.drawable.intrinsicWidth

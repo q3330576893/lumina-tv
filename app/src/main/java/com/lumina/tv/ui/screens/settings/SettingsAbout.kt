@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -73,7 +73,7 @@ fun SettingsAbout(
         }
         item(key = "about:group") {
             Column(Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).glassBorder(groupShape)) {
-                Column(Modifier.fillMaxWidth().height(SettingsTokens.RowHeight).padding(horizontal = SettingsTokens.RowPaddingH, vertical = 10.dp), verticalArrangement = Arrangement.Center) {
+                Column(Modifier.fillMaxWidth().heightIn(min = SettingsTokens.RowHeight).padding(horizontal = SettingsTokens.RowPaddingH, vertical = 10.dp), verticalArrangement = Arrangement.Center) {
                     Text("当前版本", color = TextMain, fontSize = SettingsTokens.RowTitleSize)
                     Text(BuildConfig.VERSION_NAME, color = TextSub, fontSize = SettingsTokens.RowDescSize)
                 }

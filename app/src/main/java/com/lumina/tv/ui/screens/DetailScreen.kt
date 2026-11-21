@@ -3,6 +3,8 @@ package com.lumina.tv.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -94,6 +96,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -422,6 +425,9 @@ fun DetailScreen(
     val similarRowState = rememberLazyListState()
     val detailScrollState = rememberScrollState()
     val playFocus = remember { FocusRequester() }
+    val overviewFocus = remember { FocusRequester() }
+    var overviewExpanded by rememberSaveable(item?.id) { mutableStateOf(false) }
+    var overviewFocused by remember { mutableStateOf(false) }
     val playFromStartFocus = remember { FocusRequester() }
     val sourceFocus = remember { FocusRequester() }
     var playButtonFocused by remember { mutableStateOf(false) }
@@ -995,7 +1001,7 @@ fun DetailScreen(
                             .focusGroup()
                             .onFocusChanged { topRegionFocused = it.hasFocus }
                     ) {
-                    Poster(it0!!, client?.imageUrl(it0, 720))
+                    Poster(it0!!, client?.imageUrl(it0, 480), width = 149.dp)
                     Spacer(Modifier.width(30.dp))
                     Column(Modifier.weight(1f).padding(top = 30.dp)) {
                         Text(
@@ -1057,17 +1063,43 @@ fun DetailScreen(
                         }
                         Spacer(Modifier.height(10.dp))
                         it0.overview?.let {
-                            Text(
-                                it, color = Color(0xFFC9D5E8), fontSize = 13.sp, lineHeight = 21.sp,
-                                maxLines = 8, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.fillMaxWidth(),
-                                style = androidx.compose.ui.text.TextStyle(shadow = Shadow(Color(0xD9000000), Offset(1f, 2f), 6f)),
-                            )
+                            Box(
+                                Modifier.fillMaxWidth()
+                                    .animateContentSize(animationSpec = tween(260))
+                                    .focusRequester(overviewFocus)
+                                    .focusProperties {
+                                        up = FocusRequester.Cancel
+                                        down = playFocus
+                                    }
+                                    .onFocusChanged { overviewFocused = it.isFocused }
+                                    .background(
+                                        if (overviewFocused) Color(0x14FFFFFF) else Color.Transparent,
+                                        RoundedCornerShape(12.dp),
+                                    )
+                                    .clickable { overviewExpanded = !overviewExpanded }
+                                    .focusable(),
+                            ) {
+                                Text(
+                                    it, color = Color(0xFFC9D5E8), fontSize = 13.sp, lineHeight = 21.sp,
+                                    maxLines = if (overviewExpanded) Int.MAX_VALUE else 4,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth().padding(end = 40.dp),
+                                    style = androidx.compose.ui.text.TextStyle(shadow = Shadow(Color(0xD9000000), Offset(1f, 2f), 6f)),
+                                )
+                                if (overviewFocused) {
+                                    Text(
+                                        if (overviewExpanded) "收起" else "展开",
+                                        color = Color(0xFFC9D5E8),
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
+                                    )
+                                }
+                            }
                         }
                         Spacer(Modifier.height(18.dp))
-                        Row(Modifier.focusGroup().focusProperties { up = playFocus }) {
+                        Row(Modifier.focusGroup().focusProperties { up = overviewFocus }) {
                             FocusSurface(
-                                modifier = Modifier.height(52.dp).width(150.dp).focusProperties {
+                                modifier = Modifier.height(52.dp).width(128.dp).focusProperties {
                                     if (it0.positionTicks > 0L) right = playFromStartFocus
                                 },
                                 corner = 23.dp,
@@ -1098,9 +1130,8 @@ fun DetailScreen(
                             if (it0.positionTicks > 0L) {
                                 Spacer(Modifier.width(10.dp))
                                 FocusSurface(
-                                    modifier = Modifier.height(52.dp).width(132.dp).focusProperties {
+                                    modifier = Modifier.height(52.dp).width(108.dp).focusProperties {
                                         left = playFocus
-                                        up = playFocus
                                     },
                                     corner = 23.dp,
                                     focusRequester = playFromStartFocus,
@@ -1124,28 +1155,49 @@ fun DetailScreen(
                             }
                             if (sources.isNotEmpty()) {
                                 Spacer(Modifier.width(12.dp))
-                                FocusSurface(
-                                    modifier = Modifier.height(46.dp).width(210.dp),
-                                    corner = 23.dp,
-                                    focusRequester = sourceFocus,
-                                    onClick = { showSourceMenu = true },
-                                ) { focused ->
-                                    Row(
-                                        Modifier.fillMaxSize().background(
-                                            if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
-                                        ),
-                                        horizontalArrangement = Arrangement.Center,
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Icon(Icons.Rounded.Layers, null, tint = TextMain, modifier = Modifier.size(18.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(
-                                            "版本 · $selectedSourceLabel",
-                                            color = TextMain,
-                                            fontSize = 13.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
+                                Box(Modifier.width(170.dp)) {
+                                    var sourceFocused by remember { mutableStateOf(false) }
+                                    val sourceWidth by animateDpAsState(
+                                        targetValue = if (sourceFocused) 170.dp else 96.dp,
+                                        animationSpec = tween(260),
+                                        label = "sourceWidth",
+                                    )
+                                    val source = sources.firstOrNull { it.id == selectedSourceId } ?: sources.first()
+                                    val video = source.streams.firstOrNull { it.type.equals("Video", true) }
+                                    val bitrate = (video?.bitRate?.takeIf { it > 0 } ?: source.bitrate?.takeIf { it > 0 })
+                                        ?.let { formatBitrate(it) }
+                                    val sourceLabel = listOfNotNull(
+                                        selectedSourceLabel,
+                                        source.resolution?.takeIf(String::isNotBlank),
+                                        bitrate,
+                                    ).joinToString(" · ")
+                                    FocusSurface(
+                                        modifier = Modifier.height(46.dp).width(sourceWidth).clip(RoundedCornerShape(23.dp)),
+                                        corner = 23.dp,
+                                        focusRequester = sourceFocus,
+                                        onFocusChanged = { sourceFocused = it },
+                                        onClick = { showSourceMenu = true },
+                                    ) { focused ->
+                                        Row(
+                                            Modifier.fillMaxSize().background(
+                                                if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
+                                            ).padding(horizontal = 12.dp),
+                                            horizontalArrangement = Arrangement.Center,
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Icon(Icons.Rounded.Layers, null, tint = TextMain, modifier = Modifier.size(18.dp))
+                                            if (focused) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Text(
+                                                    sourceLabel,
+                                                    color = TextMain,
+                                                    fontSize = 13.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f),
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1994,11 +2046,11 @@ private fun TrackSheet(
 }
 
 @Composable
-private fun Poster(item: MediaItem, url: String?) {
+private fun Poster(item: MediaItem, url: String?, width: Dp) {
     Box(
         Modifier
-            .width(190.dp)
-            .height(285.dp)
+            .width(width)
+            .height(width * 1.5f)
             .clip(RoundedCornerShape(18.dp))
             .background(Color(0x1AFFFFFF))
     ) {

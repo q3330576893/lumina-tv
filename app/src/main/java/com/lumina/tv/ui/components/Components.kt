@@ -1,5 +1,12 @@
 package com.lumina.tv.ui.components
 
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.inset
+import androidx.compose.ui.zIndex
+
 import android.graphics.Bitmap
 import android.app.ActivityManager
 import androidx.compose.animation.core.Animatable
@@ -223,20 +230,26 @@ fun FrostPanel(
 enum class FocusFamily { Poster, DenseGrid, Button, DetailPanel }
 
 object FocusScale {
-    const val POSTER_LARGE = 1.08f
-    const val POSTER_MEDIUM = 1.06f
-    const val DENSE_GRID = 1.02f
-    const val ULTRA_DENSE = 1.01f
+    const val POSTER_LARGE = 1.10f
+    const val POSTER_MEDIUM = 1.07f
+    const val DENSE_GRID = 1.06f
+    const val ULTRA_DENSE = 1.05f
 }
 
-private const val FOCUS_ANIMATION_DURATION_MS = 260
+private const val FOCUS_ANIMATION_DURATION_MS = 160
 
-private data class FocusSpec(val scale: Float, val elevation: Float, val duration: Int)
+private data class FocusSpec(
+    val scale: Float,
+    val elevation: Float,
+    val duration: Int,
+    val ringWidth: Dp,
+    val ringColor: Color,
+)
 private fun FocusFamily.spec(): FocusSpec = when (this) {
-    FocusFamily.Poster -> FocusSpec(FocusScale.POSTER_LARGE, 16f, FOCUS_ANIMATION_DURATION_MS)
-    FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, 8f, FOCUS_ANIMATION_DURATION_MS)
-    FocusFamily.Button -> FocusSpec(1.04f, 10f, FOCUS_ANIMATION_DURATION_MS)
-    FocusFamily.DetailPanel -> FocusSpec(1.02f, 12f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.Poster -> FocusSpec(FocusScale.POSTER_LARGE, 16f, FOCUS_ANIMATION_DURATION_MS, 2.5.dp, Color(0xF2FFFFFF))
+    FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, 8f, FOCUS_ANIMATION_DURATION_MS, 1.5.dp, Color(0xE6FFFFFF))
+    FocusFamily.Button -> FocusSpec(1.04f, 10f, FOCUS_ANIMATION_DURATION_MS, 1.5.dp, Color(0xE6FFFFFF))
+    FocusFamily.DetailPanel -> FocusSpec(1.02f, 12f, FOCUS_ANIMATION_DURATION_MS, 1.5.dp, Color(0xE6FFFFFF))
 }
 
 /** 可聚焦容器：缩放 + 高光描边的统一交互语言。 */
@@ -282,8 +295,8 @@ fun FocusSurface(
             .clip(RoundedCornerShape(corner))
             .background(ThemeRuntime.glassFill(focused))
             .border(
-                if (focused) 1.25.dp else 1.dp,
-                if (focused) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge,
+                if (focused) focusSpec.ringWidth else 1.dp,
+                if (focused) focusSpec.ringColor else Color(0x24FFFFFF),
                 RoundedCornerShape(corner),
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
@@ -336,7 +349,11 @@ fun PosterCard(
     val focused by interaction.collectIsFocusedAsState()
     val posterSpec = FocusFamily.Poster.spec()
     val cardShape = if (titleOverlay) RoundedCornerShape(10.dp) else ShapeScale.card
-    val scale by animateFloatAsState(if (focused) focusScale else 1f, tween(posterSpec.duration), label = "posterScale")
+    val scale by animateFloatAsState(
+        if (focused) focusScale else 1f,
+        spring(dampingRatio = 0.78f, stiffness = 350f),
+        label = "posterScale",
+    )
     val alpha by animateFloatAsState(if (focused) 1f else 0.85f, tween(200), label = "posterAlpha")
     LaunchedEffect(requestInitialFocus) {
         if (requestInitialFocus) {
@@ -346,7 +363,9 @@ fun PosterCard(
     }
     Column(
         Modifier
-            .then(if (width != null) Modifier.width(width).aspectRatio(1f / aspectRatio) else Modifier.fillMaxWidth().aspectRatio(1f / aspectRatio))
+            .zIndex(if (focused) 6f else 0f)
+            .then(if (width != null) Modifier.width(width) else Modifier.fillMaxWidth())
+            .then(if (titleOverlay) Modifier.aspectRatio(1f / aspectRatio) else Modifier)
             .then(if (requestInitialFocus) Modifier.focusRequester(initialFocusRequester) else Modifier)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusProperties { if (upFocus != null) up = upFocus }
@@ -355,7 +374,8 @@ fun PosterCard(
                 scaleX = scale
                 scaleY = scale
                 this.alpha = alpha
-                shadowElevation = if (focused) posterSpec.elevation else 0f
+                val translationZ = if (focused) 12.dp.toPx() else 0f
+                shadowElevation = (if (focused) posterSpec.elevation else 0f) + translationZ
                 shape = ShapeScale.card
                 clip = false
             }
@@ -375,11 +395,6 @@ fun PosterCard(
                 .aspectRatio(1f / aspectRatio)
                 .clip(cardShape)
                 .background(Color(0xFF141B2B))
-                .border(
-                    if (focused) 2.dp else 1.dp,
-                    if (focused) Accent else GlassLine,
-                    cardShape,
-                )
         ) {
             AsyncImage(
                 model = imageUrl,
@@ -421,20 +436,22 @@ fun PosterCard(
                     )
                 }
             }
-            Box(
-                Modifier.align(Alignment.BottomStart).fillMaxWidth().height(40.dp)
-                    .background(Color.Black.copy(alpha = 0.55f))
-            )
-            Text(
-                item.name,
-                modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = 9.dp),
-                color = Color.White,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                style = TextStyle(shadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 3f)),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (titleOverlay) {
+                Box(
+                    Modifier.align(Alignment.BottomStart).fillMaxWidth().height(40.dp)
+                        .background(Color.Black.copy(alpha = 0.55f))
+                )
+                Text(
+                    item.name,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = 9.dp),
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    style = TextStyle(shadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 3f)),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             if (item.positionTicks > 0 && !item.played) {
                 val total = item.runtimeTicks ?: 0L
                 val ratio = if (total > 0) (item.positionTicks.toFloat() / total).coerceIn(0f, 1f) else 0f
@@ -452,6 +469,62 @@ fun PosterCard(
                             .background(Accent)
                     )
                 }
+            }
+            Box(
+                Modifier.matchParentSize().drawBehind {
+                    val outerWidth = if (focused) 2.5.dp.toPx() else 1.dp.toPx()
+                    val outerInset = outerWidth / 2f
+                    inset(outerInset) {
+                        drawOutline(
+                            cardShape.createOutline(size, layoutDirection, this),
+                            color = if (focused) Color(0xF2FFFFFF) else GlassLine,
+                            style = Stroke(width = outerWidth),
+                        )
+                    }
+                    if (focused) {
+                        val innerWidth = 1.dp.toPx()
+                        inset(outerInset + 1.5.dp.toPx()) {
+                            drawOutline(
+                                cardShape.createOutline(size, layoutDirection, this),
+                                color = Color(0x66000000),
+                                style = Stroke(width = innerWidth),
+                            )
+                        }
+                    }
+                }
+            )
+        }
+        if (!titleOverlay) {
+            val titleAlpha by animateFloatAsState(
+                targetValue = if (focused) 1f else 0f,
+                animationSpec = tween(durationMillis = 160, delayMillis = 40),
+                label = "posterTitleAlpha",
+            )
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .graphicsLayer { this.alpha = titleAlpha }
+                    .padding(top = 14.dp)
+            ) {
+                Text(
+                    item.name,
+                    color = Color(0xF2FFFFFF),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 20.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    item.subtitle.ifBlank { item.year?.toString().orEmpty() },
+                    color = Color(0x99FFFFFF),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 15.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

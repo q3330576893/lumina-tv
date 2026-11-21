@@ -17,6 +17,7 @@ internal sealed interface HiddenPlaybackEvent {
 
 internal sealed interface HiddenPlaybackAction {
     data object ShowControls : HiddenPlaybackAction
+    data object TogglePlay : HiddenPlaybackAction
     data class Boost(val enabled: Boolean) : HiddenPlaybackAction
     data class BeginSeek(val direction: Int, val repeat: Int) : HiddenPlaybackAction
     data class EndSeek(val direction: Int) : HiddenPlaybackAction
@@ -46,7 +47,7 @@ internal fun reduceHiddenPlaybackInput(
     return when (event) {
         HiddenPlaybackEvent.Cancel -> HiddenPlaybackTransition(HiddenPlaybackInputState(), actions = endActions())
         HiddenPlaybackEvent.Tap -> if (canStart)
-            HiddenPlaybackTransition(HiddenPlaybackInputState(), true, endActions() + HiddenPlaybackAction.ShowControls)
+            HiddenPlaybackTransition(HiddenPlaybackInputState(), true, endActions() + HiddenPlaybackAction.TogglePlay)
             else HiddenPlaybackTransition(state)
         HiddenPlaybackEvent.HoldTimeout -> if (state.key == HiddenPlaybackKey.OK && !state.boosted && nowMs - state.downAtMs >= HIDDEN_OK_HOLD_MS)
             HiddenPlaybackTransition(state.copy(boosted = true), true, listOf(HiddenPlaybackAction.Boost(true)))
@@ -67,7 +68,7 @@ internal fun reduceHiddenPlaybackInput(
         is HiddenPlaybackEvent.Up -> if (state.key != event.key) HiddenPlaybackTransition(state) else {
             val shortOk = state.key == HiddenPlaybackKey.OK && !state.boosted && nowMs - state.downAtMs < HIDDEN_OK_HOLD_MS
             HiddenPlaybackTransition(HiddenPlaybackInputState(), true,
-                endActions() + if (shortOk) listOf(HiddenPlaybackAction.ShowControls) else emptyList())
+                endActions() + if (shortOk) listOf(HiddenPlaybackAction.TogglePlay) else emptyList())
         }
     }
 }

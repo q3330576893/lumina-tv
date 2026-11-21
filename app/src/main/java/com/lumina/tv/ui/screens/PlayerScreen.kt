@@ -40,6 +40,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -360,6 +361,7 @@ fun PlayerScreen(
     var lastInteractionAt by remember { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
     var clockText by remember { mutableStateOf("") }
     var isPlaying by remember { mutableStateOf(true) }
+    var pauseIndicatorUntil by remember { mutableStateOf(0L) }
     var isActuallyStalled by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var showStallOverlay by remember { mutableStateOf(false) }
@@ -2253,12 +2255,18 @@ fun PlayerScreen(
                     val recovered = audioRecoveryTrack?.takeIf { audioRecoverySourceId == audioSourceKey() }?.let { recovery ->
                         supportedCandidates.firstOrNull { it.group == recovery.group && it.index == recovery.index }
                     }
-                    val selected = recovered ?: streamIndex?.let { table.candidateFor(it, audioCandidates) }?.takeIf { it.supported }
-                    audioSelectionApplied = true
+                    val mapped = streamIndex?.let { table.candidateFor(it, audioCandidates) }
+                    val forced = recovered ?: mapped?.takeIf { it.supported }
+                    val selected = forced ?: supportedCandidates.firstOrNull()
                     if (selected != null) {
                         exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                             .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                             .addOverride(TrackSelectionOverride(selected.group, selected.index)).build()
+                        audioSelectionApplied = true
+                        val decision = if (forced != null) "forced" else "fallback-first"
+                        PageLog.add("audioSel decision=$decision embyIndex=$streamIndex picked=${selected.index} supported=${supportedCandidates.size} total=${audioCandidates.size}")
+                    } else if (supportedCandidates.isEmpty()) {
+                        audioSelectionApplied = true
                     }
                 }
                 if (audioCandidates.isNotEmpty() && audioCandidates.none { it.supported }) {
@@ -2363,6 +2371,7 @@ fun PlayerScreen(
         onDispose { exo.removeListener(listener) }
     }
 
+    var passthroughVolumeNoticeShown by remember(item.id) { mutableStateOf(false) }
     DisposableEffect(exo) {
         val analytics = object : AnalyticsListener {
             override fun onAudioDecoderInitialized(
@@ -2388,6 +2397,16 @@ fun PlayerScreen(
                 eventTime: AnalyticsListener.EventTime, audioTrackConfig: androidx.media3.exoplayer.audio.AudioSink.AudioTrackConfig,
             ) {
                 if (!isCurrentMedia3Event(eventTime)) return
+                val encoding = audioTrackConfig.encoding
+                val offload = audioTrackConfig.offload
+                val passthrough = encoding != C.ENCODING_PCM_16BIT || offload
+                PageLog.add("audioSink passthrough=$passthrough encoding=$encoding offload=$offload")
+                if (passthrough && !passthroughVolumeNoticeShown) {
+                    passthroughVolumeNoticeShown = true
+                    android.widget.Toast.makeText(
+                        context, "直通模式音量由电视/功放控制", android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                }
                 playbackDiagnostics.identity?.let { load ->
                     playbackDiagnostics.audioTrack(load, audioTrackConfig.encoding, audioTrackConfig.sampleRate,
                         audioTrackConfig.channelConfig, audioTrackConfig.offload)
@@ -2604,6 +2623,10 @@ fun PlayerScreen(
         hiddenInputState = transition.state
         transition.actions.forEach { action -> when (action) {
             HiddenPlaybackAction.ShowControls -> controlsVisible = true
+            HiddenPlaybackAction.TogglePlay -> {
+                togglePlayback()
+                pauseIndicatorUntil = android.os.SystemClock.elapsedRealtime() + 1200
+            }
             is HiddenPlaybackAction.Boost -> setBoostActive(action.enabled)
             is HiddenPlaybackAction.BeginSeek -> beginSeekHold(action.direction, action.repeat)
             is HiddenPlaybackAction.EndSeek -> endSeekHold(action.direction)
@@ -2818,6 +2841,19 @@ fun PlayerScreen(
     }
 
     // 焦点：控制栏隐藏时由捕获层拿焦点，显示时把焦点交给播放按钮
+    LaunchedEffect(pauseIndicatorUntil) {
+        if (pauseIndicatorUntil > 0L) {
+            val remaining = pauseIndicatorUntil - android.os.SystemClock.elapsedRealtime()
+            if (remaining > 0L) delay(remaining)
+            if (pauseIndicatorUntil <= android.os.SystemClock.elapsedRealtime()) pauseIndicatorUntil = 0L
+        }
+    }
+    val pauseIndicatorAlpha by animateFloatAsState(
+        targetValue = if (pauseIndicatorUntil > android.os.SystemClock.elapsedRealtime() && !optionMenu && error == null) 1f else 0f,
+        animationSpec = tween(120),
+        label = "pauseIndicatorAlpha",
+    )
+
     LaunchedEffect(controlsVisible, optionMenu, quickPanel, hiddenInputState.active) {
         delay(80)
         if (!optionMenu && quickPanel == QuickPanel.NONE &&
@@ -2969,6 +3005,15 @@ fun PlayerScreen(
 
     Box(
         Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
+            if (event.key == Key.MediaPlayPause && event.type == KeyEventType.KeyDown) {
+                if (event.nativeKeyEvent.repeatCount == 0) {
+                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+                    if (creditsCountdown.nextItem != null) cancelCreditsCountdown("remote-key", allowRestart = false)
+                    togglePlayback()
+                    pauseIndicatorUntil = android.os.SystemClock.elapsedRealtime() + 1200
+                }
+                return@onPreviewKeyEvent true
+            }
             val capturedKey = when (event.key) {
                 Key.DirectionCenter, Key.Enter -> HiddenPlaybackKey.OK
                 Key.DirectionLeft -> HiddenPlaybackKey.LEFT
@@ -2996,8 +3041,11 @@ fun PlayerScreen(
                     showExitPrompt = false
                     exitPromptAt = 0L
                 }
-                if (event.key != Key.DirectionLeft && event.key != Key.DirectionRight && !controlsVisible) {
+                if ((event.key == Key.DirectionUp || event.key == Key.DirectionDown || event.key == Key.Menu) &&
+                    event.nativeKeyEvent.repeatCount == 0
+                ) {
                     controlsVisible = true
+                    PageLog.add("ctlShow key=${event.key} rep=${event.nativeKeyEvent.repeatCount}")
                 }
             }
             false
@@ -3165,6 +3213,15 @@ fun PlayerScreen(
                     Text("正在缓冲…", color = TextSub, fontSize = 12.sp)
                 }
             }
+        }
+
+        if (pauseIndicatorAlpha > 0f) {
+            Icon(
+                imageVector = if (desiredPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                contentDescription = if (desiredPlaying) "暂停" else "播放",
+                tint = Color(0xE6FFFFFF),
+                modifier = Modifier.align(Alignment.Center).size(64.dp).alpha(pauseIndicatorAlpha),
+            )
         }
 
         playbackStatusNotice?.let { notice ->

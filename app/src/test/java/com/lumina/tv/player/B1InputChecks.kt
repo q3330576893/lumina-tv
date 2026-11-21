@@ -8,7 +8,7 @@ internal object B1InputChecks {
         check(event(HiddenPlaybackEvent.Down(HiddenPlaybackKey.OK, 0), 0).actions.isEmpty())
         check(state.active)
         check(event(HiddenPlaybackEvent.Down(HiddenPlaybackKey.OK, 1), 200).actions.isEmpty())
-        check(event(HiddenPlaybackEvent.Up(HiddenPlaybackKey.OK), 300).actions == listOf(HiddenPlaybackAction.ShowControls))
+        check(event(HiddenPlaybackEvent.Up(HiddenPlaybackKey.OK), 300).actions == listOf(HiddenPlaybackAction.TogglePlay))
         check(!state.active && event(HiddenPlaybackEvent.Up(HiddenPlaybackKey.OK), 301).actions.isEmpty())
         event(HiddenPlaybackEvent.Down(HiddenPlaybackKey.OK, 0), 1_000)
         check(event(HiddenPlaybackEvent.HoldTimeout, 1_479).actions.isEmpty())
@@ -33,7 +33,7 @@ internal object B1InputChecks {
             event(HiddenPlaybackEvent.Down(HiddenPlaybackKey.RIGHT, 0), 7_000)
             check(event(HiddenPlaybackEvent.Cancel, 7_100).actions == listOf(HiddenPlaybackAction.EndSeek(1)))
         }
-        check(event(HiddenPlaybackEvent.Tap, 8_000).actions == listOf(HiddenPlaybackAction.ShowControls))
+        check(event(HiddenPlaybackEvent.Tap, 8_000).actions == listOf(HiddenPlaybackAction.TogglePlay))
         check(event(HiddenPlaybackEvent.Tap, 8_001, canStart = false).actions.isEmpty())
         check(!event(HiddenPlaybackEvent.Down(HiddenPlaybackKey.OK, 1), 9_000).consumed) // A late repeat cannot become a new press.
         check(hiddenTouchEnabled(false, false, false, false))
