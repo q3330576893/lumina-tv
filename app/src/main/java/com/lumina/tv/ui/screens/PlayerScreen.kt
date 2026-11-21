@@ -399,6 +399,7 @@ fun PlayerScreen(
     }
     var softDecodeNoticeShown by remember(item.id) { mutableStateOf(false) }
     var rebuildRetry by remember(item.id) { mutableStateOf(false) }
+    var firstFrameRecoveryTried by remember(item.id) { mutableStateOf(false) }
     // 保留用户本次播放明确选择的内核，后续重载不覆盖该选择。
     var enginePinned by remember(item.id) { mutableStateOf<String?>(null) }
     val mpvInstalled = remember(context) { mpvLibrariesInstalled(context) }
@@ -2814,6 +2815,20 @@ fun PlayerScreen(
                 !firstFrameRendered && readyWithoutFrameSince > 0L &&
                 System.currentTimeMillis() - readyWithoutFrameSince >= 8_000L
             ) {
+                if (!firstFrameRecoveryTried) {
+                    firstFrameRecoveryTried = true
+                    val surfaceRebound = runCatching {
+                        val surface = (attachedPlayerView.get()?.videoSurfaceView as? SurfaceView)?.holder?.surface
+                        if (surface != null && surface.isValid) {
+                            exo.setVideoSurface(surface)
+                            true
+                        } else {
+                            false
+                        }
+                    }.getOrDefault(false)
+                    rebuildRetry = true
+                    PageLog.add("firstFrameGuard action=surface-rebind-or-rebuild frames=${exo.videoDecoderCounters?.renderedOutputBufferCount ?: 0} surfaceRebound=$surfaceRebound rebuildRetry=$rebuildRetry")
+                }
                 playbackStatusNotice = "已就绪但未出画面，可能是解码器或显示层问题"
                 failurePhase = "首帧"
             }

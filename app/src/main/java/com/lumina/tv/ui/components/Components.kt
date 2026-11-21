@@ -366,7 +366,7 @@ fun PosterCard(
             .zIndex(if (focused) 6f else 0f)
             .then(if (width != null) Modifier.width(width) else Modifier.fillMaxWidth())
             .then(if (titleOverlay) Modifier.aspectRatio(1f / aspectRatio) else Modifier)
-            .then(if (requestInitialFocus) Modifier.focusRequester(initialFocusRequester) else Modifier)
+            .focusRequester(initialFocusRequester)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusProperties { if (upFocus != null) up = upFocus }
             .onFocusChanged { if (it.isFocused) onFocused?.invoke() }

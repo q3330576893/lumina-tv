@@ -89,6 +89,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -314,7 +315,7 @@ fun HomeScreen(
         }
     }
 
-    // 恢复位置：必须等条目到齐（含上次已加载的分页数量）再滚，否则会被列表钳到 0
+    // 恢复位置：条目覆盖目标索引后立即滚动，剩余分页后台补齐。
     LaunchedEffect(gridStateKey, gridState, pendingGridRestore, userDataRevision, selectedLibrary) {
         if (tab == HomeTab.Favorites) return@LaunchedEffect
         val target = pendingGridRestore ?: return@LaunchedEffect
@@ -325,7 +326,7 @@ fun HomeScreen(
             return@LaunchedEffect
         }
         // 收藏由 FavoritesPager 独立恢复；电影/剧集直接进入滚动恢复。
-        while (selectedLibrary != null && librarySort != "random" && gridItems.size < wantLoaded && gridHasMore) {
+        while (selectedLibrary != null && librarySort != "random" && gridItems.size <= wantIndex && gridHasMore) {
             val lib = selectedLibrary
             if (client != null) {
                 val (sb, so) = sortParams(librarySort, librarySortOrder)
@@ -360,6 +361,7 @@ fun HomeScreen(
             } else break
         }
         // 列表布局完成后再滚，必要时重试几帧（数据刚到的那一帧 LazyGrid 还没测量）
+        PageLog.add("gridRestore phase=scroll index=$wantIndex")
         var attempt = 0
         while (attempt < 3) {
             runCatching { gridState.scrollToItem(wantIndex.coerceAtLeast(0), wantOffset.coerceAtLeast(0)) }
@@ -368,6 +370,44 @@ fun HomeScreen(
             attempt++
         }
         pendingGridRestore = null
+        scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            var backfillPages = 0
+            while (selectedLibrary != null && librarySort != "random" && gridItems.size < wantLoaded && gridHasMore && backfillPages < 3) {
+                val lib = selectedLibrary
+                if (client != null) {
+                    val (sb, so) = sortParams(librarySort, librarySortOrder)
+                    backfillPages++
+                    gridAppending = true
+                    try {
+                        PageLog.add("gridRestore phase=backfill loaded=${gridItems.size} want=$wantLoaded")
+                        val page = client.getItems(
+                            parentId = lib.id, types = collectionTypeToItemTypes(lib.type),
+                            sortBy = sb, sortOrder = so, limit = LIBRARY_PAGE_SIZE, startIndex = gridNextIndex,
+                        )
+                        currentCoroutineContext().ensureActive()
+                        if (page.isNotEmpty()) {
+                            gridItems = (gridItems + page).distinctBy { it.id }
+                            val progress = libraryAppendProgress(gridNextIndex, gridHasMore, page.size)
+                            gridNextIndex = progress.nextIndex
+                            gridHasMore = progress.hasMore
+                        } else {
+                            gridHasMore = false
+                            gridAppendFailed = false
+                        }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        val progress = libraryAppendProgress(gridNextIndex, gridHasMore, pageSize = null)
+                        gridNextIndex = progress.nextIndex
+                        gridHasMore = progress.hasMore
+                        gridAppendFailed = progress.failed
+                        break
+                    } finally {
+                        gridAppending = false
+                    }
+                } else break
+            }
+        }
     }
     // 各媒体库视图的横向内容（id → items）
     var viewContents by remember(userDataRevision) { mutableStateOf<Map<String, List<MediaItem>>>(emptyMap()) }
@@ -1102,11 +1142,16 @@ fun HomeScreen(
                             modifier = Modifier.fillMaxSize(),
                         ) {
                             itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
+                                val shouldRequestInitialFocus = remember(media.id) {
+                                    derivedStateOf {
+                                        focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0)
+                                    }
+                                }
                                 PosterCard(
                                     item = media,
                                     imageUrl = client?.imageUrl(media),
                                     width = cardWidth,
-                                    requestInitialFocus = focusedMediaId == media.id || (initialFocusPending && focusedMediaId == null && index == 0),
+                                    requestInitialFocus = shouldRequestInitialFocus.value,
                                     upFocus = if (index < libraryGridColumns) librarySortFocus else null,
                                     onFocused = { focusedMediaId = media.id },
                                     onClick = { onOpenDetail(media.id) },
@@ -1148,11 +1193,16 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(gridItems, key = { _, item -> item.id }) { index, it ->
+                            val shouldRequestInitialFocus = remember(it.id) {
+                                derivedStateOf {
+                                    focusedMediaId == it.id || (initialFocusPending && focusedMediaId == null && it == gridItems.firstOrNull())
+                                }
+                            }
                             PosterCard(
                                 item = it,
                                 imageUrl = client?.imageUrl(it),
                                 width = cardWidth,
-                                requestInitialFocus = focusedMediaId == it.id || (initialFocusPending && focusedMediaId == null && it == gridItems.firstOrNull()),
+                                requestInitialFocus = shouldRequestInitialFocus.value,
                                 focusRequester = if (tab == HomeTab.Favorites && index == 0) favoritesContentFocus else null,
                                 onFocused = { focusedMediaId = it.id },
                                 onClick = { onOpenDetail(it.id) },
