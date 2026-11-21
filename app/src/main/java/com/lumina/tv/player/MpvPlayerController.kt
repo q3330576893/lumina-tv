@@ -34,25 +34,15 @@ internal data class MpvHttpHeadersResult(val mode: String, val accepted: Int, va
         "mpv 缺少 ${total - accepted}/$total 个请求头，需要 Referer 或鉴权头的片源可能无法播放"
 }
 
-/** Probe supported mpv APIs in order without allowing a rejected optional header to block loadfile. */
+/** A physical load has a fresh mpv instance, hence an initially empty header list.
+ * -append accepts one literal element (including commas and backslashes). The
+ * pinned binding cannot read a structured string-list, so do not fall back to a
+ * void string setter + lossy print_str_list readback and claim it was verified. */
 internal fun applyMpvHttpHeaders(
     headers: Map<String, String>,
-    setPropertyString: (String, String) -> Unit,
-    getPropertyString: (String) -> String?,
     setOptionString: (String, String) -> Int,
 ): MpvHttpHeadersResult {
     if (headers.isEmpty()) return MpvHttpHeadersResult("none", 0, 0)
-    val list = headers.entries.joinToString(",") { (name, value) -> "$name: $value" }
-    if (mpvHeaderPropertyAccepted(
-            set = { setPropertyString("http-header-fields", list) },
-            readBack = { getPropertyString("http-header-fields") },
-            expected = list,
-        )) {
-        return MpvHttpHeadersResult("property", headers.size, headers.size)
-    }
-    if (mpvHeaderApiAccepted { setOptionString("http-header-fields", list) }) {
-        return MpvHttpHeadersResult("option", headers.size, headers.size)
-    }
     val accepted = headers.count { (name, value) ->
         mpvHeaderApiAccepted { setOptionString("http-header-fields-append", "$name: $value") }
     }
@@ -61,15 +51,6 @@ internal fun applyMpvHttpHeaders(
 
 private inline fun mpvHeaderApiAccepted(call: () -> Int): Boolean = try {
     call() >= 0
-} catch (_: Exception) {
-    false
-} catch (_: LinkageError) {
-    false
-}
-
-private inline fun mpvHeaderPropertyAccepted(set: () -> Unit, readBack: () -> String?, expected: String): Boolean = try {
-    set()
-    readBack() == expected
 } catch (_: Exception) {
     false
 } catch (_: LinkageError) {
@@ -102,6 +83,8 @@ class MpvPlayerController(
         var subtitlePending = 0
         @Volatile var started = false
         var failureKind: FailureKind? = null
+        val endFileEvidence = MpvEndFileTracker()
+        var endKind: MpvEndKind? = null
         var httpHeadersStatus: String? = null
         var httpHeadersNotice: String? = null
         var retryPending = false
@@ -122,13 +105,21 @@ class MpvPlayerController(
             }
             override fun eventProperty(property: String, value: String) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
             override fun eventProperty(property: String, value: Long) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
-            override fun eventProperty(property: String, value: Double) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
+            override fun eventProperty(property: String, value: Double) {
+                // Preserve native-thread samples even while the main handler is backlogged.
+                endFileEvidence.property(property, value)
+                enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
+            }
             override fun eventProperty(property: String, value: Boolean) = enqueue(this@NativeLoad) { handleProperty(this@NativeLoad, property, value) }
-            override fun event(eventId: Int) = enqueue(this@NativeLoad) { handleEvent(this@NativeLoad, eventId) }
+            override fun event(eventId: Int) {
+                val end = if (eventId == MPVLib.MpvEvent.MPV_EVENT_END_FILE) endFileEvidence.snapshot() else null
+                enqueue(this@NativeLoad) { handleEvent(this@NativeLoad, eventId, end) }
+            }
         }
         val logObserver = object : MPVLib.LogObserver {
             override fun logMessage(prefix: String, level: Int, text: String) {
                 val at = timestamp()
+                endFileEvidence.log(level, text)
                 enqueue(this@NativeLoad, requireStarted = false) {
                     appendMpvLog("$at load=${identity.physicalId} $prefix/$level $text")
                     if (!isMpvErrorLogLevel(level)) return@enqueue
@@ -138,11 +129,7 @@ class MpvPlayerController(
                         return@enqueue
                     }
                     // Preserve a useful cause when END_FILE cannot expose its reason in this API.
-                    if (isMpvHttpFailureLog(level, text)) {
-                        failureKind = FailureKind.HTTP
-                    } else if (DECODER_FAILURE.containsMatchIn(text)) {
-                        failureKind = FailureKind.DECODING
-                    }
+                    mpvEndFailureKind(level, text)?.let { failureKind = it }
                 }
             }
         }
@@ -194,6 +181,7 @@ class MpvPlayerController(
         val trackListChanged: Boolean = false,
         val httpHeadersStatus: String? = null,
         val httpHeadersNotice: String? = null,
+        val endKind: MpvEndKind? = null,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -294,7 +282,6 @@ class MpvPlayerController(
             engine.observeProperty("audio-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
             engine.observeProperty("audio-out-params", MPVLib.MpvFormat.MPV_FORMAT_NODE)
             engine.observeProperty("track-list", MPVLib.MpvFormat.MPV_FORMAT_NODE)
-            engine.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
             engine.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
             listOf("hwdec-current", "current-vo", "video-params/pixelformat")
                 .forEach { engine.observeProperty(it, MPVLib.MpvFormat.MPV_FORMAT_STRING) }
@@ -315,6 +302,7 @@ class MpvPlayerController(
 
     private fun destroyNativeLoad(load: NativeLoad): CompletableDeferred<Unit> {
         checkMainThread()
+        load.endFileEvidence.stop()
         restoreDuckedVolume(load)
         loadGate.retire(load)
         handler.removeCallbacksAndMessages(load)
@@ -371,7 +359,7 @@ class MpvPlayerController(
                 lastSurfaceHeight = resolvedHeight
                 if (fileLoaded && pendingUrl != null) {
                     // Re-seek after late attachment to make the Android VO render the already-loaded frame.
-                    mpv?.setPropertyBoolean("pause", pauseIntent)
+                    mpv?.setPropertyBoolean("pause", shouldPauseMpv(pauseIntent, audioFocusHold))
                     mpv?.command(arrayOf("seek", (positionMs / 1000.0).toString(), "absolute+exact"))
                     Log.i(TAG, "${timestamp()} re-render requested after late surface attachment")
                 }
@@ -532,7 +520,7 @@ class MpvPlayerController(
             audioFocusHold = !audioFocus.acquire(audioFocusTarget(load))
         }
         if (!refreshPauseIntent()) return
-        val pauseForLoad = pauseIntent || audioFocusHold
+        val pauseForLoad = shouldPauseMpv(pauseIntent, audioFocusHold)
         audioSilentCodec = null
         subtitleMappingNotice = null
         subtitleFallbackToAuto = false
@@ -548,8 +536,7 @@ class MpvPlayerController(
         applyAspectMode(load)
         pendingSubtitles = subtitleUrls
         runCatching {
-            val headerResult = applyMpvHttpHeaders(requestHeaders, load.engine::setPropertyString,
-                load.engine::getPropertyString, load.engine::setOptionString)
+            val headerResult = applyMpvHttpHeaders(requestHeaders, load.engine::setOptionString)
             load.httpHeadersStatus = headerResult.diagnostic
             load.httpHeadersNotice = headerResult.notice
             if (headerResult.total > 0) {
@@ -605,7 +592,7 @@ class MpvPlayerController(
             return
         }
         playing = true
-        mpv?.setPropertyBoolean("pause", pauseIntent)
+        mpv?.setPropertyBoolean("pause", shouldPauseMpv(pauseIntent, audioFocusHold))
         emit(load)
     }
 
@@ -959,6 +946,7 @@ class MpvPlayerController(
     fun release(reason: String = "unspecified") {
         checkMainThread()
         if (released) return
+        activeLoad?.endFileEvidence?.stop()
         restoreDuckedVolume()
         audioFocus.release()
         released = true
@@ -978,7 +966,7 @@ class MpvPlayerController(
     }
 
     private fun onLoadTimeout(load: NativeLoad) {
-        if (!isActive(load) || ready) return
+        if (!isActive(load) || ready || load.terminal || !mpvEndAllowsRecovery(load.endKind)) return
         if (load.failureKind == FailureKind.CERT_INVALID) {
             emit(load, buffering = false, error = CERTIFICATE_ERROR_MESSAGE, failureKind = FailureKind.CERT_INVALID)
             return
@@ -990,7 +978,7 @@ class MpvPlayerController(
         if (load.retryPending) return
         if (!softwareRetryUsed) {
             load.retryPending = true
-            val stillNeeded = { isActive(load) && !ready && !load.terminal }
+            val stillNeeded = { isActive(load) && !ready && !load.terminal && mpvEndAllowsRecovery(load.endKind) }
             onSoftwareRetry(this, load.identity, stillNeeded) {
                 if (stillNeeded()) retryInSoftware(load)
             }
@@ -1101,13 +1089,6 @@ class MpvPlayerController(
                 buffering = value
                 emit(load, buffering = value)
             }
-            "eof-reached" -> {
-                load.ended = value
-                if (value) {
-                    playing = false
-                    emit(load, ended = true)
-                }
-            }
             "pause" -> {
                 playing = !value
                 if (!value) buffering = false
@@ -1116,11 +1097,11 @@ class MpvPlayerController(
         }
     }
 
-    private fun handleEvent(load: NativeLoad, eventId: Int) {
+    private fun handleEvent(load: NativeLoad, eventId: Int, end: MpvEndFileEvidence? = null) {
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
                 if (!refreshPauseIntent()) return
-                val pauseForLoad = pauseIntent || audioFocusHold
+                val pauseForLoad = shouldPauseMpv(pauseIntent, audioFocusHold)
                 load.engine.setPropertyBoolean("pause", pauseForLoad)
                 fileLoaded = true
                 applyAspectMode(load)
@@ -1145,11 +1126,43 @@ class MpvPlayerController(
                 emit(load, buffering = false, ready = true)
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
-                Log.w(TAG, "${timestamp()} END_FILE received (reason unavailable from observer API)")
-                if (!ready) onLoadTimeout(load)
-                else postForLoad(load, 100L) {
-                    if (!load.ended && load.engine.getPropertyBoolean("eof-reached") != true) {
-                        emit(load, buffering = false, error = "mpv 播放中断", failureKind = load.failureKind ?: FailureKind.DECODING)
+                if (load.endKind != null) return
+                val captured = checkNotNull(end)
+                val latest = load.endFileEvidence.snapshot()
+                // Read only on the owning main thread, before any retirement. Most
+                // properties are already unavailable here, so retain callback samples.
+                val evidence = captured.copy(
+                    positionMs = captured.positionMs ?: mpvSecondsToMs(runCatching { load.engine.getPropertyDouble("time-pos") }.getOrNull()),
+                    durationMs = captured.durationMs ?: mpvSecondsToMs(runCatching { load.engine.getPropertyDouble("duration") }.getOrNull()),
+                    stopped = captured.stopped || latest.stopped,
+                    failureKind = captured.failureKind ?: latest.failureKind ?: load.failureKind,
+                    errorLogSeen = captured.errorLogSeen || latest.errorLogSeen,
+                )
+                val kind = classifyMpvEndFile(evidence)
+                load.endKind = kind
+                playing = false
+                buffering = false
+                fileLoaded = false
+                audioSilentCodec = null
+                appendMpvLog("${timestamp()} END_FILE kind=$kind pos=${evidence.positionMs} duration=${evidence.durationMs} errorLog=${evidence.errorLogSeen}")
+                when (kind) {
+                    MpvEndKind.ERROR -> {
+                        load.failureKind = checkNotNull(evidence.failureKind)
+                        if (!ready) onLoadTimeout(load)
+                        else emit(load, error = "mpv 播放中断", failureKind = load.failureKind)
+                    }
+                    MpvEndKind.EOF -> {
+                        positionMs = checkNotNull(evidence.positionMs)
+                        positionAvailable = true
+                        durationMs = checkNotNull(evidence.durationMs)
+                        load.ended = true
+                        emit(load, ended = true)
+                        load.terminal = true
+                    }
+                    MpvEndKind.STOP, MpvEndKind.UNKNOWN -> {
+                        // Neutral termination: no failure callback, no software retry or timer.
+                        emit(load)
+                        load.terminal = true
                     }
                 }
             }
@@ -1179,7 +1192,7 @@ class MpvPlayerController(
         if (error != null) load.terminal = true
         onState(this, load.identity, State(positionMs, durationMs, buffering, ready, playing, ended, error, audioSilentCodec,
             cacheSpeedBytesPerSecond, subtitleMappingNotice, failureKind, subtitleFallbackToAuto, bufferedPositionMs,
-            trackListChanged, load.httpHeadersStatus, load.httpHeadersNotice))
+            trackListChanged, load.httpHeadersStatus, load.httpHeadersNotice, load.endKind))
     }
 
     private fun emitTelemetry(load: NativeLoad) {
@@ -1194,7 +1207,6 @@ class MpvPlayerController(
     private companion object {
         val physicalIds = AtomicLong()
         val sessionFiles = Executors.newSingleThreadExecutor { task -> Thread(task, "mpv-session-files").apply { isDaemon = true } }
-        val DECODER_FAILURE = Regex("(?i)failed to (?:decode|open.*decoder)|error while decoding|decoder initialization failed")
         val SESSION_AUDIO_PROPERTIES = setOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device")
         const val TAG = "MpvPlayerController"
         const val SOFTWARE_RETRY_TIMEOUT_MS = 6_000L

@@ -17,6 +17,9 @@ internal data class MpvFocusPolicyState(val resumeOnGain: Boolean = false, val d
 
 internal data class MpvFocusPolicyResult(val state: MpvFocusPolicyState, val effect: MpvFocusEffect)
 
+/** Render/load restoration must respect both independent pause owners. */
+internal fun shouldPauseMpv(pauseIntent: Boolean, audioFocusHold: Boolean): Boolean = pauseIntent || audioFocusHold
+
 internal fun reduceMpvFocus(
     state: MpvFocusPolicyState,
     signal: MpvFocusSignal,

@@ -935,6 +935,7 @@ fun PlayerScreen(
 
     fun checkStrmResume(target: EmbyClient.PlaybackTarget, now: Long) {
         if (target !== currentTarget || reloadPending || !target.isStrmDirectLink) return
+        if (activeEngine == "mpv" && !com.lumina.tv.player.mpvEndAllowsRecovery(mpvState.endKind)) return
         if (target.timeline.shouldRestartStrmFromZero(lastPlayerPositionMs, now)) {
             strmResumeFallback = JSONObject().put("action", "restart-from-zero")
                 .put("requestedStartMs", target.startPositionMs)
@@ -1624,6 +1625,9 @@ fun PlayerScreen(
                             if (state.subtitleFallbackToAuto) subtitlePreference = "auto"
                         }
                         state.httpHeadersNotice?.let { playbackStatusNotice = it }
+                        if (state.endKind == com.lumina.tv.player.MpvEndKind.UNKNOWN) {
+                            playbackStatusNotice = "播放已停止（结束原因未知），可重试或更换片源"
+                        }
                         if (state.ready && !state.buffering) {
                             onTimelineFirstFrame(target, android.os.SystemClock.elapsedRealtime())
                             playbackDiagnostics.firstFrame(load, android.os.SystemClock.elapsedRealtime(), "mpv.ready (no rendered-frame callback)")
@@ -2683,7 +2687,8 @@ fun PlayerScreen(
                 val waitingForMpvCache = mpvLoad != null &&
                     (reason == WatchdogReason.BUFFERING_NO_LOAD || reason == WatchdogReason.BUFFERING_NO_PROGRESS)
                 !playbackPaused() && seekConfirmation == null && !seekInFlight && !seekHoldActive &&
-                    (mpvLoad == null || mpvBackend?.diagnosticLoadIdentity() == mpvLoad) &&
+                    (mpvLoad == null || (mpvBackend?.diagnosticLoadIdentity() == mpvLoad &&
+                        com.lumina.tv.player.mpvEndAllowsRecovery(mpvState.endKind))) &&
                     if (waitingForMpvCache) {
                         isActuallyStalled && mpvState.cacheSpeedBytesPerSecond == 0L && mpvState.bufferedPositionMs == bufferedAtHit
                     } else position == recoveryPosition || isActuallyStalled || !firstFrameRendered
@@ -2726,7 +2731,8 @@ fun PlayerScreen(
             }
             val contentTimelineKnown = target?.timelineOrigin == TimelineOrigin.CONTENT
             val watchdogMpvLoad = if (activeEngine == "mpv") mpvBackend?.diagnosticLoadIdentity() else null
-            val ownsEngine = if (activeEngine == "media3") isCurrentMedia3() else watchdogMpvLoad != null && !reloadPending
+            val ownsEngine = if (activeEngine == "media3") isCurrentMedia3() else watchdogMpvLoad != null && !reloadPending &&
+                com.lumina.tv.player.mpvEndAllowsRecovery(mpvState.endKind)
             val reason = if (ownsEngine) watchdog.onTick(
                 positionMs = playerPosition ?: 0L,
                 bufferedMs = if (activeEngine == "media3") exo.bufferedPosition.takeIf { it >= 0L } else mpvState.bufferedPositionMs,

@@ -37,61 +37,33 @@ object B15Checks {
         var combinations = 0
         for (propertySetWorks in listOf(false, true)) for (propertyReadWorks in listOf(false, true))
             for (optionWorks in listOf(false, true)) for (appendMask in 0..3) {
-            val calls = mutableListOf<String>()
-            val result = applyMpvHttpHeaders(headers,
-                { name, _ ->
-                    calls += "property:$name"
-                    if (!propertySetWorks) throw IllegalStateException("property unavailable")
-                },
-                { name ->
-                    calls += "read:$name"
-                    if (propertyReadWorks) "Referer: https://example.invalid/,X-Auth: token" else null
-                },
-                { name, value ->
-                    if (name == "http-header-fields") {
-                        calls += "option:$name"
-                        if (optionWorks) 0 else -1
-                    } else {
-                        calls += "append:$value"
-                        val index = calls.count { it.startsWith("append:") } - 1
-                        if (appendMask and (1 shl index) != 0) 0 else -1
-                    }
-                })
-            val expectedCalls = mutableListOf("property:http-header-fields")
-            if (propertySetWorks) expectedCalls += "read:http-header-fields"
-            val expected = when {
-                propertySetWorks && propertyReadWorks -> MpvHttpHeadersResult("property", 2, 2)
-                optionWorks -> {
-                    expectedCalls += "option:http-header-fields"
-                    MpvHttpHeadersResult("option", 2, 2)
-                }
-                else -> {
-                    expectedCalls += "option:http-header-fields"
-                    // Preserve caller order and distinguish each append attempt.
-                    expectedCalls += headers.map { (name, value) -> "append:$name: $value" }
-                    MpvHttpHeadersResult("append", Integer.bitCount(appendMask), 2)
-                }
+            // Preserve all 32 combinations. Legacy property/option availability
+            // must no longer change literal append acceptance or resurrect fallback.
+            val binding = B17HeaderBinding(propertySetWorks, propertyReadWorks, optionWorks, appendMask)
+            val result = binding.apply(headers)
+            val expected = MpvHttpHeadersResult("append", Integer.bitCount(appendMask), 2)
+            val expectedCalls = headers.map { (name, value) -> "option:http-header-fields-append" to "$name: $value" }
+            check(result == expected && binding.calls == expectedCalls) {
+                "header probe mismatch propertySet=$propertySetWorks propertyRead=$propertyReadWorks option=$optionWorks appendMask=$appendMask calls=${binding.calls} result=$result"
             }
-            check(result == expected && calls == expectedCalls) {
-                "header probe mismatch propertySet=$propertySetWorks propertyRead=$propertyReadWorks option=$optionWorks appendMask=$appendMask calls=$calls result=$result"
-            }
+            check(binding.elements == headers.entries.mapIndexedNotNull { index, (name, value) ->
+                "$name: $value".takeIf { appendMask and (1 shl index) != 0 }
+            })
             if (result.accepted < result.total) check(result.notice?.contains("缺少") == true)
             combinations++
         }
         check(combinations == 32)
-        val throwing = applyMpvHttpHeaders(headers,
-            { _, _ -> throw IllegalStateException("property unavailable") },
-            { _ -> throw IllegalStateException("readback unavailable") },
-            { name, _ -> if (name == "http-header-fields") throw IllegalStateException("option unavailable") else 0 })
+        val throwing = applyMpvHttpHeaders(headers) { name, _ ->
+            if (name == "http-header-fields") throw IllegalStateException("option unavailable") else 0
+        }
         check(throwing.mode == "append" && throwing.accepted == headers.size && throwing.complete)
-        val empty = applyMpvHttpHeaders(emptyMap(), { _, _ -> error("must not probe empty headers") },
-            { _ -> error("must not probe empty headers") }, { _, _ -> -1 })
+        val empty = applyMpvHttpHeaders(emptyMap()) { _, _ -> error("must not probe empty headers") }
         check(empty.mode == "none" && empty.complete)
         val source = File("src/main/java/com/lumina/tv/player/MpvPlayerController.kt").readText()
         check(source.indexOf("applyMpvHttpHeaders(requestHeaders") < source.indexOf("load.engine.command(loadCommand"))
         check("state.httpHeadersNotice?.let { playbackStatusNotice = it }" in
             File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText())
-        println("B15 PASS V2: all 32 API/readback/append acceptance combinations, fallback order, exception downgrade, visible missing-header notice")
+        println("B15 PASS V2: all 32 legacy-API/append combinations, literal order and values, no lossy fallback, visible missing-header notice")
     }
 
     private fun v3EngineCircuitBreaker() {
@@ -180,10 +152,7 @@ object B15Checks {
         val normalUrl = "Opening https://example.invalid/Videos/stream?DeviceId=33a8cd48625f455e&variant=503"
         check(!isMpvHttpFailureLog(20, normalUrl))
         val headers = linkedMapOf("Referer" to "https://example.invalid/", "X-Authorization" to "secret")
-        val missingHeaders = applyMpvHttpHeaders(headers,
-            { _, _ -> throw IllegalStateException("property unavailable") },
-            { _ -> null },
-            { _, _ -> -1 })
+        val missingHeaders = applyMpvHttpHeaders(headers) { _, _ -> -1 }
         check(missingHeaders.accepted == 0 && missingHeaders.notice?.contains("缺少") == true)
         val controller = File("src/main/java/com/lumina/tv/player/MpvPlayerController.kt").readText()
         val loadBlock = controller.substringAfter("val headerResult = applyMpvHttpHeaders")

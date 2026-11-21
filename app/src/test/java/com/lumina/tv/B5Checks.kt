@@ -5,6 +5,7 @@ import com.lumina.tv.player.PlayerHostLifecycleEvent
 import com.lumina.tv.player.PlayerLifecycleRegistry
 import com.lumina.tv.player.SubtitleOffsetState
 import com.lumina.tv.player.applyMpvHttpHeaders
+import com.lumina.tv.player.B17HeaderBinding
 import com.lumina.tv.player.detailPreviewShouldPlay
 import com.lumina.tv.player.reducePlayerHostLifecycle
 import kotlinx.coroutines.CompletableDeferred
@@ -33,28 +34,26 @@ object B5Checks {
             "X-Note" to "字幕, 中文",
             "X-Empty" to "",
         )
-        val calls = mutableListOf<Pair<String, String>>()
-        val clean = applyMpvHttpHeaders(headers,
-            { name, value -> calls += "property:$name" to value },
-            { name -> calls += "read:$name" to ""; calls.first().second },
-            { name, value -> calls += "option:$name" to value; 0 })
-        check(calls == listOf("property:http-header-fields" to
-            "Referer: https://example.invalid/path?a=1,b=2,Cookie: token=first\\second,X-Note: 字幕, 中文,X-Empty: ",
-            "read:http-header-fields" to ""))
-        check(clean.mode == "property" && clean.accepted == headers.size && clean.complete && clean.notice == null)
+        val binding = B17HeaderBinding()
+        val clean = binding.apply(headers)
+        check(binding.calls == headers.map { (name, value) -> "option:http-header-fields-append" to "$name: $value" })
+        check(binding.elements == headers.map { (name, value) -> "$name: $value" })
+        check(clean.mode == "append" && clean.accepted == headers.size && clean.complete && clean.notice == null)
+
+        // parse+print can echo a corrupted list. This must never be a success test.
+        val raw = headers.entries.joinToString(",") { (name, value) -> "$name: $value" }
+        val lossy = B17HeaderBinding()
+        lossy.setProperty("http-header-fields", raw)
+        check(lossy.getProperty("http-header-fields") == raw)
+        check(lossy.elements.size != headers.size)
 
         // Rejection must not fail loadfile; the probe reports it for diagnostics and the UI.
         val failedOptions = mutableListOf<String>()
-        val failure = applyMpvHttpHeaders(headers,
-            { name, _ -> failedOptions += "property:$name"; throw IllegalStateException("property unavailable") },
-            { name -> failedOptions += "read:$name"; null },
-            { name, _ -> failedOptions += "option:$name"; -1 })
+        val failure = applyMpvHttpHeaders(headers) { name, _ -> failedOptions += "option:$name"; -1 }
         check(failure.mode == "append" && failure.accepted == 0 && !failure.complete)
         check(failure.notice?.contains("4/4") == true) { "rejected headers must remain visible: $failure" }
-        check(failedOptions == listOf("property:http-header-fields", "option:http-header-fields") +
-            List(headers.size) { "option:http-header-fields-append" })
-        val empty = applyMpvHttpHeaders(emptyMap(), { _, _ -> error("must not probe empty headers") },
-            { _ -> error("must not probe empty headers") }, { _, _ -> -1 })
+        check(failedOptions == List(headers.size) { "option:http-header-fields-append" })
+        val empty = applyMpvHttpHeaders(emptyMap()) { _, _ -> error("must not probe empty headers") }
         check(empty.mode == "none" && empty.complete)
     }
 

@@ -186,6 +186,15 @@ val b16Checks = tasks.register<JavaExec>("b16Checks") {
     timeout.set(Duration.ofMinutes(2))
 }
 verifyOffline.configure { dependsOn(b16Checks) }
+val b17Checks = tasks.register<JavaExec>("b17Checks") {
+    group = "verification"
+    description = "B17 W2/W3/W4 mpv header, end-file and focus-pause assertions."
+    dependsOn(samples)
+    classpath = samples.get().classpath
+    mainClass.set("com.lumina.tv.player.B17Checks")
+    timeout.set(Duration.ofMinutes(2))
+}
+verifyOffline.configure { dependsOn(b17Checks) }
 val e1Checks = tasks.register<JavaExec>("e1Checks") {
     group = "verification"
     description = "Check pairing authorization, Latest response shapes and canonical server identity migration."
