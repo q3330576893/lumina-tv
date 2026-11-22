@@ -59,6 +59,12 @@ object B10Checks {
         val headers = JSONObject(sanitized).getJSONObject("RequiredHttpHeaders")
         check(headers.getString("Cookie") == "***" && headers.getString("Set-Cookie") == "***")
         check(privateCookie !in sanitized)
+        check(LogRedactor.redact("error=\"Cookie: SID=demo-one; session=demo-two\"") == "error=\"Cookie: ***\"")
+        val urls = JSONObject(LogRedactor.redactJson(
+            """{"baseUrl":"https://user:pass@example.test:8096/emby?token=demo#fragment","nested":{"base_url":"http://[::1]:8096/path"}}""",
+        ))
+        check(urls.getString("baseUrl") == "example.test")
+        check(urls.getJSONObject("nested").getString("base_url") == "[::1]")
 
         val playerDiagnostics = source("ui/screens/PlayerDiagnostics.kt")
         check("DiagExporter.appLogTail()" !in playerDiagnostics)

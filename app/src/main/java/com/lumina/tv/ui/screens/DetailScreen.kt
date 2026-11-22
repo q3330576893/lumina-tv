@@ -4,7 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -82,15 +83,14 @@ import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.input.key.onKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.res.painterResource
@@ -1097,7 +1097,11 @@ fun DetailScreen(
                             }
                         }
                         Spacer(Modifier.height(18.dp))
-                        Row(Modifier.focusGroup().focusProperties { up = overviewFocus }) {
+                        Row(
+                            Modifier.focusGroup().focusProperties {
+                                up = if (it0.overview != null) overviewFocus else FocusRequester.Cancel
+                            },
+                        ) {
                             FocusSurface(
                                 modifier = Modifier.height(52.dp).width(128.dp).focusProperties {
                                     if (it0.positionTicks > 0L) right = playFromStartFocus
@@ -1155,48 +1159,46 @@ fun DetailScreen(
                             }
                             if (sources.isNotEmpty()) {
                                 Spacer(Modifier.width(12.dp))
-                                Box(Modifier.width(170.dp)) {
-                                    var sourceFocused by remember { mutableStateOf(false) }
-                                    val sourceWidth by animateDpAsState(
-                                        targetValue = if (sourceFocused) 170.dp else 96.dp,
-                                        animationSpec = tween(260),
-                                        label = "sourceWidth",
-                                    )
-                                    val source = sources.firstOrNull { it.id == selectedSourceId } ?: sources.first()
-                                    val video = source.streams.firstOrNull { it.type.equals("Video", true) }
-                                    val bitrate = (video?.bitRate?.takeIf { it > 0 } ?: source.bitrate?.takeIf { it > 0 })
-                                        ?.let { formatBitrate(it) }
-                                    val sourceLabel = listOfNotNull(
-                                        selectedSourceLabel,
-                                        source.resolution?.takeIf(String::isNotBlank),
-                                        bitrate,
-                                    ).joinToString(" · ")
-                                    FocusSurface(
-                                        modifier = Modifier.height(46.dp).width(sourceWidth).clip(RoundedCornerShape(23.dp)),
-                                        corner = 23.dp,
-                                        focusRequester = sourceFocus,
-                                        onFocusChanged = { sourceFocused = it },
-                                        onClick = { showSourceMenu = true },
-                                    ) { focused ->
-                                        Row(
-                                            Modifier.fillMaxSize().background(
-                                                if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
-                                            ).padding(horizontal = 12.dp),
-                                            horizontalArrangement = Arrangement.Center,
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Icon(Icons.Rounded.Layers, null, tint = TextMain, modifier = Modifier.size(18.dp))
-                                            if (focused) {
-                                                Spacer(Modifier.width(6.dp))
-                                                Text(
-                                                    sourceLabel,
-                                                    color = TextMain,
-                                                    fontSize = 13.sp,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    modifier = Modifier.weight(1f),
-                                                )
-                                            }
+                                var sourceFocused by remember { mutableStateOf(false) }
+                                val source = sources.firstOrNull { it.id == selectedSourceId } ?: sources.first()
+                                val video = source.streams.firstOrNull { it.type.equals("Video", true) }
+                                val bitrate = (video?.bitRate?.takeIf { it > 0 } ?: source.bitrate?.takeIf { it > 0 })
+                                    ?.let { formatBitrate(it) }
+                                val sourceLabel = listOfNotNull(
+                                    selectedSourceLabel,
+                                    source.resolution?.takeIf(String::isNotBlank),
+                                    bitrate,
+                                ).joinToString(" · ")
+                                FocusSurface(
+                                    modifier = Modifier
+                                        .height(46.dp)
+                                        .animateContentSize(
+                                            animationSpec = tween(240, easing = FastOutSlowInEasing),
+                                        )
+                                        .widthIn(min = 46.dp, max = 300.dp),
+                                    corner = 23.dp,
+                                    focusRequester = sourceFocus,
+                                    onFocusChanged = { sourceFocused = it },
+                                    onClick = { showSourceMenu = true },
+                                ) { focused ->
+                                    Row(
+                                        Modifier.fillMaxHeight().background(
+                                            if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
+                                        ).padding(horizontal = 12.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Icon(Icons.Rounded.Layers, null, tint = TextMain, modifier = Modifier.size(18.dp))
+                                        if (focused) {
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                sourceLabel,
+                                                color = TextMain,
+                                                fontSize = 13.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.widthIn(max = 252.dp),
+                                            )
                                         }
                                     }
                                 }
@@ -1832,18 +1834,14 @@ private fun FocusGlassSurface(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    var userMovedFocus by remember { mutableStateOf(false) }
-    val showHighlight = focused && userMovedFocus
+    val inputModeManager = LocalInputModeManager.current
+    val showHighlight = focused && inputModeManager.inputMode == InputMode.Keyboard
     val scale by animateFloatAsState(if (showHighlight) 1.01f else 1f, tween(240), label = "mediaInfoFocus")
     Box(
         modifier.graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(corner))
             .background(if (showHighlight) Color(0x0AFFFFFF) else normalFill)
             .border(if (showHighlight) 1.5.dp else 1.dp, if (showHighlight) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge, RoundedCornerShape(corner))
-            .onKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown) userMovedFocus = true
-                false
-            }
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { content(showHighlight) }

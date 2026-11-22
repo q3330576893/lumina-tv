@@ -104,31 +104,13 @@ object CrashHandler {
             frames.firstOrNull()?.stackTrace.orEmpty().take(3).joinToString("\n") { "${it.className}.${it.methodName}:${it.lineNumber}" }.toByteArray()
         ).joinToString("") { "%02x".format(it) }
         val now = System.currentTimeMillis()
-        val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
-        val appLog = runCatching {
-            Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-t", "800", "--pid=${android.os.Process.myPid()}"))
-                .inputStream.bufferedReader().useLines { it.toList().takeLast(100).joinToString("\n") }
-        }.getOrDefault("app.log unavailable")
         val report = buildString {
             appendLine("[基础]")
             appendLine("时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(now))}")
-            appendLine("版本: ${BuildConfig.VERSION_NAME} / versionCode=${if (Build.VERSION.SDK_INT >= 28) info?.longVersionCode else info?.versionCode}")
+            appendLine("版本: ${BuildConfig.VERSION_NAME} / versionCode=${BuildConfig.VERSION_CODE}")
             appendLine("设备: ${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})")
             appendLine("系统: Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) ABI: ${Build.SUPPORTED_ABIS.joinToString(",")}")
             appendLine("线程: ${thread.name} (${thread.id})")
-            appendLine("\n[上下文]")
-            appendLine("页面: ${AppRuntime.screenLabel}")
-            appendLine("播放条目: ${AppRuntime.nowPlaying} / id=${AppRuntime.playingItemId}")
-            appendLine("播放引擎: ${AppRuntime.activePlayerEngine}")
-            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-            val foreground = am?.runningAppProcesses?.firstOrNull { it.pid == android.os.Process.myPid() }?.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
-            appendLine("前台: $foreground")
-            appendLine("\n[内存]")
-            appendLine("java heap used=${Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()} max=${Runtime.getRuntime().maxMemory()}")
-            appendLine("native heap=${Debug.getNativeHeapAllocatedSize()}")
-            appendLine("\n[最近页面]\n${PageLog.tail().ifBlank { "(无)" }}")
-            appendLine("\n[最近网络]\n${NetLog.tail()}")
-            appendLine("\n[最近日志]\n${AppLog.snapshot()}\n[logcat]\n$appLog")
             appendLine("\n[堆栈]")
             frames.forEachIndexed { i, cause ->
                 appendLine("Cause #${i + 1}: ${cause.javaClass.name}: ${cause.message}")
@@ -137,7 +119,23 @@ object CrashHandler {
             appendLine("\n[指纹]\n$fingerprint")
         }
         val safe = DiagExporter.sanitize(report)
-        CrashStore(root(context)).recordJava(fingerprint, safe, now)
+        CrashStore(root(context)).recordJava(fingerprint, safe, now) {
+            buildString {
+                appendLine("\n[上下文]")
+                appendLine("页面: ${AppRuntime.screenLabel}")
+                appendLine("播放条目: ${AppRuntime.nowPlaying} / id=${AppRuntime.playingItemId}")
+                appendLine("播放引擎: ${AppRuntime.activePlayerEngine}")
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                val foreground = am?.runningAppProcesses?.firstOrNull { it.pid == android.os.Process.myPid() }?.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                appendLine("前台: $foreground")
+                appendLine("\n[内存]")
+                appendLine("java heap used=${Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()} max=${Runtime.getRuntime().maxMemory()}")
+                appendLine("native heap=${Debug.getNativeHeapAllocatedSize()}")
+                appendLine("\n[最近页面]\n${PageLog.tail().ifBlank { "(无)" }}")
+                appendLine("\n[最近网络]\n${NetLog.tail()}")
+                appendLine("\n[最近日志]\n${AppLog.snapshot()}")
+            }
+        }
         context.getSharedPreferences("lumina_crash", Context.MODE_PRIVATE).edit().putBoolean("notice_pending", true).putString("fingerprint", fingerprint).commit()
     }
 

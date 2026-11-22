@@ -16,6 +16,9 @@ import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -77,12 +80,39 @@ object DiagExporter {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             return "app.log unavailable: logcat capture requires a background thread"
         }
-        return runCatching {
-        val process: Process = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-v", "epoch", "-t", "800", "--pid=${android.os.Process.myPid()}"))
-        val lines: List<String> = process.inputStream.bufferedReader(Charsets.UTF_8).useLines { it.toList() }
-        process.waitFor()
-        lines.takeLast(800).joinToString("\n")
-        }.getOrElse { "app.log unavailable: ${it.message ?: it::class.java.simpleName}" }
+        val timeoutMs = 1500L
+        val timeoutMessage = "app.log unavailable: logcat timed out after ${timeoutMs}ms"
+        val capture = FutureTask {
+            val process = ProcessBuilder("logcat", "-d", "-v", "epoch", "-t", "800", "--pid=${android.os.Process.myPid()}")
+                .redirectErrorStream(true)
+                .start()
+            val output = FutureTask {
+                process.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                    lines.toList().takeLast(800).joinToString("\n")
+                }
+            }
+            try {
+                Thread(output, "lumina-logcat-reader").apply { isDaemon = true }.start()
+                if (process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) output.get() else timeoutMessage
+            } finally {
+                output.cancel(true)
+                process.destroyForcibly()
+            }
+        }
+        return try {
+            Thread(capture, "lumina-logcat-capture").apply { isDaemon = true }.start()
+            capture.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: TimeoutException) {
+            timeoutMessage
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            "app.log unavailable: logcat capture interrupted"
+        } catch (failure: Exception) {
+            val cause = failure.cause ?: failure
+            "app.log unavailable: ${cause.message ?: cause::class.java.simpleName}"
+        } finally {
+            capture.cancel(true)
+        }
     }
 
     fun export(context: Context, payload: DiagPayload, kind: String = "playback"): File {
@@ -179,6 +209,7 @@ object DiagExporter {
 object LogRedactor {
     private const val SECRET_KEYS =
         "api_key|apikey|x-emby-token|x-emby-authorization|x-mediabrowser-token|access_token|authorization|password|passwd|pw|token|cookie|set-cookie|pass|pwd|secret|jsessionid"
+    private const val BASE_URL_KEYS = "baseUrl|base_url"
     private val encodedKeys = SECRET_KEYS.replace("-", "(?:-|%2d)").replace("_", "(?:_|%5f)")
     private const val QUOTED_VALUE = """"(?:\\.|[^"\\])*+"|'(?:\\.|[^'\\])*+'"""
     private val keyValue = Regex(
@@ -192,9 +223,13 @@ object LogRedactor {
     private val header = Regex(
         """(?im)(?<![\w"'%-])((?:$SECRET_KEYS)\b[ \t]*:[ \t]*)[^\r\n]+"""
     )
-    private val baseUrl = Regex(
-        """(?i)((?<![\w-])["']?(?:baseUrl|base_url)["']?\s*[:=]\s*)($QUOTED_VALUE|[^,}\s]+)"""
+    private val quotedHeader = Regex(
+        """(?i)(["'])((?:$SECRET_KEYS)\b[ \t]*:[ \t]*)(?:\\[^\r\n]|(?!\1)[^\r\n])*+(\1)?"""
     )
+    private val baseUrl = Regex(
+        """(?i)((?<![\w-])["']?(?:$BASE_URL_KEYS)["']?\s*[:=]\s*)($QUOTED_VALUE|[^,}\s]+)"""
+    )
+    private val baseUrlField = Regex("""(?i)^(?:$BASE_URL_KEYS)$""")
     private val urlUserInfo = Regex("""(?i)(https?://)[^\s/?#<>"']*@""")
     private val secretField = Regex("""(?i)^(?:$SECRET_KEYS)$""")
 
@@ -213,7 +248,16 @@ object LogRedactor {
             val keys = value.keys()
             while (keys.hasNext()) {
                 val key = keys.next()
-                put(key, if (secretField.matches(key)) "***" else redactJsonValue(value.opt(key)))
+                val field = value.opt(key)
+                put(key, when {
+                    secretField.matches(key) -> "***"
+                    baseUrlField.matches(key) -> when (field) {
+                        is String -> baseUrlHost(field)
+                        null, JSONObject.NULL -> JSONObject.NULL
+                        else -> "***"
+                    }
+                    else -> redactJsonValue(field)
+                })
             }
         }
         is JSONArray -> JSONArray().apply {
@@ -231,19 +275,22 @@ object LogRedactor {
             if (value == "null") return@replace match.value
             val quote = value.first().takeIf { it == '"' || it == '\'' }
             val raw = if (quote != null) value.substring(1, value.length - 1) else value
-            val host = runCatching {
-                val url = raw.replace("\\/", "/")
-                URI(if ("://" in url || url.startsWith("//")) url else "//$url").host
-            }.getOrNull()?.takeIf { it.isNotBlank() } ?: "***"
+            val host = baseUrlHost(raw)
             match.groupValues[1] + if (quote != null) "$quote$host$quote" else host
         }
         return hostsOnly
             .replace(urlUserInfo, "$1***@")
+            .replace(quotedHeader, "$1$2***$3")
             .replace(header, "$1***")
             .replace(keyValue) { it.groupValues[1] + mask(it.groupValues[2]) }
             .replace(query, "$1***")
             .replace(encodedQuery) { it.groupValues[1] + mask(it.groupValues[2]) }
     }
+
+    private fun baseUrlHost(raw: String): String = runCatching {
+        val url = raw.replace("\\/", "/")
+        URI(if ("://" in url || url.startsWith("//")) url else "//$url").host
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: "***"
 
     private fun mask(value: String): String = when {
         value.startsWith('"') -> "\"***\""

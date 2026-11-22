@@ -36,24 +36,19 @@ object B5Checks {
         )
         val binding = B17HeaderBinding()
         val clean = binding.apply(headers)
-        check(binding.calls == headers.map { (name, value) -> "option:http-header-fields-append" to "$name: $value" })
+        // One base-option set (mpv_set_option_string has no -append suffix) + one readback.
+        check(binding.calls.map { it.first } == listOf("option:http-header-fields", "read:options/http-header-fields"))
         check(binding.elements == headers.map { (name, value) -> "$name: $value" })
-        check(clean.mode == "append" && clean.accepted == headers.size && clean.complete && clean.notice == null)
-
-        // parse+print can echo a corrupted list. This must never be a success test.
-        val raw = headers.entries.joinToString(",") { (name, value) -> "$name: $value" }
-        val lossy = B17HeaderBinding()
-        lossy.setProperty("http-header-fields", raw)
-        check(lossy.getProperty("http-header-fields") == raw)
-        check(lossy.elements.size != headers.size)
+        check(clean.mode == "string-verified" && clean.accepted == 1 && clean.complete && clean.notice == null)
 
         // Rejection must not fail loadfile; the probe reports it for diagnostics and the UI.
-        val failedOptions = mutableListOf<String>()
-        val failure = applyMpvHttpHeaders(headers) { name, _ -> failedOptions += "option:$name"; -1 }
-        check(failure.mode == "append" && failure.accepted == 0 && !failure.complete)
+        val attempted = mutableListOf<Pair<String, String>>()
+        val failure = applyMpvHttpHeaders(headers, { name, value -> attempted += name to value; -1 })
+        check(failure.mode == "string-failed" && failure.accepted == 0 && !failure.complete)
         check(failure.notice?.contains("4/4") == true) { "rejected headers must remain visible: $failure" }
-        check(failedOptions == List(headers.size) { "option:http-header-fields-append" })
-        val empty = applyMpvHttpHeaders(emptyMap()) { _, _ -> error("must not probe empty headers") }
+        check(failure.failedNames == headers.keys.toList())
+        check(attempted.map { it.first } == listOf("http-header-fields"))
+        val empty = applyMpvHttpHeaders(emptyMap(), { _, _ -> error("must not probe empty headers") })
         check(empty.mode == "none" && empty.complete)
     }
 

@@ -2,60 +2,54 @@ package com.lumina.tv.player
 
 import java.io.File
 
-/** A string-list fake: -append treats its argument as ONE literal element, whereas
- * the base option parses backslash-escaped commas and print loses that structure.
- * Mirrors mpv 0.41 options/m_option.c, not an echo of the setter argument. */
+/** Mirrors mpv 0.41 string-list escaping rather than echoing the setter argument. */
 internal class B17HeaderBinding(
-    val propertyWorks: Boolean = true,
     val readWorks: Boolean = true,
     val optionWorks: Boolean = true,
-    val appendMask: Int = -1,
 ) {
     val elements = mutableListOf<String>()
     val calls = mutableListOf<Pair<String, String>>()
-    private var appendIndex = 0
-
-    fun setProperty(name: String, value: String) {
-        calls += "property:$name" to value
-        check(propertyWorks) { "property unavailable" }
-        elements.clear()
-        elements += parseList(value)
-    }
+    private var propertyValue: String? = null
 
     fun getProperty(name: String): String? {
         calls += "read:$name" to ""
-        return if (readWorks) elements.joinToString(",") else null
+        return if (readWorks) propertyValue else null
     }
 
     fun setOption(name: String, value: String): Int {
         calls += "option:$name" to value
-        check(name != "http-header-fields-clr") { "unsupported -clr must never return" }
-        if (name == "http-header-fields-append") {
-            val accepted = appendMask and (1 shl appendIndex++) != 0
-            if (accepted) elements += value
-            return if (accepted) 0 else -5
-        }
+        check(name == "http-header-fields") { "must set the base option once" }
         if (!optionWorks) return -5
         elements.clear()
         elements += parseList(value)
+        propertyValue = value
         return 0
     }
 
-    fun apply(headers: Map<String, String>) = applyMpvHttpHeaders(headers, ::setOption)
+    fun apply(headers: Map<String, String>, logEmptyValue: (String) -> Unit = {}) =
+        applyMpvHttpHeaders(headers, ::setOption, ::getProperty, logEmptyValue)
 
     companion object {
         fun parseList(value: String): List<String> {
             if (value.isEmpty()) return emptyList()
             val result = mutableListOf<String>()
             val element = StringBuilder()
-            value.forEach { char ->
-                if (char == ',' && element.lastOrNull() == '\\') {
-                    element.setLength(element.length - 1)
-                    element.append(char)
+            var index = 0
+            while (index < value.length) {
+                val char = value[index]
+                if (char == '\\' && index + 1 < value.length &&
+                    (value[index + 1] == '\\' || value[index + 1] == ',')
+                ) {
+                    element.append(value[index + 1])
+                    index += 2
                 } else if (char == ',') {
                     result += element.toString()
                     element.setLength(0)
-                } else element.append(char)
+                    index++
+                } else {
+                    element.append(char)
+                    index++
+                }
             }
             result += element.toString()
             return result
@@ -87,22 +81,48 @@ object B17Checks {
     private fun headers() {
         val headers = linkedMapOf("Referer" to "https://example.invalid/?a=1,b=2",
             "Cookie" to "token=first\\second", "X-Empty" to "", "X-Trailing" to "a\\",
-            "X-Escaped" to "a\\,b", "X-Note" to "字幕, 中文")
+            "X-Escaped" to "a\\,b", "X-Note" to "字幕,\r\n 中文", "" to "discard",
+            "Bad:Name" to "discard")
         val binding = B17HeaderBinding()
-        val result = binding.apply(headers)
-        check(binding.elements == headers.map { (k, v) -> "$k: $v" }) {
-            "reported=$result; actual element count=${binding.elements.size}, expected=${headers.size}"
+        val emptyValueLogs = mutableListOf<String>()
+        val result = binding.apply(headers, emptyValueLogs::add)
+        val validHeaders = headers.filterKeys { it.isNotEmpty() && ':' !in it }
+        val expected = validHeaders.map { (name, value) ->
+            "$name: ${value.replace("\r", "").replace("\n", "")}"
         }
-        check(result.complete && result.accepted == headers.size)
-        check(binding.calls.all { it.first == "option:http-header-fields-append" })
+        check(binding.elements == expected) {
+            "reported=$result; actual elements=${binding.elements.size}, expected=${expected.size}"
+        }
+        check(result.complete && result.accepted == 1 && result.total == validHeaders.size)
+        check(result.failedNames.isEmpty() && result.notice == null)
+        check(binding.calls.count { it.first == "option:http-header-fields" } == 1)
+        check(binding.calls.any { it.first == "read:options/http-header-fields" })
+        val serialized = binding.calls.single { it.first == "option:http-header-fields" }.second
+        check("a=1\\,b=2" in serialized && "token=first\\\\second" in serialized)
+        check(B17HeaderBinding.parseList(serialized) == expected)
+        check(emptyValueLogs == listOf("X-Empty"))
 
-        // A rejected/throwing item must not block later headers or claim completeness.
+        val failed = applyMpvHttpHeaders(headers, { _, _ -> -5 })
+        check(failed.accepted == 0 && failed.total == validHeaders.size && !failed.complete)
+        check(failed.failedNames == validHeaders.keys.toList())
+        check(failed.notice == "mpv 请求头设置失败：${validHeaders.size}/${validHeaders.size}（缺 Referer 或鉴权头的片源可能无法播放）")
+        check("token" !in checkNotNull(failed.notice))
+
         for (error in listOf<Throwable>(IllegalStateException("rejected"), UnsatisfiedLinkError("missing API"))) {
             var calls = 0
-            val partial = applyMpvHttpHeaders(headers) { _, _ -> if (++calls == 2) throw error else 1 }
-            check(calls == headers.size && partial.accepted == headers.size - 1 && !partial.complete)
-            check(partial.notice?.contains("1/${headers.size}") == true)
+            val rejected = applyMpvHttpHeaders(headers, { _, _ ->
+                calls++
+                throw error
+            })
+            check(calls == 1 && rejected.accepted == 0 && !rejected.complete)
+            check(rejected.failedNames == validHeaders.keys.toList() && rejected.notice != null)
         }
+
+        val noHeaders = B17HeaderBinding().apply(emptyMap())
+        check(noHeaders.total == 0 && noHeaders.accepted == 0 && noHeaders.notice == null)
+        check(B17HeaderBinding().apply(mapOf("" to "x", "Bad:Name" to "y")).total == 0)
+        val unavailableReadback = applyMpvHttpHeaders(mapOf("X-Test" to "ok"), { _, _ -> 0 }, { null })
+        check(unavailableReadback.complete && unavailableReadback.notice == null)
     }
 
     private fun controller() = File("src/main/java/com/lumina/tv/player/MpvPlayerController.kt").readText()
@@ -170,6 +190,15 @@ object B17Checks {
             check(end.failureKind == kind) { "$text classified as ${end.failureKind}" }
             check(classifyMpvEndFile(end) == MpvEndKind.ERROR)
             check(mpvEndAllowsRecovery(classifyMpvEndFile(end)))
+            native.property("time-pos", 99.95)
+            check(classifyMpvEndFile(native.snapshot()) == MpvEndKind.ERROR)
+            native.property("time-pos", 100.0)
+            check(classifyMpvEndFile(native.snapshot()) == MpvEndKind.EOF)
+            check(classifyMpvEndFile(end) == MpvEndKind.ERROR)
+            native.log(20, "unclassified native error")
+            check(classifyMpvEndFile(native.snapshot()) == MpvEndKind.UNKNOWN)
+            native.log(20, text)
+            check(classifyMpvEndFile(native.snapshot()) == MpvEndKind.ERROR)
             native.stop()
             check(classifyMpvEndFile(native.snapshot()) == MpvEndKind.STOP)
             check(!mpvEndAllowsRecovery(classifyMpvEndFile(native.snapshot())))
@@ -182,7 +211,7 @@ object B17Checks {
         check(classifyMpvEndFile(MpvEndFileTracker().snapshot()) == MpvEndKind.UNKNOWN)
         val warning = MpvEndFileTracker()
         warning.property("duration", 100.0)
-        warning.property("time-pos", 100.0)
+        warning.property("time-pos", 99.95)
         warning.log(30, "HTTP error 403 Forbidden")
         warning.log(40, "Opening https://example.invalid/?code=503")
         check(classifyMpvEndFile(warning.snapshot()) == MpvEndKind.EOF)
@@ -190,6 +219,8 @@ object B17Checks {
         check(warning.snapshot().failureKind == null)
         check(classifyMpvEndFile(warning.snapshot()) == MpvEndKind.UNKNOWN)
         check(!mpvEndAllowsRecovery(classifyMpvEndFile(warning.snapshot())))
+        warning.property("time-pos", 100.0)
+        check(classifyMpvEndFile(warning.snapshot()) == MpvEndKind.EOF)
     }
 
     private fun unknownEnd() {

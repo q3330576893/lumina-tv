@@ -57,7 +57,9 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -242,14 +244,46 @@ private data class FocusSpec(
     val scale: Float,
     val elevation: Float,
     val duration: Int,
-    val ringWidth: Dp,
-    val ringColor: Color,
 )
 private fun FocusFamily.spec(): FocusSpec = when (this) {
-    FocusFamily.Poster -> FocusSpec(FocusScale.POSTER_LARGE, 16f, FOCUS_ANIMATION_DURATION_MS, 2.5.dp, Color(0xF2FFFFFF))
-    FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, 8f, FOCUS_ANIMATION_DURATION_MS, 1.5.dp, Color(0xE6FFFFFF))
-    FocusFamily.Button -> FocusSpec(1.04f, 10f, FOCUS_ANIMATION_DURATION_MS, 1.5.dp, Color(0xE6FFFFFF))
-    FocusFamily.DetailPanel -> FocusSpec(1.02f, 12f, FOCUS_ANIMATION_DURATION_MS, 1.5.dp, Color(0xE6FFFFFF))
+    FocusFamily.Poster -> FocusSpec(FocusScale.POSTER_LARGE, 16f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, 8f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.Button -> FocusSpec(1.04f, 10f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.DetailPanel -> FocusSpec(1.02f, 12f, FOCUS_ANIMATION_DURATION_MS)
+}
+
+/**
+ * 海报选中态：一小圈向外的光源，替代整屏/整卡白框与灰黑影。
+ * 未选中直接返回 this；选中时在内容背后叠 3 层逐渐外扩、逐渐变淡的圆角光晕，
+ * 再补一圈 1dp 的半透明白内环（圆角与卡片一致）。
+ */
+internal fun Modifier.posterFocusGlow(focused: Boolean, corner: Dp, accent: Color): Modifier {
+    if (!focused) return this
+    return this.drawBehind {
+        val cornerPx = corner.toPx()
+        val layers = arrayOf(
+            3.dp.toPx() to 0.10f,
+            6.dp.toPx() to 0.06f,
+            9.dp.toPx() to 0.03f,
+        )
+        layers.forEach { (expand, alpha) ->
+            drawRoundRect(
+                color = accent.copy(alpha = alpha),
+                topLeft = Offset(-expand, -expand),
+                size = Size(size.width + expand * 2f, size.height + expand * 2f),
+                cornerRadius = CornerRadius(cornerPx + expand),
+            )
+        }
+        val ringWidth = 1.dp.toPx()
+        val inset = ringWidth / 2f
+        drawRoundRect(
+            color = Color.White.copy(alpha = 0.28f),
+            topLeft = Offset(inset, inset),
+            size = Size(size.width - ringWidth, size.height - ringWidth),
+            cornerRadius = CornerRadius(cornerPx),
+            style = Stroke(width = ringWidth),
+        )
+    }
 }
 
 /** 可聚焦容器：缩放 + 高光描边的统一交互语言。 */
@@ -295,8 +329,8 @@ fun FocusSurface(
             .clip(RoundedCornerShape(corner))
             .background(ThemeRuntime.glassFill(focused))
             .border(
-                if (focused) focusSpec.ringWidth else 1.dp,
-                if (focused) focusSpec.ringColor else Color(0x24FFFFFF),
+                1.dp,
+                if (focused) Color.White.copy(alpha = 0.28f) else Color(0x24FFFFFF),
                 RoundedCornerShape(corner),
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
@@ -347,14 +381,15 @@ fun PosterCard(
     val interaction = remember { MutableInteractionSource() }
     val initialFocusRequester = remember { FocusRequester() }
     val focused by interaction.collectIsFocusedAsState()
-    val posterSpec = FocusFamily.Poster.spec()
     val cardShape = if (titleOverlay) RoundedCornerShape(10.dp) else ShapeScale.card
+    // ShapeScale.card 为 RoundedCornerShape(14.dp)，这里用等价 Dp 供光晕圆角使用。
+    val cardCorner = if (titleOverlay) 10.dp else 14.dp
     val scale by animateFloatAsState(
         if (focused) focusScale else 1f,
-        spring(dampingRatio = 0.78f, stiffness = 350f),
+        spring(dampingRatio = 0.86f, stiffness = 380f),
         label = "posterScale",
     )
-    val alpha by animateFloatAsState(if (focused) 1f else 0.85f, tween(200), label = "posterAlpha")
+    val alpha by animateFloatAsState(if (focused) 1f else 0.92f, tween(200), label = "posterAlpha")
     LaunchedEffect(requestInitialFocus) {
         if (requestInitialFocus) {
             kotlinx.coroutines.delay(120)
@@ -374,11 +409,10 @@ fun PosterCard(
                 scaleX = scale
                 scaleY = scale
                 this.alpha = alpha
-                val translationZ = if (focused) 12.dp.toPx() else 0f
-                shadowElevation = (if (focused) posterSpec.elevation else 0f) + translationZ
                 shape = ShapeScale.card
                 clip = false
             }
+            .posterFocusGlow(focused, cardCorner, Accent)
             .onPreviewKeyEvent { event ->
                 if (onMenuKey != null && event.type == KeyEventType.KeyDown && event.key == Key.Menu &&
                     event.nativeKeyEvent.repeatCount == 0
@@ -472,24 +506,13 @@ fun PosterCard(
             }
             Box(
                 Modifier.matchParentSize().drawBehind {
-                    val outerWidth = if (focused) 2.5.dp.toPx() else 1.dp.toPx()
-                    val outerInset = outerWidth / 2f
-                    inset(outerInset) {
+                    val edgeWidth = 1.dp.toPx()
+                    inset(edgeWidth / 2f) {
                         drawOutline(
                             cardShape.createOutline(size, layoutDirection, this),
-                            color = if (focused) Color(0xF2FFFFFF) else GlassLine,
-                            style = Stroke(width = outerWidth),
+                            color = if (focused) Color.White.copy(alpha = 0.28f) else GlassLine,
+                            style = Stroke(width = edgeWidth),
                         )
-                    }
-                    if (focused) {
-                        val innerWidth = 1.dp.toPx()
-                        inset(outerInset + 1.5.dp.toPx()) {
-                            drawOutline(
-                                cardShape.createOutline(size, layoutDirection, this),
-                                color = Color(0x66000000),
-                                style = Stroke(width = innerWidth),
-                            )
-                        }
                     }
                 }
             )

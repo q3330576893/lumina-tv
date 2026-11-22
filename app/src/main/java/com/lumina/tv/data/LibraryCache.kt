@@ -53,7 +53,7 @@ object LibraryCache {
     private val homeWriteTimes = HashMap<String, Long>()
 
     private fun homeFile(context: Context, baseUrl: String, userId: String) =
-        File(context.filesDir, "home_cache_${baseUrl.hashCode()}_$userId.json")
+        File(context.filesDir, "home_cache_${stableCacheDigest(baseUrl, userId)}.json")
 
     suspend fun readHome(context: Context, baseUrl: String, userId: String): HomeData? = withContext(Dispatchers.IO) {
         synchronized(this@LibraryCache) {
@@ -68,7 +68,7 @@ object LibraryCache {
                     favorites = json.readItems("favorites"), genres = emptyList(),
                     views = json.readViews(), at = cacheAt,
                 )
-            }.getOrNull()?.also { putHome(it) }
+            }.getOrNull()
         }
     }
 

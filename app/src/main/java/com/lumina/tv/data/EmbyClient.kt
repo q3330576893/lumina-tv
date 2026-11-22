@@ -1705,11 +1705,12 @@ class EmbyClient(
         event.playSessionId?.let { body.put("PlaySessionId", it) }
         if (event.eventType != ProgressEventType.Stop) body.put("CanSeek", true)
         postJson(url(path), body.toString())
+        true
     }.onSuccess {
         DetailRecommendationCache.watchStateChanged(baseUrl, userId)
     }.onFailure {
         lastApiFailure = "report${event.eventType}: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(120)}"
-    }.isSuccess
+    }.getOrThrow()
 
     fun requestProgressFlush() = progressSender.requestFlush()
 

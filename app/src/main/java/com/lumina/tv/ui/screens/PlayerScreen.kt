@@ -56,6 +56,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -87,6 +88,8 @@ import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.Subtitles
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -386,6 +389,20 @@ fun PlayerScreen(
     var degraded by remember { mutableStateOf(false) }
     var audioDecodeMode by remember { mutableStateOf(AppRuntime.prefs?.audioDecodeMode ?: "auto") }
     var audioDecodeNotice by remember { mutableStateOf<String?>(null) }
+    var playerVolumePercent by remember(item.id) {
+        mutableIntStateOf((AppRuntime.prefs?.playerVolume ?: 100).coerceIn(0, 100))
+    }
+    var lastAudibleVolumePercent by remember(item.id) {
+        mutableIntStateOf((AppRuntime.prefs?.playerVolume ?: 100).let { if (it > 0) it.coerceAtMost(100) else 100 })
+    }
+    var volumeOsdVisible by remember(item.id) { mutableStateOf(false) }
+    var volumeOsdUntil by remember(item.id) { mutableLongStateOf(0L) }
+    var activeAudioPassthrough by remember(item.id) { mutableStateOf(false) }
+    var passthroughVolumeAdjustments by remember(item.id) { mutableIntStateOf(0) }
+    var passthroughPromptShown by remember(item.id) { mutableStateOf(false) }
+    var passthroughPromptVisible by remember(item.id) { mutableStateOf(false) }
+    val inputSilenceUntil = remember(item.id) { android.os.SystemClock.elapsedRealtime() + 600L }
+    var lastMediaPlayPauseAt by remember(item.id) { mutableLongStateOf(-800L) }
 
     LaunchedEffect(controlsVisible) {
         if (controlsVisible) {
@@ -647,7 +664,16 @@ fun PlayerScreen(
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setMediaCodecSelector(codecSelector)
             .setEnableDecoderFallback(true)
+        val trackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context)
+            .apply {
+                setParameters(
+                    buildUponParameters()
+                        .setAllowInvalidateSelectionsOnRendererCapabilitiesChange(true)
+                        .build(),
+                )
+            }
         val playerBuilder = ExoPlayer.Builder(context, renderers)
+            .setTrackSelector(trackSelector)
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
         if (fastStart) {
             playerBuilder.setLoadControl(DefaultLoadControl.Builder()
@@ -663,6 +689,7 @@ fun PlayerScreen(
             .build()
             .apply {
                 PlayerLifecycle.registry.created(this, "media3", "playback:${item.id}")
+                volume = playerVolumePercent / 100f
                 setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
                     activeEngine != "mpv")
                 playWhenReady = true
@@ -928,6 +955,8 @@ fun PlayerScreen(
         val sample = (observedPlayerPositionMs() ?: lastPlayerPositionMs)?.let(::timelinePosition)
         val retryIntent = explicitIntent ?: playbackReloadIntent(recoveryStartIntent, sample)
         reportStopInAppScope()
+        activeAudioPassthrough = false
+        passthroughVolumeAdjustments = 0
         reloadPending = true
         reloadUsesRecoveryAttempt = recovering
         media3LoadGeneration = -1
@@ -1673,6 +1702,7 @@ fun PlayerScreen(
                         handleMpvFailure(MpvPlayerController.FailureKind.INITIALIZATION, initialization.reason, generation)
                         return@launch
                     }
+                    backend.setVolumePercent(playerVolumePercent)
                     backend.diagnosticLoadIdentity()?.let { load ->
                         playbackDiagnostics.activate(load, android.os.SystemClock.elapsedRealtime())
                         phaseTimes.put("identity", playbackDiagnostics.identityJson())
@@ -1900,7 +1930,7 @@ fun PlayerScreen(
         }
     }
 
-    fun togglePlayback() {
+    fun togglePlayback(src: String = "player") {
         if (exitPending) return
         desiredPlaying = !desiredPlaying
         if (!desiredPlaying) cancelCreditsCountdown("pause")
@@ -1908,6 +1938,45 @@ fun PlayerScreen(
             "mpv" -> if (desiredPlaying) mpvBackend?.play() else mpvBackend?.pause()
             else -> if (desiredPlaying) exo.play() else exo.pause()
         }
+        pauseIndicatorUntil = android.os.SystemClock.elapsedRealtime() + 1200L
+        PageLog.add("togglePlay src=$src state=${if (desiredPlaying) "playing" else "paused"}")
+    }
+
+    fun setPlayerVolume(percent: Int) {
+        val value = percent.coerceIn(0, 100)
+        playerVolumePercent = value
+        if (value > 0) lastAudibleVolumePercent = value
+        AppRuntime.prefs?.playerVolume = value
+        if (activeEngine == "mpv") mpvBackend?.setVolumePercent(value) else exo.volume = value / 100f
+        volumeOsdUntil = android.os.SystemClock.elapsedRealtime() + 1_500L
+        volumeOsdVisible = true
+        if (activeAudioPassthrough) {
+            passthroughVolumeAdjustments++
+            if (passthroughVolumeAdjustments >= 2 && !passthroughPromptShown) {
+                passthroughPromptShown = true
+                passthroughPromptVisible = true
+                PageLog.add("audioSink volume-unchanged adjustments=$passthroughVolumeAdjustments action=offer-soft")
+            }
+        } else {
+            passthroughVolumeAdjustments = 0
+        }
+    }
+
+    fun switchToSoftAudio() {
+        if (!passthroughPromptVisible) return
+        passthroughPromptVisible = false
+        audioDecodeMode = "soft"
+        AppRuntime.prefs?.audioDecodeMode = "soft"
+        enginePinned = "mpv"
+        reloadForceTranscode = false
+        PageLog.add("audioSink action=soft-decode engine=$enginePinned")
+        requestPlaybackReload(sessionGeneration)
+    }
+
+    fun currentVolumePercent(): Int = if (activeEngine == "mpv") {
+        mpvBackend?.volumePercent() ?: playerVolumePercent
+    } else {
+        (exo.volume * 100f + 0.5f).toInt().coerceIn(0, 100)
     }
 
     fun setPlaybackSpeed(value: Float) {
@@ -2372,7 +2441,6 @@ fun PlayerScreen(
         onDispose { exo.removeListener(listener) }
     }
 
-    var passthroughVolumeNoticeShown by remember(item.id) { mutableStateOf(false) }
     DisposableEffect(exo) {
         val analytics = object : AnalyticsListener {
             override fun onAudioDecoderInitialized(
@@ -2402,12 +2470,8 @@ fun PlayerScreen(
                 val offload = audioTrackConfig.offload
                 val passthrough = encoding != C.ENCODING_PCM_16BIT || offload
                 PageLog.add("audioSink passthrough=$passthrough encoding=$encoding offload=$offload")
-                if (passthrough && !passthroughVolumeNoticeShown) {
-                    passthroughVolumeNoticeShown = true
-                    android.widget.Toast.makeText(
-                        context, "直通模式音量由电视/功放控制", android.widget.Toast.LENGTH_LONG,
-                    ).show()
-                }
+                activeAudioPassthrough = passthrough
+                passthroughVolumeAdjustments = 0
                 playbackDiagnostics.identity?.let { load ->
                     playbackDiagnostics.audioTrack(load, audioTrackConfig.encoding, audioTrackConfig.sampleRate,
                         audioTrackConfig.channelConfig, audioTrackConfig.offload)
@@ -2418,6 +2482,8 @@ fun PlayerScreen(
                 eventTime: AnalyticsListener.EventTime, audioTrackConfig: androidx.media3.exoplayer.audio.AudioSink.AudioTrackConfig,
             ) {
                 if (!isCurrentMedia3Event(eventTime)) return
+                activeAudioPassthrough = false
+                passthroughVolumeAdjustments = 0
                 playbackDiagnostics.identity?.let { playbackDiagnostics.releaseAudioTrack(it) }
             }
 
@@ -2624,10 +2690,7 @@ fun PlayerScreen(
         hiddenInputState = transition.state
         transition.actions.forEach { action -> when (action) {
             HiddenPlaybackAction.ShowControls -> controlsVisible = true
-            HiddenPlaybackAction.TogglePlay -> {
-                togglePlayback()
-                pauseIndicatorUntil = android.os.SystemClock.elapsedRealtime() + 1200
-            }
+            HiddenPlaybackAction.TogglePlay -> togglePlayback("hidden-input")
             is HiddenPlaybackAction.Boost -> setBoostActive(action.enabled)
             is HiddenPlaybackAction.BeginSeek -> beginSeekHold(action.direction, action.repeat)
             is HiddenPlaybackAction.EndSeek -> endSeekHold(action.direction)
@@ -2869,6 +2932,17 @@ fun PlayerScreen(
         label = "pauseIndicatorAlpha",
     )
 
+    LaunchedEffect(volumeOsdUntil) {
+        if (volumeOsdUntil <= 0L) return@LaunchedEffect
+        delay((volumeOsdUntil - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+        if (volumeOsdUntil <= android.os.SystemClock.elapsedRealtime()) volumeOsdVisible = false
+    }
+    LaunchedEffect(passthroughPromptVisible) {
+        if (!passthroughPromptVisible) return@LaunchedEffect
+        delay(8_000L)
+        passthroughPromptVisible = false
+    }
+
     LaunchedEffect(controlsVisible, optionMenu, quickPanel, hiddenInputState.active) {
         delay(80)
         if (!optionMenu && quickPanel == QuickPanel.NONE &&
@@ -3020,12 +3094,39 @@ fun PlayerScreen(
 
     Box(
         Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
-            if (event.key == Key.MediaPlayPause && event.type == KeyEventType.KeyDown) {
-                if (event.nativeKeyEvent.repeatCount == 0) {
-                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now < inputSilenceUntil) return@onPreviewKeyEvent true
+            if (passthroughPromptVisible) {
+                if ((event.key == Key.DirectionCenter || event.key == Key.Enter) &&
+                    event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0
+                ) {
+                    switchToSoftAudio()
+                } else if (event.key == Key.Back && event.type == KeyEventType.KeyDown) {
+                    passthroughPromptVisible = false
+                }
+                return@onPreviewKeyEvent true
+            }
+            if (event.key == Key.VolumeUp || event.key == Key.VolumeDown || event.key == Key.VolumeMute) {
+                if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0) {
+                    lastInteractionAt = now
+                    when (event.key) {
+                        Key.VolumeUp -> setPlayerVolume(currentVolumePercent() + 5)
+                        Key.VolumeDown -> setPlayerVolume(currentVolumePercent() - 5)
+                        Key.VolumeMute -> setPlayerVolume(
+                            if (currentVolumePercent() == 0) lastAudibleVolumePercent else 0,
+                        )
+                    }
+                }
+                return@onPreviewKeyEvent true
+            }
+            if (event.key == Key.MediaPlayPause) {
+                if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0 &&
+                    now - lastMediaPlayPauseAt >= 800L
+                ) {
+                    lastMediaPlayPauseAt = now
+                    lastInteractionAt = now
                     if (creditsCountdown.nextItem != null) cancelCreditsCountdown("remote-key", allowRestart = false)
-                    togglePlayback()
-                    pauseIndicatorUntil = android.os.SystemClock.elapsedRealtime() + 1200
+                    togglePlayback("media-play-pause")
                 }
                 return@onPreviewKeyEvent true
             }
@@ -3038,8 +3139,8 @@ fun PlayerScreen(
             if (capturedKey != null && (!controlsVisible || hiddenInputState.active) &&
                 !optionMenu && quickPanel == QuickPanel.NONE && error == null) {
                 val input = if (event.nativeKeyEvent.isCanceled) HiddenPlaybackEvent.Cancel else when (event.type) {
-                    KeyEventType.KeyDown -> HiddenPlaybackEvent.Down(capturedKey, event.nativeKeyEvent.repeatCount)
-                    KeyEventType.KeyUp -> HiddenPlaybackEvent.Up(capturedKey)
+                    KeyEventType.KeyDown -> HiddenPlaybackEvent.Down(capturedKey, event.nativeKeyEvent.repeatCount, event.nativeKeyEvent.keyCode)
+                    KeyEventType.KeyUp -> HiddenPlaybackEvent.Up(capturedKey, event.nativeKeyEvent.keyCode)
                     else -> null
                 }
                 if (input != null) {
@@ -4141,6 +4242,45 @@ fun PlayerScreen(
                 },
                 onClose = { closeOptionMenu() },
             )
+        }
+        AnimatedVisibility(
+            visible = volumeOsdVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 32.dp, bottom = 156.dp),
+        ) {
+            Column(
+                Modifier.background(Color(0xE6070A12), RoundedCornerShape(6.dp)).padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Icon(
+                        if (playerVolumePercent == 0) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
+                        contentDescription = "音量",
+                        tint = TextMain,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Text("$playerVolumePercent%", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Box(Modifier.width(150.dp).height(4.dp).background(Color(0x44FFFFFF), RoundedCornerShape(2.dp))) {
+                    Box(
+                        Modifier.fillMaxWidth(playerVolumePercent / 100f).fillMaxHeight()
+                            .background(Accent, RoundedCornerShape(2.dp)),
+                    )
+                }
+            }
+        }
+        if (passthroughPromptVisible) {
+            Box(Modifier.fillMaxSize().background(Color(0x99000000)), contentAlignment = Alignment.Center) {
+                GlassPanel(Modifier.width(520.dp), corner = 8.dp, fillColor = Color(0xF018202B)) {
+                    Text(
+                        "当前为音频直通，音量由电视/功放控制；按 OK 切换本地软解",
+                        Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
+                        color = TextMain,
+                        fontSize = 16.sp,
+                    )
+                }
+            }
         }
         audioDecodeNotice?.let { notice ->
             Text(notice, Modifier.align(Alignment.BottomEnd).padding(24.dp).background(Color(0xAA10141D), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 8.dp), color = TextMain, fontSize = 11.sp)

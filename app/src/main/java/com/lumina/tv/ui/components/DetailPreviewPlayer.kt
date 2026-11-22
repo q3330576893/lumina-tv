@@ -7,6 +7,8 @@ import android.os.Looper
 import android.view.Surface
 import android.view.TextureView
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
@@ -63,9 +65,13 @@ internal class DetailPreviewPlayer(
                 val current = build(worker.looper)
                 player = current
                 PlayerLifecycle.registry.created(current, "media3", "detail-preview")
-                current.volume = 0f
+                enforceSilentAudio(current)
                 if (loopWholeItem) current.repeatMode = Player.REPEAT_MODE_ONE
                 current.addListener(object : Player.Listener {
+                    override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                        enforceSilentAudio(current)
+                    }
+
                     override fun onVideoSizeChanged(videoSize: VideoSize) {
                         if (videoSize.width > 0 && videoSize.height > 0) {
                             val aspect = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
@@ -74,6 +80,7 @@ internal class DetailPreviewPlayer(
                     }
 
                     override fun onPlaybackStateChanged(state: Int) {
+                        if (state == Player.STATE_READY) enforceSilentAudio(current)
                         if (loopWholeItem) return
                         if (state == Player.STATE_READY) {
                             val duration = current.duration.takeIf { it > 0 }
@@ -131,6 +138,14 @@ internal class DetailPreviewPlayer(
         if (playing && current.playbackState == Player.STATE_IDLE) current.prepare()
         worker.removeCallbacks(loopCheck)
         if (playing && !loopWholeItem) worker.postDelayed(loopCheck, 250L)
+    }
+
+    private fun enforceSilentAudio(target: ExoPlayer) {
+        target.setAudioAttributes(AudioAttributes.DEFAULT, false)
+        target.trackSelectionParameters = target.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+            .build()
+        target.volume = 0f
     }
 
     fun close() {

@@ -8,7 +8,7 @@ internal data class MpvEndFileEvidence(
     val durationMs: Long?,
     val stopped: Boolean = false,
     val failureKind: MpvPlayerController.FailureKind? = null,
-    val errorLogSeen: Boolean = false,
+    val unrecoveredError: Boolean = false,
 )
 
 /** Native callbacks record before posting to the UI. An END_FILE snapshot is
@@ -18,23 +18,37 @@ internal class MpvEndFileTracker {
     private var durationMs: Long? = null
     private var stopped = false
     private var failureKind: MpvPlayerController.FailureKind? = null
-    private var errorLogSeen = false
+    private var lastErrorAtNanos: Long? = null
+    private var lastProgressAtNanos: Long? = null
 
     @Synchronized fun property(name: String, value: Double) {
         val sample = mpvSecondsToMs(value) ?: return
-        if (name == "time-pos") positionMs = sample
+        if (name == "time-pos") {
+            if (sample > (positionMs ?: 0L)) lastProgressAtNanos = System.nanoTime()
+            positionMs = sample
+        }
         if (name == "duration" && sample > 0L) durationMs = sample
     }
 
     @Synchronized fun log(level: Int, text: String) {
         if (!isMpvErrorLogLevel(level)) return
-        errorLogSeen = true
+        if (!hasUnrecoveredError()) failureKind = null
+        lastErrorAtNanos = System.nanoTime()
         mpvEndFailureKind(level, text)?.let { failureKind = it }
     }
 
     @Synchronized fun stop() { stopped = true }
 
-    @Synchronized fun snapshot() = MpvEndFileEvidence(positionMs, durationMs, stopped, failureKind, errorLogSeen)
+    @Synchronized fun snapshot(): MpvEndFileEvidence {
+        val unrecovered = hasUnrecoveredError()
+        return MpvEndFileEvidence(positionMs, durationMs, stopped, failureKind.takeIf { unrecovered }, unrecovered)
+    }
+
+    private fun hasUnrecoveredError(): Boolean {
+        val errorAt = lastErrorAtNanos ?: return false
+        val progressAt = lastProgressAtNanos ?: return true
+        return progressAt - errorAt <= 0L
+    }
 }
 
 internal fun mpvSecondsToMs(value: Double?): Long? =
@@ -45,9 +59,7 @@ internal fun mpvSecondsToMs(value: Double?): Long? =
 internal fun classifyMpvEndFile(evidence: MpvEndFileEvidence): MpvEndKind {
     if (evidence.stopped) return MpvEndKind.STOP
     if (evidence.failureKind != null) return MpvEndKind.ERROR
-    // An unrelated/recovered native error line vetoes EOF, but cannot prove
-    // that this END_FILE was a failure. Keep that ambiguity neutral too.
-    if (evidence.errorLogSeen) return MpvEndKind.UNKNOWN
+    if (evidence.unrecoveredError) return MpvEndKind.UNKNOWN
     val position = evidence.positionMs ?: return MpvEndKind.UNKNOWN
     val duration = evidence.durationMs?.takeIf { it > 0L } ?: return MpvEndKind.UNKNOWN
     val tolerance = minOf(1_000L, duration / 10L).coerceAtLeast(1L)

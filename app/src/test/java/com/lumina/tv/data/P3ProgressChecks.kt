@@ -25,8 +25,9 @@ object P3ProgressChecks {
             queueIdentityAndMigration()
             concurrentClose()
             requestTimeoutAndOwnerCancellation()
+            httpFailureClassification()
         }
-        println("P3 PASS: A seek-back ACK; B old Stop/new session; one sender for live/retry; exact ACK; Stop deduplication; closed heartbeat rejection; orphan migration; timeout/cancellation")
+        println("P3 PASS: A seek-back ACK; B old Stop/new session; one sender for live/retry; exact ACK; Stop deduplication; closed heartbeat rejection; orphan migration; timeout/cancellation; HTTP failure classification")
     }
 
     private data class Attempt(val event: PendingProgress, val response: CompletableDeferred<Boolean>)
@@ -205,6 +206,31 @@ object P3ProgressChecks {
             h.drain()
         } finally {
             h.close()
+        }
+    }
+
+    private suspend fun httpFailureClassification() = coroutineScope {
+        for (status in listOf(400, 401, 403, 404, 410, 499, 408, 429, 500, 503)) {
+            val harness = Harness(this)
+            try {
+                harness.start()
+                val failed = harness.next()
+                harness.sender.start("next-item", 0L, null, "emby-next", "DirectPlay", false)
+                failed.response.completeExceptionally(EmbyException("HTTP $status", status))
+                val retryable = status == 408 || status == 429 || status >= 500
+                if (retryable) {
+                    val retry = harness.next()
+                    check(retry.event == failed.event) { "HTTP $status discarded a retryable event" }
+                    retry.response.complete(true)
+                }
+                val next = harness.next()
+                check(next.event.itemId == "next-item") { "HTTP $status blocked the next item" }
+                next.response.complete(true)
+                harness.drain()
+                check(harness.sent.count { it.eventId == failed.event.eventId } == if (retryable) 2 else 1)
+            } finally {
+                harness.close()
+            }
         }
     }
 

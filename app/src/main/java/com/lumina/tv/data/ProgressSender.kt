@@ -1,5 +1,6 @@
 package com.lumina.tv.data
 
+import com.lumina.tv.diag.PageLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
@@ -56,24 +57,31 @@ internal class ProgressSender(
         for (ignored in wakeups) {
             while (true) {
                 val event = queue.claimNext() ?: break
-                val sent = try {
-                    val success = if (!queue.flushAndAwait()) false else try {
+                val handled = try {
+                    val terminal = if (!queue.flushAndAwait()) false else try {
                         send(event)
                     } catch (cancelled: CancellationException) {
                         // A single request's deadline must not retire the application sender.
                         currentCoroutineContext().ensureActive()
                         false
+                    } catch (failure: EmbyException) {
+                        val status = failure.httpStatus
+                        val permanentFailure = status != null && status in 400..499 && status != 408 && status != 429
+                        if (permanentFailure) runCatching {
+                            PageLog.add("progress dropped event=${event.eventType} eventId=${event.eventId} http=$status")
+                        }
+                        permanentFailure
                     } catch (_: Exception) {
                         false
                     }
-                    if (success) synchronized(admissionLock) {
+                    if (terminal) synchronized(admissionLock) {
                         if (!closed) queue.acknowledge(event)
                     }
-                    success
+                    terminal
                 } finally {
                     queue.release(event)
                 }
-                if (!sent) {
+                if (!handled) {
                     // Keep the failed head ahead of newer events; there is no separate live path.
                     delay(retryDelayMs)
                 }

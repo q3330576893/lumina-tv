@@ -96,6 +96,10 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getInt("seek_step_seconds", 10).takeIf { it in setOf(5, 10, 15, 30) } ?: 10
         set(v) = sp.edit().putInt("seek_step_seconds", v.takeIf { it in setOf(5, 10, 15, 30) } ?: 10).apply()
 
+    var playerVolume: Int
+        get() = sp.getInt("player_volume", 100).coerceIn(0, 100)
+        set(v) = sp.edit().putInt("player_volume", v.coerceIn(0, 100)).apply()
+
     var decoderPreference: String
         get() = sp.getString("decoder_preference", "auto") ?: "auto"
         set(v) = sp.edit().putString("decoder_preference", v).apply()
@@ -268,14 +272,6 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         else -> "track:$stored"
     }
 
-    private fun migratedSubtitleValue(key: String, legacyKey: String): String? {
-        sp.getString(key, null)?.let { return it }
-        val legacy = sp.getString(legacyKey, null) ?: return null
-        val value = normalizeSubtitlePreference(legacy)
-        sp.edit().putString(key, value).remove(legacyKey).apply()
-        return value
-    }
-
     fun subtitleModeFor(itemId: String, source: MediaSource? = null): SubtitleMode = when {
         subtitlePreferenceFor(itemId, source) == "off" -> SubtitleMode.OFF
         subtitlePreferenceFor(itemId, source)?.startsWith("track:") == true -> SubtitleMode.TRACK
@@ -285,7 +281,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     fun subtitlePreferenceFor(itemId: String, source: MediaSource? = null): String? {
         val key = itemKey("subtitle_track", itemId)
         // 只读该片的手动记忆；旧的跨片字幕轨/关闭状态不能遮住全局语言偏好。
-        val stored = migratedSubtitleValue(key, "subtitle_track_$itemId")
+        val stored = sp.getString(key, null)
             ?: return null
         val value = normalizeSubtitlePreference(stored)
         if (value != stored) sp.edit().putString(key, value).apply()

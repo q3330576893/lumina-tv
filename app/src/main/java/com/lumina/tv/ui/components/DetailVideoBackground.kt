@@ -28,6 +28,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.Cache
@@ -214,7 +216,13 @@ private fun DetailVideoPlayback(
                     ExoPlayer.Builder(context)
                         .setLooper(looper)
                         .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory))
-                        .build().apply { setMediaItem(media.build()) }
+                        .build().apply {
+                            setAudioAttributes(AudioAttributes.DEFAULT, false)
+                            trackSelectionParameters = trackSelectionParameters.buildUpon()
+                                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                                .build()
+                            setMediaItem(media.build())
+                        }
                 },
                 onWorkerFirstFrame = {
                     if (!usingCache && synchronized(recovery) { recovery.shouldRemove(freshFrame = true) }) {

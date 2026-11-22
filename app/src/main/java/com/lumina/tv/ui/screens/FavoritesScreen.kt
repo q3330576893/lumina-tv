@@ -120,9 +120,9 @@ internal fun FavoritesScreen(
             }
             BoxWithConstraints {
                 val gridColumns = when {
-                    maxWidth < 1400.dp -> 5
-                    maxWidth < 2400.dp -> 7
-                    else -> 9
+                    maxWidth < 1400.dp -> 6
+                    maxWidth < 2400.dp -> 9
+                    else -> 11
                 }
                 val cardWidth = (maxWidth - 40.dp * 2 - 20.dp * (gridColumns - 1)) / gridColumns
                 LazyVerticalGrid(

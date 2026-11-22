@@ -5,11 +5,14 @@ internal data class HiddenPlaybackInputState(
     val key: HiddenPlaybackKey? = null,
     val downAtMs: Long = 0,
     val boosted: Boolean = false,
+    val physicalCode: Int? = null,
+    val lastUpPhysicalCode: Int? = null,
+    val lastUpAtMs: Long = Long.MIN_VALUE,
 ) { val active: Boolean get() = key != null }
 
 internal sealed interface HiddenPlaybackEvent {
-    data class Down(val key: HiddenPlaybackKey, val repeat: Int) : HiddenPlaybackEvent
-    data class Up(val key: HiddenPlaybackKey) : HiddenPlaybackEvent
+    data class Down(val key: HiddenPlaybackKey, val repeat: Int, val physicalCode: Int? = null) : HiddenPlaybackEvent
+    data class Up(val key: HiddenPlaybackKey, val physicalCode: Int? = null) : HiddenPlaybackEvent
     data object HoldTimeout : HiddenPlaybackEvent
     data object Cancel : HiddenPlaybackEvent
     data object Tap : HiddenPlaybackEvent
@@ -30,6 +33,7 @@ internal data class HiddenPlaybackTransition(
 )
 
 internal const val HIDDEN_OK_HOLD_MS = 480L
+private const val HIDDEN_DUPLICATE_UP_WINDOW_MS = 400L
 
 /** Captured at Down, retained through recomposition until Up/cancel. All times are monotonic. */
 internal fun reduceHiddenPlaybackInput(
@@ -44,31 +48,51 @@ internal fun reduceHiddenPlaybackInput(
         HiddenPlaybackKey.RIGHT -> listOf(HiddenPlaybackAction.EndSeek(1))
         null -> emptyList()
     }
+    fun cleared(lastUpPhysicalCode: Int? = state.lastUpPhysicalCode, lastUpAtMs: Long = state.lastUpAtMs) =
+        HiddenPlaybackInputState(lastUpPhysicalCode = lastUpPhysicalCode, lastUpAtMs = lastUpAtMs)
     return when (event) {
-        HiddenPlaybackEvent.Cancel -> HiddenPlaybackTransition(HiddenPlaybackInputState(), actions = endActions())
+        HiddenPlaybackEvent.Cancel -> HiddenPlaybackTransition(cleared(), actions = endActions())
         HiddenPlaybackEvent.Tap -> if (canStart)
-            HiddenPlaybackTransition(HiddenPlaybackInputState(), true, endActions() + HiddenPlaybackAction.TogglePlay)
+            HiddenPlaybackTransition(cleared(), true, endActions() + HiddenPlaybackAction.TogglePlay)
             else HiddenPlaybackTransition(state)
         HiddenPlaybackEvent.HoldTimeout -> if (state.key == HiddenPlaybackKey.OK && !state.boosted && nowMs - state.downAtMs >= HIDDEN_OK_HOLD_MS)
             HiddenPlaybackTransition(state.copy(boosted = true), true, listOf(HiddenPlaybackAction.Boost(true)))
             else HiddenPlaybackTransition(state)
         is HiddenPlaybackEvent.Down -> {
-            if ((!state.active && (!canStart || event.repeat != 0)) || state.active && state.key != event.key)
-                HiddenPlaybackTransition(state, state.active)
-            else {
-                val next = if (state.active) state else HiddenPlaybackInputState(event.key, nowMs)
+            val physicalCode = event.physicalCode ?: event.key.ordinal
+            if (!state.active) {
+                if (!canStart || event.repeat != 0) return HiddenPlaybackTransition(state)
+                val next = state.copy(key = event.key, downAtMs = nowMs, boosted = false, physicalCode = physicalCode)
+                val actions = when (event.key) {
+                    HiddenPlaybackKey.OK -> emptyList()
+                    HiddenPlaybackKey.LEFT -> listOf(HiddenPlaybackAction.BeginSeek(-1, 0))
+                    HiddenPlaybackKey.RIGHT -> listOf(HiddenPlaybackAction.BeginSeek(1, 0))
+                }
+                HiddenPlaybackTransition(next, true, actions)
+            } else if (state.key != event.key || state.physicalCode != physicalCode) {
+                HiddenPlaybackTransition(state, true)
+            } else if (event.repeat == 0) {
+                HiddenPlaybackTransition(state, true)
+            } else {
                 val actions = when (event.key) {
                     HiddenPlaybackKey.OK -> emptyList()
                     HiddenPlaybackKey.LEFT -> listOf(HiddenPlaybackAction.BeginSeek(-1, event.repeat))
                     HiddenPlaybackKey.RIGHT -> listOf(HiddenPlaybackAction.BeginSeek(1, event.repeat))
                 }
-                HiddenPlaybackTransition(next, true, actions)
+                HiddenPlaybackTransition(state, true, actions)
             }
         }
-        is HiddenPlaybackEvent.Up -> if (state.key != event.key) HiddenPlaybackTransition(state) else {
+        is HiddenPlaybackEvent.Up -> {
+            val physicalCode = event.physicalCode ?: event.key.ordinal
+            if (state.key != event.key || state.physicalCode != physicalCode) {
+                val duplicate = !state.active && state.lastUpPhysicalCode == physicalCode &&
+                    nowMs - state.lastUpAtMs in 0 until HIDDEN_DUPLICATE_UP_WINDOW_MS
+                HiddenPlaybackTransition(state, duplicate)
+            } else {
             val shortOk = state.key == HiddenPlaybackKey.OK && !state.boosted && nowMs - state.downAtMs < HIDDEN_OK_HOLD_MS
-            HiddenPlaybackTransition(HiddenPlaybackInputState(), true,
-                endActions() + if (shortOk) listOf(HiddenPlaybackAction.TogglePlay) else emptyList())
+                HiddenPlaybackTransition(cleared(physicalCode, nowMs), true,
+                    endActions() + if (shortOk) listOf(HiddenPlaybackAction.TogglePlay) else emptyList())
+            }
         }
     }
 }

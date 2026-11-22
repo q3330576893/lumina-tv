@@ -24,16 +24,19 @@ internal class CrashStore(private val directory: File, private val maxStatsBytes
         writeStats(stats)
     }
 
-    fun recordJava(fingerprint: String, report: String, at: Long) = synchronized(lock) {
+    fun recordJava(fingerprint: String, report: String, at: Long, details: (() -> String)? = null) = synchronized(lock) {
+        // A duplicate fingerprint suppresses history only; the current scene is always refreshed.
+        val latest = File(directory, "crash-latest.txt")
+        latest.writeText(LogRedactor.redact(report), Charsets.UTF_8)
+        if (details != null) {
+            runCatching { latest.appendText(LogRedactor.redact(details()), Charsets.UTF_8) }
+        }
         val stats = writableStats()
         val entry = stats.optJSONObject(fingerprint) ?: JSONObject()
         val count = entry.optInt("count", 0) + 1
         entry.put("type", "JAVA").put("count", count).put("lastAt", at)
         stats.put(fingerprint, entry)
 
-        // A duplicate fingerprint suppresses history only; the current scene is always refreshed.
-        val safe = LogRedactor.redact(report)
-        File(directory, "crash-latest.txt").writeText(safe, Charsets.UTF_8)
         if (count == 1) {
             for (n in 5 downTo 2) {
                 runCatching {
@@ -41,7 +44,7 @@ internal class CrashStore(private val directory: File, private val maxStatsBytes
                         ?.copyTo(File(directory, "crash-$n.txt"), overwrite = true)
                 }
             }
-            runCatching { File(directory, "crash-1.txt").writeText(safe, Charsets.UTF_8) }
+            runCatching { latest.copyTo(File(directory, "crash-1.txt"), overwrite = true) }
         }
         writeStats(stats)
     }

@@ -19,6 +19,7 @@ import kotlinx.coroutines.CompletableDeferred
 import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.json.JSONArray
+import kotlin.math.roundToInt
 
 internal fun shouldSyncMpvAudioTrack(
     ready: Boolean,
@@ -27,26 +28,48 @@ internal fun shouldSyncMpvAudioTrack(
     hasPendingManualAudio: Boolean,
 ): Boolean = ready && hasPendingManualAudio && (becameReady || trackListChanged)
 
-internal data class MpvHttpHeadersResult(val mode: String, val accepted: Int, val total: Int) {
-    val diagnostic: String get() = "mpv headers mode=$mode accepted=$accepted/$total"
-    val complete: Boolean get() = accepted == total
+internal data class MpvHttpHeadersResult(
+    val mode: String,
+    val accepted: Int,
+    val total: Int,
+    val failedNames: List<String>,
+) {
+    val diagnostic: String get() = "mpv headers mode=$mode accepted=$accepted headers=$total"
+    val complete: Boolean get() = total == 0 || accepted == 1
     val notice: String? get() = if (complete) null else
-        "mpv 缺少 ${total - accepted}/$total 个请求头，需要 Referer 或鉴权头的片源可能无法播放"
+        "mpv 请求头设置失败：${failedNames.size}/$total（缺 Referer 或鉴权头的片源可能无法播放）"
 }
 
-/** A physical load has a fresh mpv instance, hence an initially empty header list.
- * -append accepts one literal element (including commas and backslashes). The
- * pinned binding cannot read a structured string-list, so do not fall back to a
- * void string setter + lossy print_str_list readback and claim it was verified. */
 internal fun applyMpvHttpHeaders(
     headers: Map<String, String>,
     setOptionString: (String, String) -> Int,
+    getPropertyString: ((String) -> String?)? = null,
+    logEmptyValue: (String) -> Unit = {},
 ): MpvHttpHeadersResult {
-    if (headers.isEmpty()) return MpvHttpHeadersResult("none", 0, 0)
-    val accepted = headers.count { (name, value) ->
-        mpvHeaderApiAccepted { setOptionString("http-header-fields-append", "$name: $value") }
+    val cleanHeaders = headers.mapNotNull { (name, value) ->
+        if (name.isEmpty() || ':' in name) return@mapNotNull null
+        val cleanValue = value.replace("\r", "").replace("\n", "")
+        if (cleanValue.isEmpty()) logEmptyValue(name)
+        name to cleanValue
     }
-    return MpvHttpHeadersResult("append", accepted, headers.size)
+    if (cleanHeaders.isEmpty()) return MpvHttpHeadersResult("none", 0, 0, emptyList())
+
+    val value = cleanHeaders.joinToString(",") { (name, headerValue) ->
+        escapeMpvHeaderElement("$name: $headerValue")
+    }
+    val accepted = if (mpvHeaderApiAccepted { setOptionString("http-header-fields", value) }) 1 else 0
+    val readbackCount = if (accepted == 1 && getPropertyString != null) {
+        mpvHeaderProperty { getPropertyString("options/http-header-fields") }
+            ?.let(::mpvStringListElementCount)
+    } else null
+    val mode = when {
+        accepted == 0 -> "string-failed"
+        getPropertyString == null || readbackCount == null -> "string"
+        readbackCount == cleanHeaders.size -> "string-verified"
+        else -> "string-count-mismatch"
+    }
+    val failedNames = if (accepted == 0) cleanHeaders.map { it.first } else emptyList()
+    return MpvHttpHeadersResult(mode, accepted, cleanHeaders.size, failedNames)
 }
 
 private inline fun mpvHeaderApiAccepted(call: () -> Int): Boolean = try {
@@ -55,6 +78,35 @@ private inline fun mpvHeaderApiAccepted(call: () -> Int): Boolean = try {
     false
 } catch (_: LinkageError) {
     false
+}
+
+private inline fun mpvHeaderProperty(call: () -> String?): String? = try {
+    call()
+} catch (_: Exception) {
+    null
+} catch (_: LinkageError) {
+    null
+}
+
+private fun escapeMpvHeaderElement(value: String): String =
+    value.replace("\\", "\\\\").replace(",", "\\,")
+
+private fun mpvStringListElementCount(value: String): Int {
+    if (value.isEmpty()) return 0
+    var count = 1
+    var index = 0
+    while (index < value.length) {
+        when {
+            value[index] == '\\' && index + 1 < value.length &&
+                (value[index + 1] == '\\' || value[index + 1] == ',') -> index += 2
+            value[index] == ',' -> {
+                count++
+                index++
+            }
+            else -> index++
+        }
+    }
+    return count
 }
 
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
@@ -324,6 +376,7 @@ class MpvPlayerController(
     private val subtitleOptions = linkedMapOf<String, String>()
     private var subtitleDelayMs = 0L
     private var playbackSpeed = 1f
+    private var requestedVolumePercent = 100
     private var aspectMode = 0
 
     fun setAspectMode(mode: Int) {
@@ -354,6 +407,8 @@ class MpvPlayerController(
             }
             if (attachedSurface !== surface || resolvedWidth != lastSurfaceWidth || resolvedHeight != lastSurfaceHeight) {
                 Log.i(TAG, "${timestamp()} attached surface ${resolvedWidth}x$resolvedHeight, vo=gpu")
+                runCatching { mpv?.setPropertyString("vo", "gpu") }
+                    .onFailure { appendMpvLog("${timestamp()} mpv vo=gpu unsupported: ${it.message}") }
                 runCatching { mpv?.setPropertyString("android-surface-size", "${resolvedWidth}x${resolvedHeight}") }
                 lastSurfaceWidth = resolvedWidth
                 lastSurfaceHeight = resolvedHeight
@@ -372,6 +427,10 @@ class MpvPlayerController(
         checkMainThread()
         if (!released) {
             Log.i(TAG, "${timestamp()} MPVLib.detachSurface")
+            // mpv-android parity: park the VO before detaching so a stale window cannot
+            // keep the last frame or fight the next attach.
+            runCatching { mpv?.setPropertyString("vo", "null") }
+                .onFailure { appendMpvLog("${timestamp()} mpv vo=null unsupported: ${it.message}") }
             runCatching { mpv?.detachSurface() }
             if (attachedSurface != null) Log.d(TAG, "surface detached")
             attachedSurface = null
@@ -536,15 +595,20 @@ class MpvPlayerController(
         applyAspectMode(load)
         pendingSubtitles = subtitleUrls
         runCatching {
-            val headerResult = applyMpvHttpHeaders(requestHeaders, load.engine::setOptionString)
+            val headerResult = applyMpvHttpHeaders(
+                requestHeaders,
+                load.engine::setOptionString,
+                load.engine::getPropertyString,
+            ) { name -> PageLog.add("mpv header empty value name=$name") }
             load.httpHeadersStatus = headerResult.diagnostic
             load.httpHeadersNotice = headerResult.notice
             if (headerResult.total > 0) {
-                PageLog.add("${headerResult.diagnostic} load=${load.identity.physicalId}")
+                PageLog.add("${headerResult.diagnostic} failedNames=${headerResult.failedNames.joinToString(",")} load=${load.identity.physicalId}")
             }
             subtitleOptions.forEach { (key, value) -> load.engine.setOptionString(key, value) }
             load.engine.setPropertyDouble("sub-delay", subtitleDelayMs / 1000.0)
             load.engine.setPropertyDouble("speed", playbackSpeed.toDouble())
+            load.engine.setPropertyDouble("volume", requestedVolumePercent.toDouble())
             // Apply pause before loadfile as well, so a paused load cannot briefly start audio.
             load.engine.setPropertyBoolean("pause", pauseForLoad)
             onPhysicalLoad(this, load.identity, pauseForLoad)
@@ -667,6 +731,21 @@ class MpvPlayerController(
     fun setSpeed(speed: Float) {
         playbackSpeed = speed
         if (!released) mpv?.setPropertyDouble("speed", speed.toDouble())
+    }
+
+    fun setVolumePercent(percent: Int) {
+        checkMainThread()
+        requestedVolumePercent = percent.coerceIn(0, 100)
+        PageLog.add("mpvVolume pct=$requestedVolumePercent")
+        activeLoad?.takeIf(::isActive)?.let { load ->
+            runCatching { load.engine.setPropertyDouble("volume", requestedVolumePercent.toDouble()) }
+        }
+    }
+
+    fun volumePercent(): Int? = activeLoad?.takeIf(::isActive)?.let { load ->
+        runCatching {
+            load.engine.getPropertyDouble("volume")?.takeIf { it.isFinite() }?.roundToInt()?.coerceIn(0, 100)
+        }.getOrNull()
     }
 
     fun positionMs(): Long = positionMs
@@ -1135,8 +1214,6 @@ class MpvPlayerController(
                     positionMs = captured.positionMs ?: mpvSecondsToMs(runCatching { load.engine.getPropertyDouble("time-pos") }.getOrNull()),
                     durationMs = captured.durationMs ?: mpvSecondsToMs(runCatching { load.engine.getPropertyDouble("duration") }.getOrNull()),
                     stopped = captured.stopped || latest.stopped,
-                    failureKind = captured.failureKind ?: latest.failureKind ?: load.failureKind,
-                    errorLogSeen = captured.errorLogSeen || latest.errorLogSeen,
                 )
                 val kind = classifyMpvEndFile(evidence)
                 load.endKind = kind
@@ -1144,7 +1221,7 @@ class MpvPlayerController(
                 buffering = false
                 fileLoaded = false
                 audioSilentCodec = null
-                appendMpvLog("${timestamp()} END_FILE kind=$kind pos=${evidence.positionMs} duration=${evidence.durationMs} errorLog=${evidence.errorLogSeen}")
+                appendMpvLog("${timestamp()} END_FILE kind=$kind pos=${evidence.positionMs} duration=${evidence.durationMs} errorLog=${evidence.unrecoveredError}")
                 when (kind) {
                     MpvEndKind.ERROR -> {
                         load.failureKind = checkNotNull(evidence.failureKind)
