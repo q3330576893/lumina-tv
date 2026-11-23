@@ -33,10 +33,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalContext
@@ -108,21 +110,25 @@ class MainActivity : ComponentActivity() {
             com.lumina.tv.ui.theme.ThemeRuntime.applyGlass(it.glassStyle)
             com.lumina.tv.ui.theme.ThemeRuntime.applyBase(it.baseTheme)
         }
+        // 首帧与 Compose 背景对齐，避免启动时闪一下不同底色
+        window.setBackgroundDrawable(
+            android.graphics.drawable.ColorDrawable(
+                com.lumina.tv.ui.theme.ThemeRuntime.bgTop.toArgb(),
+            ),
+        )
 
         AppRuntime.onRemoteKey = { action -> runOnUiThread { dispatchRemote(action) } }
         AppRuntime.onSearch = { kw -> runOnUiThread { if (AppRuntime.session != null) phoneSearch = kw } }
 
         setContent {
             LuminaTheme {
-                var bootDone by remember { mutableStateOf(AppRuntime.session == null) }
+                var bootDone by rememberSaveable { mutableStateOf(AppRuntime.session == null) }
                 val serverName = AppRuntime.prefs?.serverName
                     ?: AppRuntime.session?.serverName
                     ?: "Emby"
                 LaunchedEffect(Unit) {
                     if (!bootDone) {
-                        val startedAt = System.currentTimeMillis()
-                        val elapsed = System.currentTimeMillis() - startedAt
-                        if (elapsed < 600) delay(600 - elapsed)
+                        delay(320)
                         bootDone = true
                     }
                 }

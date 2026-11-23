@@ -150,6 +150,7 @@ import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.FocusScale
 import com.lumina.tv.ui.components.GlassTone
 import com.lumina.tv.ui.components.glassSurface
+import com.lumina.tv.ui.components.focusGutter
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.ResumeRemovalPill
@@ -431,6 +432,7 @@ fun HomeScreen(
     // invalidates every visible card and no longer re-requests focus in a loop.
     var restoreTargetId by rememberSaveable { mutableStateOf<String?>(null) }
     var lastGridKeyAt by remember { mutableLongStateOf(0L) }
+    val gridLogCounter = remember { intArrayOf(0) }
     var resumeRowFocused by remember { mutableStateOf(false) }
     var focusedMediaSection by rememberSaveable { mutableStateOf<String?>(null) }
     var focusedLibraryId by rememberSaveable(client) { mutableStateOf<String?>(null) }
@@ -894,7 +896,9 @@ fun HomeScreen(
         ) {
             val at = android.os.SystemClock.elapsedRealtime()
             lastGridKeyAt = at
-            PageLog.add("gridKey key=${event.key} at=$at")
+            if (com.lumina.tv.BuildConfig.DEBUG && ++gridLogCounter[0] % 20 == 0) {
+                PageLog.add("gridKey sample key=${event.key} at=$at")
+            }
         }
         if (event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
             val inResume = resumeRowFocused || (focusedMediaId != null && resume.any { it.id == focusedMediaId })
@@ -1165,10 +1169,14 @@ fun HomeScreen(
                             else -> 9
                         }
                         val cardWidth = (maxWidth - 32.dp * 2 - 12.dp * (libraryGridColumns - 1)) / libraryGridColumns
+                        val gutter = focusGutter(cardWidth, FocusScale.DENSE_GRID)
                         LazyVerticalGrid(
                             state = gridState,
                             columns = GridCells.Fixed(libraryGridColumns),
-                            contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = 12.dp, bottom = 160.dp),
+                            contentPadding = PaddingValues(
+                                start = 32.dp + gutter, end = 32.dp + gutter,
+                                top = 12.dp + gutter, bottom = 160.dp + gutter,
+                            ),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalArrangement = Arrangement.spacedBy(18.dp),
                             modifier = Modifier.fillMaxSize(),
@@ -1184,7 +1192,9 @@ fun HomeScreen(
                                     onFocused = {
                                         if (restoreTargetId != null) restoreTargetId = null
                                         focusedMediaId = media.id
-                                        PageLog.add("gridFocus id=${media.id} costMs=${android.os.SystemClock.elapsedRealtime() - lastGridKeyAt}")
+                                        if (com.lumina.tv.BuildConfig.DEBUG && ++gridLogCounter[0] % 20 == 0) {
+                                            PageLog.add("gridFocus sample id=${media.id} costMs=${android.os.SystemClock.elapsedRealtime() - lastGridKeyAt}")
+                                        }
                                     },
                                     onClick = {
                                         restoreTargetId = media.id
@@ -1220,10 +1230,14 @@ fun HomeScreen(
                         else -> 9
                     }
                     val cardWidth = (maxWidth - 32.dp * 2 - 12.dp * (gridColumns - 1)) / gridColumns
+                    val gutter = focusGutter(cardWidth, FocusScale.DENSE_GRID)
                     LazyVerticalGrid(
                         state = gridState,
                         columns = GridCells.Fixed(gridColumns),
-                        contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = 76.dp, bottom = 160.dp),
+                        contentPadding = PaddingValues(
+                            start = 32.dp + gutter, end = 32.dp + gutter,
+                            top = 76.dp + gutter, bottom = 160.dp + gutter,
+                        ),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                         modifier = Modifier.fillMaxSize(),
@@ -1239,7 +1253,9 @@ fun HomeScreen(
                                 onFocused = {
                                     if (restoreTargetId != null) restoreTargetId = null
                                     focusedMediaId = it.id
-                                    PageLog.add("gridFocus id=${it.id} costMs=${android.os.SystemClock.elapsedRealtime() - lastGridKeyAt}")
+                                    if (com.lumina.tv.BuildConfig.DEBUG && ++gridLogCounter[0] % 20 == 0) {
+                                        PageLog.add("gridFocus sample id=${it.id} costMs=${android.os.SystemClock.elapsedRealtime() - lastGridKeyAt}")
+                                    }
                                 },
                                 onClick = {
                                     restoreTargetId = it.id
@@ -2606,7 +2622,10 @@ private fun RowSection(
             modifier = Modifier
                 .focusGroup()
                 .then(if (onRowFocusChanged != null) Modifier.onFocusChanged { onRowFocusChanged(it.hasFocus) } else Modifier),
-            contentPadding = PaddingValues(start = 40.dp, end = 40.dp),
+            contentPadding = PaddingValues(
+                start = 40.dp + focusGutter(width, FocusScale.POSTER_MEDIUM),
+                end = 40.dp + focusGutter(width, FocusScale.POSTER_MEDIUM),
+            ),
             horizontalArrangement = Arrangement.spacedBy(Space.m),
         ) {
             items(items, key = { it.id }) { it ->

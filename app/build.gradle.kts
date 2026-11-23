@@ -21,8 +21,8 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 153
-        versionName = "1.24.9"
+        versionCode = 154
+        versionName = "1.24.10"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "TMDB_API_KEY", "\"${localProps.getProperty("TMDB_API_KEY", "")}\"")
         buildConfigField("String", "MDBLIST_API_KEY", "\"${localProps.getProperty("MDBLIST_API_KEY", "")}\"")
@@ -86,6 +86,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-dash:1.7.1")
     implementation("androidx.media3:media3-ui:1.7.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.7.1")
+    // FFmpeg audio extension (GPL-3.0). 1.6.1+2 is built against media3 1.7.1.
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.6.1+2")
     implementation("org.jellycine.mpv:libmpv:1.0.4")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")

@@ -240,16 +240,19 @@ object FocusScale {
 
 private const val FOCUS_ANIMATION_DURATION_MS = 160
 
+/** 放大后需要的额外内边距，避免四角卡被 Lazy 容器裁切。 */
+internal fun focusGutter(cardWidth: Dp, maxScale: Float): Dp =
+    (((maxScale - 1f) / 2f) * cardWidth.value).dp + 8.dp
+
 private data class FocusSpec(
     val scale: Float,
-    val elevation: Float,
     val duration: Int,
 )
 private fun FocusFamily.spec(): FocusSpec = when (this) {
-    FocusFamily.Poster -> FocusSpec(FocusScale.POSTER_LARGE, 16f, FOCUS_ANIMATION_DURATION_MS)
-    FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, 8f, FOCUS_ANIMATION_DURATION_MS)
-    FocusFamily.Button -> FocusSpec(1.04f, 10f, FOCUS_ANIMATION_DURATION_MS)
-    FocusFamily.DetailPanel -> FocusSpec(1.02f, 12f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.Poster -> FocusSpec(FocusScale.POSTER_LARGE, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.Button -> FocusSpec(1.04f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.DetailPanel -> FocusSpec(1.02f, FOCUS_ANIMATION_DURATION_MS)
 }
 
 /**
@@ -322,7 +325,7 @@ fun FocusSurface(
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
-                shadowElevation = if (focused) focusSpec.elevation else 0f
+                shadowElevation = 0f
                 shape = RoundedCornerShape(corner)
                 clip = false
             }

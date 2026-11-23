@@ -13,3 +13,7 @@
 
 # ZXing
 -keep class com.google.zxing.** { *; }
+
+# Media3 FFmpeg 音频扩展：DefaultRenderersFactory 通过反射按类名加载
+-keep class androidx.media3.decoder.ffmpeg.** { *; }
+-dontwarn androidx.media3.decoder.ffmpeg.**
