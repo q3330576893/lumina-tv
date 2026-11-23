@@ -54,8 +54,9 @@ internal fun shouldAutomaticallyTryMpvAudioFallback(
     failures: PlaybackPathFailures,
     mpvAvailable: Boolean,
     mpvExplicitlyRequested: Boolean,
+    audioUndecodable: Boolean = false,
 ): Boolean = failure == PlaybackFailureReason.AUDIO_OUTPUT && path.engine == "media3" &&
-    mpvAvailable && mpvExplicitlyRequested &&
+    mpvAvailable && (mpvExplicitlyRequested || audioUndecodable) &&
     !failures.excludes(path.copy(engine = "mpv"))
 
 /** mpv enters the list only after a user choice. */

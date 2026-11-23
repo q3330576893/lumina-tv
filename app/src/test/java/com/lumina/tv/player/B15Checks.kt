@@ -135,7 +135,10 @@ object B15Checks {
         val initial = PlaybackPath("b15-source", "media3", PlaybackDelivery.DIRECT_PLAY, "1", "auto")
         val failures = PlaybackPathFailures()
         failures.record(PlaybackPathFailure(initial, PlaybackFailureReason.AUDIO_OUTPUT, 1, "first-frame-audio-output"))
-        check(!shouldAutomaticallyTryMpvAudioFallback(PlaybackFailureReason.AUDIO_OUTPUT, initial, failures, true, false))
+        check(shouldAutomaticallyTryMpvAudioFallback(
+            PlaybackFailureReason.AUDIO_OUTPUT, initial, failures, true, false, audioUndecodable = true))
+        check(!shouldAutomaticallyTryMpvAudioFallback(
+            PlaybackFailureReason.AUDIO_OUTPUT, initial, failures, true, false, audioUndecodable = false))
         check(shouldAutomaticallyTryMpvAudioFallback(PlaybackFailureReason.AUDIO_OUTPUT, initial, failures, true, true))
         check(!shouldAutomaticallyTryMpvAudioFallback(PlaybackFailureReason.LOAD, initial, failures, true, true))
         val automaticMpv = selectPlaybackEngine("media3", "mpv", initial, failures, mpvAvailable = true)

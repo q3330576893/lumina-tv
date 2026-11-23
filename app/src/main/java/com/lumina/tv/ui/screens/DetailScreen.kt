@@ -507,10 +507,30 @@ fun DetailScreen(
                 sourcesLoading = false
                 PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - startedAt}")
             }
+            val seasonRefreshJob = if (cached.item?.type == "Series") launch {
+                val refreshedSeasons = catchingRequest { c.getSeasons(id) }.getOrNull()
+                if (!refreshedSeasons.isNullOrEmpty()) {
+                    seasonDirectory = completeSeasonDirectoryLoad(Result.success(refreshedSeasons))
+                    if (selectedSeason == null) selectSeason(id, refreshedSeasons.first())
+                }
+                PageLog.add("detailLoad id=$id stage=seasons-refresh ms=${System.currentTimeMillis() - startedAt}")
+            } else null
             launch {
                 joinAll(freshItemJob, sourceJob)
+                seasonRefreshJob?.join()
                 previewMetadataReady = true
-                LibraryCache.putDetail(id, cached.copy(item = item ?: cached.item, sources = sources, at = System.currentTimeMillis()), cacheRevision)
+                if (cached.item?.type != "Series" || seasonDirectory.seasons.isNotEmpty()) {
+                    LibraryCache.putDetail(
+                        id,
+                        cached.copy(
+                            item = item ?: cached.item,
+                            seasons = seasonDirectory.seasons,
+                            sources = sources,
+                            at = System.currentTimeMillis(),
+                        ),
+                        cacheRevision,
+                    )
+                }
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - startedAt}")
             }
             return@LaunchedEffect
@@ -576,9 +596,13 @@ fun DetailScreen(
         PageLog.add("detailLoad id=$id stage=main-ready ms=${System.currentTimeMillis() - loadStartedAt}")
         if (it0 != null) {
             val seasonJob = launch {
-                val seasonResult = if (it0.type == "Series") catchingRequest { c.getSeasons(id) }
+                val seasonResult: Result<List<MediaItem>> = if (it0.type == "Series") catchingRequest { c.getSeasons(id) }
                     else Result.success(emptyList())
-                seasonDirectory = completeSeasonDirectoryLoad(seasonResult)
+                seasonDirectory = if (it0.type == "Series" && seasonResult.getOrNull()?.isEmpty() == true) {
+                    SeasonDirectoryLoadState(error = IllegalStateException("empty-season-directory"))
+                } else {
+                    completeSeasonDirectoryLoad(seasonResult)
+                }
                 val loadedSeasons = seasonDirectory.seasons
                 selectSeason(id, loadedSeasons.firstOrNull())
                 PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
@@ -591,7 +615,7 @@ fun DetailScreen(
             launch {
                 joinAll(seasonJob, sourceJob)
                 previewMetadataReady = true
-                if (it0.type != "Series" || seasonDirectory.status != SeasonDirectoryStatus.FAILURE) {
+                if (it0.type != "Series" || seasons.isNotEmpty()) {
                     LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()), cacheRevision)
                 }
                 PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - loadStartedAt}")

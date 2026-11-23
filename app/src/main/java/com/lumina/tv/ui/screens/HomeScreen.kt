@@ -1164,13 +1164,13 @@ fun HomeScreen(
                             maxWidth < 2400.dp -> 7
                             else -> 9
                         }
-                        val cardWidth = (maxWidth - 40.dp * 2 - 20.dp * (libraryGridColumns - 1)) / libraryGridColumns
+                        val cardWidth = (maxWidth - 32.dp * 2 - 12.dp * (libraryGridColumns - 1)) / libraryGridColumns
                         LazyVerticalGrid(
                             state = gridState,
                             columns = GridCells.Fixed(libraryGridColumns),
-                            contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 12.dp, bottom = 160.dp),
-                            horizontalArrangement = Arrangement.spacedBy(20.dp),
-                            verticalArrangement = Arrangement.spacedBy(32.dp),
+                            contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = 12.dp, bottom = 160.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(18.dp),
                             modifier = Modifier.fillMaxSize(),
                         ) {
                             itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
@@ -1219,13 +1219,13 @@ fun HomeScreen(
                         maxWidth < 2400.dp -> 7
                         else -> 9
                     }
-                    val cardWidth = (maxWidth - 40.dp * 2 - 20.dp * (gridColumns - 1)) / gridColumns
+                    val cardWidth = (maxWidth - 32.dp * 2 - 12.dp * (gridColumns - 1)) / gridColumns
                     LazyVerticalGrid(
                         state = gridState,
                         columns = GridCells.Fixed(gridColumns),
-                        contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 76.dp, bottom = 160.dp),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(32.dp),
+                        contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = 76.dp, bottom = 160.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(gridItems, key = { _, item -> item.id }) { index, it ->

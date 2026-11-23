@@ -75,7 +75,8 @@ object B3Checks {
         check(failure.status == SeasonDirectoryStatus.FAILURE && failure.error != null && failure.seasons.isEmpty())
 
         val detail = File("src/main/java/com/lumina/tv/ui/screens/DetailScreen.kt").readText()
-        check("if (it0.type != \"Series\" || seasonDirectory.status != SeasonDirectoryStatus.FAILURE)" in detail)
+        check("if (it0.type != \"Series\" || seasons.isNotEmpty())" in detail)
+        check("seasonResult.getOrNull()?.isEmpty() == true" in detail && "empty-season-directory" in detail)
         check("episodesStaleOf" in detail && "episodeReloadTick" in detail)
         val player = File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText()
         check("LibraryCache.putEpisodes(sid, item.seasonId, episodes)" !in player)

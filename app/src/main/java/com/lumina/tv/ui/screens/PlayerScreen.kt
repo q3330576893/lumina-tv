@@ -1029,11 +1029,12 @@ fun PlayerScreen(
         reason: String,
         generation: Int = sessionGeneration,
         minimumDelayMs: Long = 0L,
+        bypassRecoveryBudget: Boolean = false,
         stillNeeded: () -> Boolean = { true },
         action: () -> Unit,
     ) {
         if (!isCurrentLoad(generation) || reloadPending || audioRecoveryJob?.isActive == true) return
-        if (recoveryBudget.exhausted) {
+        if (recoveryBudget.exhausted && !bypassRecoveryBudget) {
             mpvBackend?.release("recovery-budget-exhausted")
             mpvBackend = null
             media3LoadGeneration = -1
@@ -1044,7 +1045,8 @@ fun PlayerScreen(
             return
         }
         audioRecoveryJob = instanceScope.launch {
-            val waitMs = maxOf(minimumDelayMs, recoveryBudget.cooldownRemainingMs(android.os.SystemClock.elapsedRealtime()))
+            val waitMs = if (bypassRecoveryBudget) minimumDelayMs
+            else maxOf(minimumDelayMs, recoveryBudget.cooldownRemainingMs(android.os.SystemClock.elapsedRealtime()))
             if (waitMs > 0L) {
                 playbackStatusNotice = "播放恢复需要稍候，将自动继续尝试"
                 delay(waitMs)
@@ -1055,7 +1057,9 @@ fun PlayerScreen(
                 playbackStatusNotice = null
                 return@launch
             }
-            if (!recoveryBudget.tryAcquire(android.os.SystemClock.elapsedRealtime())) return@launch
+            if (!bypassRecoveryBudget &&
+                !recoveryBudget.tryAcquire(android.os.SystemClock.elapsedRealtime())
+            ) return@launch
             audioRecoveryJob = null
             recovering = true
             error = null
@@ -1196,10 +1200,12 @@ fun PlayerScreen(
         val mpvKey = audioMpvKey() ?: return
         if (activeEngine == "mpv" && mpvKey !in audioMpvFailures) return
         recordPathFailure(PlaybackFailureReason.AUDIO_OUTPUT, reason)
+        val audioUndecodable = audioSupport == AudioSupport.UNSUPPORTED
         val automaticMpvFallback = currentPath?.let { path ->
             shouldAutomaticallyTryMpvAudioFallback(PlaybackFailureReason.AUDIO_OUTPUT, path, pathFailures,
                 mpvInstalled && !mpvInitializationFailed,
-                mpvWasExplicitlyRequested(AppRuntime.prefs?.playerEngine, enginePinned))
+                mpvWasExplicitlyRequested(AppRuntime.prefs?.playerEngine, enginePinned),
+                audioUndecodable)
         } == true
         val tryMpv = activeEngine != "mpv" && mpvKey !in audioMpvAttempts && mpvKey !in audioMpvFailures &&
             (canTryMpvPath() || automaticMpvFallback)
@@ -1222,12 +1228,12 @@ fun PlayerScreen(
         val sourceJson = currentPlaybackSourceJson()
         val canTranscode = sourceJson?.optBoolean("SupportsTranscoding", false) == true &&
             !sourceJson.optString("TranscodingUrl").isNullOrBlank() && !transcodeFallbackTried
-        if (recoveryBudget.exhausted || (!tryMpv && alternative == null && !canTranscode)) {
+        if ((recoveryBudget.exhausted && !tryMpv) || (!tryMpv && alternative == null && !canTranscode)) {
             finishAudioRecovery(if (recoveryBudget.exhausted) "budget-exhausted" else "no-playable-audio")
             return
         }
         val generation = sessionGeneration
-        recoverAutomatically("audio:$reason", generation) {
+        recoverAutomatically("audio:$reason", generation, bypassRecoveryBudget = tryMpv) {
             error = null
             playbackStatusNotice = null
             reloadForceTranscode = false
@@ -1236,7 +1242,7 @@ fun PlayerScreen(
                 audioMpvAttempts += mpvKey
                 audioDecodeNotice = "当前音轨本机无可用解码器，已切换软解内核"
                 engineSwitchTrace.add("audio-recovery:mpv:$reason")
-                PageLog.add("audioRecovery action=mpv reason=$reason attempts=${recoveryBudget.attempts}")
+                PageLog.add("audioRecovery route=mpv-auto reason=$reason")
                 enginePinned = "mpv"
                 mpvState = MpvPlayerController.State()
                 requestPlaybackReload(generation)
