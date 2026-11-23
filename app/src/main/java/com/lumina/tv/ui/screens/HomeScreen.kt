@@ -501,7 +501,9 @@ fun HomeScreen(
             return@LaunchedEffect
         }
         val session = AppRuntime.session
-        val diskCached = session?.let { LibraryCache.readHome(context, it.baseUrl, it.userId) }
+        val diskCached = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            session?.let { LibraryCache.readHome(context, it.baseUrl, it.userId) }
+        }
         val cached = diskCached ?: LibraryCache.home
         if (cached != null) {
             resumeItems = cached.resume
@@ -1181,7 +1183,11 @@ fun HomeScreen(
                             verticalArrangement = Arrangement.spacedBy(18.dp),
                             modifier = Modifier.fillMaxSize(),
                         ) {
-                            itemsIndexed(gridItems, key = { _, item -> item.id }) { index, media ->
+                            itemsIndexed(
+                                gridItems,
+                                key = { _, item -> item.id },
+                                contentType = { _, item -> item.type },
+                            ) { index, media ->
                                 PosterCard(
                                     item = media,
                                     imageUrl = client?.imageUrl(media),
@@ -1242,7 +1248,11 @@ fun HomeScreen(
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
-                        itemsIndexed(gridItems, key = { _, item -> item.id }) { index, it ->
+                        itemsIndexed(
+                            gridItems,
+                            key = { _, item -> item.id },
+                            contentType = { _, item -> item.type },
+                        ) { index, it ->
                             PosterCard(
                                 item = it,
                                 imageUrl = client?.imageUrl(it),
@@ -2199,10 +2209,13 @@ private fun Hero(
     val isPastWipeMidpoint by remember(wipeProgress) {
         derivedStateOf(structuralEqualityPolicy()) { wipeProgress.value >= 0.5f }
     }
+    val heroByImage = remember(items, heroCandidatesById, failedHeroImages) {
+        items.associateBy { resolveHeroImage(it) }
+    }
     val displayItem = if (topImage != null && topLoaded && isPastWipeMidpoint) {
         items.getOrNull(currentIndex) ?: item
     } else {
-        items.firstOrNull { resolveHeroImage(it) == bottomImage } ?: item
+        bottomImage?.let { heroByImage[it] } ?: item
     }
     val playAction = rememberPlayableItemAction(listOf(item.id, displayItem.id, currentIndex), active = active) { target, _ -> onPlay(target) }
     val currentPlayAction by rememberUpdatedState(playAction)

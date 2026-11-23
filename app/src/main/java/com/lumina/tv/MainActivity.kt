@@ -228,10 +228,10 @@ private fun AppRoot(
     }
 
     // 启动渐入：整体从轻微缩小 + 透明淡入，避免进 App 生硬
-    var started by remember { mutableStateOf(false) }
+    var started by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { started = true }
-    val appAlpha by animateFloatAsState(if (started) 1f else 0f, tween(520), label = "appAlpha")
-    val appScale by animateFloatAsState(if (started) 1f else 0.985f, tween(520), label = "appScale")
+    val appAlpha by animateFloatAsState(if (started) 1f else 0f, tween(180), label = "appAlpha")
+    val appScale by animateFloatAsState(if (started) 1f else 0.985f, tween(180), label = "appScale")
 
     LaunchedEffect(Unit) {
         if (AppRuntime.pairing == null) AppRuntime.startPairing(context)
