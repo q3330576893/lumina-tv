@@ -317,6 +317,9 @@ class MpvPlayerController(
                 "cache" to "yes",
                 "keep-open" to "no",
                 "sub-scale" to "1.0",
+                "audio-spdif" to "ac3,eac3,dts,truehd",
+                "demuxer-max-bytes" to "64MiB",
+                "demuxer-max-back-bytes" to "32MiB",
             ).forEach { (key, value) -> engine.setOptionString(key, value) }
             MpvTlsPolicy.options(tlsCaFile).forEach { (key, value) ->
                 check(engine.setOptionString(key, value) >= 0) { "无法启用 TLS 证书验证" }
