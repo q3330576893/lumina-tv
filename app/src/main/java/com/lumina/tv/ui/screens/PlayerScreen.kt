@@ -672,19 +672,44 @@ fun PlayerScreen(
                         .build(),
                 )
             }
+        val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+        val videoBitrateBps = playbackSource?.streams
+            ?.firstOrNull { it.type.equals("Video", true) }?.bitRate?.takeIf { it > 0 }
+            ?: playbackSource?.bitrate?.takeIf { it > 0 }
+            ?: 0L
+        val totalMemMb = runCatching {
+            val am = context.getSystemService(android.app.ActivityManager::class.java)
+            val info = android.app.ActivityManager.MemoryInfo()
+            am?.getMemoryInfo(info)
+            (info.totalMem / (1024L * 1024L)).toInt()
+        }.getOrDefault(0)
+        val bufferPlan = m3oBufferPlan(totalMemMb, videoBitrateBps > 25_000_000L, fastStart)
+        PageLog.add(
+            "m3o buffer tier=${bufferPlan.tier} memMb=$totalMemMb bitrateMbps=${videoBitrateBps / 1_000_000} " +
+                "min=${bufferPlan.minMs} max=${bufferPlan.maxMs} bytes=${bufferPlan.targetBytes} backSec=${bufferPlan.backSec}",
+        )
         val playerBuilder = ExoPlayer.Builder(context, renderers)
             .setTrackSelector(trackSelector)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
-        if (fastStart) {
-            playerBuilder.setLoadControl(DefaultLoadControl.Builder()
-                .setBufferDurationsMs(
-                    15_000,
-                    50_000,
-                    1_000,
-                    2_000,
-                )
-                .build())
-        }
+            .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory, extractors))
+            .setHandleAudioBecomingNoisy(true)
+            .setSeekBackIncrementMs(10_000L)
+            .setSeekForwardIncrementMs(30_000L)
+            .setPauseAtEndOfMediaItems(true)
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        bufferPlan.minMs,
+                        bufferPlan.maxMs,
+                        bufferPlan.forPlaybackMs,
+                        bufferPlan.afterRebufferMs,
+                    )
+                    .setTargetBufferBytes(bufferPlan.targetBytes)
+                    .setBackBuffer(bufferPlan.backSec, true)
+                    .setPrioritizeTimeOverSizeThresholds(false)
+                    .build(),
+            )
         playerBuilder
             .build()
             .apply {
@@ -693,13 +718,23 @@ fun PlayerScreen(
                 setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
                     activeEngine != "mpv")
                 playWhenReady = true
-                trackSelectionParameters = trackSelectionParameters.buildUpon()
+                val selectionParams = trackSelectionParameters.buildUpon()
                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, resolveSubtitlePreference(
                         AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource),
                         AppRuntime.prefs?.preferredSubtitleLanguage,
                         emptyList(),
                     ) == "off")
-                    .build()
+                if (audioDecodeMode == "passthrough") {
+                    selectionParams.setAudioOffloadPreferences(
+                        androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences.DEFAULT.buildUpon()
+                            .setAudioOffloadMode(
+                                androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences
+                                    .AUDIO_OFFLOAD_MODE_ENABLED,
+                            )
+                            .build(),
+                    )
+                }
+                trackSelectionParameters = selectionParams.build()
             }
     }
 
@@ -709,6 +744,23 @@ fun PlayerScreen(
             activeEngine != "mpv",
         )
         onDispose { }
+    }
+
+    // M3O-4: one summary line per playback session, no behaviour change.
+    val playbackStatsListener = remember(item.id) {
+        androidx.media3.exoplayer.analytics.PlaybackStatsListener(false) { _, stats ->
+            val bwMbps = if (stats.totalBandwidthTimeMs > 0) {
+                stats.totalBandwidthBytes * 8000.0 / stats.totalBandwidthTimeMs / 1_000_000.0
+            } else 0.0
+            PageLog.add(
+                "m3o stats startup=${stats.firstReportedTimeMs} rebuffer=${stats.totalRebufferCount}/${stats.maxRebufferTimeMs}ms " +
+                    "dropped=${stats.totalDroppedFrames} underrun=${stats.totalAudioUnderruns} bw=%.1fMbps".format(bwMbps),
+            )
+        }
+    }
+    DisposableEffect(exo, playbackStatsListener) {
+        exo.addAnalyticsListener(playbackStatsListener)
+        onDispose { exo.removeAnalyticsListener(playbackStatsListener) }
     }
 
     // Work that touches a player belongs to that exact instance, even across suspension.
@@ -4370,4 +4422,50 @@ private fun OsdIconButton(
             )
         }
     }
+}
+
+/** M3O-1: memory- and bitrate-aware buffer plan. Time-based with a byte ceiling, like SmartTube. */
+private data class M3oBufferPlan(
+    val tier: String,
+    val minMs: Int,
+    val maxMs: Int,
+    val forPlaybackMs: Int,
+    val afterRebufferMs: Int,
+    val targetBytes: Int,
+    val backSec: Int,
+)
+
+private fun m3oBufferPlan(totalMemMb: Int, highBitrate: Boolean, fastStart: Boolean): M3oBufferPlan {
+    val tier = when {
+        totalMemMb in 1..2048 -> "low"
+        totalMemMb in 2049..4096 -> "mid"
+        totalMemMb > 4096 -> "high"
+        else -> "mid"
+    }
+    val minMs: Int
+    val maxMs: Int
+    val bytes: Int
+    val backSec: Int
+    when (tier) {
+        "low" -> {
+            minMs = 15_000; maxMs = 30_000; bytes = 64 * 1024 * 1024; backSec = 10
+        }
+        "high" -> if (highBitrate) {
+            minMs = 50_000; maxMs = 90_000; bytes = 256 * 1024 * 1024; backSec = 30
+        } else {
+            minMs = 30_000; maxMs = 60_000; bytes = 192 * 1024 * 1024; backSec = 30
+        }
+        else -> if (highBitrate) {
+            minMs = 30_000; maxMs = 60_000; bytes = 160 * 1024 * 1024; backSec = 20
+        } else {
+            minMs = 30_000; maxMs = 50_000; bytes = 128 * 1024 * 1024; backSec = 20
+        }
+    }
+    val forPlaybackMs = if (fastStart) {
+        if (tier == "high" && highBitrate) 1_500 else 1_000
+    } else 2_500
+    val afterRebufferMs = if (fastStart) {
+        if (highBitrate) 3_000 else 2_500
+    } else 5_000
+    return M3oBufferPlan(tier, minMs, maxMs, forPlaybackMs, afterRebufferMs, bytes, backSec)
 }
