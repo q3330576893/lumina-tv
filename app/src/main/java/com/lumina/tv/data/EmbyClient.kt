@@ -142,8 +142,10 @@ class EmbyClient(
     /** Main playback, HLS children and diagnostics share the same per-hop credential boundary. */
     val playbackHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(12, TimeUnit.SECONDS)
+            .connectionPool(okhttp3.ConnectionPool(8, 5, TimeUnit.MINUTES))
+            .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            .protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
             .originAuthentication { OriginCredentials(baseUrl, authHeader()) }
             .build()
     }
@@ -1558,22 +1560,26 @@ class EmbyClient(
             }
         }
 
-    private fun deviceProfile(): JSONObject = JSONObject()
-        .put("DirectPlayProfiles", JSONArray()
-            .put(JSONObject().put("Type", "Video").put("Container", "mkv,mp4,m4v,ts,mov")
-                .put("VideoCodec", "h264,hevc").put("AudioCodec", if (com.lumina.tv.AppRuntime.prefs?.declareDtsDirectPlay == true)
-                    "aac,ac3,eac3,mp3,opus,flac,vorbis,dts,truehd" else "aac,ac3,eac3,mp3,opus,flac,vorbis"))
-            .put(JSONObject().put("Type", "Audio").put("Container", "mp3").put("AudioCodec", "mp3")))
-        .put("SubtitleProfiles", JSONArray()
-            .put(JSONObject().put("Format", "srt").put("Method", "External"))
-            .put(JSONObject().put("Format", "subrip").put("Method", "External"))
-            .put(JSONObject().put("Format", "vtt").put("Method", "External"))
-            .put(JSONObject().put("Format", "webvtt").put("Method", "External")))
-        .put("TranscodingProfiles", JSONArray()
-            .put(JSONObject().put("Container", "ts").put("Type", "Video").put("VideoCodec", "h264")
-                .put("AudioCodec", "aac").put("Protocol", "hls").put("MaxAudioChannels", "2"))
-            .put(JSONObject().put("Container", "ts").put("Type", "Audio").put("AudioCodec", "aac")
-                .put("Protocol", "hls").put("MaxAudioChannels", "2")))
+    private fun deviceProfile(): JSONObject {
+        val directVideoProfile = JSONObject()
+            .put("Type", "Video").put("Container", "mkv,mp4,m4v,ts,mov")
+            .put("VideoCodec", "h264,hevc").put("AudioCodec", if (com.lumina.tv.AppRuntime.prefs?.declareDtsDirectPlay == true)
+                "aac,ac3,eac3,mp3,opus,flac,vorbis,dts,truehd" else "aac,ac3,eac3,mp3,opus,flac,vorbis")
+        return JSONObject()
+            .put("DirectPlayProfiles", JSONArray()
+                .put(directVideoProfile)
+                .put(JSONObject().put("Type", "Audio").put("Container", "mp3").put("AudioCodec", "mp3")))
+            .put("SubtitleProfiles", JSONArray()
+                .put(JSONObject().put("Format", "srt").put("Method", "External"))
+                .put(JSONObject().put("Format", "subrip").put("Method", "External"))
+                .put(JSONObject().put("Format", "vtt").put("Method", "External"))
+                .put(JSONObject().put("Format", "webvtt").put("Method", "External")))
+            .put("TranscodingProfiles", JSONArray()
+                .put(JSONObject().put("Container", "ts").put("Type", "Video").put("VideoCodec", "h264")
+                    .put("AudioCodec", "aac").put("Protocol", "hls").put("MaxAudioChannels", "2"))
+                .put(JSONObject().put("Container", "ts").put("Type", "Audio").put("AudioCodec", "aac")
+                    .put("Protocol", "hls").put("MaxAudioChannels", "2")))
+    }
 
     private fun usablePlaybackUrl(raw: String?): String? = catchingRequest { absUrl(raw)?.takeIf { value ->
         val uri = java.net.URI(value)

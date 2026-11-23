@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.TypeScale
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -52,7 +54,7 @@ fun SubtitlePreviewCard(
                 Text(
                     text = previewText,
                     color = Color(0xFF07090E),
-                    fontSize = 18.sp * scale,
+                    fontSize = TypeScale.sp18 * scale,
                     fontWeight = FontWeight.Medium,
                     style = TextStyle(drawStyle = Stroke(width = outlineWidthPx)),
                     maxLines = 1,
@@ -61,7 +63,7 @@ fun SubtitlePreviewCard(
             Text(
                 text = previewText,
                 color = color,
-                fontSize = 18.sp * scale,
+                fontSize = TypeScale.sp18 * scale,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
             )
@@ -69,7 +71,7 @@ fun SubtitlePreviewCard(
         Text(
             text = "预览 · 随设置变化",
             color = Color.White.copy(alpha = 0.78f),
-            fontSize = 10.sp,
+            fontSize = TypeScale.sp10,
             modifier = Modifier.align(Alignment.TopEnd)
                 .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(bottomStart = 8.dp))
                 .padding(horizontal = 8.dp, vertical = 4.dp),

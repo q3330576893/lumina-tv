@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.TypeScale
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -140,7 +142,7 @@ fun SettingsBackend(
                         },
                 ) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("高级选项", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("高级选项", color = TextMain, fontSize = TypeScale.sp14, fontWeight = FontWeight.Medium)
                         Spacer(Modifier.width(12.dp))
                         val summary = buildList {
                             if (sourceReleaseGroups.isBlank()) add("未设置（不按发布组排序）")
@@ -152,7 +154,7 @@ fun SettingsBackend(
                             })
                             if (sourceBitrate != NumericPref.UNSET) add(if (sourceBitrate == NumericPref.HIGH) "码率高优先" else "码率低优先")
                         }.joinToString(" · ").ifBlank { "片源偏好：默认（取第一个源）" }
-                        Text(summary, Modifier.weight(1f), color = TextSub, fontSize = 10.sp, maxLines = 1)
+                        Text(summary, Modifier.weight(1f), color = TextSub, fontSize = TypeScale.sp10, maxLines = 1)
                         androidx.compose.material3.Icon(if (sourcePreferencesExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = if (disclosureFocused) Accent else TextSub)
                     }
                 }
@@ -163,7 +165,7 @@ fun SettingsBackend(
                     exit = shrinkVertically(),
                 ) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp)) {
-                        Text("动态范围", color = TextSub, fontSize = 10.sp)
+                        Text("动态范围", color = TextSub, fontSize = TypeScale.sp10)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             listOf(
                                 DynamicRangePref.UNSET to "不设置", DynamicRangePref.DOLBY_VISION to "DV优先",
@@ -174,13 +176,13 @@ fun SettingsBackend(
                                     sourceDynamicRange = value; prefs?.sourceDynamicRange = value
                                 }) { focused ->
                                     Box(Modifier.fillMaxWidth().height(32.dp).background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
-                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 10.dp))
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp10, modifier = Modifier.padding(horizontal = 10.dp))
                                     }
                                 }
                             }
                         }
                         Spacer(Modifier.height(6.dp))
-                        Text("码率", color = TextSub, fontSize = 10.sp)
+                        Text("码率", color = TextSub, fontSize = TypeScale.sp10)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             listOf(NumericPref.UNSET to "不设置", NumericPref.HIGH to "高优先", NumericPref.LOW to "低优先").forEach { (value, label) ->
                                 val active = sourceBitrate == value
@@ -188,7 +190,7 @@ fun SettingsBackend(
                                     sourceBitrate = value; prefs?.sourceBitratePreference = value
                                 }) { focused ->
                                     Box(Modifier.fillMaxWidth().height(32.dp).background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
-                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 10.dp))
+                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp10, modifier = Modifier.padding(horizontal = 10.dp))
                                     }
                                 }
                             }
@@ -196,8 +198,8 @@ fun SettingsBackend(
                         Spacer(Modifier.height(8.dp))
                         FocusSurface(Modifier.fillMaxWidth().height(40.dp), corner = 10.dp, onClick = { releaseGroupsDialog = true }) { focused ->
                             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("发布组关键词", color = TextMain, modifier = Modifier.weight(1f), fontSize = 12.sp)
-                                Text(sourceReleaseGroups.ifBlank { "SPARKS,FGT" }, color = if (focused) TextMain else TextSub, fontSize = 11.sp, maxLines = 1)
+                                Text("发布组关键词", color = TextMain, modifier = Modifier.weight(1f), fontSize = TypeScale.sp12)
+                                Text(sourceReleaseGroups.ifBlank { "SPARKS,FGT" }, color = if (focused) TextMain else TextSub, fontSize = TypeScale.sp11, maxLines = 1)
                             }
                         }
                     }

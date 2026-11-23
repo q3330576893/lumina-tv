@@ -16,6 +16,11 @@
 - AndroidX / Jetpack Compose / Media3（`androidx.media3:*:1.7.1`）
 - OkHttp、Coil、Haze、NanoHTTPD、ZXing
 
+## Anime4K
+
+- Anime4K — 来源：https://github.com/bloc97/Anime4K；许可证：MIT；用途：可选视频超分，默认关闭、仅 mpv 内核。
+- Copyright (c) 2019-2021 bloc97
+
 ## 分发说明
 
 发布 APK 时，对应源码即本仓库同一提交：

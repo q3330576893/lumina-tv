@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.TypeScale
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -95,9 +97,9 @@ fun SettingsAccount(
         }
         item(key = "account:current") {
             Column(Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).glassBorder(groupShape).padding(SettingsTokens.RowPaddingH)) {
-                Text(session?.serverName ?: prefs?.serverName ?: "-", color = TextMain, fontSize = 18.sp)
+                Text(session?.serverName ?: prefs?.serverName ?: "-", color = TextMain, fontSize = TypeScale.sp18)
                 Spacer(Modifier.height(4.dp))
-                Text(session?.baseUrl ?: prefs?.baseUrl ?: "-", color = TextSub, fontSize = 12.sp)
+                Text(session?.baseUrl ?: prefs?.baseUrl ?: "-", color = TextSub, fontSize = TypeScale.sp12)
                 Spacer(Modifier.height(10.dp))
                 ActionRow(
                     focusKey = "account:current-edit",
@@ -121,14 +123,14 @@ fun SettingsAccount(
         }
         if (savedServers.isEmpty()) {
             item(key = "account:empty") {
-                Text("暂无已保存服务器", color = TextSub, fontSize = 14.sp, modifier = Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).padding(SettingsTokens.RowPaddingH))
+                Text("暂无已保存服务器", color = TextSub, fontSize = TypeScale.sp14, modifier = Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).padding(SettingsTokens.RowPaddingH))
             }
         } else {
             items(savedServers.size, key = { "account:server:${savedServers[it].second}" }) { index ->
                 val (name, url) = savedServers[index]
                 Column(Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).padding(horizontal = 10.dp, vertical = 4.dp)) {
-                    Text(name, color = TextMain, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp))
-                    Text(url, color = TextSub, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp))
+                    Text(name, color = TextMain, fontSize = TypeScale.sp14, modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp))
+                    Text(url, color = TextSub, fontSize = TypeScale.sp11, modifier = Modifier.padding(horizontal = 8.dp))
                     NavigationRow(
                         focusKey = "account:switch:$url",
                         title = "切换服务器",

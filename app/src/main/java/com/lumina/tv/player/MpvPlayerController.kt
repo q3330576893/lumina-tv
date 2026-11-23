@@ -110,6 +110,12 @@ private fun mpvStringListElementCount(value: String): Int {
 }
 
 /** Small Android Surface-backed mpv bridge. Hardware decode is attempted first, then retried in software. */
+data class Anime4kConfig(val shaderPaths: List<String>) {
+    companion object {
+        val Off = Anime4kConfig(emptyList())
+    }
+}
+
 class MpvPlayerController(
     context: Context,
     private val generation: Int,
@@ -119,6 +125,7 @@ class MpvPlayerController(
     private val desiredPlaying: (() -> Boolean?)? = null,
     private val onPhysicalLoad: (MpvPlayerController, LoadIdentity, Boolean) -> Unit = { _, _, _ -> },
     private val onState: (MpvPlayerController, LoadIdentity, State) -> Unit,
+    private val anime4k: Anime4kConfig = Anime4kConfig.Off,
 ) {
     data class LoadIdentity(val generation: Int, val physicalId: Long, val software: Boolean)
     enum class FailureKind { INITIALIZATION, SURFACE, HTTP, DECODING, FIRST_FRAME_TIMEOUT, LOAD, CERT_INVALID }
@@ -321,6 +328,12 @@ class MpvPlayerController(
                 "demuxer-max-bytes" to "64MiB",
                 "demuxer-max-back-bytes" to "32MiB",
             ).forEach { (key, value) -> engine.setOptionString(key, value) }
+            if (anime4k.shaderPaths.isNotEmpty() && !software) {
+                engine.setOptionString("hwdec", "mediacodec-copy")
+                engine.setOptionString("gpu-api", "opengl")
+                engine.setOptionString("glsl-shaders", anime4k.shaderPaths.joinToString(";"))
+                appendMpvLog("anime4k enabled shaders=${anime4k.shaderPaths.size}")
+            }
             MpvTlsPolicy.options(tlsCaFile).forEach { (key, value) ->
                 check(engine.setOptionString(key, value) >= 0) { "无法启用 TLS 证书验证" }
             }
@@ -764,6 +777,7 @@ class MpvPlayerController(
         val current = synchronized(logLock) { diagnosticLines.toList() }.joinToString("\n")
         return listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
     }
+    fun anime4kShaderCount(): Int = anime4k.shaderPaths.size
     fun softwareRetryCount(): Int = softwareRetryCount
     fun diagnosticLoadIdentity(): LoadIdentity? = activeLoad?.takeIf(::isActive)?.identity
 

@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.TypeScale
+
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.tween
@@ -34,7 +36,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -57,6 +61,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 
 private object SettingsFocusMemory {
     var category: SettingsCategory = SettingsCategory.Appearance
@@ -231,18 +236,21 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
         }
         val index = SettingsFocusMemory.rowIndices[key] ?: 0
         val scrollOffset = SettingsFocusMemory.rowScrollOffsets[key] ?: 0
-        var restored = false
-        for (attempt in 0 until 10) {
-            if (focusEpoch != epochAtSwitch) return@LaunchedEffect
-            val state = listStates.getValue(selectedCategory)
-            runCatching { state.scrollToItem(index, scrollOffset) }
-            delay(40)
-            val currentRequester = focusRequesters[key]
-            if (currentRequester != null && runCatching { currentRequester.requestFocus() }.isSuccess) {
-                restored = true
-                break
-            }
+        if (focusEpoch != epochAtSwitch) return@LaunchedEffect
+        val state = listStates.getValue(selectedCategory)
+        val scrolled = runCatching { state.scrollToItem(index, scrollOffset) }.isSuccess
+        if (!scrolled) {
+            if (focusEpoch == epochAtSwitch) runCatching { railRequester.requestFocus() }
+            return@LaunchedEffect
         }
+        withFrameNanos { }
+        snapshotFlow {
+            focusEpoch != epochAtSwitch || state.layoutInfo.visibleItemsInfo.any { it.index == index }
+        }.first { it }
+        withFrameNanos { }
+        if (focusEpoch != epochAtSwitch) return@LaunchedEffect
+        val currentRequester = focusRequesters[key]
+        val restored = currentRequester != null && runCatching { currentRequester.requestFocus() }.isSuccess
         if (!restored && focusEpoch == epochAtSwitch) runCatching { railRequester.requestFocus() }
     }
 }
@@ -260,7 +268,7 @@ private fun SettingsCategoryRail(
     val shape = RoundedCornerShape(SettingsTokens.GroupCorner)
     FrostPanel(Modifier.width(railWidth).fillMaxHeight(), hazeState, SettingsTokens.GroupCorner) {
         Column(Modifier.fillMaxSize().glassBorder(shape).focusGroup().padding(horizontal = 10.dp, vertical = 16.dp)) {
-            Text("设置", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+            Text("设置", color = TextMain, fontSize = TypeScale.sp18, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
             Spacer(Modifier.height(10.dp))
             SettingsCategory.entries.forEach { category ->
                 val enabled = category in setOf(SettingsCategory.Account, SettingsCategory.Appearance, SettingsCategory.Home, SettingsCategory.Playback, SettingsCategory.Subtitles, SettingsCategory.Compatibility, SettingsCategory.About)
@@ -282,7 +290,7 @@ private fun SettingsCategoryRail(
                 ) {
                     if (selected || focused) Box(Modifier.width(SettingsTokens.FocusBarW).height(SettingsTokens.FocusBarH).background(Accent, RoundedCornerShape(2.dp)))
                     Box(Modifier.padding(start = 14.dp).size(14.dp).background(if (selected) Accent else TextSub.copy(alpha = .75f), RoundedCornerShape(4.dp)))
-                    Text(category.label, Modifier.padding(start = 10.dp), color = if (selected || focused) TextMain else TextSub, fontSize = 15.sp, maxLines = 1)
+                    Text(category.label, Modifier.padding(start = 10.dp), color = if (selected || focused) TextMain else TextSub, fontSize = TypeScale.sp15, maxLines = 1)
                 }
             }
         }

@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.TypeScale
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
@@ -79,7 +81,7 @@ fun SideRail(
             Text(
                 text = "设置",
                 color = TextMain,
-                fontSize = 18.sp,
+                fontSize = TypeScale.sp18,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
@@ -165,7 +167,7 @@ private fun SideRailItem(
             Text(
                 text = category.label,
                 color = if (selected || focused) TextMain else TextSub,
-                fontSize = 15.sp,
+                fontSize = TypeScale.sp15,
                 fontWeight = if (selected || focused) FontWeight.Medium else FontWeight.Normal,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

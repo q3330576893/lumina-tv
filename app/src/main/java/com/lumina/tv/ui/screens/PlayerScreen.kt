@@ -1,4 +1,4 @@
-﻿package com.lumina.tv.ui.screens
+package com.lumina.tv.ui.screens
 
 import com.lumina.tv.data.catchingRequest
 import com.lumina.tv.data.PlaybackStartIntent
@@ -27,6 +27,11 @@ import com.lumina.tv.player.playbackControlsOverlayVisible
 import com.lumina.tv.player.trickplayCanPresent
 
 import android.os.Build
+import android.os.BatteryManager
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.ConnectivityManager
 import android.text.format.DateFormat
 import android.view.SurfaceHolder
 import android.view.Surface
@@ -85,7 +90,7 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.FastForward
-import androidx.compose.material.icons.rounded.PlaylistPlay
+import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
@@ -178,7 +183,9 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
+import com.lumina.tv.ui.theme.TypeScale
 import com.lumina.tv.player.SubtitleRenderersFactory
+import com.lumina.tv.player.Anime4kConfig
 import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.player.MpvAvailabilityProbe
 import com.lumina.tv.player.mpvLibrariesInstalled
@@ -310,6 +317,59 @@ internal suspend fun finishPlaybackLoadFailure(
 }
 
 private fun audioMime(codec: String?): String? = audioMimeForSourceHint(codec.orEmpty())
+
+/** Returns a skip reason for next-episode prewarming; any available network is allowed. */
+private fun prewarmNextSkipReason(context: Context, next: MediaItem): String? {
+    val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        ?: return "no_network"
+    val network = connectivity.activeNetwork ?: return "no_network"
+    connectivity.getNetworkCapabilities(network) ?: return "no_network"
+
+    val batteryPercent = runCatching {
+        context.getSystemService(BatteryManager::class.java)
+            ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            ?.takeIf { it in 0..100 }
+    }.getOrNull() ?: runCatching {
+        val status = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = status?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = status?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        if (level >= 0 && scale > 0) (level * 100) / scale else null
+    }.getOrNull()
+    if (batteryPercent != null && batteryPercent <= 20) return "battery_low"
+
+    val resolution = next.resolution.orEmpty()
+    val width = Regex("(\\d{3,5})\\s*[x×]\\s*\\d{3,5}", RegexOption.IGNORE_CASE)
+        .find(resolution)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    if ((width != null && width >= 3840) || resolution.contains("4K", ignoreCase = true) ||
+        resolution.contains("2160", ignoreCase = true)
+    ) return "high_bitrate"
+    return null
+}
+
+private suspend fun ensureAnime4kShaders(context: Context, names: List<String>): List<String>? =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val shaderDirectory = java.io.File(context.cacheDir, "anime4k")
+            if (!shaderDirectory.isDirectory && !shaderDirectory.mkdirs()) {
+                error("anime4k cache directory unavailable")
+            }
+            names.map { name ->
+                val target = java.io.File(shaderDirectory, name)
+                val assetLength = runCatching {
+                    context.assets.openFd("anime4k/$name").use { it.length }
+                }.getOrNull()?.takeIf { it >= 0L }
+                val targetIsFile = target.isFile
+                val sameLength = targetIsFile && assetLength != null && target.length() == assetLength
+                if (!sameLength) {
+                    val contents = context.assets.open("anime4k/$name").use { it.readBytes() }
+                    val sameCompressedContents = assetLength == null && targetIsFile &&
+                        target.readBytes().contentEquals(contents)
+                    if (!sameCompressedContents) target.writeBytes(contents)
+                }
+                target.absolutePath
+            }
+        }.getOrNull()
+    }
 
 
 private fun media3AudioTracks(tracks: Tracks): List<MediaStream> = tracks.groups
@@ -498,6 +558,11 @@ fun PlayerScreen(
     var dvDecoderPath by remember(item.id) { mutableStateOf<String?>(null) }
     var activeVideoDecoder by remember(item.id) { mutableStateOf<String?>(null) }
     var firstFrameRendered by remember(item.id) { mutableStateOf(false) }
+    var tunnelingEnabled by remember(item.id) { mutableStateOf(false) }
+    var tunnelingFallbackTried by remember(item.id) { mutableStateOf(false) }
+    var tunnelingGeneration by remember(item.id) { mutableIntStateOf(-1) }
+    var tunnelingEnabledAt by remember(item.id) { mutableLongStateOf(0L) }
+    var tunnelingFallbackJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var resumedByBackground by remember(item.id) { mutableStateOf(false) }
     var readyWithoutFrameSince by remember(item.id) { mutableLongStateOf(0L) }
     var playbackStatusNotice by remember(item.id) { mutableStateOf<String?>(null) }
@@ -638,6 +703,30 @@ fun PlayerScreen(
 
     val subtitleRenderersFactory = remember(item.id) { SubtitleRenderersFactory(context) }
     val fastStart = AppRuntime.prefs?.fastStart != false
+    val trackSelector = remember(item.id, rebuildRetry, fastStart) {
+        androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context).apply {
+            setParameters(
+                buildUponParameters()
+                    .setAllowInvalidateSelectionsOnRendererCapabilitiesChange(true)
+                    .setTunnelingEnabled(false)
+                    .build(),
+            )
+        }
+    }
+
+    fun setTunnelingEnabled(enabled: Boolean): Boolean = runCatching {
+        trackSelector.setParameters(
+            trackSelector.buildUponParameters()
+                .setTunnelingEnabled(enabled)
+                .build(),
+        )
+        tunnelingEnabled = enabled
+        true
+    }.getOrElse { failure ->
+        tunnelingEnabled = false
+        PageLog.add("media3Tunneling parameterUpdate failed enabled=$enabled err=${failure.javaClass.simpleName}")
+        false
+    }
 
     val exo = remember(item.id, rebuildRetry, fastStart) {
         val preference = AppRuntime.prefs?.decoderPreference ?: "auto"
@@ -664,14 +753,6 @@ fun PlayerScreen(
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setMediaCodecSelector(codecSelector)
             .setEnableDecoderFallback(true)
-        val trackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context)
-            .apply {
-                setParameters(
-                    buildUponParameters()
-                        .setAllowInvalidateSelectionsOnRendererCapabilitiesChange(true)
-                        .build(),
-                )
-            }
         val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
             .setConstantBitrateSeekingAlwaysEnabled(true)
@@ -896,7 +977,8 @@ fun PlayerScreen(
             reportStopInAppScope()
             instanceJob.cancel()
             attachedPlayerView.getAndSet(null)?.player = null
-            runCatching { exo.clearVideoSurface(); exo.release() }
+            runCatching { exo.clearVideoSurface() }
+            runCatching { exo.release() }
                 .onSuccess { PlayerLifecycle.registry.released(exo, "playback-disposed") }
         }
     }
@@ -1076,6 +1158,10 @@ fun PlayerScreen(
         recovering = false
     }
 
+    fun reportError(msg: String) {
+        error = msg
+    }
+
     // Audio, watchdog, HTTP retries and engine fallback all enter the same budget once.
     fun recoverAutomatically(
         reason: String,
@@ -1093,7 +1179,7 @@ fun PlayerScreen(
             exo.pause()
             updateStalled(false)
             playbackStatusNotice = null
-            error = "自动恢复次数已用完，请重试或更换片源、音轨"
+            reportError("自动恢复次数已用完，请重试或更换片源、音轨")
             return
         }
         audioRecoveryJob = instanceScope.launch {
@@ -1118,8 +1204,12 @@ fun PlayerScreen(
             playbackStatusNotice = null
             watchdog.reset()
             PageLog.add("automaticRecovery reason=$reason attempts=${recoveryBudget.attempts} gen=$generation")
-            action()
-            recovering = false
+            try {
+                action()
+            } finally {
+                recovering = false
+                audioRecoveryJob = null
+            }
         }
     }
 
@@ -1139,7 +1229,7 @@ fun PlayerScreen(
         playbackStatusNotice = null
         failurePhase = "证书验证"
         exo.pause()
-        error = CERTIFICATE_ERROR_MESSAGE
+        reportError(CERTIFICATE_ERROR_MESSAGE)
     }
 
     fun audioSourceKey(): String = currentSourceId ?: playbackSource?.id ?: item.id
@@ -1231,8 +1321,8 @@ fun PlayerScreen(
             }
             ContainerRecovery.TERMINAL -> {
                 updateStalled(false)
-                error = if (transcodeFallbackTried) "该片源容器不受支持，转码后仍失败"
-                    else "该片源容器不受支持，且无可用的 mpv 或服务器转码路径"
+                reportError(if (transcodeFallbackTried) "该片源容器不受支持，转码后仍失败"
+                    else "该片源容器不受支持，且无可用的 mpv 或服务器转码路径")
                 engineSwitchTrace.add("container-terminal:direct:$errorCodeName")
             }
         }
@@ -1241,7 +1331,7 @@ fun PlayerScreen(
     fun finishAudioRecovery(reason: String) {
         updateStalled(false)
         playbackStatusNotice = null
-        error = audioFailureMessage()
+        reportError(audioFailureMessage())
         audioDecodeNotice = error
         PageLog.add("audioRecovery action=terminal reason=$reason attempts=${recoveryBudget.attempts}")
     }
@@ -1445,6 +1535,11 @@ fun PlayerScreen(
         loadStartedAt = android.os.SystemClock.elapsedRealtime()
         readyAt = 0L
         firstFrameAt = 0L
+        tunnelingFallbackJob?.cancel()
+        tunnelingFallbackJob = null
+        tunnelingEnabledAt = 0L
+        tunnelingGeneration = -1
+        setTunnelingEnabled(false)
         watchdog.reset()
         // Snapshot before releasing either engine. Zero is a valid restoration point.
         val loadIntent = pendingStartIntent ?: recoveryStartIntent
@@ -1591,11 +1686,26 @@ fun PlayerScreen(
                 }, plannedAudio, audioDecodeMode, badHttpFallbackStage)
                 val displayHdrTypes = readDisplayHdrTypes(context)
                 val contentHdr = rangeType.takeUnless { isDolbyVision }
+                val isHdr = rangeType.contains("HDR") || rangeType.contains("HLG")
+                val dvCapability = DeviceCodecCapabilities.supportsDolbyVision
+                val hdrCapability = isHdr && supportsContentHdr(displayHdrTypes, rangeType) == true
                 val selectedEngine = selectPlaybackEngine(AppRuntime.prefs?.playerEngine, enginePinned,
                     path, pathFailures, mpvInstalled && !mpvInitializationFailed)
                 if (selectedEngine == null) {
                     throw EmbyException("当前片源的播放路径均已失败，请重试或更换片源、音轨")
                 }
+                val tunnelingEligible = if (isDolbyVision) dvCapability else isHdr && hdrCapability
+                val enableTunnelingForLoad = selectedEngine == "media3" && tunnelingEligible && !tunnelingFallbackTried
+                val tunnelingActuallyEnabled = enableTunnelingForLoad && setTunnelingEnabled(true)
+                if (tunnelingActuallyEnabled) {
+                    tunnelingGeneration = generation
+                    tunnelingEnabledAt = android.os.SystemClock.elapsedRealtime()
+                }
+                PageLog.add(
+                    "media3Tunneling decision gen=$generation range=$rangeType dv=$isDolbyVision " +
+                        "dvCap=$dvCapability hdrCap=$hdrCapability engine=$selectedEngine " +
+                        "eligible=$tunnelingEligible enabled=$tunnelingActuallyEnabled fallbackTried=$tunnelingFallbackTried",
+                )
                 currentPath = path.copy(engine = selectedEngine)
                 val video = target.source?.streams?.firstOrNull { it.type == "Video" }
                 val videoResolution = video?.let { stream ->
@@ -1650,6 +1760,61 @@ fun PlayerScreen(
                     .orEmpty()
                 val srcId = target.source?.id
                 if (activeEngine == "mpv") {
+                    val anime4kMode = AppRuntime.prefs?.anime4kMode ?: "off"
+                    val rangeForAnime4k = videoStreamForDv?.videoRangeType.orEmpty().uppercase()
+                    val metadataForAnime4k = listOfNotNull(
+                        videoStreamForDv?.profile,
+                        videoStreamForDv?.displayTitle,
+                        videoStreamForDv?.title,
+                    ).joinToString(" ").uppercase().filter(Char::isLetterOrDigit)
+                    val transferForAnime4k = videoStreamForDv?.colorTransfer.orEmpty().uppercase().filter(Char::isLetterOrDigit)
+                    val anime4kIsDolbyVision = isDolbyVision || metadataForAnime4k.contains("DOVI") ||
+                        metadataForAnime4k.contains("DOLBYVISION") || metadataForAnime4k.contains("DVHE") ||
+                        metadataForAnime4k.contains("DVH1")
+                    val anime4kIsHdr = isHdr || rangeForAnime4k.contains("PQ") ||
+                        metadataForAnime4k.contains("HDR") || transferForAnime4k == "PQ" ||
+                        transferForAnime4k.contains("2084") || transferForAnime4k.contains("HLG") ||
+                        transferForAnime4k.contains("ARIBSTDB67")
+                    val anime4kVideoHeight = video?.height
+                        ?: Regex("\\d{3,4}x(\\d{3,4})", RegexOption.IGNORE_CASE).find(videoResolution.orEmpty())
+                            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ?: Regex("\\b(\\d{3,4})p\\b", RegexOption.IGNORE_CASE).find(videoResolution.orEmpty())
+                            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    val anime4kShaderNames = when (anime4kMode) {
+                        "efficiency" -> listOf(
+                            "Anime4K_Clamp_Highlights.glsl",
+                            "Anime4K_Restore_CNN_S.glsl",
+                            "Anime4K_Upscale_CNN_x2_S.glsl",
+                        )
+                        "quality" -> listOf(
+                            "Anime4K_Clamp_Highlights.glsl",
+                            "Anime4K_Restore_CNN_M.glsl",
+                            "Anime4K_Upscale_CNN_x2_M.glsl",
+                        )
+                        else -> emptyList()
+                    }
+                    val anime4kConfig = when {
+                        anime4kMode == "off" -> Anime4kConfig.Off
+                        anime4kIsDolbyVision -> {
+                            PageLog.add("anime4k skip reason=dv")
+                            Anime4kConfig.Off
+                        }
+                        anime4kIsHdr -> {
+                            PageLog.add("anime4k skip reason=hdr")
+                            Anime4kConfig.Off
+                        }
+                        anime4kVideoHeight == null || anime4kVideoHeight > 1080 -> {
+                            PageLog.add("anime4k skip reason=resolution")
+                            Anime4kConfig.Off
+                        }
+                        else -> {
+                            val shaderPaths = ensureAnime4kShaders(context, anime4kShaderNames)
+                            if (shaderPaths.isNullOrEmpty()) {
+                                PageLog.add("anime4k shader copy failed")
+                                Anime4kConfig.Off
+                            } else Anime4kConfig(shaderPaths)
+                        }
+                    }
                     mpvBackend?.release("new-external-load")
                     mpvState = MpvPlayerController.State()
                     val caBundle = MpvTlsPolicy.platformCaBundle(context.cacheDir)
@@ -1681,7 +1846,7 @@ fun PlayerScreen(
                             progressSession = c.reportStart(item.id, target.startPositionMs, srcId, target.playMethod,
                                 target.playSessionId, paused = paused)
                         }
-                    }) { owner, load, state ->
+                    }, onState = { owner, load, state ->
                         if (!isCurrentLoad(load.generation) || reloadPending || mpvBackend !== owner || activeEngine != "mpv") {
                             PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration")
                             return@MpvPlayerController
@@ -1754,7 +1919,7 @@ fun PlayerScreen(
                         if (state.error != null) {
                             handleMpvFailure(state.failureKind ?: MpvPlayerController.FailureKind.LOAD, state.error, generation)
                         }
-                    }.also { mpvBackend = it }
+                    }, anime4k = anime4kConfig).also { mpvBackend = it }
                     val initialization = backend.initialize()
                     if (initialization is MpvPlayerController.InitializationResult.Failed) {
                         handleMpvFailure(MpvPlayerController.FailureKind.INITIALIZATION, initialization.reason, generation)
@@ -1867,6 +2032,25 @@ fun PlayerScreen(
                     }) return@launch
                     exo.setMediaSource(videoSource)
                     exo.prepare()
+                    if (tunnelingActuallyEnabled && tunnelingGeneration == generation) {
+                        tunnelingFallbackJob?.cancel()
+                        val enabledAt = tunnelingEnabledAt
+                        val remainingMs = (enabledAt + 3_000L - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1L)
+                        tunnelingFallbackJob = instanceScope.launch {
+                            delay(remainingMs)
+                            if (isCurrentLoad(generation) && !reloadPending && activeEngine == "media3" &&
+                                tunnelingEnabled && tunnelingGeneration == generation && !firstFrameRendered
+                            ) {
+                                tunnelingFallbackTried = true
+                                tunnelingEnabledAt = 0L
+                                tunnelingGeneration = -1
+                                PageLog.add("media3Tunneling fallback gen=$generation reason=no-first-frame elapsedMs=${android.os.SystemClock.elapsedRealtime() - enabledAt}")
+                                setTunnelingEnabled(false)
+                                requestPlaybackReload(generation)
+                            }
+                            tunnelingFallbackJob = null
+                        }
+                    }
                     pendingStartIntent = null
                     target.playerStartPositionMs?.let(exo::seekTo)
                     exo.setPlaybackSpeed(speedState.effectiveSpeed)
@@ -1885,7 +2069,7 @@ fun PlayerScreen(
                     if (failurePhase == "未知") failurePhase = "解析"
                     // PlaybackInfo/HTTP negotiation is shared by both engines.
                     if (isCertificateFailure(e)) showCertificateError(activeEngine)
-                    error = message
+                    reportError(message)
                 }
                 if (!handled) PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration")
             }
@@ -1899,7 +2083,7 @@ fun PlayerScreen(
         return buildPlayerDiagPayload(
             context, outcome, activeEngine, MpvAvailabilityProbe.process.snapshot(context),
             mpvBackend.takeIf { load.current }, item, source, load,
-            audioDecodeMode, audioSupport.name, degraded, engineSwitchTrace, exo,
+            audioDecodeMode, audioSupport.name, audioCaps, degraded, engineSwitchTrace, exo,
             if (load.current) failurePhase else "stale", mpvState.takeIf { load.current } ?: MpvPlayerController.State(),
             controlsVisible, isActuallyStalled, error.takeIf { load.current }, position,
             activeVideoDecoder.takeIf { load.current }, dvDecoderPath.takeIf { load.current }, playbackStatusNotice.takeIf { load.current },
@@ -1917,7 +2101,7 @@ fun PlayerScreen(
         AppRuntime.currentVideoRange = "SDR"
         AppRuntime.playingItemId = item.id
         if (client == null) {
-            error = "未登录"
+            reportError("未登录")
             return@LaunchedEffect
         }
     }
@@ -2060,6 +2244,22 @@ fun PlayerScreen(
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
                 if (!isCurrentMedia3()) return
                 val errorClass = classifyPlaybackError(err)
+                if (tunnelingEnabled && tunnelingGeneration == sessionGeneration && !firstFrameRendered &&
+                    errorClass.category == PlaybackErrorCategory.DECODING && !tunnelingFallbackTried
+                ) {
+                    val generation = sessionGeneration
+                    tunnelingFallbackTried = true
+                    tunnelingFallbackJob?.cancel()
+                    tunnelingFallbackJob = null
+                    tunnelingEnabledAt = 0L
+                    tunnelingGeneration = -1
+                    PageLog.add("media3Tunneling fallback gen=$generation reason=decoder-error")
+                    setTunnelingEnabled(false)
+                    error = null
+                    updateStalled(true)
+                    requestPlaybackReload(generation)
+                    return
+                }
                 android.util.Log.e("LuminaTV", "Media3 playback failed code=${err.errorCode}", err)
                 PageLog.add("playbackError category=${errorClass.category.name} code=${err.errorCode} action=${errorClass.action}")
                 failurePhase = when {
@@ -2100,7 +2300,7 @@ fun PlayerScreen(
                     playbackStatusNotice = null
                     failurePhase = "认证"
                     updateStalled(false)
-                    error = "登录已失效，请重新登录"
+                    reportError("登录已失效，请重新登录")
                     exo.pause()
                     PageLog.add("playbackRecovery route=authentication action=terminal no-transcode")
                     return
@@ -2152,7 +2352,7 @@ fun PlayerScreen(
                                 else -> "非视频内容（$contentType）"
                             }
                             failurePhase = "直链校验"
-                            error = "片源直链失效：服务器返回了$typeLabel（网盘链接可能已过期）"
+                            reportError("片源直链失效：服务器返回了$typeLabel（网盘链接可能已过期）")
                             rangeProbeDiagnostics.put("nonVideoResponse", true)
                             loadDetails.lastPlaybackErrorJson = JSONObject(loadDetails.lastPlaybackErrorJson.orEmpty())
                                 .put("contentType", contentType)
@@ -2172,7 +2372,7 @@ fun PlayerScreen(
                         else -> "非视频内容（$probeContentType）"
                     }
                     failurePhase = "直链校验"
-                    error = "片源直链失效：服务器返回了$typeLabel（网盘链接可能已过期）"
+                    reportError("片源直链失效：服务器返回了$typeLabel（网盘链接可能已过期）")
                     rangeProbeDiagnostics.put("nonVideoResponse", true)
                     loadDetails.lastPlaybackErrorJson = JSONObject(loadDetails.lastPlaybackErrorJson.orEmpty())
                         .put("contentType", probeContentType)
@@ -2187,7 +2387,7 @@ fun PlayerScreen(
                         val status = generateSequence(err as Throwable?) { it.cause }
                             .filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>()
                             .firstOrNull()?.responseCode
-                        error = "当前片源不可用${status?.let { "（HTTP $it）" }.orEmpty()}，请选择其他版本"
+                        reportError("当前片源不可用${status?.let { "（HTTP $it）" }.orEmpty()}，请选择其他版本")
                         PageLog.add("playbackRecovery route=source-gone action=terminal sourceFallback=unavailable")
                     }
                 } else if (errorRoute == PlaybackErrorRoute.AUDIO_OUTPUT) {
@@ -2219,11 +2419,11 @@ fun PlayerScreen(
                     updateStalled(false)
                     playbackStatusNotice = null
                     failurePhase = "网络"
-                    error = "媒体服务器暂时不可用，请稍后重试"
+                    reportError("媒体服务器暂时不可用，请稍后重试")
                     PageLog.add("playbackRecovery route=network-retry action=terminal retryLimit=2")
                 } else if (errorRoute == PlaybackErrorRoute.PERMISSION_DENIED) {
                     updateStalled(false)
-                    error = "媒体服务器拒绝了播放请求（权限或认证失败）"
+                    reportError("媒体服务器拒绝了播放请求（权限或认证失败）")
                 } else if (isBadHttpStatus && loadCoordinator.advanceHttp400(sessionGeneration)) {
                     updateStalled(true)
                     error = null
@@ -2253,7 +2453,7 @@ fun PlayerScreen(
                     requestAutomaticReload(sessionGeneration, "media3:${err.errorCodeName}")
                 } else if (containerUnsupported && currentIsHls) {
                     updateStalled(false)
-                    error = "该片源无法播放（转码流与直连都失败）"
+                    reportError("该片源无法播放（转码流与直连都失败）")
                     engineSwitchTrace.add("container-terminal:hls:${err.errorCodeName}")
                 } else if (containerUnsupported) {
                     recoverUnsupportedContainer(err.errorCodeName, sessionGeneration)
@@ -2261,10 +2461,10 @@ fun PlayerScreen(
                     degraded = true
                     transcodeFallbackTried = true
                     reloadForceTranscode = true
-                    error = "直连失败，自动切换转码…"
+                    reportError("直连失败，自动切换转码…")
                     requestAutomaticReload(sessionGeneration, "media3:${err.errorCodeName}")
                 } else if (!rebuildRetry && !containerUnsupported) {
-                    error = "媒体服务器转码流失败，重试转码路径…"
+                    reportError("媒体服务器转码流失败，重试转码路径…")
                     reloadForceTranscode = true
                     engineSwitchTrace.add("server-transcode-retry:${err.errorCodeName}")
                     val generation = sessionGeneration
@@ -2294,7 +2494,7 @@ fun PlayerScreen(
                     val playbackUrlPath = runCatching {
                         android.net.Uri.parse(currentPlaybackUrl).path.orEmpty().takeLast(40)
                     }.getOrDefault("")
-                    error = buildString {
+                    reportError(buildString {
                         append("URL=").append(playbackUrlPath).append("\n")
                         append("${failurePhase}阶段失败：")
                         append("播放失败：${err.errorCodeName}")
@@ -2315,7 +2515,7 @@ fun PlayerScreen(
                     }.let { message ->
                         val urlLine = message.substringBefore('\n')
                         message.substringAfter('\n') + "\n" + urlLine
-                    }
+                    })
                 }
             }
 
@@ -2571,6 +2771,10 @@ fun PlayerScreen(
                     observeTimelinePosition(target, exo.currentPosition.takeIf { it >= 0L }, exo.duration, now)
                 }
                 firstFrameRendered = true
+                if (tunnelingGeneration == sessionGeneration) {
+                    tunnelingFallbackJob?.cancel()
+                    tunnelingFallbackJob = null
+                }
                 updateStalled(exo.playbackState == Player.STATE_BUFFERING && exo.playWhenReady)
                 phaseTimes.put("firstFramePositionMs", exo.currentPosition)
                 if (firstFrameAt == 0L) firstFrameAt = now
@@ -2916,6 +3120,16 @@ fun PlayerScreen(
                     val next = catchingRequest { c.getNextEpisode(item) }.getOrNull()
                     if (next != null) {
                         prewarmedEpisodeId = next.id
+                        val skipReason = try {
+                            prewarmNextSkipReason(context, next)
+                        } catch (_: Exception) {
+                            PageLog.add("prewarm gate failed")
+                            return@launch
+                        }
+                        if (skipReason != null) {
+                            PageLog.add("prewarm skipped reason=$skipReason")
+                            return@launch
+                        }
                         prewarmNext(next)
                     } else prewarmedEpisodeId = "none"
                 }
@@ -3375,16 +3589,16 @@ fun PlayerScreen(
                 }
                 if (bufferingImage == null) {
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF263142), Color(0xFF10141D)))))
-                    Text(item.seriesName ?: item.name, color = TextMain, fontSize = 24.sp, maxLines = 2,
+                    Text(item.seriesName ?: item.name, color = TextMain, fontSize = TypeScale.sp24, maxLines = 2,
                         modifier = Modifier.align(Alignment.Center).padding(horizontal = 40.dp))
-                    Text("暂无横版剧照", color = TextSub, fontSize = 13.sp,
+                    Text("暂无横版剧照", color = TextSub, fontSize = TypeScale.sp13,
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 40.dp))
                 }
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Accent, strokeWidth = 2.5.dp, modifier = Modifier.size(36.dp))
                     Spacer(Modifier.height(10.dp))
-                    Text("正在缓冲…", color = TextSub, fontSize = 12.sp)
+                    Text("正在缓冲…", color = TextSub, fontSize = TypeScale.sp12)
                 }
             }
         }
@@ -3402,7 +3616,7 @@ fun PlayerScreen(
             Text(
                 notice,
                 color = Color(0xFFFFD28A),
-                fontSize = 12.sp,
+                fontSize = TypeScale.sp12,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 96.dp)
                     .background(Color(0xAA10141D), RoundedCornerShape(6.dp))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
@@ -3415,7 +3629,7 @@ fun PlayerScreen(
             Text(
                 "当前音轨无音频输出（$codec），按菜单可切换其他音轨",
                 color = Color(0xFFFFD28A),
-                fontSize = 12.sp,
+                fontSize = TypeScale.sp12,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 132.dp)
                     .background(Color(0xAA10141D), RoundedCornerShape(6.dp))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
@@ -3426,7 +3640,7 @@ fun PlayerScreen(
 
         error?.let {
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                Text(it, color = Color(0xFFFF8A9A), fontSize = 14.sp, modifier = Modifier.padding(horizontal = 40.dp))
+                Text(it, color = Color(0xFFFF8A9A), fontSize = TypeScale.sp14, modifier = Modifier.padding(horizontal = 40.dp))
                 if (bufferingTimedOut || error != null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     FocusSurface(Modifier.width(132.dp).height(40.dp), corner = 20.dp, onClick = {
@@ -3436,7 +3650,7 @@ fun PlayerScreen(
                         requestPlaybackReload(sessionGeneration)
                     }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
-                            Text("重试", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                            Text("重试", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp12)
                         }
                     }
                     if (mediaSources.size > 1) {
@@ -3464,7 +3678,7 @@ fun PlayerScreen(
                             }
                         }) { focused ->
                             Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
-                                Text("换源", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                                Text("换源", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp12)
                             }
                         }
                     }
@@ -3476,13 +3690,13 @@ fun PlayerScreen(
                         requestPlaybackReload(sessionGeneration)
                     }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
-                            Text("立即切换转码", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = 12.sp)
+                            Text("立即切换转码", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp12)
                         }
                     }
                     }
                     FocusSurface(Modifier.width(164.dp).height(40.dp), corner = 20.dp, onClick = { showDiagExport = true }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
-                            Text("导出诊断包", color = if (focused) Accent else TextMain, fontSize = 12.sp)
+                            Text("导出诊断包", color = if (focused) Accent else TextMain, fontSize = TypeScale.sp12)
                         }
                     }
                     }
@@ -3495,7 +3709,7 @@ fun PlayerScreen(
                 GlassPanel(Modifier.width(520.dp).heightIn(max = 560.dp), corner = 20.dp, fillColor = Color(0xD910141D)) {
                     Column(Modifier.padding(18.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("章节与片段", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text("章节与片段", color = TextMain, fontSize = TypeScale.sp16, fontWeight = FontWeight.SemiBold)
                             Spacer(Modifier.weight(1f))
                             CtrlButton(Icons.Rounded.Pause, "关闭章节列表") { chapterPanel = false }
                         }
@@ -3507,12 +3721,12 @@ fun PlayerScreen(
                                     controlsVisible = true
                                 }) { focused ->
                                     Row(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Text(formatTime(chapter.startMs), color = Accent, fontSize = 12.sp)
+                                        Text(formatTime(chapter.startMs), color = Accent, fontSize = TypeScale.sp12)
                                         Spacer(Modifier.width(12.dp))
-                                        Text(chapter.name, color = TextMain, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(chapter.name, color = TextMain, fontSize = TypeScale.sp12, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         Spacer(Modifier.weight(1f))
-                                        if (chapter.name.contains(Regex("intro|opening|片头", RegexOption.IGNORE_CASE))) Text("片头", color = TextSub, fontSize = 10.sp)
-                                        if (chapter.name.contains(Regex("credit|ending|片尾|字幕", RegexOption.IGNORE_CASE))) Text("片尾", color = TextSub, fontSize = 10.sp)
+                                        if (chapter.name.contains(Regex("intro|opening|片头", RegexOption.IGNORE_CASE))) Text("片头", color = TextSub, fontSize = TypeScale.sp10)
+                                        if (chapter.name.contains(Regex("credit|ending|片尾|字幕", RegexOption.IGNORE_CASE))) Text("片尾", color = TextSub, fontSize = TypeScale.sp10)
                                     }
                                 }
                             }
@@ -3526,7 +3740,7 @@ fun PlayerScreen(
             Text(
                 seekHint.orEmpty(),
                 color = Color.White,
-                fontSize = 16.sp,
+                fontSize = TypeScale.sp16,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .padding(bottom = 132.dp)
@@ -3542,7 +3756,7 @@ fun PlayerScreen(
         ) {
             Text(
                 if (speedState.boostActive) "3x 快进中 »»" else seekHint.orEmpty(),
-                color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                color = TextMain, fontSize = TypeScale.sp13, fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .padding(top = 24.dp)
                     .background(Color(0x99000000), RoundedCornerShape(16.dp))
@@ -3562,12 +3776,12 @@ fun PlayerScreen(
                 Column {
                     Text(
                         "${creditsCountdown.remainingSeconds} 秒后播放下一集",
-                        color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        color = TextMain, fontSize = TypeScale.sp13, fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         "第${ne.indexNumber ?: 0}集 · ${ne.name}",
-                        color = TextSub, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        color = TextSub, fontSize = TypeScale.sp11, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                     Spacer(Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3583,7 +3797,7 @@ fun PlayerScreen(
                                     Accent.copy(alpha = if (focused) 1f else 0.9f), RoundedCornerShape(17.dp)
                                 ),
                                 contentAlignment = Alignment.Center,
-                            ) { Text("立即播放", color = Color(0xFF06101F), fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                            ) { Text("立即播放", color = Color(0xFF06101F), fontSize = TypeScale.sp12, fontWeight = FontWeight.Bold) }
                         }
                         FocusSurface(
                             modifier = Modifier.height(34.dp).width(80.dp),
@@ -3595,7 +3809,7 @@ fun PlayerScreen(
                                     if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF), RoundedCornerShape(17.dp)
                                 ),
                                 contentAlignment = Alignment.Center,
-                            ) { Text("取消", color = TextMain, fontSize = 12.sp) }
+                            ) { Text("取消", color = TextMain, fontSize = TypeScale.sp12) }
                         }
                     }
                 }
@@ -3679,7 +3893,7 @@ fun PlayerScreen(
                         if (focused) Color(0xCC070A12) else Color(0x99070A12), RoundedCornerShape(20.dp)
                     ),
                     contentAlignment = Alignment.Center,
-                ) { Text("跳过片头 »", color = TextMain, fontSize = 13.sp) }
+                ) { Text("跳过片头 »", color = TextMain, fontSize = TypeScale.sp13) }
             }
         }
 
@@ -3719,7 +3933,7 @@ fun PlayerScreen(
                                 Text(
                                     formatTime(target),
                                     color = TextMain,
-                                    fontSize = 11.sp,
+                                    fontSize = TypeScale.sp11,
                                     fontWeight = FontWeight.SemiBold,
                                     modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                                         .background(Color(0xAA070A12)).padding(vertical = 3.dp),
@@ -3732,7 +3946,7 @@ fun PlayerScreen(
                         Text(
                             "第 ${item.indexNumber} 集",
                             color = Color.White.copy(alpha = 0.85f),
-                            fontSize = 14.sp,
+                            fontSize = TypeScale.sp14,
                             maxLines = 1,
                             modifier = Modifier.padding(bottom = 6.dp),
                         )
@@ -3751,9 +3965,9 @@ fun PlayerScreen(
                     )
                     Spacer(Modifier.height(4.dp))
                     Row {
-                        Text(formatTime(position), color = TextSub, fontSize = 11.sp)
+                        Text(formatTime(position), color = TextSub, fontSize = TypeScale.sp11)
                         Spacer(Modifier.weight(1f))
-                        Text(formatTime(duration), color = TextSub, fontSize = 11.sp)
+                        Text(formatTime(duration), color = TextSub, fontSize = TypeScale.sp11)
                     }
                 }
 
@@ -3795,7 +4009,7 @@ fun PlayerScreen(
                         Text(
                             displayTitle,
                             color = Color.White,
-                            fontSize = 17.sp,
+                            fontSize = TypeScale.sp17,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -3809,7 +4023,7 @@ fun PlayerScreen(
                     Text(
                         if (speedState.userSpeed == 1f) clockText else "$clockText  ${"%.1f".format(Locale.US, speedState.userSpeed)}x",
                         color = Color.White.copy(alpha = 0.8f),
-                        fontSize = 14.sp,
+                        fontSize = TypeScale.sp14,
                     )
                     val networkBytesPerSecond = if (activeEngine == "mpv") {
                         mpvState.cacheSpeedBytesPerSecond
@@ -3822,7 +4036,7 @@ fun PlayerScreen(
                         } else {
                             "${(networkBytesPerSecond / 1_000L).coerceAtLeast(1L)} KB/s"
                         }
-                        Text(networkSpeed, color = Color.White.copy(alpha = 0.68f), fontSize = 12.sp)
+                        Text(networkSpeed, color = Color.White.copy(alpha = 0.68f), fontSize = TypeScale.sp12)
                     }
                 }
 
@@ -3841,7 +4055,7 @@ fun PlayerScreen(
                         optionMenu = false
                     }
                     if (hasEpisodeButton) {
-                        OsdIconButton(Icons.Rounded.PlaylistPlay, "选集", episodeFocus, speedFocus, menuFocus, playFocus, { controlHasFocus = it }) {
+                        OsdIconButton(Icons.AutoMirrored.Rounded.PlaylistPlay, "选集", episodeFocus, speedFocus, menuFocus, playFocus, { controlHasFocus = it }) {
                             if (quickPanel == QuickPanel.EPISODES) closeQuickPanel(episodeFocus)
                             else {
                                 quickContentHasFocus = false
@@ -3872,7 +4086,7 @@ fun PlayerScreen(
                 Text(
                     if (quickPanel == QuickPanel.SPEED) "倍速播放" else "选集",
                     color = TextSub,
-                    fontSize = 12.sp,
+                    fontSize = TypeScale.sp12,
                     modifier = Modifier.padding(bottom = 10.dp),
                 )
                 if (quickPanel == QuickPanel.SPEED) {
@@ -3914,7 +4128,7 @@ fun PlayerScreen(
                                     Text(
                                         if (s == 1f) "1.0x" else "${s}x",
                                         color = if (active) Color(0xFF06101F) else TextMain,
-                                        fontSize = 13.sp,
+                                        fontSize = TypeScale.sp13,
                                     )
                                 }
                             }
@@ -3978,7 +4192,7 @@ fun PlayerScreen(
                                     Text(
                                         season.name,
                                         color = if (active) Color(0xFF06101F) else TextMain,
-                                        fontSize = 12.sp,
+                                        fontSize = TypeScale.sp12,
                                         maxLines = 1,
                                         softWrap = false,
                                         modifier = Modifier.padding(horizontal = 16.dp),
@@ -3996,7 +4210,7 @@ fun PlayerScreen(
                                 episodeRetry++
                             },
                         ) {
-                            Text("剧集读取失败 · 点此重试", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = TextMain, fontSize = 12.sp)
+                            Text("剧集读取失败 · 点此重试", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = TextMain, fontSize = TypeScale.sp12)
                         }
                     }
                     Box(Modifier.weight(1f, fill = false)) {
@@ -4010,7 +4224,7 @@ fun PlayerScreen(
                             Text(
                                 "本季暂无集数",
                                 color = TextSub,
-                                fontSize = 12.sp,
+                                fontSize = TypeScale.sp12,
                                 modifier = Modifier.align(Alignment.Center),
                             )
                         } else if (quickEpisodes.isNotEmpty()) {
@@ -4057,7 +4271,7 @@ fun PlayerScreen(
                                             Text(
                                                 ep.indexNumber?.toString() ?: "-",
                                                 color = if (active) Color(0xFF06101F) else TextMain,
-                                                fontSize = 12.sp,
+                                                fontSize = TypeScale.sp12,
                                                 maxLines = 1,
                                                 textAlign = TextAlign.Center,
                                             )
@@ -4078,7 +4292,7 @@ fun PlayerScreen(
                     .background(Color(0xCC0B1018), RoundedCornerShape(18.dp))
                     .padding(horizontal = 14.dp, vertical = 8.dp),
                 color = TextMain,
-                fontSize = 12.sp,
+                fontSize = TypeScale.sp12,
                 maxLines = 1,
             )
         }
@@ -4273,7 +4487,7 @@ fun PlayerScreen(
                         closeOptionMenu()
                         enginePinned = next
                         reloadForceTranscode = false
-                        error = "正在切换播放内核…"
+                        reportError("正在切换播放内核…")
                         requestPlaybackReload(sessionGeneration)
                     }
                 },
@@ -4318,7 +4532,7 @@ fun PlayerScreen(
                         tint = TextMain,
                         modifier = Modifier.size(20.dp),
                     )
-                    Text("$playerVolumePercent%", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("$playerVolumePercent%", color = TextMain, fontSize = TypeScale.sp14, fontWeight = FontWeight.SemiBold)
                 }
                 Box(Modifier.width(150.dp).height(4.dp).background(Color(0x44FFFFFF), RoundedCornerShape(2.dp))) {
                     Box(
@@ -4335,13 +4549,13 @@ fun PlayerScreen(
                         "当前为音频直通，音量由电视/功放控制；按 OK 切换本地软解",
                         Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
                         color = TextMain,
-                        fontSize = 16.sp,
+                        fontSize = TypeScale.sp16,
                     )
                 }
             }
         }
         audioDecodeNotice?.let { notice ->
-            Text(notice, Modifier.align(Alignment.BottomEnd).padding(24.dp).background(Color(0xAA10141D), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 8.dp), color = TextMain, fontSize = 11.sp)
+            Text(notice, Modifier.align(Alignment.BottomEnd).padding(24.dp).background(Color(0xAA10141D), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 8.dp), color = TextMain, fontSize = TypeScale.sp11)
             LaunchedEffect(notice) { delay(3_000); audioDecodeNotice = null }
         }
     }
@@ -4349,7 +4563,7 @@ fun PlayerScreen(
         Box(Modifier.fillMaxSize().background(Color(0xCC000000)), contentAlignment = Alignment.Center) {
             GlassPanel(Modifier.width(480.dp), corner = 18.dp, fillColor = Color(0xF018202B)) {
                 Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Text("Media3 无法播放该片，是否尝试 mpv 内核？", color = TextMain, fontSize = 17.sp)
+                    Text("Media3 无法播放该片，是否尝试 mpv 内核？", color = TextMain, fontSize = TypeScale.sp17)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         FocusSurface(Modifier.width(130.dp).height(42.dp), corner = 10.dp, onClick = {
                             engineSwitchTrace.add("user-confirmed-mpv")
@@ -4366,7 +4580,7 @@ fun PlayerScreen(
                         FocusSurface(Modifier.width(130.dp).height(42.dp), corner = 10.dp, onClick = {
                             engineSwitchTrace.add("user-declined-mpv")
                             showMpvConfirm = false
-                            error = "Media3 播放失败。可导出诊断包或手动切换播放内核。"
+                            reportError("Media3 播放失败。可导出诊断包或手动切换播放内核。")
                         }) { focused ->
                             Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
                                 Text("取消", color = TextMain)

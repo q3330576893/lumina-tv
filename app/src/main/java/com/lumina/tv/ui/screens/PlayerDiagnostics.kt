@@ -8,6 +8,9 @@ import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
+import com.lumina.tv.player.AudioCapabilities
+import com.lumina.tv.player.AudioCodecMatrix
+import com.lumina.tv.player.AudioSupport
 import com.lumina.tv.player.MpvAvailabilitySnapshot
 import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.player.PlaybackDiagnostics
@@ -30,6 +33,7 @@ internal fun buildPlayerDiagPayload(
     load: PlaybackLoadDetailSnapshot,
     audioDecodeMode: String,
     audioSupport: String,
+    audioCaps: AudioCapabilities,
     degraded: Boolean,
     engineSwitchTrace: List<String>,
     exo: ExoPlayer,
@@ -73,6 +77,7 @@ internal fun buildPlayerDiagPayload(
     val displayHdrTypes = readDisplayHdrTypes(context)
     val actualAudioIndex = if (activeEngine == "mpv") mpvBackend?.currentAudioEmbyIndex() else selectedAudioStreamIndex
     val audioStream = playbackSource?.audioStreams?.firstOrNull { it.index == actualAudioIndex }
+    val audioCapabilitySummary = AudioCodecMatrix.currentAudioSupport(audioCaps)
     if (activeEngine == "mpv") listOf("decoderInitMs", "compatMappingMs", "firstFrameMs", "stableOutputMs").forEach { key ->
         if (phases.isNull(key)) phases.put(key, "N/A")
     }
@@ -81,11 +86,19 @@ internal fun buildPlayerDiagPayload(
         .put("display", JSONObject().put("hdr", displayHdrDiagnostic(displayHdrTypes)?.let(::JSONArray) ?: JSONObject.NULL))
         .put("engine", mpvAvailability.addTo(JSONObject()
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
-            .put("active", activeEngine))
+            .put("active", activeEngine)
+            .put("anime4k", JSONObject()
+                .put("mode", AppRuntime.prefs?.anime4kMode ?: "off")
+                .put("shaders", if (activeEngine == "mpv") mpvBackend?.anime4kShaderCount() ?: 0 else 0)
+                .put("fallback", false))
+            .put("audioSupport", JSONObject()
+                .put("maxChannels", audioCapabilitySummary.maxChannels)
+                .put("passthrough", JSONArray(audioCapabilitySummary.codecs
+                    .filterValues { it == AudioSupport.PASSTHROUGH }.keys.sorted())))
             .put("mpvProperties", JSONObject(mpvBackend?.diagnosticProperties().orEmpty()))
             .put("liveVideoDecoders", PlayerLifecycle.registry.liveVideoDecoders)
             .put("videoDecoderCountScope", "media3_callbacks;mpv_lifecycle_only")
-            .put("kernels", JSONArray().put("media3").put("mpv")))
+            .put("kernels", JSONArray().put("media3").put("mpv"))))
         .put("media", JSONObject()
             .put("id", item.id)
             .put("name", item.name)

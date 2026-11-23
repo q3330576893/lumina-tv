@@ -92,6 +92,11 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         }
         set(v) = sp.edit().putString("engine", v).apply()
 
+    var anime4kMode: String
+        get() = sp.getString("anime4k_mode", "off")
+            ?.takeIf { it in setOf("off", "efficiency", "quality") } ?: "off"
+        set(v) = sp.edit().putString("anime4k_mode", v.takeIf { it in setOf("off", "efficiency", "quality") } ?: "off").apply()
+
     var seekStepSeconds: Int
         get() = sp.getInt("seek_step_seconds", 10).takeIf { it in setOf(5, 10, 15, 30) } ?: 10
         set(v) = sp.edit().putInt("seek_step_seconds", v.takeIf { it in setOf(5, 10, 15, 30) } ?: 10).apply()

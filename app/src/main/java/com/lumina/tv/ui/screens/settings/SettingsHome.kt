@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.TypeScale
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -78,7 +80,7 @@ fun SettingsHome(
                         .glassBorder(groupShape)
                         .padding(SettingsTokens.RowPaddingH),
                 ) {
-                    Text("打开一次首页后会自动同步服务器分类", color = TextSub, fontSize = 14.sp)
+                    Text("打开一次首页后会自动同步服务器分类", color = TextSub, fontSize = TypeScale.sp14)
                 }
             }
         } else {

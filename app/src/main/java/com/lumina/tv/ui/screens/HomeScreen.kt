@@ -921,13 +921,13 @@ fun HomeScreen(
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text("点击任意位置重试", color = Accent, fontSize = 13.sp)
+                    Text("点击任意位置重试", color = Accent, fontSize = TypeScale.sp13)
                     Spacer(Modifier.height(6.dp))
-                    Text("加载失败：$error", color = TextSub, fontSize = 13.sp)
+                    Text("加载失败：$error", color = TextSub, fontSize = TypeScale.sp13)
                     Spacer(Modifier.height(6.dp))
-                    Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = 11.sp)
+                    Text("服务器：${AppRuntime.session?.baseUrl}", color = TextSub.copy(alpha = 0.6f), fontSize = TypeScale.sp11)
                     AppRuntime.client?.lastApiFailure?.let { failure ->
-                        Text("诊断：$failure", color = TextSub.copy(alpha = 0.6f), fontSize = 10.sp, maxLines = 2)
+                        Text("诊断：$failure", color = TextSub.copy(alpha = 0.6f), fontSize = TypeScale.sp10, maxLines = 2)
                     }
                 }
                 tab == HomeTab.Recommend -> BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
@@ -984,7 +984,7 @@ fun HomeScreen(
                                         .background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(28.dp)),
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    Text("还没有观看记录 · 去媒体库逛逛", color = TextMain, fontSize = 13.sp)
+                                    Text("还没有观看记录 · 去媒体库逛逛", color = TextMain, fontSize = TypeScale.sp13)
                                 }
                             }
                         }
@@ -1038,18 +1038,18 @@ fun HomeScreen(
                                 Modifier.fillMaxSize().then(if (focused) Modifier.border(1.dp, Accent, CircleShape) else Modifier),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Text("‹", color = if (focused) Accent else TextMain, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+                                Text("‹", color = if (focused) Accent else TextMain, fontSize = TypeScale.sp20, fontWeight = FontWeight.Medium)
                             }
                         }
                         Spacer(Modifier.width(16.dp))
                         Column(Modifier.widthIn(max = 260.dp)) {
                             Text(
                                 selectedLibrary?.name.orEmpty(),
-                                color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Medium,
+                                color = TextMain, fontSize = TypeScale.sp24, fontWeight = FontWeight.Medium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                             Text(if (librarySort == "random") "随机固定样本 · ${gridItems.size}/最多 50 部（非全库）"
-                                else libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextMain.copy(alpha = 0.6f), fontSize = 11.sp)
+                                else libraryTotalCount?.let { "共 $it 部" } ?: "已加载 ${gridItems.size} 部", color = TextMain.copy(alpha = 0.6f), fontSize = TypeScale.sp11)
                         }
                         Spacer(Modifier.weight(1f))
                         Box {
@@ -1072,9 +1072,9 @@ fun HomeScreen(
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("排序", color = if (focused) Accent else TextSub, fontSize = 9.sp, lineHeight = 11.sp)
-                                        Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                                        if (gridRefreshing) Text("刷新中", color = Accent, fontSize = 9.sp, lineHeight = 10.sp)
+                                        Text("排序", color = if (focused) Accent else TextSub, fontSize = TypeScale.sp9, lineHeight = 11.sp)
+                                        Text(SORT_LABELS[librarySort] ?: "默认", color = if (focused) Accent else TextMain, fontSize = TypeScale.sp13, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                        if (gridRefreshing) Text("刷新中", color = Accent, fontSize = TypeScale.sp9, lineHeight = 10.sp)
                                     }
                                 }
                             }
@@ -1119,8 +1119,8 @@ fun HomeScreen(
                                                     .padding(horizontal = 18.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
-                                                Text(if (selected) "✓" else "", color = Accent, fontSize = 14.sp, modifier = Modifier.width(22.dp))
-                                                Text(label, color = if (itemFocused || selected) TextMain else TextSub, fontSize = 14.sp)
+                                                Text(if (selected) "✓" else "", color = Accent, fontSize = TypeScale.sp14, modifier = Modifier.width(22.dp))
+                                                Text(label, color = if (itemFocused || selected) TextMain else TextSub, fontSize = TypeScale.sp14)
                                             }
                                         }
                                         Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).height(1.dp).background(Color(0x26FFFFFF)))
@@ -1149,8 +1149,8 @@ fun HomeScreen(
                                                     .padding(horizontal = 18.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
-                                                Text(if (selected) "✓" else "", color = Accent, fontSize = 14.sp, modifier = Modifier.width(22.dp))
-                                                Text(label, color = if (orderFocused || selected) TextMain else TextSub, fontSize = 14.sp)
+                                                Text(if (selected) "✓" else "", color = Accent, fontSize = TypeScale.sp14, modifier = Modifier.width(22.dp))
+                                                Text(label, color = if (orderFocused || selected) TextMain else TextSub, fontSize = TypeScale.sp14)
                                             }
                                         }
                                     }
@@ -1159,10 +1159,10 @@ fun HomeScreen(
                     }
                     if (gridLoading && gridItems.isEmpty()) LoadingView(text = "正在读取 ${selectedLibrary?.name.orEmpty()}…")
                     else if (libraryError != null) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("读取失败：${libraryError}", color = TextSub, fontSize = 13.sp)
+                        Text("读取失败：${libraryError}", color = TextSub, fontSize = TypeScale.sp13)
                     }
                     else if (gridItems.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("此媒体库暂无内容", color = TextSub, fontSize = 13.sp)
+                        Text("此媒体库暂无内容", color = TextSub, fontSize = TypeScale.sp13)
                     }
                     else BoxWithConstraints {
                         val libraryGridColumns = when {
@@ -1218,7 +1218,7 @@ fun HomeScreen(
                                     onClick = { gridRetryRequested++ },
                                 ) { focused ->
                                     Box(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
-                                        Text("加载失败，按 OK 重试", color = TextMain, fontSize = 13.sp)
+                                        Text("加载失败，按 OK 重试", color = TextMain, fontSize = TypeScale.sp13)
                                     }
                                 }
                             }
@@ -1227,7 +1227,7 @@ fun HomeScreen(
                 }
                 gridLoading -> LoadingView(text = "正在加载…")
                 gridItems.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("这里还没有内容", color = TextSub, fontSize = 13.sp)
+                    Text("这里还没有内容", color = TextSub, fontSize = TypeScale.sp13)
                 }
                 else -> BoxWithConstraints {
                     val gridColumns = when {
@@ -1282,7 +1282,7 @@ fun HomeScreen(
             Text(
                 "离线，显示上次内容",
                 color = Color(0xFF9AA4B2),
-                fontSize = 11.sp,
+                fontSize = TypeScale.sp11,
                 modifier = Modifier.align(Alignment.TopEnd).zIndex(3f).padding(top = 18.dp, end = 34.dp),
             )
         }
@@ -1337,7 +1337,7 @@ fun HomeScreen(
                 text = {
                     Column {
                         Text("《${item.name}》")
-                        Text("只从这一行移除，不影响播放记录", color = TextSub, fontSize = 12.sp)
+                        Text("只从这一行移除，不影响播放记录", color = TextSub, fontSize = TypeScale.sp12)
                     }
                 },
                 confirmButton = {
@@ -1484,14 +1484,14 @@ private fun ServerCapsule(
                     ) {
                         Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.size(34.dp).clip(RoundedCornerShape(17.dp)).background(Color(0x2E6EA8FF)), contentAlignment = Alignment.Center) {
-                                Text("L", color = Accent, fontSize = 17.sp, fontWeight = FontWeight.Black)
+                                Text("L", color = Accent, fontSize = TypeScale.sp17, fontWeight = FontWeight.Black)
                             }
                             Spacer(Modifier.width(10.dp))
                             Column {
-                                Text("当前服务器", color = TextSub, fontSize = 9.sp)
+                                Text("当前服务器", color = TextSub, fontSize = TypeScale.sp9)
                                 Text(
                                     AppRuntime.session?.userName ?: "未登录",
-                                    color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                    color = TextMain, fontSize = TypeScale.sp13, fontWeight = FontWeight.SemiBold,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 )
                             }
@@ -1542,7 +1542,7 @@ private fun ServerCapsule(
                                                 if (current) "✓ ${server.name}" else server.name,
                                                 modifier = Modifier.weight(1f),
                                                 color = if (current) Accent else TextMain,
-                                                fontSize = 13.sp,
+                                                fontSize = TypeScale.sp13,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
@@ -1550,7 +1550,7 @@ private fun ServerCapsule(
                                             Text(
                                                 runCatching { android.net.Uri.parse(server.url).host }.getOrNull().orEmpty(),
                                                 color = TextSub,
-                                                fontSize = 10.sp,
+                                                fontSize = TypeScale.sp10,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
@@ -1589,10 +1589,10 @@ private fun MenuRowGlass(title: String, sub: String, danger: Boolean = false, on
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text(title, color = if (danger) Color(0xFFFF8A9A) else TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                Text(sub, color = TextSub, fontSize = 10.sp)
+                Text(title, color = if (danger) Color(0xFFFF8A9A) else TextMain, fontSize = TypeScale.sp13, fontWeight = FontWeight.SemiBold)
+                Text(sub, color = TextSub, fontSize = TypeScale.sp10)
             }
-            Text("›", color = TextSub, fontSize = 15.sp)
+            Text("›", color = TextSub, fontSize = TypeScale.sp15)
         }
     }
 }
@@ -1679,7 +1679,7 @@ private fun TopNavBar(
                             .background(Color(0xE610141D), RoundedCornerShape(8.dp))
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         color = Color.White,
-                        fontSize = 14.sp,
+                        fontSize = TypeScale.sp14,
                         maxLines = 1,
                     )
                 }
@@ -1737,7 +1737,7 @@ private fun TopAction(label: String, icon: androidx.compose.ui.graphics.vector.I
         ) {
             Icon(icon, contentDescription = label, tint = if (focused) Accent else TextMain, modifier = Modifier.size(15.dp))
             Spacer(Modifier.width(5.dp))
-            Text(label, color = if (focused) Accent else TextMain, fontSize = 11.sp)
+            Text(label, color = if (focused) Accent else TextMain, fontSize = TypeScale.sp11)
         }
     }
 }
@@ -1770,7 +1770,7 @@ private fun TabChip(
             Text(
                 label,
                 color = if (active) Color(0xFF06101F) else TextMain,
-                fontSize = 12.sp,
+                fontSize = TypeScale.sp12,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 10.dp),
@@ -1792,7 +1792,7 @@ private fun HomeLibraryRow(
         Text(
             "媒体库",
             color = TextMain,
-            fontSize = 20.sp,
+            fontSize = TypeScale.sp20,
             fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(start = 40.dp, bottom = 10.dp),
         )
@@ -1838,7 +1838,7 @@ private fun HomeLibraryRow(
                             Text(
                                 view.name,
                                 color = Color.White,
-                                fontSize = 16.sp,
+                                fontSize = TypeScale.sp16,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1846,7 +1846,7 @@ private fun HomeLibraryRow(
                             Text(
                                 libraryCategoryCountLabel(counts[view.id], contents[view.id].orEmpty().size),
                                 color = Color.White.copy(alpha = 0.6f),
-                                fontSize = 11.sp,
+                                fontSize = TypeScale.sp11,
                             )
                         }
                         if (focused) Box(Modifier.fillMaxSize().border(1.5.dp, Accent, shape))
@@ -1871,7 +1871,7 @@ private fun MediaLibrary(
 ) {
     if (views.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("服务器暂无媒体库分类", color = TextSub, fontSize = 13.sp)
+            Text("服务器暂无媒体库分类", color = TextSub, fontSize = TypeScale.sp13)
         }
         return
     }
@@ -1894,7 +1894,7 @@ private fun MediaLibrary(
     }
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 76.dp, bottom = 6.dp)) {
-            Text("媒体库", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("媒体库", color = TextMain, fontSize = TypeScale.sp22, fontWeight = FontWeight.Bold)
         }
         LazyVerticalGrid(
             columns = GridCells.Adaptive(300.dp),
@@ -1951,14 +1951,14 @@ private fun MediaLibrary(
                             }
                             Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x22FFFFFF)).align(Alignment.TopCenter))
                             Column(Modifier.align(Alignment.BottomStart).padding(16.dp)) {
-                                Text(v.name, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                Text(v.name, color = Color.White, fontSize = TypeScale.sp20, fontWeight = FontWeight.Bold)
                                 Text(
                                     libraryCategoryCountLabel(counts[v.id], libraryItems.size),
                                     color = Color(0xCCFFFFFF),
-                                    fontSize = 11.sp,
+                                    fontSize = TypeScale.sp11,
                                 )
                             }
-                            Text("›", color = Color(0xCCFFFFFF), fontSize = 24.sp, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp))
+                            Text("›", color = Color(0xCCFFFFFF), fontSize = TypeScale.sp24, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp))
                         }
                     }
                 }
@@ -2059,7 +2059,7 @@ private fun Hero(
             .onPreviewKeyEvent { it.type == KeyEventType.KeyDown && it.key == Key.DirectionDown && onNavigateDown() }
             .focusable()) {
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
-            Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = 13.sp)
+            Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = TypeScale.sp13)
         }
         return
     }
@@ -2302,7 +2302,7 @@ private fun Hero(
         ) {
             if (bottomImage == null && topImage == null && item.id in tmdbResolvedIds) {
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
-                Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = 13.sp)
+                Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = TypeScale.sp13)
             }
             bottomImage?.takeUnless(::isRejectedHeroImage)?.let { image ->
                 val imageOwner = items.firstOrNull { media -> heroCandidatesById[media.id].orEmpty().any { it.url == image } } ?: item
@@ -2366,7 +2366,7 @@ private fun Hero(
                 .widthIn(max = titleWidth),
             verticalArrangement = Arrangement.Bottom,
         ) {
-            Text("为你推荐", color = TextSub, fontSize = 14.sp, letterSpacing = 3.sp)
+            Text("为你推荐", color = TextSub, fontSize = TypeScale.sp14, letterSpacing = 3.sp)
             Spacer(Modifier.height(8.dp))
             if (!titleLogo.isNullOrBlank()) {
                 AsyncImage(
@@ -2379,7 +2379,7 @@ private fun Hero(
             } else {
                 Text(
                     displayItem.seriesName ?: displayItem.name,
-                    color = TextMain, style = TextStyle(fontSize = 40.sp, lineHeight = 48.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.2.sp),
+                    color = TextMain, style = TextStyle(fontSize = TypeScale.sp40, lineHeight = 48.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.2.sp),
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -2392,12 +2392,12 @@ private fun Hero(
             ).joinToString("   ")
             if (sub.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
-                Text(sub, color = TextSub, style = TextStyle(fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.Normal), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(sub, color = TextSub, style = TextStyle(fontSize = TypeScale.sp15, lineHeight = 20.sp, fontWeight = FontWeight.Normal), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             displayItem.overview?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    it, color = Color(0xFFC9D5E8), fontSize = 14.sp, lineHeight = 21.sp,
+                    it, color = Color(0xFFC9D5E8), fontSize = TypeScale.sp14, lineHeight = 21.sp,
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -2436,7 +2436,7 @@ private fun Hero(
                         Text(
                             if (playAction.resolving) "解析单集…" else if (displayItem.id != item.id) "切换中…"
                             else if (displayItem.positionTicks > 0) "继续播放" else "立即播放",
-                            color = Color(0xFF0B1018), fontSize = 17.sp, fontWeight = FontWeight.Bold,
+                            color = Color(0xFF0B1018), fontSize = TypeScale.sp17, fontWeight = FontWeight.Bold,
                         )
                     }
                 }
@@ -2461,7 +2461,7 @@ private fun Hero(
                     Box(
                         Modifier.fillMaxSize().background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF)),
                         contentAlignment = Alignment.Center,
-                    ) { Text("查看详情", color = Color(0xFFE8ECF2), fontSize = 15.sp) }
+                    ) { Text("查看详情", color = Color(0xFFE8ECF2), fontSize = TypeScale.sp15) }
                 }
             }
         }
@@ -2627,11 +2627,26 @@ private fun RowSection(
     onClick: (MediaItem) -> Unit,
 ) {
     val client = AppRuntime.client
+    val listState = rememberLazyListState()
+    LaunchedEffect(listState, items, focusItemId, focusedSection, sectionKey) {
+        val targetId = focusItemId ?: return@LaunchedEffect
+        if (focusedSection != sectionKey) return@LaunchedEffect
+        val targetIndex = items.indexOfFirst { it.id == targetId }
+        if (targetIndex < 0) return@LaunchedEffect
+        val isTargetVisible = {
+            listState.layoutInfo.visibleItemsInfo.any { it.key == targetId }
+        }
+        withFrameNanos { }
+        if (isTargetVisible()) return@LaunchedEffect
+        listState.scrollToItem(targetIndex)
+        snapshotFlow(isTargetVisible).first { it }
+    }
     Column(Modifier.padding(top = topPadding)) {
         if (titleOverlay) {
-            Text(title, Modifier.padding(start = 40.dp, bottom = 10.dp), color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+            Text(title, Modifier.padding(start = 40.dp, bottom = 10.dp), color = TextMain, fontSize = TypeScale.sp20, fontWeight = FontWeight.Medium)
         } else SectionTitle(title, Modifier.padding(start = 40.dp, bottom = 10.dp))
         LazyRow(
+            state = listState,
             modifier = Modifier
                 .focusGroup()
                 .then(if (onRowFocusChanged != null) Modifier.onFocusChanged { onRowFocusChanged(it.hasFocus) } else Modifier),
@@ -2669,7 +2684,7 @@ private fun HomeRowSkeleton(title: String) {
             title,
             Modifier.padding(start = 40.dp, bottom = 10.dp),
             color = TextMain.copy(alpha = 0.38f),
-            fontSize = 20.sp,
+            fontSize = TypeScale.sp20,
             fontWeight = FontWeight.Medium,
         )
         Row(

@@ -130,6 +130,7 @@ import com.lumina.tv.ui.theme.GlassStrong
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
+import com.lumina.tv.ui.theme.TypeScale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.joinAll
@@ -996,7 +997,7 @@ fun DetailScreen(
             LoadingView(text = "\u672a\u627e\u5230\u8be5\u5185\u5bb9")
         } else if (loadFailed) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("\u52a0\u8f7d\u5931\u8d25", color = TextMain, fontSize = 16.sp)
+                Text("\u52a0\u8f7d\u5931\u8d25", color = TextMain, fontSize = TypeScale.sp16)
                 Spacer(Modifier.height(14.dp))
                 FocusSurface(Modifier.width(156.dp).height(42.dp), corner = 12.dp, requestFocus = true, onClick = {
                     loading = true
@@ -1004,7 +1005,7 @@ fun DetailScreen(
                     detailRetry++
                 }) { focused ->
                     Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
-                        Text("\u70b9\u51fb\u91cd\u8bd5", color = TextMain, fontSize = 13.sp)
+                        Text("\u70b9\u51fb\u91cd\u8bd5", color = TextMain, fontSize = TypeScale.sp13)
                     }
                 }
             }
@@ -1030,7 +1031,7 @@ fun DetailScreen(
                     Column(Modifier.weight(1f).padding(top = 30.dp)) {
                         Text(
                             if (it0.type == "Episode" && it0.name.isNotBlank()) it0.name else it0.seriesName ?: it0.name,
-                            color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Bold,
+                            color = TextMain, fontSize = TypeScale.sp32, fontWeight = FontWeight.Bold,
                             maxLines = 2, overflow = TextOverflow.Ellipsis,
                             style = androidx.compose.ui.text.TextStyle(shadow = Shadow(Color(0xE6000000), Offset(2f, 3f), 8f)),
                         )
@@ -1055,7 +1056,7 @@ fun DetailScreen(
                             )
                         }
                         if (infoParts.isNotEmpty()) {
-                            Text(infoParts.joinToString("   "), color = TextSub, fontSize = 12.sp)
+                            Text(infoParts.joinToString("   "), color = TextSub, fontSize = TypeScale.sp12)
                         }
                         mdb?.let { ratings ->
                             val ratingLine = listOfNotNull(
@@ -1064,7 +1065,7 @@ fun DetailScreen(
                                 ratings.metacritic?.takeIf { it > 0 }?.let { "MC $it" },
                                 ratings.trakt?.takeIf { it > 0 }?.let { "Trakt $it" },
                             ).joinToString(" · ")
-                            if (ratingLine.isNotBlank()) Text(ratingLine, color = TextSub, fontSize = 11.sp)
+                            if (ratingLine.isNotBlank()) Text(ratingLine, color = TextSub, fontSize = TypeScale.sp11)
                         }
                         val badgeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
                         val topBadges = badgeSource?.let { source ->
@@ -1081,7 +1082,7 @@ fun DetailScreen(
                             Text(
                                 "DV 原片可能触发电视切换显示模式",
                                 color = TextSub,
-                                fontSize = 10.sp,
+                                fontSize = TypeScale.sp10,
                                 modifier = Modifier.padding(top = 5.dp),
                             )
                         }
@@ -1104,7 +1105,7 @@ fun DetailScreen(
                                     .focusable(),
                             ) {
                                 Text(
-                                    it, color = Color(0xFFC9D5E8), fontSize = 13.sp, lineHeight = 21.sp,
+                                    it, color = Color(0xFFC9D5E8), fontSize = TypeScale.sp13, lineHeight = 21.sp,
                                     maxLines = if (overviewExpanded) Int.MAX_VALUE else 4,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.fillMaxWidth().padding(end = 40.dp),
@@ -1114,7 +1115,7 @@ fun DetailScreen(
                                     Text(
                                         if (overviewExpanded) "收起" else "展开",
                                         color = Color(0xFFC9D5E8),
-                                        fontSize = 11.sp,
+                                        fontSize = TypeScale.sp11,
                                         modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
                                     )
                                 }
@@ -1152,7 +1153,7 @@ fun DetailScreen(
                                 ) {
                                     Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF06101F), modifier = Modifier.size(22.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text(if (playAction.resolving) "解析单集…" else "播放", color = Color(0xFF06101F), fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                                    Text(if (playAction.resolving) "解析单集…" else "播放", color = Color(0xFF06101F), fontSize = TypeScale.sp17, fontWeight = FontWeight.Bold)
                                 }
                             }
                             if (it0.positionTicks > 0L) {
@@ -1177,7 +1178,7 @@ fun DetailScreen(
                                             ),
                                         contentAlignment = Alignment.Center,
                                     ) {
-                                        Text("从头播放", color = Color.White, fontSize = 14.sp)
+                                        Text("从头播放", color = Color.White, fontSize = TypeScale.sp14)
                                     }
                                 }
                             }
@@ -1218,7 +1219,7 @@ fun DetailScreen(
                                             Text(
                                                 sourceLabel,
                                                 color = TextMain,
-                                                fontSize = 13.sp,
+                                                fontSize = TypeScale.sp13,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                                 modifier = Modifier.widthIn(max = 252.dp),
@@ -1302,7 +1303,7 @@ fun DetailScreen(
                                 ) {
                                     Icon(Icons.Rounded.ArrowBack, null, tint = TextMain, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("返回", color = TextMain, fontSize = 15.sp)
+                                    Text("返回", color = TextMain, fontSize = TypeScale.sp15)
                                 }
                             }
                         }
@@ -1311,7 +1312,7 @@ fun DetailScreen(
 
                 if (seasons.isNotEmpty()) {
                     Spacer(Modifier.height(18.dp))
-                    Text("季数与剧集", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                    Text("季数与剧集", color = TextMain, fontSize = TypeScale.sp18, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.height(12.dp))
                     LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(seasons, key = { it.id }) { s ->
@@ -1339,7 +1340,7 @@ fun DetailScreen(
                                     Text(
                                         s.name,
                                         color = if (active) Accent else TextMain,
-                                        fontSize = 12.sp,
+                                        fontSize = TypeScale.sp12,
                                     )
                                 }
                             }
@@ -1353,13 +1354,13 @@ fun DetailScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             CircularProgressIndicator(Modifier.size(16.dp), color = Accent, strokeWidth = 2.dp)
-                            Text("季目录加载中", color = TextSub, fontSize = 12.sp)
+                            Text("季目录加载中", color = TextSub, fontSize = TypeScale.sp12)
                         }
                         SeasonDirectoryStatus.FAILURE -> Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Text("季目录读取失败，请重试", color = TextSub, fontSize = 12.sp)
+                            Text("季目录读取失败，请重试", color = TextSub, fontSize = TypeScale.sp12)
                             FocusSurface(
                                 Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = 1.04f,
                                 onClick = {
@@ -1370,10 +1371,10 @@ fun DetailScreen(
                                 Box(
                                     Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
                                     contentAlignment = Alignment.Center,
-                                ) { Text("重试", color = TextMain, fontSize = 12.sp) }
+                                ) { Text("重试", color = TextMain, fontSize = TypeScale.sp12) }
                             }
                         }
-                        SeasonDirectoryStatus.EMPTY -> Text("暂无季目录", color = TextSub, fontSize = 12.sp)
+                        SeasonDirectoryStatus.EMPTY -> Text("暂无季目录", color = TextSub, fontSize = TypeScale.sp12)
                         SeasonDirectoryStatus.SUCCESS -> Unit
                     }
                 }
@@ -1385,7 +1386,7 @@ fun DetailScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         CircularProgressIndicator(Modifier.size(16.dp), color = Accent, strokeWidth = 2.dp)
-                        Text("剧集加载中", color = TextSub, fontSize = 12.sp)
+                        Text("剧集加载中", color = TextSub, fontSize = TypeScale.sp12)
                     }
                 }
                 if (episodes.isNotEmpty()) {
@@ -1402,7 +1403,7 @@ fun DetailScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Text("剧集读取失败，请重试", color = TextSub, fontSize = 12.sp)
+                        Text("剧集读取失败，请重试", color = TextSub, fontSize = TypeScale.sp12)
                         FocusSurface(
                             Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = 1.04f,
                             onClick = {
@@ -1414,16 +1415,16 @@ fun DetailScreen(
                             Box(
                                 Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
                                 contentAlignment = Alignment.Center,
-                            ) { Text("重试", color = TextMain, fontSize = 12.sp) }
+                            ) { Text("重试", color = TextMain, fontSize = TypeScale.sp12) }
                         }
                     }
                 } else if (!episodeLoading && episodes.isEmpty() && selectedSeason != null) {
-                    Text("本季暂无剧集", color = TextSub, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
+                    Text("本季暂无剧集", color = TextSub, fontSize = TypeScale.sp12, modifier = Modifier.padding(top = 12.dp))
                 }
                 val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
                 if (cast.isNotEmpty()) {
                     Spacer(Modifier.height(22.dp))
-                    Text("演职人员", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                    Text("演职人员", color = TextMain, fontSize = TypeScale.sp18, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.height(12.dp))
                     LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
@@ -1433,7 +1434,7 @@ fun DetailScreen(
                 }
 
                 Spacer(Modifier.height(24.dp))
-                Text("相关推荐", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                Text("相关推荐", color = TextMain, fontSize = TypeScale.sp18, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(12.dp))
                 if (similarLoading) {
                     Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1444,7 +1445,7 @@ fun DetailScreen(
                 } else if (similar.isEmpty()) {
                     Text(
                         "暂无相关推荐",
-                        color = TextSub, fontSize = 12.sp,
+                        color = TextSub, fontSize = TypeScale.sp12,
                         modifier = Modifier.padding(vertical = 6.dp),
                     )
                 } else {
@@ -1493,7 +1494,7 @@ fun DetailScreen(
                 )
                 if (providerLinks.isNotEmpty()) {
                     Spacer(Modifier.height(24.dp))
-                    Text("外部链接", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                    Text("外部链接", color = TextMain, fontSize = TypeScale.sp18, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.height(12.dp))
                     val uriHandler = LocalUriHandler.current
                     Row(
@@ -1531,7 +1532,7 @@ fun DetailScreen(
                                             .then(if (index == 0) Modifier.aspectRatio(190.24f / 81.52f) else Modifier.aspectRatio(1f))
                                             .graphicsLayer { alpha = if (focused) 1f else 0.85f },
                                     )
-                                    Text(label, color = if (focused) Color.White else Color(0xD9FFFFFF), fontSize = 12.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.96.sp)
+                                    Text(label, color = if (focused) Color.White else Color(0xD9FFFFFF), fontSize = TypeScale.sp12, fontWeight = FontWeight.Medium, letterSpacing = 0.96.sp)
                                 }
                             }
                         }
@@ -1664,12 +1665,12 @@ private fun PersonCard(person: MediaPerson, imageUrl: String?) {
                     AsyncImage(imageUrl, contentDescription = person.name, contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize().clip(CircleShape))
                 } else {
-                    Text(person.name.take(1), color = Accent, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                    Text(person.name.take(1), color = Accent, fontSize = TypeScale.sp28, fontWeight = FontWeight.Bold)
                 }
             }
             Spacer(Modifier.height(7.dp))
-            Text(person.name, color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(person.role ?: person.type ?: "演职人员", color = Color.White.copy(alpha = 0.6f), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(person.name, color = Color.White.copy(alpha = 0.9f), fontSize = TypeScale.sp12, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(person.role ?: person.type ?: "演职人员", color = Color.White.copy(alpha = 0.6f), fontSize = TypeScale.sp10, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
       }
     }
@@ -1718,10 +1719,10 @@ private fun PickerDialog(
         Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
             GlassPanel(Modifier.width(560.dp), corner = 22.dp) {
                 Column(Modifier.padding(22.dp)) {
-                    Text(title, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(title, color = TextMain, fontSize = TypeScale.sp16, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(14.dp))
-                    if (loading) Text("正在读取列表…", color = TextSub, fontSize = 12.sp)
-                    else if (options.isEmpty()) Text("没有可选项", color = TextSub, fontSize = 12.sp)
+                    if (loading) Text("正在读取列表…", color = TextSub, fontSize = TypeScale.sp12)
+                    else if (options.isEmpty()) Text("没有可选项", color = TextSub, fontSize = TypeScale.sp12)
                     Column(
                         Modifier.heightIn(max = 46.dp * 8 + 40.dp).verticalScroll(rememberScrollState()).focusGroup(),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1742,7 +1743,7 @@ private fun PickerDialog(
                                 Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                                     Icon(if (id == currentKey) Icons.Rounded.CheckCircle else Icons.Rounded.Layers, null, tint = if (id == currentKey) Accent else TextSub, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(10.dp))
-                                    Text(label, color = TextMain, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(label, color = TextMain, fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
                           }
@@ -1758,8 +1759,8 @@ private fun PickerDialog(
 private fun SettingRow(label: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
     FocusSurface(Modifier.fillMaxWidth().height(52.dp), corner = 10.dp, scaleTo = 1f, onClick = onClick) { focused ->
         Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(10.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("$label：$value", color = if (enabled) TextMain else TextSub.copy(alpha = 0.65f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Text("›", color = if (enabled) Accent else TextSub.copy(alpha = 0.5f), fontSize = 20.sp)
+            Text("$label：$value", color = if (enabled) TextMain else TextSub.copy(alpha = 0.65f), fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text("›", color = if (enabled) Accent else TextSub.copy(alpha = 0.5f), fontSize = TypeScale.sp20)
         }
     }
 }
@@ -1811,15 +1812,15 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
             Modifier.fillMaxSize().padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("媒体信息", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text("媒体信息", color = TextMain, fontSize = TypeScale.sp18, fontWeight = FontWeight.Bold, maxLines = 1)
             Spacer(Modifier.width(12.dp))
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 summaryBadges.forEach { SpecBadge(it) }
                 if (summaryBadges.isEmpty()) {
-                    if (technicalSummary.isNotBlank()) Text(technicalSummary, color = if (hasFocus) TextMain.copy(alpha = 0.92f) else TextSub, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (technicalSummary.isNotBlank()) Text(technicalSummary, color = if (hasFocus) TextMain.copy(alpha = 0.92f) else TextSub, fontSize = TypeScale.sp12, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            Text(if (expanded) "收起" else "展开", color = TextSub, fontSize = 11.sp)
+            Text(if (expanded) "收起" else "展开", color = TextSub, fontSize = TypeScale.sp11)
             Spacer(Modifier.width(6.dp))
             Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = if (hasFocus) Accent else TextSub, modifier = Modifier.size(18.dp))
         }
@@ -1881,8 +1882,8 @@ private fun MediaGlassCard(title: String, icon: ImageVector, count: String?, mod
                     Icon(icon, null, tint = Color(0xD9FFFFFF), modifier = Modifier.size(13.dp))
                 }
                 Spacer(Modifier.width(8.dp))
-                Text(title, color = Color(0xEBFFFFFF), fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-                count?.let { Text(it, color = Color(0x73FFFFFF), fontSize = 11.sp) }
+                Text(title, color = Color(0xEBFFFFFF), fontSize = TypeScale.sp13, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                count?.let { Text(it, color = Color(0x73FFFFFF), fontSize = TypeScale.sp11) }
             }
             Spacer(Modifier.height(10.dp))
             content()
@@ -1895,8 +1896,8 @@ private fun DetailRows(rows: List<Pair<String, String>>) {
     Column {
         rows.forEachIndexed { index, (label, value) ->
             Row(Modifier.fillMaxWidth().height(26.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(label, color = Color(0x80FFFFFF), fontSize = 11.sp, modifier = Modifier.width(72.dp))
-                Text(value, color = Color(0xEBFFFFFF), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text(label, color = Color(0x80FFFFFF), fontSize = TypeScale.sp11, modifier = Modifier.width(72.dp))
+                Text(value, color = Color(0xEBFFFFFF), fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             }
             if (index < rows.lastIndex) {
                 Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(0.5.dp).background(GlassLine))
@@ -2054,12 +2055,12 @@ private fun TrackSheet(
                     .padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Text("播放设置", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("播放设置", color = TextMain, fontSize = TypeScale.sp16, fontWeight = FontWeight.SemiBold)
                 content()
                 Spacer(Modifier.height(2.dp))
                 FocusSurface(Modifier.fillMaxWidth().height(44.dp), corner = 22.dp, onClick = onDismiss) { focused ->
                     Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
-                        Text("完成", color = TextMain, fontSize = 13.sp)
+                        Text("完成", color = TextMain, fontSize = TypeScale.sp13)
                     }
                 }
             }
@@ -2110,7 +2111,7 @@ private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
                             .clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.55f))
                             .padding(horizontal = 6.dp, vertical = 2.dp),
                     ) {
-                        Text("第 ${episodeNumber} 集", color = Color.White.copy(alpha = 0.9f), fontSize = 11.sp, maxLines = 1)
+                        Text("第 ${episodeNumber} 集", color = Color.White.copy(alpha = 0.9f), fontSize = TypeScale.sp11, maxLines = 1)
                     }
                 }
                 ep.runtimeTicks?.takeIf { it > 0L }?.let { ticks ->
@@ -2120,7 +2121,7 @@ private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
                         duration,
                         modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp)
                             .clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 5.dp, vertical = 2.dp),
-                        color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp, maxLines = 1,
+                        color = Color.White.copy(alpha = 0.7f), fontSize = TypeScale.sp10, maxLines = 1,
                     )
                 }
             }
@@ -2128,7 +2129,7 @@ private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
                 Spacer(Modifier.height(6.dp))
                 Text(
                     ep.name, color = TextMain.copy(alpha = if (focused) 1f else 0.9f),
-                    fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    fontSize = TypeScale.sp12, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
         }

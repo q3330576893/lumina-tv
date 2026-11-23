@@ -19,8 +19,29 @@ typealias AudioCaps = AudioCapabilities
 
 enum class AudioSupport { PASSTHROUGH, DECODE_ONLY, UNSUPPORTED }
 
+data class AudioCapabilitySummary(
+    val codecs: Map<Int, AudioSupport>,
+    val maxChannels: Int,
+)
+
 object AudioCodecMatrix {
     val PASSTHROUGH_ENCODINGS: Set<Int> = setOf(5, 6, 7, 8, 14, 17, 18, 30)
+
+    fun currentAudioSupport(caps: AudioCaps): AudioCapabilitySummary {
+        val codecs = PASSTHROUGH_ENCODINGS.associateWith { encoding ->
+            val selectedEncoding = fallback(encoding, caps)
+            if (selectedEncoding != 0 && !caps.profiles[selectedEncoding].isNullOrEmpty()) {
+                AudioSupport.PASSTHROUGH
+            } else {
+                AudioSupport.UNSUPPORTED
+            }
+        }
+        val maxChannels = caps.profiles.values.asSequence().flatten()
+            .maxOfOrNull { it.maxChannels }
+            ?.coerceAtLeast(2)
+            ?: 2
+        return AudioCapabilitySummary(codecs, maxChannels)
+    }
 
     fun encoding(mime: String?, codecs: String?): Int {
         val normalizedMime = mime.orEmpty().substringBefore(';').trim().lowercase()

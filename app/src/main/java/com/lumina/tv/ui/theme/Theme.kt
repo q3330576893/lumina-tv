@@ -192,6 +192,25 @@ object TypeScale {
         fontWeight = FontWeight.Normal)
     val caption = TextStyle(fontSize = 11.sp, lineHeight = 15.sp,
         fontWeight = FontWeight.Normal)
+    val sp9 = 9.sp
+    val sp10 = 10.sp
+    val sp11 = 11.sp
+    val sp12 = 12.sp
+    val sp13 = 13.sp
+    val sp14 = 14.sp
+    val sp15 = 15.sp
+    val sp16 = 16.sp
+    val sp17 = 17.sp
+    val sp18 = 18.sp
+    val sp20 = 20.sp
+    val sp22 = 22.sp
+    val sp23 = 23.sp
+    val sp24 = 24.sp
+    val sp26 = 26.sp
+    val sp28 = 28.sp
+    val sp32 = 32.sp
+    val sp40 = 40.sp
+    val sp44 = 44.sp
 }
 
 object ShapeScale {

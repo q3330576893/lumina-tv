@@ -50,6 +50,7 @@ fun SettingsPlayback(
     var cacheUsed by remember { mutableStateOf(PlaybackCache.spaceBytes(context)) }
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
     var preferredAudioLanguage by remember { mutableStateOf(prefs?.preferredAudioLanguage.orEmpty()) }
+    var anime4kMode by remember { mutableStateOf(prefs?.anime4kMode ?: "off") }
 
     LaunchedEffect(context) {
         PlaybackCache.autoTrim(context)
@@ -61,6 +62,7 @@ fun SettingsPlayback(
             "playback:defaultSpeed", "playback:autoNextEpisode", "playback:globalIntroSeconds",
             "playback:endCreditsSkipSeconds", "playback:maxStreamingBitrate", "playback:playbackCacheBytes",
             "playback:clearCache", "playback:forceTranscode", "playback:preferredAudioLanguage",
+            "playback:anime4kMode",
         )
     }
     val requesters = remember {
@@ -74,6 +76,10 @@ fun SettingsPlayback(
     val bitrateOptions = remember { listOf(20_000_000L to "20 Mbps", 40_000_000L to "40 Mbps", 80_000_000L to "80 Mbps", 120_000_000L to "120 Mbps").map { SettingChoiceOption(it.first.toString(), it.second) } }
     val languageOptions = remember {
         listOf("" to "跟随片源", "zh" to "中文", "en" to "英文", "ja" to "日文", "ko" to "韩文")
+            .map { SettingChoiceOption(it.first, it.second) }
+    }
+    val anime4kOptions = remember {
+        listOf("off" to "关闭", "efficiency" to "效率", "quality" to "质量")
             .map { SettingChoiceOption(it.first, it.second) }
     }
     val cacheOptions = remember {
@@ -127,7 +133,10 @@ fun SettingsPlayback(
                 }, requesters.getValue(rowKeys[7]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[6]), downRequester = requesters.getValue(rowKeys[8]))
                 ChoiceRow("playback:preferredAudioLanguage", "首选音轨语言", "新影片默认语言；按片手动选择优先", languageOptions, preferredAudioLanguage, { key ->
                     preferredAudioLanguage = key; prefs?.preferredAudioLanguage = key
-                }, requesters.getValue(rowKeys[8]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[7]), downRequester = requesters.getValue(rowKeys[8]), showDivider = false)
+                }, requesters.getValue(rowKeys[8]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[7]), downRequester = requesters.getValue(rowKeys[9]))
+                ChoiceRow("playback:anime4kMode", "Anime4K 超分", "仅 mpv 内核 / SDR / 1080p 及以下生效", anime4kOptions, anime4kMode, { key ->
+                    anime4kMode = key; prefs?.anime4kMode = key
+                }, requesters.getValue(rowKeys[9]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[8]), downRequester = requesters.getValue(rowKeys[9]), showDivider = false)
             }
         }
         item { Spacer(Modifier.height(1.dp)) }

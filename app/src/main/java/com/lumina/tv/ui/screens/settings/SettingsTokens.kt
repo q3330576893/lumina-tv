@@ -1,7 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.lumina.tv.ui.theme.TypeScale
 
 object SettingsTokens {
     val RailWidth = 208.dp
@@ -13,10 +13,10 @@ object SettingsTokens {
     val GroupGap = 28.dp
     val PagePaddingH = 48.dp
     val PagePaddingV = 32.dp
-    val TitleSize = 26.sp
-    val GroupLabelSize = 11.sp
-    val RowTitleSize = 15.sp
-    val RowDescSize = 12.sp
+    val TitleSize = TypeScale.sp26
+    val GroupLabelSize = TypeScale.sp11
+    val RowTitleSize = TypeScale.sp15
+    val RowDescSize = TypeScale.sp12
     val FocusBarW = 3.dp
     val FocusBarH = 24.dp
     const val MotionFocusMs = 260

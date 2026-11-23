@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.TypeScale
+
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -240,7 +242,7 @@ fun BaseThemeRow(
                     Text(
                         text = option.label,
                         color = TextSub.copy(alpha = 0.6f),
-                        fontSize = 11.sp,
+                        fontSize = TypeScale.sp11,
                         maxLines = 1,
                     )
                 }
@@ -305,7 +307,7 @@ fun ValueRow(
         Text(
             text = valueLabel,
             color = TextMain,
-            fontSize = 12.sp,
+            fontSize = TypeScale.sp12,
             textAlign = TextAlign.End,
             modifier = Modifier.width(32.dp),
         )
@@ -340,9 +342,9 @@ fun NavigationRow(
         showDivider = showDivider,
         modifier = modifier,
     ) {
-        Text(currentValue, color = TextSub, fontSize = 12.sp, maxLines = 1)
+        Text(currentValue, color = TextSub, fontSize = TypeScale.sp12, maxLines = 1)
         Spacer(Modifier.width(10.dp))
-        Text("›", color = TextMain, fontSize = 20.sp)
+        Text("›", color = TextMain, fontSize = TypeScale.sp20)
     }
 }
 
@@ -392,7 +394,7 @@ fun ActionRow(
             Text(
                 text = actionLabel,
                 color = if (danger) Danger else TextMain,
-                fontSize = 13.sp,
+                fontSize = TypeScale.sp13,
                 fontWeight = FontWeight.Medium,
             )
         }
@@ -562,7 +564,7 @@ private fun SegmentedChoiceControl(options: List<SettingChoiceOption>, selectedK
                 Text(
                     text = option.label,
                     color = if (selected) SelectedChoiceText else TextSub,
-                    fontSize = 11.sp,
+                    fontSize = TypeScale.sp11,
                     fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
                     maxLines = 1,
                 )
@@ -597,7 +599,7 @@ private fun ColorChoiceControl(options: List<SettingChoiceOption>, selectedKey: 
         Text(
             text = selectedLabel,
             color = TextMain,
-            fontSize = 11.sp,
+            fontSize = TypeScale.sp11,
             fontWeight = FontWeight.Medium,
             modifier = Modifier.width(48.dp),
             maxLines = 1,

@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.TypeScale
+
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -125,7 +127,7 @@ fun SettingsAbout(
                         updateResult.startsWith("检查失败") -> Color(0xFFFF8A9A)
                         else -> TextSub
                     },
-                    fontSize = 11.sp,
+                    fontSize = TypeScale.sp11,
                     modifier = Modifier.padding(start = SettingsTokens.RowPaddingH, bottom = 8.dp),
                 )
                 ActionRow("about:releasePage", "打开发布页", "打开 GitHub Releases", "打开", {
