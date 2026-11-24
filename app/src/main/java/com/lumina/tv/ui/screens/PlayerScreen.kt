@@ -226,6 +226,7 @@ import com.lumina.tv.player.creditsWindowStartMs
 import com.lumina.tv.player.shouldCancelCreditsForSeek
 import com.lumina.tv.player.ContainerRecovery
 import com.lumina.tv.player.containerRecovery
+import com.lumina.tv.player.containerMpvFallbackAllowed
 import com.lumina.tv.player.playbackSourceJson
 import com.lumina.tv.player.serverTranscodingAvailable
 import com.lumina.tv.player.withStopPositionSample
@@ -262,6 +263,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -516,6 +518,7 @@ fun PlayerScreen(
     var sessionGeneration by loadCoordinator::generation
     val playbackDiagnostics = remember(item.id) { com.lumina.tv.player.PlaybackDiagnostics { PageLog.add(it) } }
     val watchdog = remember(item.id) { PlaybackWatchdog() }
+    var mpvBufferProgress by remember(item.id) { mutableStateOf<Pair<Long, Long>?>(null) }
     var recoveryBudget by remember(item.id) { mutableStateOf(PlaybackRecoveryBudget()) }
     val pathFailures = remember(item.id) { PlaybackPathFailures() }
     var currentPath by remember(item.id) { mutableStateOf<PlaybackPath?>(null) }
@@ -1162,6 +1165,17 @@ fun PlayerScreen(
         error = msg
     }
 
+    fun canStartAutomaticRecovery(generation: Int, reason: String): Boolean {
+        val cause = when {
+            !isCurrentLoad(generation) -> "stale"
+            reloadPending -> "reloading"
+            audioRecoveryJob?.isActive == true -> "audio-job"
+            else -> null
+        }
+        if (cause != null) PageLog.add("automaticRecovery rejected reason=$reason cause=$cause")
+        return cause == null
+    }
+
     // Audio, watchdog, HTTP retries and engine fallback all enter the same budget once.
     fun recoverAutomatically(
         reason: String,
@@ -1171,7 +1185,7 @@ fun PlayerScreen(
         stillNeeded: () -> Boolean = { true },
         action: () -> Unit,
     ) {
-        if (!isCurrentLoad(generation) || reloadPending || audioRecoveryJob?.isActive == true) return
+        if (!canStartAutomaticRecovery(generation, reason)) return
         if (recoveryBudget.exhausted && !bypassRecoveryBudget) {
             mpvBackend?.release("recovery-budget-exhausted")
             mpvBackend = null
@@ -1189,7 +1203,12 @@ fun PlayerScreen(
                 playbackStatusNotice = "播放恢复需要稍候，将自动继续尝试"
                 delay(waitMs)
             }
-            if (!isCurrentLoad(generation)) return@launch
+            if (!isCurrentLoad(generation)) {
+                audioRecoveryJob = null
+                playbackStatusNotice = null
+                PageLog.add("automaticRecovery rejected reason=$reason cause=stale")
+                return@launch
+            }
             if (!stillNeeded()) {
                 audioRecoveryJob = null
                 playbackStatusNotice = null
@@ -1197,7 +1216,16 @@ fun PlayerScreen(
             }
             if (!bypassRecoveryBudget &&
                 !recoveryBudget.tryAcquire(android.os.SystemClock.elapsedRealtime())
-            ) return@launch
+            ) {
+                audioRecoveryJob = null
+                playbackStatusNotice = null
+                if (mpvBackend == null && error == null) {
+                    reportError("播放恢复未获准，请重试")
+                } else {
+                    PageLog.add("automaticRecovery rejected reason=$reason cause=budget")
+                }
+                return@launch
+            }
             audioRecoveryJob = null
             recovering = true
             error = null
@@ -1213,8 +1241,15 @@ fun PlayerScreen(
         }
     }
 
-    fun requestAutomaticReload(generation: Int, reason: String) {
+    fun requestAutomaticReload(generation: Int, reason: String): Boolean {
+        if (!canStartAutomaticRecovery(generation, reason)) return false
+        // The exhausted-budget branch reports a terminal error synchronously and never launches.
+        if (recoveryBudget.exhausted) {
+            recoverAutomatically(reason, generation) { requestPlaybackReload(generation) }
+            return false
+        }
         recoverAutomatically(reason, generation) { requestPlaybackReload(generation) }
+        return true
     }
 
     fun showCertificateError(engine: String) {
@@ -1245,6 +1280,13 @@ fun PlayerScreen(
             mpvInstalled && !mpvInitializationFailed) == "mpv"
     } == true
 
+    fun canFallbackToMpvPath(): Boolean {
+        val pref = AppRuntime.prefs?.playerEngine ?: "auto"
+        val path = currentPath ?: return false
+        return containerMpvFallbackAllowed(pref, enginePinned, path, pathFailures,
+            mpvInstalled && !mpvInitializationFailed)
+    }
+
     fun audioMpvKey(): PlaybackPath? = currentPath?.copy(engine = "mpv")
 
     fun audioFailureMessage(): String {
@@ -1262,10 +1304,14 @@ fun PlayerScreen(
         return "该片音轨（$codec）本机无法硬解，$recoveryMessage，$serverMessage。请换片源或音轨。"
     }
 
-    fun retryAlternateSource(generation: Int, reason: String): Boolean {
+    fun retryAlternateSource(
+        generation: Int,
+        reason: String,
+        failureReason: PlaybackFailureReason = PlaybackFailureReason.HTTP,
+    ): Boolean {
         if (!isCurrentLoad(generation) || reloadPending || mediaSources.size <= 1) return false
         if (mediaSources.none { it.id != currentSourceId && it.id !in triedSources }) return false
-        recordPathFailure(PlaybackFailureReason.HTTP, "source-fallback:$reason")
+        recordPathFailure(failureReason, "source-fallback:$reason")
         val tried = triedSources + setOfNotNull(currentSourceId)
         val candidates = mediaSources.mapIndexed { index, source -> source.toSourceOption(index) }
             .filter { it.id != currentSourceId && it.id !in tried }
@@ -1294,8 +1340,9 @@ fun PlayerScreen(
     fun recoverUnsupportedContainer(errorCodeName: String, generation: Int) {
         val canTranscode = serverTranscodingAvailable(currentPlaybackSourceJson())
         // Recheck mpv even after a transcode attempt, before declaring a terminal container failure.
-        when (containerRecovery(canTryMpvPath(), canTranscode, transcodeFallbackTried)) {
+        when (containerRecovery(canFallbackToMpvPath(), canTranscode, transcodeFallbackTried)) {
             ContainerRecovery.MPV -> {
+                PageLog.add("containerRecovery action=mpv reason=$errorCodeName")
                 enginePinned = "mpv"
                 reloadForceTranscode = false
                 forceDirectNext = false
@@ -1307,7 +1354,7 @@ fun PlayerScreen(
                 requestAutomaticReload(generation, "media3:$errorCodeName")
             }
             ContainerRecovery.TRANSCODE -> {
-                transcodeFallbackTried = true
+                PageLog.add("containerRecovery action=transcode reason=$errorCodeName")
                 forceDirectNext = false
                 degraded = true
                 enginePinned = "media3"
@@ -1320,6 +1367,11 @@ fun PlayerScreen(
                 requestAutomaticReload(generation, "media3:$errorCodeName")
             }
             ContainerRecovery.TERMINAL -> {
+                if (retryAlternateSource(generation, errorCodeName, PlaybackFailureReason.PARSING)) {
+                    PageLog.add("containerRecovery action=source-fallback reason=$errorCodeName")
+                    return
+                }
+                PageLog.add("containerRecovery action=terminal reason=$errorCodeName")
                 updateStalled(false)
                 reportError(if (transcodeFallbackTried) "该片源容器不受支持，转码后仍失败"
                     else "该片源容器不受支持，且无可用的 mpv 或服务器转码路径")
@@ -1399,7 +1451,6 @@ fun PlayerScreen(
                     audioDecodeNotice = "软解未能播放，正在切换本机支持的音轨"
                     PageLog.add("audioRecovery action=supported-track index=${alternative.index} attempts=${recoveryBudget.attempts}")
                 } else {
-                    transcodeFallbackTried = true
                     reloadForceTranscode = true
                     audioDecodeNotice = "本机无法播放该音轨，正在尝试服务器转码"
                     PageLog.add("audioRecovery action=transcode attempts=${recoveryBudget.attempts}")
@@ -1411,12 +1462,11 @@ fun PlayerScreen(
 
     fun recordAudioMpvFailure(): Boolean {
         val key = audioMpvKey() ?: return false
-        val firstFailure = audioMpvFailures.add(key)
         // Keep A1's supported-track/transcode chain after an mpv audio-path failure.
         if (key !in audioMpvAttempts) return false
-        mpvBackend?.release("audio-mpv-failed")
-        mpvBackend = null
-        if (!firstFailure) return true
+        val firstFailure = audioMpvFailures.add(key)
+        if (!firstFailure) return false
+        if (!canStartAutomaticRecovery(sessionGeneration, "audio:mpv-failed")) return false
         PageLog.add("audioRecovery action=mpv-failed attempts=${recoveryBudget.attempts}")
         requestAudioRecovery("mpv-failed")
         return true
@@ -1445,8 +1495,6 @@ fun PlayerScreen(
         }
         recordPathFailure(reason, detail)
         if (recordAudioMpvFailure()) return
-        mpvBackend?.release("mpv-failed:$reason")
-        mpvBackend = null
         enginePinned = "media3"
         updateStalled(false)
         failurePhase = when (kind) {
@@ -1458,7 +1506,12 @@ fun PlayerScreen(
         }
         audioDecodeNotice = "mpv 播放失败（$reason），已切回内置内核 Media3"
         reloadForceTranscode = currentPath?.delivery == PlaybackDelivery.TRANSCODE
-        requestAutomaticReload(generation, "mpv:$reason")
+        val accepted = requestAutomaticReload(generation, "mpv:$reason")
+        if (!accepted) {
+            mpvBackend?.release("mpv-failed:$reason")
+            mpvBackend = null
+            reportError("mpv 播放失败（$reason），请重试或换片源")
+        }
     }
 
     LaunchedEffect(item.id, mediaSources, initialSourceId, currentSourceId) {
@@ -1592,9 +1645,10 @@ fun PlayerScreen(
             readyWithoutFrameSince = 0L
             bufferingTimedOut = false
             try {
-                MpvRetirementFence.await()
+                if (withTimeoutOrNull(3_000L) { MpvRetirementFence.await() } == null) {
+                    PageLog.add("mpvRetirementFence timeout, continue load")
+                }
                 if (!isCurrentLoad(generation) || reloadPending) return@launch
-                if (forceTranscode) transcodeFallbackTried = true
                 val maxStreamingBitrate = AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
                 val strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy()
                 val preparedTracks = c.preparePlaybackTracks(item.id, sourceId, audioStreamIndex, strategy,
@@ -1648,7 +1702,9 @@ fun PlayerScreen(
                     else -> "SDR"
                 }
                 val targetIsHls = target.url.contains("master.m3u8", true) || target.url.contains(".m3u8", true)
-                if (targetIsHls) transcodeFallbackTried = true
+                val hlsRemuxTried = targetIsHls && target.mode != com.lumina.tv.data.PlaybackMode.Transcode
+                phaseTimes.put("hlsRemuxTried", hlsRemuxTried)
+                if (target.mode == com.lumina.tv.data.PlaybackMode.Transcode) transcodeFallbackTried = true
                 rangeProbeJob = instanceScope.launch {
                     val probeResult = runCatching { PlaybackRangeProbe.probe(target.url, target.headers, c.playbackHttpClient) }
                         .getOrElse { JSONObject().put("error", it.javaClass.simpleName) }
@@ -1909,7 +1965,10 @@ fun PlayerScreen(
                         watchdog.onPlaybackStateChanged(if (isActuallyStalled) Player.STATE_BUFFERING else if (state.ready) Player.STATE_READY else Player.STATE_IDLE)
                         if (state.audioSilentCodec != null && audioMpvKey() in audioMpvAttempts) {
                             recordPathFailure(PlaybackFailureReason.AUDIO_OUTPUT, "audio-output-unavailable")
-                            recordAudioMpvFailure()
+                            if (!recordAudioMpvFailure()) {
+                                handleMpvFailure(MpvPlayerController.FailureKind.DECODING,
+                                    "mpv audio path failed (${state.audioSilentCodec})", generation)
+                            }
                             return@MpvPlayerController
                         }
                         if (state.ended) {
@@ -2459,7 +2518,6 @@ fun PlayerScreen(
                     recoverUnsupportedContainer(err.errorCodeName, sessionGeneration)
                 } else if (!degraded) {
                     degraded = true
-                    transcodeFallbackTried = true
                     reloadForceTranscode = true
                     reportError("直连失败，自动切换转码…")
                     requestAutomaticReload(sessionGeneration, "media3:${err.errorCodeName}")
@@ -3073,13 +3131,35 @@ fun PlayerScreen(
             }
             target?.let { observeTimelinePosition(it, playerPosition, playerDuration, now) }
             target?.let { checkStrmResume(it, now) }
+            val watchdogMpvLoad = if (activeEngine == "mpv") mpvBackend?.diagnosticLoadIdentity() else null
+            val mpvBufferedPosition = mpvState.bufferedPositionMs.takeIf { watchdogMpvLoad != null }
+            val previousMpvBuffer = mpvBufferProgress
+            val mpvBufferGrowthAtMs = when {
+                mpvBufferedPosition == null -> {
+                    mpvBufferProgress = null
+                    0L
+                }
+                previousMpvBuffer == null || mpvBufferedPosition < previousMpvBuffer.first -> {
+                    mpvBufferProgress = mpvBufferedPosition to 0L
+                    0L
+                }
+                mpvBufferedPosition > previousMpvBuffer.first -> {
+                    mpvBufferProgress = mpvBufferedPosition to now
+                    now
+                }
+                else -> previousMpvBuffer.second.also {
+                    mpvBufferProgress = mpvBufferedPosition to it
+                }
+            }
+            // cacheSpeed also drives isLoading, so it cannot independently prove buffered media is advancing.
+            val mpvDownloadInProgress = watchdogMpvLoad != null && mpvBufferedPosition != null &&
+                mpvBufferGrowthAtMs > 0L && now - mpvBufferGrowthAtMs <= 3_000L
             if (activeEngine == "mpv" && strmRestartNoticePending && mpvState.ready && !reloadPending && target?.startPositionMs == 0L) {
                 strmRestartNoticePending = false
                 strmRestartNoticeShown = true
                 showTimelineNotice("此片源未能续播，已从头播放")
             }
             val contentTimelineKnown = target?.timelineOrigin == TimelineOrigin.CONTENT
-            val watchdogMpvLoad = if (activeEngine == "mpv") mpvBackend?.diagnosticLoadIdentity() else null
             val ownsEngine = if (activeEngine == "media3") isCurrentMedia3() else watchdogMpvLoad != null && !reloadPending &&
                 com.lumina.tv.player.mpvEndAllowsRecovery(mpvState.endKind)
             val reason = if (ownsEngine) watchdog.onTick(
@@ -3093,7 +3173,7 @@ fun PlayerScreen(
                 bytesLoaded = bytesLoaded,
                 isLoading = isLoading,
                 mpvLoadId = watchdogMpvLoad?.physicalId,
-                downloadInProgress = watchdogMpvLoad != null && mpvState.cacheSpeedBytesPerSecond > 0L,
+                downloadInProgress = mpvDownloadInProgress,
                 nowMs = now,
             ) else null
             if (reason != null) {
@@ -3946,7 +4026,7 @@ fun PlayerScreen(
                         Text(
                             "第 ${item.indexNumber} 集",
                             color = Color.White.copy(alpha = 0.85f),
-                            fontSize = TypeScale.sp14,
+                            fontSize = TypeScale.sp18,
                             maxLines = 1,
                             modifier = Modifier.padding(bottom = 6.dp),
                         )
@@ -3965,9 +4045,9 @@ fun PlayerScreen(
                     )
                     Spacer(Modifier.height(4.dp))
                     Row {
-                        Text(formatTime(position), color = TextSub, fontSize = TypeScale.sp11)
+                        Text(formatTime(position), color = TextSub, fontSize = TypeScale.sp14)
                         Spacer(Modifier.weight(1f))
-                        Text(formatTime(duration), color = TextSub, fontSize = TypeScale.sp11)
+                        Text(formatTime(duration), color = TextSub, fontSize = TypeScale.sp14)
                     }
                 }
 
@@ -4009,7 +4089,7 @@ fun PlayerScreen(
                         Text(
                             displayTitle,
                             color = Color.White,
-                            fontSize = TypeScale.sp17,
+                            fontSize = TypeScale.sp22,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -4023,7 +4103,7 @@ fun PlayerScreen(
                     Text(
                         if (speedState.userSpeed == 1f) clockText else "$clockText  ${"%.1f".format(Locale.US, speedState.userSpeed)}x",
                         color = Color.White.copy(alpha = 0.8f),
-                        fontSize = TypeScale.sp14,
+                        fontSize = TypeScale.sp18,
                     )
                     val networkBytesPerSecond = if (activeEngine == "mpv") {
                         mpvState.cacheSpeedBytesPerSecond
@@ -4036,7 +4116,7 @@ fun PlayerScreen(
                         } else {
                             "${(networkBytesPerSecond / 1_000L).coerceAtLeast(1L)} KB/s"
                         }
-                        Text(networkSpeed, color = Color.White.copy(alpha = 0.68f), fontSize = TypeScale.sp12)
+                        Text(networkSpeed, color = Color.White.copy(alpha = 0.68f), fontSize = TypeScale.sp15)
                     }
                 }
 

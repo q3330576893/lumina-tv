@@ -17,6 +17,17 @@ internal fun containerRecovery(
     else -> ContainerRecovery.TERMINAL
 }
 
+internal fun containerMpvFallbackAllowed(
+    pref: String,
+    pinned: String?,
+    path: PlaybackPath,
+    failures: PlaybackPathFailures,
+    mpvAvailable: Boolean,
+): Boolean {
+    if (pref == "media3" && pinned != "mpv") return false
+    return selectPlaybackEngine("mpv", null, path, failures, mpvAvailable) == "mpv"
+}
+
 internal fun playbackSourceJson(playbackInfoJson: String?, sourceId: String?): JSONObject? = runCatching {
     val sources = JSONObject(playbackInfoJson.orEmpty()).optJSONArray("MediaSources")
     (0 until (sources?.length() ?: 0)).mapNotNull { sources?.optJSONObject(it) }

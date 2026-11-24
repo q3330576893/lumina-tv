@@ -30,6 +30,12 @@ object E4Checks {
 
     private fun containerFallbacks() {
         val path = PlaybackPath("blurayiso", "media3", PlaybackDelivery.DIRECT_PLAY, "1", "auto")
+        check(containerMpvFallbackAllowed("auto", null, path, PlaybackPathFailures(), mpvAvailable = true))
+        check(!containerMpvFallbackAllowed("media3", null, path, PlaybackPathFailures(), mpvAvailable = true))
+        val excludedMpv = PlaybackPathFailures().apply {
+            record(PlaybackPathFailure(path.copy(engine = "mpv"), PlaybackFailureReason.PARSING, 1, "mpv-failed"))
+        }
+        check(!containerMpvFallbackAllowed("auto", null, path, excludedMpv, mpvAvailable = true))
         for (mpvExcluded in listOf(false, true)) for (serverSupportsTranscoding in listOf(false, true)) {
             val failures = PlaybackPathFailures()
             failures.record(PlaybackPathFailure(path, PlaybackFailureReason.PARSING, 1, "container-unsupported"))

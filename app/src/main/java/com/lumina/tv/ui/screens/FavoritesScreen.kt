@@ -41,7 +41,7 @@ internal fun FavoritesScreen(
     var backdropUrl by remember { mutableStateOf<String?>(null) }
     var restoreFocusId by remember { mutableStateOf<String?>(null) }
     val state = pager.state
-    val focusedBackdropUrl = remember(focusedId) {
+    val focusedBackdropUrl = remember(focusedId, state.items) {
         val item = if (focusedId == null) state.items.firstOrNull()
             else state.items.firstOrNull { it.id == focusedId }
         item?.let {

@@ -50,7 +50,8 @@ object B10Checks {
         check(smallArray.length() == 3)
         check(boundedDiagnosticJson("\"scalar\"", cap) == "\"scalar\"")
         val malformed = JSONObject(boundedDiagnosticJson("{broken", cap))
-        check(malformed.getBoolean("invalid") && !malformed.has("truncated") && malformed.getString("reason") == "invalid_json")
+        check(malformed.getBoolean("invalidJson") && !malformed.has("truncated") &&
+            malformed.getString("reason") == "parse_failed" && "broken" in malformed.getString("preview"))
 
         val privateCookie = "session=must-not-escape"
         val sanitized = LogRedactor.redactJson(

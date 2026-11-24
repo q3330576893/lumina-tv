@@ -18,6 +18,7 @@ data class SavedServer(
 class Prefs internal constructor(private val sp: SharedPreferences) {
     constructor(context: Context) : this(context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE))
     private val sessionStore = SessionStore(sp)
+    private var failedServerName: String? = null
 
     init {
         if (sp.contains("end_skip_seconds")) {
@@ -68,11 +69,17 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
             sp.getString(SessionStore.DRAFT_USER, "").orEmpty() else getSecret("user_name")
 
     var serverName: String
-        get() = sessionStore.read(migrate = false)?.serverName ?: if (sessionStore.hasRecord())
+        get() = failedServerName ?: sessionStore.read(migrate = false)?.serverName ?: if (sessionStore.hasRecord())
             sp.getString(SessionStore.DRAFT_NAME, "Emby") ?: "Emby" else getSecret("server_name", "Emby")
         set(v) {
             val session = sessionStore.read(migrate = false)
-            if (session != null) check(saveSession(session.copy(serverName = v)))
+            if (session != null) {
+                if (saveSession(session.copy(serverName = v))) failedServerName = null
+                else {
+                    failedServerName = failedServerName ?: session.serverName
+                    PageLog.add("prefs serverName save failed")
+                }
+            }
             else sp.edit().putString(SessionStore.DRAFT_NAME, v).apply()
         }
 
@@ -528,14 +535,18 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     fun visibleResumeItems(items: List<MediaItem>): List<MediaItem> =
         contentState?.visibleResumeItems(items) ?: items
 
-    fun saveSession(s: Session): Boolean = sessionStore.save(s)
+    fun saveSession(s: Session): Boolean = sessionStore.save(s).also { saved ->
+        if (saved) failedServerName = null
+    }
 
     fun readSession(): Session? = sessionStore.read()
 
-    fun prepareServerLogin(url: String, user: String) { check(sessionStore.clear(url, user)) }
+    fun prepareServerLogin(url: String, user: String): Boolean = sessionStore.clear(url, user).also { cleared ->
+        if (!cleared) PageLog.add("prefs prepareServerLogin failed")
+    }
 
-    fun clearSession() {
-        check(sessionStore.clear())
+    fun clearSession(): Boolean = sessionStore.clear().also { cleared ->
+        if (!cleared) PageLog.add("prefs clearSession failed")
     }
 
     fun hasSession(): Boolean = sessionStore.read(migrate = false) != null

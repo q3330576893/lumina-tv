@@ -37,6 +37,7 @@ import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import com.lumina.tv.data.PreviewVideoCache
 import com.lumina.tv.data.PreviewCacheRecovery
 import com.lumina.tv.data.previewResourceKey
@@ -69,10 +70,13 @@ fun DetailVideoBackground(
     var probeResult by remember(url, mediaKey) { mutableStateOf<String?>(null) }
     var probeAllowsCache by remember(url, mediaKey) { mutableStateOf(false) }
     var resourceKey by remember(url, mediaKey) { mutableStateOf(mediaKey) }
+    var contentIsManifest by remember(url, mediaKey) { mutableStateOf(false) }
+    var hlsMalformedFallbackTried by remember(url, mediaKey, previewStage) { mutableStateOf(false) }
 
     LaunchedEffect(url, mediaKey) {
         probeResult = null
         probeAllowsCache = false
+        contentIsManifest = false
         if (url.isNullOrBlank()) {
             probeResult = "skip=no-preview-url"
             onStatus("skip=no-preview-url")
@@ -83,30 +87,52 @@ fun DetailVideoBackground(
         val scheme = Uri.parse(url).scheme?.lowercase()
         probeResult = when {
             scheme == "file" || scheme == "content" -> "valid"
-            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url, mediaKey, requestHeaders, requestClient).let {
-                probeAllowsCache = it.valid == true &&
-                    it.contentType.orEmpty().let { type -> type.startsWith("video/", true) || type.startsWith("application/octet-stream", true) } &&
-                    previewStage != "hls" && !it.prefix.trimStart().startsWith("#EXTM3U", true) && !url.contains(".m3u8", true)
-                resourceKey = previewResourceKey(mediaKey, it.etag, it.lastModified, it.length)
-                if (it.valid == true) "valid" else if (it.reason == "html") "skip=html" else "skip=err"
+            scheme == "http" || scheme == "https" -> VideoSourceProbe.probe(url, mediaKey, requestHeaders, requestClient).let { probe ->
+                contentIsManifest = probe.prefix.removePrefix("\uFEFF").trimStart().startsWith("#EXTM3U", true)
+                val probeStage = previewStage ?: when {
+                    url.contains(".m3u8", true) -> "hls"
+                    Uri.parse(url).getQueryParameter("static") == "true" -> "static"
+                    else -> "direct"
+                }
+                val effectiveProbeStage = if (probeStage == "hls" && !contentIsManifest) "direct" else probeStage
+                probeAllowsCache = probe.valid == true &&
+                    probe.contentType.orEmpty().let { type -> type.startsWith("video/", true) || type.startsWith("application/octet-stream", true) } &&
+                    effectiveProbeStage != "hls" && !probe.prefix.trimStart().startsWith("#EXTM3U", true) && !url.contains(".m3u8", true)
+                resourceKey = previewResourceKey(mediaKey, probe.etag, probe.lastModified, probe.length)
+                if (probe.valid == true) "valid" else if (probe.reason == "html") "skip=html" else "skip=err"
             }
             else -> "skip=url"
         }
         if (probeResult != "valid") onStatus("skip=playback-failed")
     }
 
+    val parsedStage = previewStage ?: when {
+        url?.contains(".m3u8", true) == true -> "hls"
+        url?.let { Uri.parse(it).getQueryParameter("static") == "true" } == true -> "static"
+        else -> "direct"
+    }
+    val effectiveStage = if (parsedStage == "hls" && !contentIsManifest) "direct" else parsedStage
+    val playbackStage = if (effectiveStage == "hls" && hlsMalformedFallbackTried) "direct" else effectiveStage
+    LaunchedEffect(probeResult, parsedStage, contentIsManifest) {
+        if (probeResult == "valid" && parsedStage == "hls" && !contentIsManifest) {
+            PageLog.add("detailPreview stage=hls-skip reason=not-manifest")
+        }
+    }
+
     if (probeResult == "valid" && !url.isNullOrBlank()) {
-        key(url, resourceKey) {
+        key(url, resourceKey, playbackStage) {
             DetailVideoPlayback(
                 url = url,
                 mediaKey = resourceKey,
                 requestHeaders = requestHeaders,
                 requestClient = requestClient,
                 cacheAllowed = probeAllowsCache,
-                stage = previewStage ?: when {
-                    url.contains(".m3u8", true) -> "hls"
-                    Uri.parse(url).getQueryParameter("static") == "true" -> "static"
-                    else -> "direct"
+                stage = playbackStage,
+                onMalformedHlsFallback = {
+                    if (hlsMalformedFallbackTried) false else {
+                        hlsMalformedFallbackTried = true
+                        true
+                    }
                 },
                 playing = playing,
                 onStatus = onStatus,
@@ -126,6 +152,7 @@ private fun DetailVideoPlayback(
     requestClient: OkHttpClient?,
     cacheAllowed: Boolean,
     stage: String,
+    onMalformedHlsFallback: () -> Boolean,
     playing: Boolean,
     onStatus: (String) -> Unit,
     startAtMs: Long?,
@@ -161,6 +188,9 @@ private fun DetailVideoPlayback(
                 onFirstFrame = { firstFrame = true },
                 onVideoSize = { videoAspectRatio = it },
                 onError = { error ->
+                    val malformedHlsManifest = stage == "hls" &&
+                        error?.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED &&
+                        onMalformedHlsFallback()
                     val cacheReadFailure = error != null && generateSequence<Throwable>(error) { it.cause }.any {
                         it is Cache.CacheException || it is FileDataSource.FileDataSourceException
                     }
@@ -169,7 +199,10 @@ private fun DetailVideoPlayback(
                         PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
                         PlaybackException.ERROR_CODE_DECODING_FAILED,
                     )
-                    if (cacheAllowed && synchronized(recovery) { recovery.retry(cacheReadFailure, malformedCachedInput) }) {
+                    if (malformedHlsManifest) {
+                        publishStatus("prep")
+                        PageLog.add("detailPreview stage=hls-fallback reason=malformed-manifest")
+                    } else if (cacheAllowed && synchronized(recovery) { recovery.retry(cacheReadFailure, malformedCachedInput) }) {
                         bypassCache = true
                         publishStatus("prep")
                         PageLog.add("detailPreview stage=$stage cache-retry=upstream-once")
@@ -213,15 +246,21 @@ private fun DetailVideoPlayback(
                     val media = MediaItem.Builder().setUri(url)
                     if (stage == "hls") media.setMimeType(MimeTypes.APPLICATION_M3U8)
                     if (usingCache) media.setCustomCacheKey(mediaKey)
+                    val mediaItem = media.build()
+                    val mediaSource = if (stage == "direct" && url.contains(".m3u8", true)) {
+                        ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+                    } else {
+                        DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory)
+                            .createMediaSource(mediaItem)
+                    }
                     ExoPlayer.Builder(context)
                         .setLooper(looper)
-                        .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory))
                         .build().apply {
                             setAudioAttributes(AudioAttributes.DEFAULT, false)
                             trackSelectionParameters = trackSelectionParameters.buildUpon()
                                 .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
                                 .build()
-                            setMediaItem(media.build())
+                            setMediaSource(mediaSource)
                         }
                 },
                 onWorkerFirstFrame = {

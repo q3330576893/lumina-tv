@@ -148,7 +148,12 @@ object DiagExporter {
     }
 
     private fun readPrefix(file: File, limit: Int = 120 * 1024): String {
-        val readLimit = file.length().coerceAtMost(limit.toLong()).toInt()
+        val fileLength = file.length()
+        val readLimit = if (file.extension.equals("json", ignoreCase = true) && fileLength <= limit.toLong() * 4L) {
+            fileLength.toInt()
+        } else {
+            fileLength.coerceAtMost(limit.toLong()).toInt()
+        }
         val buffer = ByteArray(readLimit)
         var bytesRead = 0
         try {

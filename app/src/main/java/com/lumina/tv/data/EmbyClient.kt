@@ -645,7 +645,9 @@ class EmbyClient(
         val key = playbackTargetKey(itemId, forceTranscode, sourceId, audioStreamIndex, forceDirect, maxStreamingBitrate,
             strategy, startIntent, requestedPositionMs, manualAudioSelection, trackIntent = trackIntent)
         val cached = playbackTargetCache.remove(key)
-        val target = cached?.second?.takeIf { System.currentTimeMillis() - cached.first < 120_000L }
+        val now = System.currentTimeMillis()
+        playbackTargetCache.entries.removeIf { now - it.value.first > 120_000L }
+        val target = cached?.second?.takeIf { now - cached.first < 120_000L }
         if (target != null) {
             PageLog.add("prewarm hit nextId=$itemId")
         } else {
@@ -1554,9 +1556,12 @@ class EmbyClient(
                     .put("subtitleIntent", trackIntent.subtitleMode.name),
             ).also { target ->
                 currentCoroutineContext().ensureActive()
-                if (cacheResult && first != null && target.url.isNotBlank()) playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect, maxStreamingBitrate,
-                        strategy, startIntent, startPositionMs, manualAudioStreamSelection, removeSubtitleParams, preferDirectStreamUrl, trackIntent)] =
-                    System.currentTimeMillis() to target
+                if (cacheResult && first != null && target.url.isNotBlank()) {
+                    playbackTargetCache.keys.removeAll { it.request.itemId == item.id }
+                    playbackTargetCache[playbackTargetKey(item.id, forceTranscode, mediaSourceId, audioStreamIndex, forceDirect, maxStreamingBitrate,
+                            strategy, startIntent, startPositionMs, manualAudioStreamSelection, removeSubtitleParams, preferDirectStreamUrl, trackIntent)] =
+                        System.currentTimeMillis() to target
+                }
             }
         }
 

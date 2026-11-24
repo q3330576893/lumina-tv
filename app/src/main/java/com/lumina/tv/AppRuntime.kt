@@ -151,7 +151,8 @@ object AppRuntime {
         return true
     }
 
-    fun logout() {
+    fun logout(): Boolean {
+        if (prefs?.clearSession() == false) return false
         client?.clearPendingProgress()
         client?.close()
         session?.let { current ->
@@ -160,7 +161,7 @@ object AppRuntime {
         com.lumina.tv.data.LibraryCache.clear()
         session = null
         client = null
-        prefs?.clearSession()
+        return true
     }
 
     suspend fun startPairing(context: Context) = refreshPairingUrl(context)

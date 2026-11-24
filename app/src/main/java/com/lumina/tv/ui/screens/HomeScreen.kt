@@ -221,6 +221,7 @@ fun HomeScreen(
     val client = AppRuntime.client
     val userDataRevision = LibraryCache.userDataRevision
     val context = LocalContext.current
+    val homeIdentity = client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
     val prefetchSemaphore = remember { kotlinx.coroutines.sync.Semaphore(3) }
     val countSemaphore = remember { kotlinx.coroutines.sync.Semaphore(4) }
     val hazeState = remember { HazeState() }
@@ -233,7 +234,7 @@ fun HomeScreen(
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
     var error by remember { mutableStateOf<String?>(null) }
     var offline by remember { mutableStateOf(false) }
-    var resumeItems by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.resume ?: emptyList()) }
+    var resumeItems by remember(homeIdentity) { mutableStateOf(LibraryCache.home?.resume ?: emptyList()) }
     var resumeFilterVersion by remember { mutableIntStateOf(0) }
     // SharedPreferences filtering runs only when these remember keys change.
     val resume = remember(resumeItems, resumeFilterVersion, client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }) {
@@ -241,10 +242,10 @@ fun HomeScreen(
     }
     var pendingResumeRemoval by remember { mutableStateOf<MediaItem?>(null) }
     val removeFocus = remember { FocusRequester() }
-    var latest by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.latest ?: emptyList()) }
-    var movies by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.movies ?: emptyList()) }
-    var series by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
-    var favorites by remember(userDataRevision) { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
+    var latest by remember(homeIdentity) { mutableStateOf(LibraryCache.home?.latest ?: emptyList()) }
+    var movies by remember(homeIdentity) { mutableStateOf(LibraryCache.home?.movies ?: emptyList()) }
+    var series by remember(homeIdentity) { mutableStateOf(LibraryCache.home?.series ?: emptyList()) }
+    var favorites by remember(homeIdentity) { mutableStateOf(LibraryCache.home?.favorites ?: emptyList()) }
     val favoritesPager = remember(client) {
         client?.let { c -> com.lumina.tv.data.FavoritesPager(
             com.lumina.tv.data.favoritesQueryKey(c.baseUrl, c.userId),
@@ -493,6 +494,7 @@ fun HomeScreen(
     }
 
     LaunchedEffect(reloadToken, client, userDataRevision) {
+        loading = true
         AppRuntime.screenLabel = "首页"
         val c = client
         if (c == null) {
@@ -1518,16 +1520,15 @@ private fun ServerCapsule(
                                                 serverMenuOpen = false
                                                 onServerSwitched()
                                             } else {
-                                                AppRuntime.prefs?.let { prefs ->
-                                                    prefs.prepareServerLogin(server.url, server.userName)
+                                                if (AppRuntime.prefs?.prepareServerLogin(server.url, server.userName) == true) {
+                                                    serverMenuOpen = false
+                                                    android.widget.Toast.makeText(
+                                                        context,
+                                                        "该服务器登录已过期，请重新登录",
+                                                        android.widget.Toast.LENGTH_SHORT,
+                                                    ).show()
+                                                    onSwitchServer()
                                                 }
-                                                serverMenuOpen = false
-                                                android.widget.Toast.makeText(
-                                                    context,
-                                                    "该服务器登录已过期，请重新登录",
-                                                    android.widget.Toast.LENGTH_SHORT,
-                                                ).show()
-                                                onSwitchServer()
                                             }
                                         },
                                     ) { focused ->

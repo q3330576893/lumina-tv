@@ -111,10 +111,22 @@ object B15Checks {
             tinyStore.recordExit("NATIVE", "large-evidence-".repeat(80), 456L)
             val truncated = JSONObject(file.readText())
             check(truncated.getBoolean("truncated") && truncated.getInt("maxBytes") == 256)
-            check(file.length() <= 256)
+            check(truncated.getString("preview").contains("large-evidence"))
             store.recordExit("ANR", "fresh evidence", 789L)
             val recovered = JSONObject(file.readText())
             check(!recovered.optBoolean("truncated") && recovered.getJSONObject("lastCrash").getLong("at") == 789L)
+            store.recordExit("NATIVE", "evidence-".repeat(3_000), 890L)
+            val boundedEvidence = JSONObject(file.readText()).getJSONObject("lastCrash").getString("evidence")
+            check(boundedEvidence.toByteArray(Charsets.UTF_8).size <= 8 * 1024)
+            file.writeText(JSONObject().put("truncated", true).put("originalBytes", 200_000)
+                .put("maxBytes", 120 * 1024).put("preview", "legacy marker")
+                .put("fingerprint-preserved", JSONObject().put("count", 7))
+                .put("lastCrash", JSONObject().put("evidence", "discard this evidence")).toString())
+            store.recordJava("fingerprint-new", "report", 901L)
+            val retained = JSONObject(file.readText())
+            check(!retained.optBoolean("truncated"))
+            check(retained.getJSONObject("fingerprint-preserved").getInt("count") == 7)
+            check(retained.getJSONObject("lastCrash").getString("evidence").isEmpty())
         } finally {
             directory.deleteRecursively()
         }
@@ -125,9 +137,10 @@ object B15Checks {
         check("trailing-field: intact" in safeJson.getString("evidence"))
         val truncated = JSONObject(boundedDiagnosticJson(
             JSONObject().put("evidence", "x".repeat(200)).toString(), 32))
-        check(truncated.getBoolean("truncated") && truncated.getInt("maxBytes") == 32)
+        check(truncated.getBoolean("truncated") && truncated.getInt("maxBytes") == 32 && truncated.has("preview"))
         val malformed = JSONObject(boundedDiagnosticJson("{broken", 32))
-        check(malformed.getBoolean("invalid") && !malformed.has("truncated"))
+        check(malformed.getBoolean("invalidJson") && malformed.getString("reason") == "parse_failed" &&
+            malformed.getString("preview").contains("broken") && !malformed.has("truncated"))
         println("B15 PASS V4: atomic/concurrent write round-trip, valid overflow JSON and structure-safe redaction")
     }
 

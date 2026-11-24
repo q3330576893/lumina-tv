@@ -58,13 +58,19 @@ internal class SessionStore(
         val edit = sp.edit().putString(KEY, stored).putString(CHECKSUM, checksum(json))
         if (!requireEncryption) removeLegacy(edit)
         edit.remove(DRAFT_URL).remove(DRAFT_USER).remove(DRAFT_NAME)
-        check(edit.commit()) { "Session commit failed" }
+        if (!edit.commit()) {
+            failed("write", IllegalStateException("Session commit failed"))
+            return false
+        }
         if (requireEncryption && hasLegacyFields()) {
             // A failed commit can still publish new values in SharedPreferences memory. Keep every
             // legacy field out of that first editor until the encrypted record is confirmed durable.
             val cleanup = sp.edit()
             removeLegacy(cleanup)
-            check(cleanup.commit()) { "Session legacy cleanup failed" }
+            if (!cleanup.commit()) {
+                failed("write_cleanup", IllegalStateException("Session legacy cleanup failed"))
+                return false
+            }
         }
         true
     }.onFailure { failed("write", it) }.getOrDefault(false)
@@ -74,7 +80,10 @@ internal class SessionStore(
         val edit = sp.edit().putString(KEY, "none").remove(CHECKSUM)
         removeLegacy(edit)
         edit.putString(DRAFT_URL, loginUrl).putString(DRAFT_USER, loginUser).remove(DRAFT_NAME)
-        check(edit.commit()) { "Session clear failed" }
+        if (!edit.commit()) {
+            failed("clear", IllegalStateException("Session clear failed"))
+            return false
+        }
         true
     }.onFailure { failed("clear", it) }.getOrDefault(false)
 

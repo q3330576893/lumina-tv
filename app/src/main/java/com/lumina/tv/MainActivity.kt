@@ -326,9 +326,10 @@ private fun AppRoot(
                         navigate(Screen.Login, Screen.Home)
                     },
                     onLogout = {
-                        AppRuntime.logout()
-                        com.lumina.tv.data.LibraryCache.clear()
-                        replaceRoot(Screen.Login)
+                        if (AppRuntime.logout()) {
+                            com.lumina.tv.data.LibraryCache.clear()
+                            replaceRoot(Screen.Login)
+                        }
                     },
                     active = target == screen,
                 )
@@ -372,7 +373,7 @@ private fun AppRoot(
                 BackHandler { goBack() }
                 com.lumina.tv.ui.screens.settings.SettingsScreen(
                     onBack = { goBack() },
-                    onLogout = { AppRuntime.logout(); replaceRoot(Screen.Login) },
+                    onLogout = { if (AppRuntime.logout()) replaceRoot(Screen.Login) },
                 )
             }
         }

@@ -17,13 +17,17 @@ internal fun boundedDiagnosticJson(text: String, maxBytes: Int): String {
         }
     }
         .getOrElse {
-            return JSONObject().put("invalid", true).put("reason", "invalid_json").toString()
+            val preview = text.take(2_000).replace('\n', ' ').replace('\r', ' ')
+            return JSONObject().put("invalidJson", true).put("reason", "parse_failed")
+                .put("preview", preview).toString()
         }
     val originalBytes = normalized.toByteArray(Charsets.UTF_8).size
     if (originalBytes <= maxBytes) return normalized
+    val preview = text.take(2_000).replace('\n', ' ').replace('\r', ' ')
     return JSONObject()
         .put("truncated", true)
         .put("originalBytes", originalBytes)
         .put("maxBytes", maxBytes)
+        .put("preview", preview)
         .toString()
 }

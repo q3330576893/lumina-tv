@@ -223,7 +223,9 @@ object LibraryCache {
 
     fun browseOf(key: String, ttl: Long = 3 * 60_000L): List<MediaItem>? {
         val e = synchronized(this) { browse[key] } ?: return null
-        return if (e.fixedSample || System.currentTimeMillis() - e.at < minOf(ttl, e.ttlMs)) e.items else null
+        val age = System.currentTimeMillis() - e.at
+        return if ((e.fixedSample && age < 10 * 60_000L) ||
+            (!e.fixedSample && age < minOf(ttl, e.ttlMs))) e.items else null
     }
 
     fun putBrowse(key: String, list: List<MediaItem>, revision: Long = userDataRevision, fixedSample: Boolean = false) {

@@ -49,12 +49,38 @@ internal class CrashStore(private val directory: File, private val maxStatsBytes
         writeStats(stats)
     }
 
-    private fun writableStats(): JSONObject = readStats().let { stats ->
-        if (stats.optBoolean("truncated")) JSONObject() else stats
+    private fun writableStats(): JSONObject = readStats().also { stats ->
+        if (stats.optBoolean("truncated")) {
+            stats.optJSONObject("lastCrash")?.put("evidence", "")
+            stats.remove("truncated")
+            stats.remove("originalBytes")
+            stats.remove("maxBytes")
+            stats.remove("preview")
+        }
     }
 
     private fun writeStats(stats: JSONObject) {
         directory.mkdirs()
+        val lastCrash = stats.optJSONObject("lastCrash")
+        if (lastCrash != null) {
+            val evidence = lastCrash.optString("evidence", "")
+            val maxEvidenceBytes = 8 * 1024
+            var end = 0
+            var byteCount = 0
+            while (end < evidence.length) {
+                val codePoint = evidence.codePointAt(end)
+                val codePointBytes = when {
+                    codePoint <= 0x7f -> 1
+                    codePoint <= 0x7ff -> 2
+                    codePoint <= 0xffff -> 3
+                    else -> 4
+                }
+                if (byteCount + codePointBytes > maxEvidenceBytes) break
+                byteCount += codePointBytes
+                end += Character.charCount(codePoint)
+            }
+            if (end < evidence.length) lastCrash.put("evidence", evidence.substring(0, end))
+        }
         val bounded = boundedDiagnosticJson(stats.toString(2), maxStatsBytes)
         val destination = statsFile.toPath()
         val temporary = Files.createTempFile(directory.toPath(), "crash-stats-", ".tmp")

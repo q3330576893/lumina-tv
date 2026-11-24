@@ -29,7 +29,9 @@ import com.lumina.tv.ui.theme.ThemeRuntime
 import androidx.compose.material3.Text
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsPlayback(
@@ -47,14 +49,16 @@ fun SettingsPlayback(
     var endCreditsSeconds by remember { mutableStateOf(AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) }
     var bitrate by remember { mutableStateOf(prefs?.maxStreamingBitrate ?: 120_000_000L) }
     var cacheBytes by remember { mutableStateOf(prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L) }
-    var cacheUsed by remember { mutableStateOf(PlaybackCache.spaceBytes(context)) }
+    var cacheUsed by remember { mutableStateOf(0L) }
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
     var preferredAudioLanguage by remember { mutableStateOf(prefs?.preferredAudioLanguage.orEmpty()) }
     var anime4kMode by remember { mutableStateOf(prefs?.anime4kMode ?: "off") }
 
     LaunchedEffect(context) {
-        PlaybackCache.autoTrim(context)
-        cacheUsed = PlaybackCache.spaceBytes(context)
+        cacheUsed = withContext(Dispatchers.IO) {
+            PlaybackCache.autoTrim(context)
+            PlaybackCache.spaceBytes(context)
+        }
     }
 
     val rowKeys = remember {
@@ -119,14 +123,19 @@ fun SettingsPlayback(
                 }, requesters.getValue(rowKeys[4]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[5]))
                 ChoiceRow("playback:playbackCacheBytes", "缓存上限", "每天自动清理一次，超过上限会提前淘汰", cacheOptions, cacheBytes.toString(), { key ->
                     cacheBytes = key.toLong(); prefs?.playbackCacheBytes = cacheBytes
-                    PlaybackCache.setLimit(cacheBytes)
                     scope.launch {
-                        PlaybackCache.autoTrim(context, force = true)
-                        cacheUsed = PlaybackCache.spaceBytes(context)
+                        cacheUsed = withContext(Dispatchers.IO) {
+                            PlaybackCache.setLimit(cacheBytes)
+                            PlaybackCache.autoTrim(context, force = true)
+                            PlaybackCache.spaceBytes(context)
+                        }
                     }
                 }, requesters.getValue(rowKeys[5]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[4]), downRequester = requesters.getValue(rowKeys[6]))
                 ActionRow("playback:clearCache", "播放缓存", "已用 ${cacheUsed / (1024L * 1024L)} MB / 上限 ${cacheBytes / (1024L * 1024L)} MB · 每天自动清理", "清空", {
-                    PlaybackCache.clear(context); cacheUsed = PlaybackCache.spaceBytes(context)
+                    scope.launch {
+                        withContext(Dispatchers.IO) { PlaybackCache.clear(context) }
+                        cacheUsed = withContext(Dispatchers.IO) { PlaybackCache.spaceBytes(context) }
+                    }
                 }, requesters.getValue(rowKeys[6]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[5]), downRequester = requesters.getValue(rowKeys[7]))
                 ToggleRow("playback:forceTranscode", "强制转码", "电视盒子解码异常或画面卡顿时打开", forceTranscode, {
                     forceTranscode = it; prefs?.forceTranscode = it
