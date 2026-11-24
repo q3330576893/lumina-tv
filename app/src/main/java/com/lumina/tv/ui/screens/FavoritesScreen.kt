@@ -8,6 +8,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
@@ -19,6 +20,8 @@ import com.lumina.tv.data.FavoritesPager
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.wideImageCandidates
 import com.lumina.tv.ui.components.PosterCard
+import com.lumina.tv.ui.components.PosterFocusDir
+import com.lumina.tv.ui.components.PosterFocusRole
 import com.lumina.tv.ui.theme.Ink
 import com.lumina.tv.ui.theme.TextSub
 import kotlinx.coroutines.delay
@@ -38,6 +41,7 @@ internal fun FavoritesScreen(
     var refresh by remember { mutableIntStateOf(0) }
     var restoring by remember { mutableStateOf(true) }
     var focusedId by remember { mutableStateOf(pager.anchor.focusedId) }
+    var favoritesGridHasFocus by remember { mutableStateOf(false) }
     var backdropUrl by remember { mutableStateOf<String?>(null) }
     var restoreFocusId by remember { mutableStateOf<String?>(null) }
     val state = pager.state
@@ -125,20 +129,59 @@ internal fun FavoritesScreen(
                     else -> 11
                 }
                 val cardWidth = (maxWidth - 40.dp * 2 - 20.dp * (gridColumns - 1)) / gridColumns
+                val focusColumns = remember(gridState.layoutInfo) {
+                    val visible = gridState.layoutInfo.visibleItemsInfo
+                    visible.firstOrNull()?.let { first ->
+                        visible.count { it.index in first.index until (first.index + 50) && it.offset.y == first.offset.y }
+                            .coerceAtLeast(1)
+                    } ?: 1
+                }
+                val focusedIndex = if (favoritesGridHasFocus) state.items.indexOfFirst { it.id == focusedId } else -1
+                var previousFocusIndex by remember(state.items) { mutableIntStateOf(-1) }
+                var focusDir by remember(state.items) { mutableStateOf(PosterFocusDir.NONE) }
+                LaunchedEffect(focusedIndex) {
+                    if (focusedIndex >= 0) {
+                        if (previousFocusIndex >= 0) {
+                            val delta = focusedIndex - previousFocusIndex
+                            focusDir = when {
+                                kotlin.math.abs(delta) >= focusColumns -> if (delta > 0) PosterFocusDir.DOWN else PosterFocusDir.UP
+                                delta > 0 -> PosterFocusDir.RIGHT
+                                delta < 0 -> PosterFocusDir.LEFT
+                                else -> PosterFocusDir.NONE
+                            }
+                        } else focusDir = PosterFocusDir.NONE
+                        previousFocusIndex = focusedIndex
+                    } else {
+                        previousFocusIndex = -1
+                        focusDir = PosterFocusDir.NONE
+                    }
+                }
+                fun roleOf(index: Int) = when {
+                    focusedIndex < 0 -> PosterFocusRole.REST
+                    index == focusedIndex -> PosterFocusRole.FOCUSED
+                    kotlin.math.abs(index - focusedIndex) == 1 ||
+                        kotlin.math.abs(index - focusedIndex) == focusColumns -> PosterFocusRole.NEIGHBOR
+                    else -> PosterFocusRole.REST
+                }
                 LazyVerticalGrid(
                     state = gridState,
                     columns = GridCells.Fixed(gridColumns),
                     contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 12.dp, bottom = 160.dp),
                     horizontalArrangement = Arrangement.spacedBy(20.dp),
                     verticalArrangement = Arrangement.spacedBy(32.dp),
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().onFocusChanged { favoritesGridHasFocus = it.hasFocus },
                 ) {
                     itemsIndexed(state.items, key = { _, item -> item.id }) { index, item ->
+                        val requestFocus = !restoring && restoreFocusId == item.id
                         PosterCard(
                             item = item,
                             imageUrl = client.imageUrl(item),
                             width = cardWidth,
-                            requestInitialFocus = !restoring && restoreFocusId == item.id,
+                            requestInitialFocus = requestFocus,
+                            focusRole = roleOf(index),
+                            focusDir = focusDir,
+                            snapAnimation = gridState.isScrollInProgress || requestFocus,
+                            roleDriven = true,
                             focusRequester = if (index == 0) firstItemFocus else null,
                             onFocused = { focusedId = item.id; restoreFocusId = null; savePosition() },
                             onClick = { savePosition(); onOpenDetail(item.id) },

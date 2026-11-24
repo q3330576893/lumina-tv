@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -41,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -56,6 +58,8 @@ import com.lumina.tv.ui.components.EmptyView
 import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
+import com.lumina.tv.ui.components.PosterFocusDir
+import com.lumina.tv.ui.components.PosterFocusRole
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.GlassLine
 import com.lumina.tv.ui.theme.TextMain
@@ -98,10 +102,14 @@ fun SearchScreen(
     var handledSearchNow by remember { mutableIntStateOf(0) }
     var history by remember { mutableStateOf(prefs?.searchHistory().orEmpty()) }
     var focusedItemId by rememberSaveable { mutableStateOf<String?>(null) }
+    var focusedLatestId by remember { mutableStateOf<String?>(null) }
     var typeFilter by rememberSaveable { mutableIntStateOf(0) }
     var favoritesOnly by rememberSaveable { mutableStateOf(false) }
     var unwatchedOnly by rememberSaveable { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
+    val latestGridState = rememberLazyGridState()
+    var searchGridHasFocus by remember { mutableStateOf(false) }
+    var latestGridHasFocus by remember { mutableStateOf(false) }
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
 
     fun submitSearch(query: String = keyword) {
@@ -354,16 +362,56 @@ fun SearchScreen(
                     if (loadingMore || hasMore && autoLoadedEmptyPages < SEARCH_EMPTY_AUTO_PAGE_LIMIT) LoadingView(text = "继续搜索中…")
                     else EmptyView("没有找到相关内容")
                 } else {
+                    val focusColumns = remember(gridState.layoutInfo) {
+                        val visible = gridState.layoutInfo.visibleItemsInfo
+                        visible.firstOrNull()?.let { first ->
+                            visible.count { it.index in first.index until (first.index + 50) && it.offset.y == first.offset.y }
+                                .coerceAtLeast(1)
+                        } ?: 1
+                    }
+                    val focusedIndex = if (searchGridHasFocus) visibleResults.indexOfFirst { it.id == focusedItemId } else -1
+                    var previousFocusIndex by remember(visibleResults) { mutableIntStateOf(-1) }
+                    var focusDir by remember(visibleResults) { mutableStateOf(PosterFocusDir.NONE) }
+                    LaunchedEffect(focusedIndex) {
+                        if (focusedIndex >= 0) {
+                            if (previousFocusIndex >= 0) {
+                                val delta = focusedIndex - previousFocusIndex
+                                focusDir = when {
+                                    kotlin.math.abs(delta) >= focusColumns -> if (delta > 0) PosterFocusDir.DOWN else PosterFocusDir.UP
+                                    delta > 0 -> PosterFocusDir.RIGHT
+                                    delta < 0 -> PosterFocusDir.LEFT
+                                    else -> PosterFocusDir.NONE
+                                }
+                            } else focusDir = PosterFocusDir.NONE
+                            previousFocusIndex = focusedIndex
+                        } else {
+                            previousFocusIndex = -1
+                            focusDir = PosterFocusDir.NONE
+                        }
+                    }
+                    fun roleOf(index: Int) = when {
+                        focusedIndex < 0 -> PosterFocusRole.REST
+                        index == focusedIndex -> PosterFocusRole.FOCUSED
+                        kotlin.math.abs(index - focusedIndex) == 1 ||
+                            kotlin.math.abs(index - focusedIndex) == focusColumns -> PosterFocusRole.NEIGHBOR
+                        else -> PosterFocusRole.REST
+                    }
                     LazyVerticalGrid(
                         state = gridState,
                         columns = GridCells.Adaptive(150.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize().onFocusChanged { searchGridHasFocus = it.hasFocus },
                     ) {
-                        items(visibleResults, key = { it.id }) { item ->
+                        itemsIndexed(visibleResults, key = { _, item -> item.id }) { index, item ->
+                            val requestFocus = item.id == focusedItemId ||
+                                (focusedItemId == null && item == visibleResults.firstOrNull())
                             PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp,
-                                requestInitialFocus = item.id == focusedItemId || (focusedItemId == null && item == visibleResults.firstOrNull()),
+                                requestInitialFocus = requestFocus,
+                                focusRole = roleOf(index),
+                                focusDir = focusDir,
+                                snapAnimation = gridState.isScrollInProgress || requestFocus,
+                                roleDriven = true,
                                 onFocused = { focusedItemId = item.id }) {
                                 onOpenDetail(item.seriesId ?: item.id)
                             }
@@ -390,11 +438,46 @@ fun SearchScreen(
                 }
             }
             else -> {
+                val latestFocusColumns = remember(latestGridState.layoutInfo) {
+                    val visible = latestGridState.layoutInfo.visibleItemsInfo.filter { it.index >= 2 }
+                    visible.firstOrNull()?.let { first ->
+                        visible.count { it.index in first.index until (first.index + 50) && it.offset.y == first.offset.y }
+                            .coerceAtLeast(1)
+                    } ?: 1
+                }
+                val latestFocusedIndex = if (latestGridHasFocus) latest.indexOfFirst { it.id == focusedLatestId } else -1
+                var previousLatestFocusIndex by remember(latest) { mutableIntStateOf(-1) }
+                var latestFocusDir by remember(latest) { mutableStateOf(PosterFocusDir.NONE) }
+                LaunchedEffect(latestFocusedIndex) {
+                    if (latestFocusedIndex >= 0) {
+                        if (previousLatestFocusIndex >= 0) {
+                            val delta = latestFocusedIndex - previousLatestFocusIndex
+                            latestFocusDir = when {
+                                kotlin.math.abs(delta) >= latestFocusColumns -> if (delta > 0) PosterFocusDir.DOWN else PosterFocusDir.UP
+                                delta > 0 -> PosterFocusDir.RIGHT
+                                delta < 0 -> PosterFocusDir.LEFT
+                                else -> PosterFocusDir.NONE
+                            }
+                        } else latestFocusDir = PosterFocusDir.NONE
+                        previousLatestFocusIndex = latestFocusedIndex
+                    } else {
+                        previousLatestFocusIndex = -1
+                        latestFocusDir = PosterFocusDir.NONE
+                    }
+                }
+                fun latestRoleOf(index: Int) = when {
+                    latestFocusedIndex < 0 -> PosterFocusRole.REST
+                    index == latestFocusedIndex -> PosterFocusRole.FOCUSED
+                    kotlin.math.abs(index - latestFocusedIndex) == 1 ||
+                        kotlin.math.abs(index - latestFocusedIndex) == latestFocusColumns -> PosterFocusRole.NEIGHBOR
+                    else -> PosterFocusRole.REST
+                }
                 LazyVerticalGrid(
+                    state = latestGridState,
                     columns = GridCells.Adaptive(150.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().onFocusChanged { latestGridHasFocus = it.hasFocus },
                 ) {
                     if (history.isNotEmpty()) {
                         item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
@@ -421,9 +504,15 @@ fun SearchScreen(
                     item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
                         Text("最近添加", color = TextMain, fontSize = 16.sp, modifier = Modifier.padding(bottom = 2.dp))
                     }
-                    items(latest, key = { "latest:${it.id}" }) { item ->
+                    itemsIndexed(latest, key = { _, it -> "latest:${it.id}" }) { index, item ->
+                        val requestFocus = item == latest.firstOrNull()
                         PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp,
-                            requestInitialFocus = item == latest.firstOrNull(), onFocused = {}) {
+                            requestInitialFocus = requestFocus,
+                            focusRole = latestRoleOf(index),
+                            focusDir = latestFocusDir,
+                            snapAnimation = latestGridState.isScrollInProgress || requestFocus,
+                            roleDriven = true,
+                            onFocused = { focusedLatestId = item.id }) {
                             onOpenDetail(item.seriesId ?: item.id)
                         }
                     }

@@ -38,6 +38,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
@@ -121,6 +122,8 @@ import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.FocusScale
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
+import com.lumina.tv.ui.components.PosterFocusDir
+import com.lumina.tv.ui.components.PosterFocusRole
 import com.lumina.tv.ui.components.DetailVideoBackground
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
@@ -424,6 +427,28 @@ fun DetailScreen(
     var focusedRelatedId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     val castRowState = rememberLazyListState()
     val similarRowState = rememberLazyListState()
+    var similarRowHasFocus by remember(id) { mutableStateOf(false) }
+    val focusedRelatedIndex = if (similarRowHasFocus) similar.indexOfFirst { it.id == focusedRelatedId } else -1
+    var previousRelatedIndex by remember(similar) { mutableIntStateOf(-1) }
+    var relatedFocusDir by remember(similar) { mutableStateOf(PosterFocusDir.NONE) }
+    LaunchedEffect(focusedRelatedIndex) {
+        if (focusedRelatedIndex >= 0) {
+            if (previousRelatedIndex >= 0) {
+                relatedFocusDir = if (focusedRelatedIndex > previousRelatedIndex) PosterFocusDir.RIGHT
+                else if (focusedRelatedIndex < previousRelatedIndex) PosterFocusDir.LEFT else PosterFocusDir.NONE
+            } else relatedFocusDir = PosterFocusDir.NONE
+            previousRelatedIndex = focusedRelatedIndex
+        } else {
+            previousRelatedIndex = -1
+            relatedFocusDir = PosterFocusDir.NONE
+        }
+    }
+    fun relatedRoleOf(index: Int) = when {
+        focusedRelatedIndex < 0 -> PosterFocusRole.REST
+        index == focusedRelatedIndex -> PosterFocusRole.FOCUSED
+        kotlin.math.abs(index - focusedRelatedIndex) == 1 -> PosterFocusRole.NEIGHBOR
+        else -> PosterFocusRole.REST
+    }
     val detailScrollState = rememberScrollState()
     val playFocus = remember { FocusRequester() }
     val overviewFocus = remember { FocusRequester() }
@@ -1449,14 +1474,23 @@ fun DetailScreen(
                         modifier = Modifier.padding(vertical = 6.dp),
                     )
                 } else {
-                    LazyRow(state = similarRowState, modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        items(similar, key = { it.id }) { related ->
+                    LazyRow(
+                        state = similarRowState,
+                        modifier = Modifier.focusGroup().onFocusChanged { similarRowHasFocus = it.hasFocus },
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        itemsIndexed(similar, key = { _, it -> it.id }) { index, related ->
+                            val requestFocus = related.id == focusedRelatedId
                             PosterCard(
                                 item = related,
                                 imageUrl = client?.imageUrl(related),
                                 width = 138.dp,
                                 focusScale = FocusScale.DENSE_GRID,
-                                requestInitialFocus = related.id == focusedRelatedId,
+                                requestInitialFocus = requestFocus,
+                                focusRole = relatedRoleOf(index),
+                                focusDir = relatedFocusDir,
+                                snapAnimation = similarRowState.isScrollInProgress || requestFocus,
+                                roleDriven = true,
                                 onFocused = { focusedRelatedId = related.id },
                                 onClick = { playAction.invalidate(); onOpenDetail(related.id) },
                             )
