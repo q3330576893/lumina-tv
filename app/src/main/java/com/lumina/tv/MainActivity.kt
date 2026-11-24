@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.IntSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.PlaybackCache
 import com.lumina.tv.ui.components.AuroraBackground
@@ -81,6 +82,7 @@ private fun Screen.depth(): Int = when (this) {
 class MainActivity : ComponentActivity() {
     private var phoneSearch by mutableStateOf<String?>(null)
     private var startupCrashNotice by mutableStateOf<String?>(null)
+    private var bootReady by mutableStateOf(false)
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
@@ -93,48 +95,63 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Lumina phone and TV clients intentionally share the 16:9 landscape layout.
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        startupCrashNotice = CrashHandler.takeStartupNotice(this)
         com.lumina.tv.diag.PageLog.add("activity_created restored=${savedInstanceState != null}")
-        AppRuntime.init(this)
         if (intent?.getBooleanExtra(BootReceiver.EXTRA_BOOT_LAUNCH, false) == true) {
             com.lumina.tv.diag.PageLog.add("bootLaunch activity_created")
         }
-        PlaybackCache.initialize(applicationContext)
-        AppRuntime.restore()
         lifecycleScope.launch(Dispatchers.IO) {
-            PlaybackCache.autoTrim(applicationContext)
+            var crashNotice: String? = null
+            try {
+                crashNotice = CrashHandler.takeStartupNotice(this@MainActivity)
+                AppRuntime.init(this@MainActivity)
+                PlaybackCache.initialize(applicationContext)
+                AppRuntime.restore()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    PlaybackCache.autoTrim(applicationContext)
+                }
+            } catch (failure: Throwable) {
+                android.util.Log.e("LuminaTV", "Startup initialization failed", failure)
+            } finally {
+                withContext(Dispatchers.Main) {
+                    try {
+                        startupCrashNotice = crashNotice
+                        AppRuntime.prefs?.let {
+                            com.lumina.tv.ui.theme.ThemeRuntime.applyTheme(it.themeColor)
+                            com.lumina.tv.ui.theme.ThemeRuntime.applyGlass(it.glassStyle)
+                            com.lumina.tv.ui.theme.ThemeRuntime.applyBase(it.baseTheme)
+                        }
+                        window.setBackgroundDrawable(
+                            android.graphics.drawable.ColorDrawable(
+                                com.lumina.tv.ui.theme.ThemeRuntime.bgTop.toArgb(),
+                            ),
+                        )
+                    } catch (failure: Throwable) {
+                        android.util.Log.e("LuminaTV", "Startup UI setup failed", failure)
+                    } finally {
+                        bootReady = true
+                    }
+                }
+            }
         }
-        // 应用个性化主题与玻璃质感
-        AppRuntime.prefs?.let {
-            com.lumina.tv.ui.theme.ThemeRuntime.applyTheme(it.themeColor)
-            com.lumina.tv.ui.theme.ThemeRuntime.applyGlass(it.glassStyle)
-            com.lumina.tv.ui.theme.ThemeRuntime.applyBase(it.baseTheme)
-        }
-        // 首帧与 Compose 背景对齐，避免启动时闪一下不同底色
-        window.setBackgroundDrawable(
-            android.graphics.drawable.ColorDrawable(
-                com.lumina.tv.ui.theme.ThemeRuntime.bgTop.toArgb(),
-            ),
-        )
 
         AppRuntime.onRemoteKey = { action -> runOnUiThread { dispatchRemote(action) } }
         AppRuntime.onSearch = { kw -> runOnUiThread { if (AppRuntime.session != null) phoneSearch = kw } }
 
         setContent {
             LuminaTheme {
-                var bootDone by rememberSaveable { mutableStateOf(AppRuntime.session == null) }
+                var bootDone by rememberSaveable { mutableStateOf(false) }
+                val showMain = bootReady && bootDone
                 val serverName = AppRuntime.prefs?.serverName
                     ?: AppRuntime.session?.serverName
                     ?: "Emby"
-                LaunchedEffect(Unit) {
-                    if (!bootDone) {
-                        delay(320)
-                        bootDone = true
-                    }
+                LaunchedEffect(bootReady) {
+                    if (!bootReady) return@LaunchedEffect
+                    delay(320)
+                    bootDone = true
                 }
-                AuroraBackground(active = !bootDone) {
+                AuroraBackground(active = !showMain) {
                     Crossfade(
-                        targetState = bootDone,
+                        targetState = showMain,
                         animationSpec = tween(260),
                         label = "boot-transition",
                     ) { done ->

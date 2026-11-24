@@ -561,6 +561,7 @@ fun PlayerScreen(
     var dvDecoderPath by remember(item.id) { mutableStateOf<String?>(null) }
     var activeVideoDecoder by remember(item.id) { mutableStateOf<String?>(null) }
     var firstFrameRendered by remember(item.id) { mutableStateOf(false) }
+    var initialLoadPending by remember(item.id) { mutableStateOf(false) }
     var tunnelingEnabled by remember(item.id) { mutableStateOf(false) }
     var tunnelingFallbackTried by remember(item.id) { mutableStateOf(false) }
     var tunnelingGeneration by remember(item.id) { mutableIntStateOf(-1) }
@@ -992,7 +993,16 @@ fun PlayerScreen(
         playbackMarkers = catchingRequest { client?.getPlaybackMarkers(item.id) }.getOrNull()
     }
 
-    val isBufferingForDisplay = isActuallyStalled && showStallOverlay &&
+    LaunchedEffect(item.id, sessionGeneration) {
+        initialLoadPending = false
+        delay(400)
+        if (!firstFrameRendered && error == null) initialLoadPending = true
+    }
+    LaunchedEffect(firstFrameRendered, error) {
+        if (firstFrameRendered || error != null) initialLoadPending = false
+    }
+
+    val isBufferingForDisplay = ((isActuallyStalled && showStallOverlay) || initialLoadPending) &&
         error == null && playbackStatusNotice == null
     val controlsOverlayVisible = playbackControlsOverlayVisible(controlsVisible, seekHoldActive, optionMenu, isBufferingForDisplay)
     val canShowTrickplay = trickplayCanPresent(controlsOverlayVisible, previewActive, duration,
