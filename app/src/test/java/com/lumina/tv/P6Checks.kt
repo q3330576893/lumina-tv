@@ -3,6 +3,11 @@ package com.lumina.tv
 import com.lumina.tv.data.*
 import com.lumina.tv.player.MpvPlayerController.LoadIdentity
 import com.lumina.tv.player.PlaybackDiagnostics
+import com.lumina.tv.ui.screens.DetailHlsFailureCache
+import com.lumina.tv.ui.screens.HeroImageLayer
+import com.lumina.tv.ui.screens.detailCastEntries
+import com.lumina.tv.ui.screens.detailPersonKey
+import com.lumina.tv.ui.screens.heroDisplayLayer
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -20,10 +25,63 @@ object P6Checks {
         httpPages()
         pagingOwnership()
         diagnosticOwnership()
+        detailPageRecords()
+        sharedHeroArtwork()
         println("P6 PASS: 137 favorites, response-local totals/offsets, mutation rebuild, retained failures, stale loads, focus anchors, actual readback and session-bound metrics")
     }
 
     private fun items(count: Int) = (0 until count).map { MediaItem("id$it", "Item $it", "Movie", isFavorite = true) }
+
+    private fun detailPageRecords() {
+        var now = 0L
+        val failures = DetailHlsFailureCache { now }
+        failures.add("broken")
+        now = 10 * 60 * 1000L - 1
+        check("broken" in failures)
+        now++
+        check("broken" !in failures)
+        failures.add("broken") // Expiry permits a fresh attempt and failure window.
+        check("broken" in failures)
+        check("broken" !in DetailHlsFailureCache { now }) // A different page starts clean.
+        failures.add("")
+        check("" !in failures)
+
+        val bounded = DetailHlsFailureCache { now }
+        repeat(128) { bounded.add("hls:$it") }
+        bounded.add("hls:0") // A repeated failure refreshes its eviction position.
+        bounded.add("hls:128")
+        check("hls:0" in bounded && "hls:1" !in bounded)
+        check((2..128).all { "hls:$it" in bounded })
+
+        val actor = MediaPerson("person", "Performer", role = "Lead", type = "Actor")
+        val secondRole = actor.copy(role = "Narrator")
+        val director = actor.copy(role = null, type = "Director")
+        val anonymous = actor.copy(id = null, name = "Another performer")
+        val cast = detailCastEntries(listOf(actor, actor, secondRole, director, anonymous, actor.copy(name = "")))
+        check(cast == listOf(actor, secondRole, director, anonymous))
+        check(cast.map(::detailPersonKey).distinct().size == cast.size)
+        val delimiterInId = actor.copy(id = "a|b", type = "c")
+        val delimiterInType = actor.copy(id = "a", type = "b|c")
+        check(detailPersonKey(delimiterInId) != detailPersonKey(delimiterInType))
+        check(detailPersonKey(actor) != detailPersonKey(actor.copy(id = null, name = actor.id!!)))
+        println("P6 BATCH-6 PASS: page-local HLS TTL/capacity and distinct cast roles")
+    }
+
+    private fun sharedHeroArtwork() {
+        val first = MediaItem("first", "First movie", "Movie")
+        val second = MediaItem("second", "Second series", "Series")
+        val items = listOf(first, second).associateBy { it.id }
+        val bottom = HeroImageLayer(first.id, "https://artwork/shared.jpg")
+        val top = HeroImageLayer(second.id, bottom.imageUrl)
+        fun displayed(loaded: Boolean, pastMidpoint: Boolean) =
+            heroDisplayLayer(bottom, top, loaded, pastMidpoint)?.let { items[it.itemId] }
+        check(displayed(loaded = false, pastMidpoint = true) == first)
+        check(displayed(loaded = true, pastMidpoint = false) == first)
+        check(displayed(loaded = true, pastMidpoint = true) == second)
+        check(heroDisplayLayer(top, null, false, true)?.itemId == second.id)
+        check(heroDisplayLayer(null, top, true, true)?.itemId == second.id)
+        println("P6 BATCH-6 PASS: shared artwork retains each layer's media identity through the wipe")
+    }
 
     private suspend fun httpPages() = coroutineScope {
         val serverItems = items(137)

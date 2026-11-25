@@ -114,6 +114,7 @@ import com.lumina.tv.data.MdblistClient
 import com.lumina.tv.data.MediaPerson
 import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.MediaStream
+import com.lumina.tv.data.PlayableItemRequestGate
 import com.lumina.tv.data.bucketOf
 import com.lumina.tv.data.sameRegionBonus
 import com.lumina.tv.player.AudioCapabilities
@@ -148,6 +149,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -173,7 +175,6 @@ import com.lumina.tv.data.resolveTmdbMetadataItem
 import com.lumina.tv.data.tmdbMediaPath
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
-private val hlsUnsupportedItems = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 @OptIn(ExperimentalFoundationApi::class)
 private object DetailNoBringIntoViewSpec : BringIntoViewSpec {
     override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
@@ -185,6 +186,50 @@ private object DetailNoBringIntoViewSpec : BringIntoViewSpec {
     }
 }
 private const val DETAIL_PREVIEW_FAILURE_TTL_MS = 10 * 60 * 1000L
+private const val DETAIL_HLS_FAILURE_LIMIT = 128
+
+internal class DetailHlsFailureCache(private val nowMs: () -> Long = { android.os.SystemClock.elapsedRealtime() }) {
+    private val failures = LinkedHashMap<String, Long>()
+
+    @Synchronized
+    operator fun contains(key: String): Boolean {
+        prune(nowMs())
+        return key in failures
+    }
+
+    @Synchronized
+    fun add(key: String) {
+        if (key.isBlank()) return
+        val now = nowMs()
+        prune(now)
+        failures.remove(key)
+        failures[key] = now
+        while (failures.size > DETAIL_HLS_FAILURE_LIMIT) {
+            val oldest = failures.entries.iterator()
+            oldest.next()
+            oldest.remove()
+        }
+    }
+
+    private fun prune(now: Long) {
+        val entries = failures.entries.iterator()
+        while (entries.hasNext()) {
+            if (now - entries.next().value >= DETAIL_PREVIEW_FAILURE_TTL_MS) entries.remove()
+        }
+    }
+}
+
+internal fun detailPersonKey(person: MediaPerson): String = listOf(
+    if (person.id.isNullOrBlank()) "name" else "id",
+    person.id?.takeIf(String::isNotBlank) ?: person.name,
+    person.type.orEmpty(),
+    person.role.orEmpty(),
+).joinToString("|") { "${it.length}:$it" }
+
+internal fun detailCastEntries(people: List<MediaPerson>): List<MediaPerson> = people
+    .filter { it.name.isNotBlank() }
+    .distinctBy(::detailPersonKey)
+    .take(16)
 
 internal suspend fun loadDetailRecommendations(
     client: com.lumina.tv.data.EmbyClient,
@@ -314,6 +359,7 @@ fun DetailScreen(
     val sourceAudioCaps = remember { catchingRequest { detect(context) }.getOrDefault(AudioCapabilities(emptyMap())) }
     val client = AppRuntime.client
     val accountScope = client?.let { identityScope(it.baseUrl, it.userId) }
+    val hlsUnsupportedItems = remember(id, client) { DetailHlsFailureCache() }
     val recommendationRevisions by DetailRecommendationCache.revisions.collectAsState()
     val recommendationRevision = recommendationRevisions[accountScope] ?: 0L
     val detailHazeState = remember { HazeState() }
@@ -395,10 +441,29 @@ fun DetailScreen(
             when (it) { "off" -> "-1"; "auto" -> "auto"; else -> it.removePrefix("track:emby:") }
         }) }
     // 单集的版本选择
-    var episodeTarget by remember { mutableStateOf<MediaItem?>(null) }
-    var episodeSources by remember { mutableStateOf<List<MediaSource>>(emptyList()) }
-    var episodeSourcesLoading by remember { mutableStateOf(false) }
-    var showEpisodeSourceMenu by remember { mutableStateOf(false) }
+    val episodeSourceGate = remember(id, client) {
+        PlayableItemRequestGate().apply { updateContext(listOf(id, client)) }
+    }
+    var episodeSourceTicket by remember(episodeSourceGate) { mutableStateOf<Long?>(null) }
+    var episodeSourceJob by remember(episodeSourceGate) { mutableStateOf<Job?>(null) }
+    var episodeTarget by remember(episodeSourceGate) { mutableStateOf<MediaItem?>(null) }
+    var episodeSources by remember(episodeSourceGate) { mutableStateOf<List<MediaSource>>(emptyList()) }
+    var episodeSourcesLoading by remember(episodeSourceGate) { mutableStateOf(false) }
+    var showEpisodeSourceMenu by remember(episodeSourceGate) { mutableStateOf(false) }
+    fun closeEpisodeSourceMenu(ticket: Long) {
+        if (!episodeSourceGate.accepts(ticket)) return
+        episodeSourceGate.cancel()
+        episodeSourceJob?.cancel()
+        episodeSourceJob = null
+        episodeSourceTicket = null
+        episodeSourcesLoading = false
+        showEpisodeSourceMenu = false
+        episodeTarget = null
+        episodeSources = emptyList()
+    }
+    LaunchedEffect(previewActive, episodeSourceGate) {
+        if (!previewActive) episodeSourceTicket?.let(::closeEpisodeSourceMenu)
+    }
     val favoriteAction = remember(id, client) { UserFlagMutation() }
     val playedAction = remember(id, client) { UserFlagMutation() }
     val isFav = favoriteAction.value
@@ -407,6 +472,8 @@ fun DetailScreen(
     androidx.compose.runtime.DisposableEffect(pageActive) {
         onDispose {
             pageActive.set(false)
+            episodeSourceGate.updateContext(null)
+            episodeSourceJob?.cancel()
             heroDrift.reset()
         }
     }
@@ -932,22 +999,33 @@ fun DetailScreen(
     /** 单集有多个版本时先选版本，只有一个版本才直接播。 */
     fun pickEpisode(ep: MediaItem) {
         if (episodeSourcesLoading || playAction.resolving) return
-        if (ep.sourceCount <= 1) {
+        if (ep.isMissing || ep.sourceCount <= 1) {
             playAction.play(ep)
             return
         }
+        val ticket = episodeSourceGate.begin() ?: return
+        episodeSourceTicket = ticket
         episodeTarget = ep
         episodeSources = emptyList()
         episodeSourcesLoading = true
         showEpisodeSourceMenu = true
-        scope.launch {
-            val loaded = catchingRequest { client?.getMediaSources(ep.id) }.getOrDefault(emptyList()).orEmpty()
-            if (!pageActive.get() || AppRuntime.client !== client || episodeTarget?.id != ep.id || !showEpisodeSourceMenu) return@launch
-            episodeSources = loaded
-            episodeSourcesLoading = false
-            if (episodeSources.isEmpty()) {
-                showEpisodeSourceMenu = false
-                playAction.play(ep)
+        episodeSourceJob = scope.launch {
+            try {
+                val loaded = catchingRequest { client?.getMediaSources(ep.id) }.getOrDefault(emptyList()).orEmpty()
+                currentCoroutineContext().ensureActive()
+                if (!episodeSourceGate.accepts(ticket) || !pageActive.get() || AppRuntime.client !== client ||
+                    episodeTarget?.id != ep.id || !showEpisodeSourceMenu) return@launch
+                episodeSources = loaded
+                if (loaded.isEmpty()) {
+                    closeEpisodeSourceMenu(ticket)
+                    playAction.play(ep)
+                }
+            } finally {
+                // Closing the menu can already have admitted another load of the same episode.
+                if (episodeSourceGate.accepts(ticket)) {
+                    episodeSourcesLoading = false
+                    episodeSourceJob = null
+                }
             }
         }
     }
@@ -1464,13 +1542,13 @@ fun DetailScreen(
                 } else if (!episodeLoading && episodes.isEmpty() && selectedSeason != null) {
                     Text("本季暂无剧集", color = TextSub, fontSize = TypeScale.sp12, modifier = Modifier.padding(top = 12.dp))
                 }
-                val cast = it0!!.people.filter { person -> person.name.isNotBlank() }.take(16)
+                val cast = detailCastEntries(it0!!.people)
                 if (cast.isNotEmpty()) {
                     Spacer(Modifier.height(22.dp))
                     Text("演职人员", color = TextMain, fontSize = TypeScale.sp18, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.height(12.dp))
                     LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(cast, key = { it.id ?: "${it.name}-${it.role.orEmpty()}" }) { person ->
+                        items(cast, key = ::detailPersonKey) { person ->
                             PersonCard(person = person, imageUrl = client?.personImageUrl(person))
                         }
                     }
@@ -1653,8 +1731,9 @@ fun DetailScreen(
         }
 
         // 单集版本选择
-        if (showEpisodeSourceMenu && episodeTarget != null) {
+        if (showEpisodeSourceMenu && episodeTarget != null && episodeSourceTicket != null) {
             val ep = episodeTarget!!
+            val ticket = episodeSourceTicket!!
             SourceMenu(
                 sources = episodeSources,
                 sourcesLoading = episodeSourcesLoading,
@@ -1663,14 +1742,14 @@ fun DetailScreen(
                 audioCaps = sourceAudioCaps,
                 title = "选择版本 · ${ep.name}",
                 onPick = { sid ->
-                    if (pageActive.get() && AppRuntime.client === client && episodeTarget?.id == ep.id) {
+                    if (episodeSourceGate.accepts(ticket) && pageActive.get() && AppRuntime.client === client && episodeTarget?.id == ep.id) {
                         playAction.invalidate()
-                        showEpisodeSourceMenu = false
+                        closeEpisodeSourceMenu(ticket)
                         AppRuntime.prefs?.rememberSource(ep.id, sid.takeIf { it.isNotBlank() })
                         if (sid.isBlank()) onPlay(ep) else onPlayWithSource(ep, sid)
                     }
                 },
-                onClose = { showEpisodeSourceMenu = false; episodeSourcesLoading = false; episodeTarget = null },
+                onClose = { closeEpisodeSourceMenu(ticket) },
             )
         }
 

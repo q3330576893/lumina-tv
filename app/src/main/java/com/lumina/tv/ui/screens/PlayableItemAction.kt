@@ -86,8 +86,21 @@ fun rememberPlayableItemAction(contextKey: Any, active: Boolean = true, onResolv
             title = { Text(if (request.result.allWatched) "本剧已全部看完" else "暂无可播的未看单集") },
             text = { Text("可以从首个可播单集重播：${request.result.firstEpisode.subtitle}") },
             confirmButton = { TextButton(onClick = {
-                if (current(request.ticket)) currentOnResolved(request.result.firstEpisode, request.fromStart)
-                replay = null
+                var keepTicket = false
+                try {
+                    if (current(request.ticket)) {
+                        currentOnResolved(request.result.firstEpisode, request.fromStart)
+                        keepTicket = true
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    PageLog.add("playableItem action=failed type=${failure.javaClass.simpleName}")
+                    if (current(request.ticket)) Toast.makeText(context, "播放失败，请重试", Toast.LENGTH_LONG).show()
+                } finally {
+                    if (replay?.ticket == request.ticket) replay = null
+                    if (!keepTicket) gate.finish(request.ticket)
+                }
             }) { Text("播放首集") } },
             dismissButton = { TextButton(onClick = ::dismissReplay) { Text("取消") } },
         )
@@ -106,8 +119,8 @@ fun rememberPlayableItemAction(contextKey: Any, active: Boolean = true, onResolv
                     if (current(ticket)) {
                         when (result) {
                             is PlayableItemResult.Ready -> {
-                                keepTicket = true // Remain locked until navigation disposes this entry.
                                 currentOnResolved(result.item, fromStart)
+                                keepTicket = true // Retain only after navigation returns successfully.
                             }
                             is PlayableItemResult.ReplayAvailable -> {
                                 keepTicket = true

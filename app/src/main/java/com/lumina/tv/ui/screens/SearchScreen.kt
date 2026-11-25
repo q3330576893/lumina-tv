@@ -30,6 +30,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -76,6 +77,33 @@ import java.net.UnknownHostException
 
 internal const val SEARCH_REQUEST_TIMEOUT_SECONDS = 8
 
+internal data class LatestItemsState(
+    val items: List<MediaItem> = emptyList(),
+    val loading: Boolean = true,
+    val error: String? = null,
+)
+
+internal class LatestItemsLoader {
+    private var requestSequence = 0L
+    var state by mutableStateOf(LatestItemsState())
+        private set
+
+    suspend fun load(request: suspend () -> List<MediaItem>) {
+        val sequence = ++requestSequence
+        state = LatestItemsState()
+        val result = catchingRequest { request() }
+        currentCoroutineContext().ensureActive()
+        // A late success or failure cannot replace a newer retry's state.
+        if (sequence != requestSequence) return
+        state = result.fold(
+            onSuccess = { LatestItemsState(items = it, loading = false) },
+            onFailure = { LatestItemsState(loading = false, error = "最近添加读取失败，请重试。") },
+        )
+    }
+
+    fun cancel() { requestSequence++ }
+}
+
 @Composable
 fun SearchScreen(
     initialKeyword: String = "",
@@ -89,7 +117,10 @@ fun SearchScreen(
     val inputFocus = remember { FocusRequester() }
     var keyword by rememberSaveable { mutableStateOf(initialKeyword) }
     var results by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var latest by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    val latestLoader = remember(client) { LatestItemsLoader() }
+    val latestState = latestLoader.state
+    val latest = latestState.items
+    var latestRetry by remember(client) { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
     var hasMore by remember { mutableStateOf(false) }
@@ -124,7 +155,15 @@ fun SearchScreen(
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "搜索"
         runCatching { inputFocus.requestFocus() }
-        latest = catchingRequest { client?.getLatest(null, 12) }.getOrNull().orEmpty()
+    }
+    DisposableEffect(latestLoader) {
+        onDispose { latestLoader.cancel() }
+    }
+    LaunchedEffect(latestLoader, latestRetry) {
+        latestLoader.load {
+            val currentClient = client ?: throw EmbyException("客户端未就绪")
+            currentClient.getLatest(null, 12)
+        }
     }
 
     LaunchedEffect(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow) {
@@ -517,7 +556,22 @@ fun SearchScreen(
                         }
                     }
                     if (latest.isEmpty()) item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
-                        EmptyView("暂无最近添加内容")
+                        when {
+                            latestState.loading -> Text("正在读取最近添加…", color = TextSub, fontSize = 13.sp)
+                            latestState.error != null -> Column {
+                                Text(latestState.error, color = TextSub, fontSize = 13.sp)
+                                FocusSurface(
+                                    Modifier.padding(top = 8.dp).height(42.dp).width(112.dp), corner = 12.dp,
+                                    onClick = { latestRetry++ },
+                                ) { focused ->
+                                    Box(
+                                        Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF)),
+                                        contentAlignment = Alignment.Center,
+                                    ) { Text("重试", color = TextMain, fontSize = 13.sp) }
+                                }
+                            }
+                            else -> EmptyView("暂无最近添加内容")
+                        }
                     }
                 }
             }

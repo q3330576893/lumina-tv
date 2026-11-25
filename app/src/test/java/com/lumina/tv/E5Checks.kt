@@ -17,7 +17,12 @@ import com.lumina.tv.ui.screens.shouldAppendSearchPage
 import com.lumina.tv.ui.screens.shouldAutoLoadEmptySearchPage
 import com.lumina.tv.ui.screens.shouldRetryLibraryAppend
 import com.lumina.tv.ui.screens.SEARCH_EMPTY_AUTO_PAGE_LIMIT
+import com.lumina.tv.ui.screens.LatestItemsLoader
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 object E5Checks {
@@ -28,6 +33,7 @@ object E5Checks {
         searchPaging()
         accountFocus()
         seriesSourceProbe()
+        latestItemsRequests()
         println("E5 PASS: season failure/empty/cache and old-row clearing, retryable library append, filtered search continuation capped at 3 pages, registered acyclic account focus, source probe tri-state and cancellation")
     }
 
@@ -73,6 +79,49 @@ object E5Checks {
         check(!shouldAutoLoadEmptySearchPage(0, true, false, false, SEARCH_EMPTY_AUTO_PAGE_LIMIT))
         check(!shouldAutoLoadEmptySearchPage(0, true, false, true, 0))
         check(!shouldAutoLoadEmptySearchPage(1, true, false, false, 0))
+    }
+
+    private suspend fun latestItemsRequests() = coroutineScope {
+        val loader = LatestItemsLoader()
+        check(loader.state.loading && loader.state.error == null)
+        loader.load { error("offline") }
+        check(!loader.state.loading && loader.state.error != null && loader.state.items.isEmpty())
+        loader.load { emptyList() }
+        check(!loader.state.loading && loader.state.error == null && loader.state.items.isEmpty())
+
+        val fresh = MediaItem("fresh", "Fresh item", "Movie")
+        for (oldFails in listOf(false, true)) {
+            val delayed = CompletableDeferred<List<MediaItem>>()
+            val old = launch(start = CoroutineStart.UNDISPATCHED) {
+                loader.load {
+                    val rows = delayed.await()
+                    if (oldFails) error("late failure")
+                    rows
+                }
+            }
+            check(loader.state.loading && loader.state.error == null)
+            loader.load { listOf(fresh) }
+            delayed.complete(listOf(fresh.copy(id = "old")))
+            old.join()
+            check(loader.state.items == listOf(fresh) && loader.state.error == null && !loader.state.loading)
+        }
+
+        val disposedResponse = CompletableDeferred<List<MediaItem>>()
+        val disposed = launch(start = CoroutineStart.UNDISPATCHED) { loader.load { disposedResponse.await() } }
+        val beforeDispose = loader.state
+        loader.cancel()
+        disposedResponse.complete(listOf(fresh.copy(id = "disposed")))
+        disposed.join()
+        check(loader.state == beforeDispose)
+
+        var cancelled = false
+        try {
+            loader.load { throw CancellationException("leave search") }
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+        check(cancelled)
+        println("E5 BATCH-6 PASS: latest failure versus empty, retry, stale success/failure and disposal guards")
     }
 
     private fun accountFocus() {

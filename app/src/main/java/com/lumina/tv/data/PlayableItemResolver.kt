@@ -57,6 +57,7 @@ suspend fun resolvePlayableItem(
     loadEpisodes: suspend (String) -> List<MediaItem>,
     probeSource: suspend (MediaItem) -> EpisodeSourceAvailability,
 ): PlayableItemResult {
+    if (item.isMissing) return PlayableItemResult.Unavailable
     if (item.type == "Movie" || item.type == "Episode") return PlayableItemResult.Ready(item)
     if (item.type != "Series") return PlayableItemResult.Unavailable
     val episodes = loadEpisodes(item.id).filter { it.type == "Episode" && !it.isMissing }

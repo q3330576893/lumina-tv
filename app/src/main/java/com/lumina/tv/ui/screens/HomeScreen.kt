@@ -2087,6 +2087,15 @@ private fun TopButton(icon: androidx.compose.ui.graphics.vector.ImageVector, lab
  */
 private val recentlyShownHeroIds = mutableListOf<String>()
 
+internal data class HeroImageLayer(val itemId: String, val imageUrl: String)
+
+internal fun heroDisplayLayer(
+    bottom: HeroImageLayer?,
+    top: HeroImageLayer?,
+    topLoaded: Boolean,
+    pastWipeMidpoint: Boolean,
+): HeroImageLayer? = top?.takeIf { topLoaded && pastWipeMidpoint } ?: bottom
+
 internal fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: Int = 6): List<MediaItem> {
     if (pool.isEmpty() || size <= 0) return emptyList()
     val seed = System.currentTimeMillis() / 3_600_000L
@@ -2201,6 +2210,7 @@ private fun Hero(
     val heroCandidatesById = remember(items, client, tmdbBackdrops) {
         items.associate { it.id to heroImageCandidates(it) }
     }
+    val heroItemsById = remember(items) { items.associateBy { it.id } }
     var failedHeroImages by remember(client) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
     var failedThumbImages by remember(client) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
     val lastHeroImageLogs = remember(client) { mutableMapOf<String, Pair<String, Boolean>>() }
@@ -2233,9 +2243,19 @@ private fun Hero(
             logHeroImage(media, image, true)
         }
     }
+    fun layerImageLoaded(layer: HeroImageLayer?, image: String, width: Int, height: Int) {
+        val current = layer?.takeIf { it.imageUrl == image } ?: return
+        heroItemsById[current.itemId]?.let { heroImageLoaded(it, image, width, height) }
+    }
+    fun layerImageFailed(layer: HeroImageLayer?, image: String) {
+        val current = layer?.takeIf { it.imageUrl == image } ?: return
+        heroItemsById[current.itemId]?.let { rejectHeroImage(it, image) }
+    }
     val wipeProgress = remember(items, client) { Animatable(1f) }
-    var bottomImage by remember(items, client) { mutableStateOf(resolveHeroImage(item)) }
-    var topImage by remember(items, client) { mutableStateOf<String?>(null) }
+    var bottomLayer by remember(items, client) {
+        mutableStateOf(resolveHeroImage(item)?.let { HeroImageLayer(item.id, it) })
+    }
+    var topLayer by remember(items, client) { mutableStateOf<HeroImageLayer?>(null) }
     var topLoaded by remember(items, client) { mutableStateOf(false) }
     var isForward by remember(items) { mutableStateOf(true) }
     var lastRequestedIndex by remember(items) { mutableStateOf(currentIndex) }
@@ -2244,22 +2264,29 @@ private fun Hero(
 
     LaunchedEffect(currentIndex, items, client, tmdbBackdrops, failedHeroImages, tmdbResolvedIds) {
         val targetItem = items.getOrNull(currentIndex)
-        val targetImage = resolveHeroImage(targetItem)
-        if (isRejectedHeroImage(bottomImage)) bottomImage = null
-        if (targetImage == null || isRejectedHeroImage(topImage)) {
+        val targetLayer = targetItem?.let { media -> resolveHeroImage(media)?.let { HeroImageLayer(media.id, it) } }
+        if (isRejectedHeroImage(bottomLayer?.imageUrl)) bottomLayer = null
+        if (targetLayer == null || isRejectedHeroImage(topLayer?.imageUrl)) {
             // A rejected top candidate must not leave the wipe at zero over an empty layer.
             transitionJob?.cancel()
             transitionGeneration += 1
-            topImage = null
+            topLayer = null
             topLoaded = false
             wipeProgress.snapTo(1f)
         }
-        if (targetImage == null) {
+        if (targetLayer == null) {
             if (targetItem != null && targetItem.id in tmdbResolvedIds) onItemUnavailable(targetItem.id)
             lastRequestedIndex = currentIndex
             return@LaunchedEffect
         }
-        if (targetImage == topImage || (topImage == null && targetImage == bottomImage)) {
+        if (targetLayer.imageUrl == topLayer?.imageUrl) {
+            // Shared artwork keeps the bitmap but still changes the owning media.
+            topLayer = targetLayer
+            lastRequestedIndex = currentIndex
+            return@LaunchedEffect
+        }
+        if (topLayer == null && targetLayer.imageUrl == bottomLayer?.imageUrl) {
+            bottomLayer = targetLayer
             lastRequestedIndex = currentIndex
             return@LaunchedEffect
         }
@@ -2267,28 +2294,28 @@ private fun Hero(
         transitionJob?.cancel()
         transitionGeneration += 1
         if (topLoaded && wipeProgress.value > 0f) {
-            topImage?.let {
-                bottomImage = it
+            topLayer?.let {
+                bottomLayer = it
             }
         }
         val forwardDistance = (currentIndex - lastRequestedIndex + items.size) % items.size
         val backwardDistance = (lastRequestedIndex - currentIndex + items.size) % items.size
         isForward = forwardDistance <= backwardDistance
         lastRequestedIndex = currentIndex
-        topImage = targetImage
+        topLayer = targetLayer
         topLoaded = false
         wipeProgress.snapTo(0f)
     }
-    LaunchedEffect(topImage, topLoaded, transitionGeneration) {
-        val image = topImage ?: return@LaunchedEffect
-        if (!topLoaded || isRejectedHeroImage(image)) return@LaunchedEffect
+    LaunchedEffect(topLayer, topLoaded, transitionGeneration) {
+        val layer = topLayer ?: return@LaunchedEffect
+        if (!topLoaded || isRejectedHeroImage(layer.imageUrl)) return@LaunchedEffect
         val generation = transitionGeneration
         transitionJob?.cancel()
         transitionJob = transitionScope.launch {
             wipeProgress.animateTo(1f, tween(600, easing = FastOutSlowInEasing))
-            if (generation == transitionGeneration && image == topImage) {
-                bottomImage = image
-                topImage = null
+            if (generation == transitionGeneration && layer == topLayer) {
+                bottomLayer = layer
+                topLayer = null
                 topLoaded = false
             }
         }
@@ -2302,14 +2329,8 @@ private fun Hero(
     val isPastWipeMidpoint by remember(wipeProgress) {
         derivedStateOf(structuralEqualityPolicy()) { wipeProgress.value >= 0.5f }
     }
-    val heroByImage = remember(items, heroCandidatesById, failedHeroImages) {
-        items.associateBy { resolveHeroImage(it) }
-    }
-    val displayItem = if (topImage != null && topLoaded && isPastWipeMidpoint) {
-        items.getOrNull(currentIndex) ?: item
-    } else {
-        bottomImage?.let { heroByImage[it] } ?: item
-    }
+    val displayLayer = heroDisplayLayer(bottomLayer, topLayer, topLoaded, isPastWipeMidpoint)
+    val displayItem = displayLayer?.let { heroItemsById[it.itemId] } ?: item
     val playAction = rememberPlayableItemAction(listOf(item.id, displayItem.id, currentIndex), active = active) { target, _ -> onPlay(target) }
     val currentPlayAction by rememberUpdatedState(playAction)
     val advance by rememberUpdatedState(onNext)
@@ -2393,39 +2414,39 @@ private fun Hero(
                 .fillMaxSize()
                 .background(Ink)
         ) {
-            if (bottomImage == null && topImage == null && item.id in tmdbResolvedIds) {
+            if (bottomLayer == null && topLayer == null && item.id in tmdbResolvedIds) {
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
                 Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = TypeScale.sp13)
             }
-            bottomImage?.takeUnless(::isRejectedHeroImage)?.let { image ->
-                val imageOwner = items.firstOrNull { media -> heroCandidatesById[media.id].orEmpty().any { it.url == image } } ?: item
+            bottomLayer?.takeUnless { isRejectedHeroImage(it.imageUrl) }?.let bottom@{ layer ->
+                val imageOwner = heroItemsById[layer.itemId] ?: return@bottom
                 HeroBackdropImage(
-                    imageUrl = image,
+                    imageUrl = layer.imageUrl,
                     isPoster = heroCandidatesById[imageOwner.id].orEmpty().any {
-                        it.url == image && it.source == "poster"
+                        it.url == layer.imageUrl && it.source == "poster"
                     },
                     onSuccess = { width, height ->
-                        heroImageLoaded(imageOwner, image, width, height)
+                        layerImageLoaded(bottomLayer, layer.imageUrl, width, height)
                     },
-                    onError = { rejectHeroImage(imageOwner, image) },
+                    onError = { layerImageFailed(bottomLayer, layer.imageUrl) },
                 )
             }
-            topImage?.takeUnless(::isRejectedHeroImage)?.let { image ->
-                val imageOwner = items.firstOrNull { media -> heroCandidatesById[media.id].orEmpty().any { it.url == image } } ?: item
+            topLayer?.takeUnless { isRejectedHeroImage(it.imageUrl) }?.let top@{ layer ->
+                val imageOwner = heroItemsById[layer.itemId] ?: return@top
                 HeroBackdropImage(
-                    imageUrl = image,
+                    imageUrl = layer.imageUrl,
                     isPoster = heroCandidatesById[imageOwner.id].orEmpty().any {
-                        it.url == image && it.source == "poster"
+                        it.url == layer.imageUrl && it.source == "poster"
                     },
                     wipeProgress = wipeProgress.asState(),
                     isForward = isForward,
                     onLoaded = {
-                        if (image == topImage && !isRejectedHeroImage(image)) topLoaded = true
+                        if (layer.imageUrl == topLayer?.imageUrl && !isRejectedHeroImage(layer.imageUrl)) topLoaded = true
                     },
                     onSuccess = { width, height ->
-                        heroImageLoaded(imageOwner, image, width, height)
+                        layerImageLoaded(topLayer, layer.imageUrl, width, height)
                     },
-                    onError = { rejectHeroImage(imageOwner, image) },
+                    onError = { layerImageFailed(topLayer, layer.imageUrl) },
                 )
             }
         Box(

@@ -42,10 +42,10 @@ internal fun FavoritesScreen(
     var restoring by remember { mutableStateOf(true) }
     var focusedId by remember { mutableStateOf(pager.anchor.focusedId) }
     var favoritesGridHasFocus by remember { mutableStateOf(false) }
-    var backdropUrl by remember { mutableStateOf<String?>(null) }
+    var backdropUrl by remember(client) { mutableStateOf<String?>(null) }
     var restoreFocusId by remember { mutableStateOf<String?>(null) }
     val state = pager.state
-    val focusedBackdropUrl = remember(focusedId, state.items) {
+    val focusedBackdropUrl = remember(focusedId, state.items, client) {
         val item = if (focusedId == null) state.items.firstOrNull()
             else state.items.firstOrNull { it.id == focusedId }
         item?.let {
@@ -53,7 +53,7 @@ internal fun FavoritesScreen(
                 .firstOrNull { candidate -> candidate.source != "poster" }?.url
         }
     }
-    LaunchedEffect(focusedId) {
+    LaunchedEffect(focusedBackdropUrl, client) {
         delay(160)
         backdropUrl = focusedBackdropUrl
     }

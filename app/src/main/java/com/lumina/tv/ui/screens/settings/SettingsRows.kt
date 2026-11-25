@@ -283,34 +283,37 @@ fun ValueRow(
     ) {
         val fraction = ((value - valueRange.start) / (valueRange.endInclusive - valueRange.start))
             .coerceIn(0f, 1f)
-        Canvas(Modifier.width(160.dp).height(20.dp)) {
-            val centerY = size.height / 2f
-            drawLine(
-                color = Color.White.copy(alpha = 0.18f),
-                start = Offset(0f, centerY),
-                end = Offset(size.width, centerY),
-                strokeWidth = 3.dp.toPx(),
-            )
-            drawLine(
-                color = Accent,
-                start = Offset(0f, centerY),
-                end = Offset(size.width * fraction, centerY),
-                strokeWidth = 3.dp.toPx(),
-            )
-            drawCircle(
-                color = Accent,
-                radius = 7.dp.toPx(),
-                center = Offset(size.width * fraction, centerY),
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Canvas(Modifier.width(160.dp).height(20.dp)) {
+                val centerY = size.height / 2f
+                drawLine(
+                    color = Color.White.copy(alpha = 0.18f),
+                    start = Offset(0f, centerY),
+                    end = Offset(size.width, centerY),
+                    strokeWidth = 3.dp.toPx(),
+                )
+                drawLine(
+                    color = Accent,
+                    start = Offset(0f, centerY),
+                    end = Offset(size.width * fraction, centerY),
+                    strokeWidth = 3.dp.toPx(),
+                )
+                drawCircle(
+                    color = Accent,
+                    radius = 7.dp.toPx(),
+                    center = Offset(size.width * fraction, centerY),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = valueLabel,
+                color = TextMain,
+                fontSize = TypeScale.sp12,
+                textAlign = TextAlign.End,
+                maxLines = 1,
+                modifier = Modifier.widthIn(min = 32.dp),
             )
         }
-        Spacer(Modifier.width(12.dp))
-        Text(
-            text = valueLabel,
-            color = TextMain,
-            fontSize = TypeScale.sp12,
-            textAlign = TextAlign.End,
-            modifier = Modifier.width(32.dp),
-        )
     }
 }
 
