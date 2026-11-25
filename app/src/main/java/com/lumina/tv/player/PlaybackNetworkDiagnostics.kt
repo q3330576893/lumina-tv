@@ -9,26 +9,30 @@ import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import javax.net.ssl.SSLException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 data class PlaybackErrorClassification(val category: PlaybackErrorCategory, val code: Int, val action: String)
 
 fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification {
-    val causes = generateSequence(error as Throwable?) { it.cause }.toList()
+    val causes = playbackErrorCauses(error).toList()
     val statusCodes = causes.mapNotNull { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode }
     val category = when {
         isCertificateFailure(error) -> PlaybackErrorCategory.CERT_INVALID
         statusCodes.any { it == 401 || it == 403 } -> PlaybackErrorCategory.AUTH_FAILED
         statusCodes.any { it == 404 || it == 410 } -> PlaybackErrorCategory.SOURCE_GONE
-        statusCodes.any { it in 500..599 } -> PlaybackErrorCategory.NETWORK_TRANSIENT
+        statusCodes.any { it == 408 || it == 429 || it in 500..599 } -> PlaybackErrorCategory.NETWORK_TRANSIENT
         error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> PlaybackErrorCategory.AUDIO_OUTPUT
         error.errorCode == PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED -> PlaybackErrorCategory.RESOURCE_RECLAIMED
         error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND || statusCodes.any { it == 404 || it == 410 } -> PlaybackErrorCategory.SOURCE_GONE
         error.errorCode == PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> PlaybackErrorCategory.HTTP_CONTENT_INVALID
         error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
-            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> PlaybackErrorCategory.NETWORK_TRANSIENT
+            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+            causes.any { it is SSLException } -> PlaybackErrorCategory.NETWORK_TRANSIENT
         error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> PlaybackErrorCategory.OTHER
         error.errorCode == PlaybackException.ERROR_CODE_IO_NO_PERMISSION ||
             error.errorCode == PlaybackException.ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED -> PlaybackErrorCategory.HTTP_PERMISSION
@@ -48,6 +52,44 @@ fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification
         else -> PlaybackErrorCategory.OTHER
     }
     return PlaybackErrorClassification(category, error.errorCode, playbackErrorAction(category))
+}
+
+internal fun playbackErrorCauses(error: Throwable): Sequence<Throwable> = sequence {
+    val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+    var current: Throwable? = error
+    while (current != null && seen.add(current)) {
+        yield(current)
+        current = current.cause
+    }
+}
+
+internal const val MAX_PLAYBACK_NETWORK_RETRY_DELAY_MS = 60_000L
+
+/** Null declines automatic retry when the server asks us to wait beyond the bounded recovery window. */
+internal fun playbackNetworkRetryDelayMs(error: PlaybackException, retryIndex: Int, nowMs: Long = System.currentTimeMillis()): Long? {
+    if (retryIndex !in 0..1) return null
+    val headers = playbackErrorCauses(error)
+        .filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>()
+        .firstOrNull()?.headerFields.orEmpty()
+    val serverDelay = playbackRetryAfterMs(headers, nowMs)
+    if (serverDelay != null && serverDelay > MAX_PLAYBACK_NETWORK_RETRY_DELAY_MS) return null
+    return maxOf(if (retryIndex == 0) 1_000L else 3_000L, serverDelay ?: 0L)
+}
+
+internal fun playbackRetryAfterMs(headers: Map<String, List<String>>, nowMs: Long): Long? {
+    fun header(name: String): String? = headers.entries.firstOrNull { it.key.equals(name, true) }?.value?.firstOrNull()?.trim()
+    val raw = header("Retry-After")?.takeIf { it.isNotEmpty() } ?: return null
+    if (raw.all { it in '0'..'9' }) {
+        // Saturate rather than overflow a very large delay into an immediate retry.
+        return (raw.toLongOrNull() ?: Long.MAX_VALUE)
+            .coerceAtMost(MAX_PLAYBACK_NETWORK_RETRY_DELAY_MS / 1_000L + 1L) * 1_000L
+    }
+    fun date(value: String): Long? = runCatching {
+        ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli()
+    }.getOrNull()
+    val retryAt = date(raw) ?: return null
+    val reference = header("Date")?.let(::date) ?: nowMs
+    return (retryAt - reference).coerceAtLeast(0L)
 }
 
 object PlaybackRangeProbe {

@@ -20,6 +20,7 @@ object B1Checks {
         java.util.logging.Logger.getLogger("fi.iki.elonen.NanoHTTPD").level = java.util.logging.Level.OFF // Expected disconnects in timeout fixtures.
         networkBoundaries()
         tlsBoundaries()
+        playbackRetryAndTlsClassification()
         B1SubtitleChecks.run()
         B1ResumeChecks.run()
         B1InputChecks.run()
@@ -104,6 +105,72 @@ object B1Checks {
             account.close(); otherAccount.close(); a.stop(); b.stop()
             (transports + otherAccount.playbackHttpClient).forEach { it.dispatcher.executorService.shutdown(); it.connectionPool.evictAll() }
         }
+    }
+
+    private fun playbackRetryAndTlsClassification() {
+        fun error(status: Int, headers: Map<String, List<String>> = emptyMap()) = playbackErrorSample(
+            androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+            java.io.IOException("wrapped", androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException(
+                status, "sample", null, headers, androidx.media3.datasource.DataSpec::class.java.cast(null), ByteArray(0))))
+        for (status in listOf(408, 429, 500, 503)) {
+            val failure = error(status)
+            val classification = classifyPlaybackError(failure)
+            check(classification.category == PlaybackErrorCategory.NETWORK_TRANSIENT && classification.action == "retry")
+            check(playbackNetworkRetryDelayMs(failure, 0, 0L) == 1_000L)
+            check(playbackNetworkRetryDelayMs(failure, 1, 0L) == 3_000L)
+            check(!shouldRetryNetworkPlayback(classification.category, 2))
+            check(playbackNetworkRetryDelayMs(failure, 2, 0L) == null)
+        }
+        check(playbackNetworkRetryDelayMs(error(429, mapOf("retry-after" to listOf("12"))), 0, 0L) == 12_000L)
+        check(playbackNetworkRetryDelayMs(error(408, mapOf("Retry-After" to listOf("60"))), 1, 0L) == 60_000L)
+        for (value in listOf("61", "9999999999999999999999999")) {
+            check(playbackNetworkRetryDelayMs(error(429, mapOf("Retry-After" to listOf(value))), 0, 0L) == null)
+        }
+        val dates = mapOf("Retry-After" to listOf("Wed, 25 Nov 2026 00:00:15 GMT"),
+            "Date" to listOf("Wed, 25 Nov 2026 00:00:00 GMT"))
+        check(playbackNetworkRetryDelayMs(error(429, dates), 0, 123L) == 15_000L) // Use server clock.
+        check(playbackNetworkRetryDelayMs(error(429, mapOf("Retry-After" to listOf("invalid"))), 1, 0L) == 3_000L)
+        val handshake = SSLHandshakeException("protocol negotiation failed")
+        check(!isCertificateFailure(handshake))
+        check(!isCertificateFailure(java.io.IOException("wrapped", handshake)))
+        check(isCertificateFailure(SSLHandshakeException("verify failed").apply {
+            initCause(java.security.cert.CertificateException("expired"))
+        }))
+        check(isCertificateFailure(SSLPeerUnverifiedException("hostname mismatch")))
+        check(isCertificateFailure(java.security.cert.CertPathValidatorException("untrusted issuer")))
+        check(classifyPlaybackError(playbackErrorSample(
+            androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED, handshake))
+            .category == PlaybackErrorCategory.NETWORK_TRANSIENT)
+
+        fun assertTlsClassification(cause: Throwable, certificate: Boolean) {
+            val expected = if (certificate) PlaybackErrorCategory.CERT_INVALID else PlaybackErrorCategory.NETWORK_TRANSIENT
+            val action = if (certificate) "check_certificate" else "retry"
+            for (wrapped in listOf(cause, java.io.IOException("wrapped TLS", cause))) {
+                check(isCertificateFailure(wrapped) == certificate) { "TLS cause: $cause" }
+                for (code in listOf(androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                    androidx.media3.common.PlaybackException.ERROR_CODE_IO_UNSPECIFIED)) {
+                    val actual = classifyPlaybackError(playbackErrorSample(code, wrapped))
+                    check(actual.category == expected && actual.action == action && actual.code == code) { "$cause: $actual" }
+                }
+            }
+        }
+        // The samples contract retains CERT_INVALID for an otherwise unspecified handshake.
+        assertTlsClassification(SSLHandshakeException("sample"), certificate = true)
+        for (message in listOf("protocol negotiation failed", "Received fatal alert: protocol_version",
+            "Received fatal alert: handshake_failure", "No appropriate protocol (protocol is disabled)",
+            "no cipher suites in common", "Remote host terminated the handshake", "Read timed out")) {
+            assertTlsClassification(SSLHandshakeException(message), certificate = false)
+        }
+        for (transport in listOf(SSLProtocolException("unexpected record"), SocketException("connection reset"),
+            java.net.SocketTimeoutException("timeout"), java.io.EOFException("peer disconnected"))) {
+            assertTlsClassification(SSLHandshakeException("sample").apply { initCause(transport) }, certificate = false)
+        }
+        assertTlsClassification(SSLException("TLS I/O error"), certificate = false)
+        assertTlsClassification(SSLProtocolException("bad record MAC"), certificate = false)
+        assertTlsClassification(SSLHandshakeException("protocol negotiation failed").apply {
+            initCause(java.security.cert.CertificateException("expired"))
+        }, certificate = true)
+        check(!isCertificateFailure(java.io.IOException("certificate verification failed")))
     }
 
     private fun tlsBoundaries() {

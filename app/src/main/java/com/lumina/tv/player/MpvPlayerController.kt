@@ -21,6 +21,9 @@ import org.json.JSONObject
 import org.json.JSONArray
 import kotlin.math.roundToInt
 
+internal fun mpvLoadAcceptsSeek(terminal: Boolean, ended: Boolean, endKind: MpvEndKind?): Boolean =
+    !terminal && !ended && endKind == null
+
 internal fun shouldSyncMpvAudioTrack(
     ready: Boolean,
     becameReady: Boolean,
@@ -737,7 +740,7 @@ class MpvPlayerController(
     fun seekTo(ms: Long) {
         checkMainThread()
         val load = activeLoad?.takeIf(::isActive) ?: return
-        load.ended = false
+        check(mpvLoadAcceptsSeek(load.terminal, load.ended, load.endKind)) { "Ended mpv load requires Restore/reload before seeking" }
         bufferedPositionMs = null
         val requestedMs = ms.coerceAtLeast(0L)
         mpv?.command(arrayOf("seek", (requestedMs / 1000.0).toString(), "absolute+exact"))

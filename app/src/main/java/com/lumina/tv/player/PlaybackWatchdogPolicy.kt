@@ -24,10 +24,12 @@ internal fun playbackWatchdogReason(input: PlaybackWatchdogInput): WatchdogReaso
     if (!input.playWhenReady || input.seeking || !input.startupComplete || input.suppressed || input.loadingAgeMs < 8_000L) {
         return null
     }
+    // Near EOF the engine may wait for finalization. Do not let the 4s generic stall branches preempt 60s.
+    if (input.durationMs > 0L && input.durationMs - input.positionMs in 0L..10_000L) {
+        return if (input.positionAgeMs >= 60_000L && !input.downloadInProgress) WatchdogReason.NO_END else null
+    }
     val bufferedAge = input.bufferedAgeMs
     return when {
-        input.durationMs > 0L && input.durationMs - input.positionMs in 0L..10_000L &&
-            input.positionAgeMs >= 60_000L && !input.downloadInProgress -> WatchdogReason.NO_END
         input.buffering && !input.loading && !input.downloadInProgress && input.stateAgeMs >= 4_000L &&
             input.bytesUnchangedForMs >= 4_000L && (!input.mpvLoad || bufferedAge != null && bufferedAge >= 4_000L) ->
             WatchdogReason.BUFFERING_NO_LOAD

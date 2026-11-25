@@ -66,6 +66,7 @@ object B17Checks {
             "W3 natural EOF and queued EOF" to ::eofEvidence,
             "W3 real error evidence and manual stop" to ::errorAndStop,
             "W3 unknown end blocks automatic recovery" to ::unknownEnd,
+            "B4 EOF seeks restore into a new load" to ::eofSeek,
             "W4 Surface pause wiring" to ::surfaceWiring,
             "W4 transient/delayed focus and latest pause intent" to ::focusPause,
         )
@@ -233,6 +234,21 @@ object B17Checks {
         check(mpvSecondsToMs(Double.NaN) == null && mpvSecondsToMs(Double.POSITIVE_INFINITY) == null)
         check(mpvSecondsToMs(-1.0) == null && mpvSecondsToMs(null) == null)
         check(mpvEndAllowsRecovery(null)) // Ordinary startup must keep its timeout/retry.
+    }
+
+    private fun eofSeek() {
+        check(mpvLoadAcceptsSeek(terminal = false, ended = false, endKind = null))
+        check(!mpvLoadAcceptsSeek(terminal = true, ended = false, endKind = null))
+        check(!mpvLoadAcceptsSeek(terminal = false, ended = true, endKind = null))
+        for (kind in MpvEndKind.entries) check(!mpvLoadAcceptsSeek(false, false, kind))
+        val controller = File("src/main/java/com/lumina/tv/player/MpvPlayerController.kt").readText()
+        val seek = controller.substringAfter("fun seekTo(ms: Long)").substringBefore("fun setSpeed")
+        check("check(mpvLoadAcceptsSeek(load.terminal, load.ended, load.endKind))" in seek)
+        check("load.ended = false" !in seek)
+        val screen = File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText()
+        val restore = screen.substringAfter("fun seekPlayerTo(").substringBefore("val playerPosition =")
+        check("mpvState.endKind == com.lumina.tv.player.MpvEndKind.EOF" in restore)
+        check("requestPlaybackReload(sessionGeneration, PlaybackStartIntent.Restore(displayTarget))" in restore)
     }
 
     private fun focusPause() {

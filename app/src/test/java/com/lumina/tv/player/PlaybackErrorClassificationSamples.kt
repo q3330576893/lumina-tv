@@ -6,6 +6,7 @@ import androidx.media3.datasource.HttpDataSource
 import android.os.Bundle
 import java.io.IOException
 import java.security.cert.CertificateException
+import javax.net.ssl.SSLException
 import javax.net.ssl.SSLHandshakeException
 
 // These fixtures use Media3's real exception types without calling Android SystemClock or Uri.
@@ -69,6 +70,16 @@ fun runPlaybackErrorClassificationAssertions() {
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
         PlaybackErrorCategory.CERT_INVALID,
         SSLHandshakeException("sample"),
+    )
+    assertCategory(
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackErrorCategory.NETWORK_TRANSIENT,
+        SSLHandshakeException("handshake timed out"),
+    )
+    assertCategory(
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackErrorCategory.NETWORK_TRANSIENT,
+        SSLException("remote host terminated the handshake"),
     )
     check(classify(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED, IOException(CertificateException())).let {
         it.category == PlaybackErrorCategory.CERT_INVALID && it.action == "check_certificate"

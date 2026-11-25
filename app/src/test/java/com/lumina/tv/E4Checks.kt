@@ -6,6 +6,13 @@ import com.lumina.tv.diag.PageLog
 import com.lumina.tv.player.*
 import com.lumina.tv.ui.screens.rememberHomeHeroItems
 import com.lumina.tv.ui.screens.pickHeroItems
+import com.lumina.tv.ui.screens.playbackContinuationPaused
+import com.lumina.tv.ui.screens.media3DesiredPlayingAfterChange
+import com.lumina.tv.ui.screens.media3AudioOnlyReady
+import com.lumina.tv.ui.screens.isDefinitelyNonMediaResponse
+import com.lumina.tv.ui.screens.media3AudioOffloadPreferences
+import com.lumina.tv.ui.screens.m3oBufferPlan
+import androidx.media3.common.Player
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.Snapshot
 import kotlinx.coroutines.*
@@ -23,6 +30,12 @@ object E4Checks {
         decoderLifetimes()
         playbackSpeeds()
         creditsCountdowns()
+        continuationPauseIntent()
+        audioOnlyReady()
+        directMimeAndOffload()
+        bufferBounds()
+        pathFailureScope()
+        watchdogEndWait()
         audioModeEngineOrder()
         mpvAspectModes()
         println("E4 PASS: container fallback priority/exclusions, mpv tri-state, Stop sample gate, real Compose hero recomposition, decoder lifetimes, boost/selection/reload, countdown cancellation/resume, soft-mode engine exclusions and mpv aspect properties")
@@ -273,6 +286,95 @@ object E4Checks {
         yield()
         check(!slow.active && slow.remainingSeconds == 0 && slow.nextItem == null)
         ticks.close()
+    }
+
+    private fun continuationPauseIntent() {
+        check(!playbackContinuationPaused(true, enginePlaying = false, naturallyEnded = true))
+        check(playbackContinuationPaused(false, enginePlaying = false, naturallyEnded = true))
+        check(playbackContinuationPaused(true, enginePlaying = false, naturallyEnded = false))
+        for (reason in listOf(Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS,
+            Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY,
+            Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE,
+            Player.PLAY_WHEN_READY_CHANGE_REASON_SUPPRESSED_TOO_LONG)) {
+            check(!media3DesiredPlayingAfterChange(true, false, reason))
+        }
+        check(media3DesiredPlayingAfterChange(true, false, Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM))
+        check(media3DesiredPlayingAfterChange(true, false, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST))
+        check(!media3DesiredPlayingAfterChange(false, true, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST))
+    }
+
+    private fun audioOnlyReady() {
+        check(media3AudioOnlyReady(hasVideo = false, hasSelectedAudio = true))
+        check(!media3AudioOnlyReady(hasVideo = true, hasSelectedAudio = true))
+        check(!media3AudioOnlyReady(hasVideo = false, hasSelectedAudio = false)) // Empty/unknown tracks are not audio-only.
+    }
+
+    private fun directMimeAndOffload() {
+        for (type in listOf("video/mp4", "audio/mpeg", "application/ogg", "application/vnd.apple.mpegurl",
+            "application/x-mpegURL", "application/dash+xml", "application/octet-stream", "text/xml", "text/vtt",
+            "text/unknown", "", "application/unknown")) {
+            check(!isDefinitelyNonMediaResponse(type)) { type }
+        }
+        for (type in listOf("text/html; charset=utf-8", "image/jpeg", "application/json", "TEXT/PLAIN")) {
+            check(isDefinitelyNonMediaResponse(type)) { type }
+        }
+        val enabled = androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
+        val disabled = androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED
+        check(media3AudioOffloadPreferences("passthrough").audioOffloadMode == enabled)
+        for (mode in listOf("auto", "soft")) check(media3AudioOffloadPreferences(mode).audioOffloadMode == disabled)
+    }
+
+    private fun bufferBounds() {
+        for ((mem, backSec, ceilingMb) in listOf(Triple(2048, 10, 64), Triple(4096, 20, 160), Triple(8192, 30, 256))) {
+            for (highBitrate in listOf(false, true)) for (fastStart in listOf(false, true)) {
+                val plan = m3oBufferPlan(mem, highBitrate, fastStart)
+                check(plan.backSec * 1000 == backSec * 1000 && plan.backSec * 1000 in 10_000..30_000)
+                check(plan.targetBytes in 1..(ceilingMb * 1024 * 1024))
+                check(plan.maxMs >= plan.minMs && plan.minMs >= plan.afterRebufferMs)
+            }
+        }
+        check(m3oBufferPlan(0, false, true).targetBytes <= 160 * 1024 * 1024)
+    }
+
+    private fun pathFailureScope() {
+        val path = PlaybackPath("source", "mpv", PlaybackDelivery.DIRECT_PLAY, "dts", "auto")
+        for (reason in listOf(PlaybackFailureReason.HTTP, PlaybackFailureReason.LOAD)) {
+            val failures = PlaybackPathFailures()
+            failures.recordEngineFailure(PlaybackPathFailure(path, reason, 1, "one request failed"))
+            check(failures.excludes(path))
+            check(!failures.excludes(path.copy(delivery = PlaybackDelivery.TRANSCODE)))
+            check(!failures.excludes(path.copy(delivery = PlaybackDelivery.DIRECT_STREAM)))
+            check(!failures.excludes(path.copy(audioTrack = "aac")))
+            check(!failures.excludes(path.copy(requestVariant = 1)))
+            check(!failures.excludes(path.copy(sourceId = "other")))
+        }
+        val failures = PlaybackPathFailures()
+        failures.recordEngineFailure(PlaybackPathFailure(path, PlaybackFailureReason.INITIALIZATION, 1, "native init failed"))
+        check(failures.excludes(path.copy(delivery = PlaybackDelivery.TRANSCODE)))
+        check(!failures.excludes(path.copy(engine = "media3")))
+        failures.clearForManualRetry()
+        check(!failures.excludes(path))
+    }
+
+    private fun watchdogEndWait() {
+        val end = PlaybackWatchdogInput(
+            positionMs = 115_000L, durationMs = 120_000L, positionAgeMs = 4_000L,
+            bufferedAgeMs = 10_000L, stateAgeMs = 10_000L, bytesUnchangedForMs = 10_000L,
+            loadingAgeMs = 10_000L, buffering = false, ready = true, loading = false,
+            downloadInProgress = false, mpvLoad = false, playWhenReady = true,
+            seeking = false, startupComplete = true, suppressed = false,
+        )
+        for (buffering in listOf(false, true)) for (loading in listOf(false, true)) {
+            val input = end.copy(buffering = buffering, ready = !buffering, loading = loading)
+            for (age in listOf(4_000L, 59_999L)) check(playbackWatchdogReason(input.copy(positionAgeMs = age)) == null)
+            check(playbackWatchdogReason(input.copy(positionAgeMs = 60_000L)) == WatchdogReason.NO_END)
+        }
+        check(playbackWatchdogReason(end.copy(positionAgeMs = 60_000L, downloadInProgress = true)) == null)
+        check(playbackWatchdogReason(end.copy(positionAgeMs = 60_000L, playWhenReady = false)) == null)
+        check(playbackWatchdogReason(end.copy(positionAgeMs = 60_000L, seeking = true)) == null)
+        check(playbackWatchdogReason(end.copy(positionMs = 110_000L)) == null) // Inclusive 10s window.
+        check(playbackWatchdogReason(end.copy(positionMs = 109_999L)) == WatchdogReason.PLAYING_NO_PROGRESS)
+        check(playbackWatchdogReason(end.copy(durationMs = 0L)) == WatchdogReason.PLAYING_NO_PROGRESS)
     }
 
     private fun audioModeEngineOrder() {

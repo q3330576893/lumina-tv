@@ -171,6 +171,20 @@ object E2Checks {
         val initiallyUnavailable = PendingSeekConfirmation(40_000L, 40_000L, null, 0L)
         check(initiallyUnavailable.evaluate(40_100L, 500L) == SeekConfirmation.CONFIRMED)
         check(initiallyUnavailable.evaluate(null, 1_500L) == SeekConfirmation.ROLLED_BACK)
+        val fast = PendingSeekConfirmation(15_000L, 15_000L, 10_000L, 0L, playbackSpeed = 3f)
+        check(fast.evaluate(14_200L, 1_400L) == SeekConfirmation.PENDING) // Failed +5s at 3x enters old target tolerance.
+        check(fast.evaluate(14_500L, 1_500L) == SeekConfirmation.ROLLED_BACK)
+        check(fast.evaluate(15_300L, 100L) == SeekConfirmation.CONFIRMED) // A real jump differs from natural drift.
+        check(fast.evaluate(18_000L, 1_000L) == SeekConfirmation.CONFIRMED) // Drift after a real seek is allowed.
+        val paused = fast.copy(paused = true)
+        check(paused.evaluate(10_000L, 1_500L) == SeekConfirmation.ROLLED_BACK)
+        check(paused.evaluate(15_000L, 1_400L) == SeekConfirmation.CONFIRMED)
+        check(paused.evaluate(14_200L, 1_400L, paused = false) == SeekConfirmation.PENDING)
+        val accelerated = fast.copy(playbackSpeed = 1f)
+        check(accelerated.evaluate(14_200L, 1_400L, playbackSpeed = 3f) == SeekConfirmation.PENDING)
+        val small = PendingSeekConfirmation(11_000L, 11_000L, 10_000L, 0L)
+        check(small.evaluate(11_000L, 1_000L) == SeekConfirmation.PENDING)
+        check(small.evaluate(11_500L, 1_500L) == SeekConfirmation.ROLLED_BACK)
     }
 
     private suspend fun progressAndStopHttp() {

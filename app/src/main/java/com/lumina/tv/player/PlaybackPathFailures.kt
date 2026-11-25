@@ -26,16 +26,16 @@ internal class PlaybackPathFailures {
     private val failures = linkedSetOf<PlaybackPathFailure>()
     private val engineFailures = linkedSetOf<Triple<String, String, PlaybackFailureReason>>()
     private val engineWideFailureReasons = setOf(
-        PlaybackFailureReason.LOAD,
-        PlaybackFailureReason.HTTP,
         PlaybackFailureReason.INITIALIZATION,
         PlaybackFailureReason.DECODING,
     )
     fun record(failure: PlaybackPathFailure) { failures += failure }
     fun recordEngineFailure(failure: PlaybackPathFailure) {
-        require(failure.reason in engineWideFailureReasons)
         failures += failure
-        engineFailures += Triple(failure.path.sourceId, failure.path.engine, failure.reason)
+        // Keep this entry point compatible: HTTP/LOAD evidence belongs only to its exact delivery/audio path.
+        if (failure.reason in engineWideFailureReasons) {
+            engineFailures += Triple(failure.path.sourceId, failure.path.engine, failure.reason)
+        }
     }
     fun excludes(path: PlaybackPath): Boolean = failures.any { failure ->
         failure.path == path
