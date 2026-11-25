@@ -66,6 +66,13 @@ internal class ProgressSender(
                         false
                     } catch (failure: EmbyException) {
                         val status = failure.httpStatus
+                        if (status == 401 || status == 403) {
+                            runCatching { PageLog.add("progress authentication required http=$status; pending retained") }
+                            // This client's credentials cannot recover. Leave the exact head intact;
+                            // activating the same identity with a new token creates a fresh sender.
+                            // Exiting also prevents queued/new wakeups from spinning on rejected auth.
+                            return@launch
+                        }
                         val permanentFailure = status != null && status in 400..499 && status != 408 && status != 429
                         if (permanentFailure) runCatching {
                             PageLog.add("progress dropped event=${event.eventType} eventId=${event.eventId} http=$status")

@@ -113,10 +113,10 @@ object AppRuntime {
         val identityChanged = previous != null &&
             com.lumina.tv.data.identityScope(previous.baseUrl, previous.userId) != com.lumina.tv.data.identityScope(s.baseUrl, s.userId)
         if (identityChanged) {
-            client?.clearPendingProgress()
             applicationContext?.let { com.lumina.tv.data.LibraryCache.removeHomeDisk(it, previous.baseUrl, previous.userId) }
             com.lumina.tv.data.LibraryCache.clear()
         }
+        // Switching identities seals the old outbox; only explicit logout discards its pending reports.
         client?.close()
         session = s
         client = EmbyClient(

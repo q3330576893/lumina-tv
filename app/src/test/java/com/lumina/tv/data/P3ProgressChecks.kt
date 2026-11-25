@@ -11,10 +11,16 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Real outbox and worker, deterministic delayed HTTP results, no Android runtime or server. */
 object P3ProgressChecks {
@@ -26,15 +32,18 @@ object P3ProgressChecks {
             concurrentClose()
             requestTimeoutAndOwnerCancellation()
             httpFailureClassification()
+            authenticationFailureAndReopen()
+            readRecoveryPreservesAdmissions()
+            readFailureDoesNotOverwrite()
+            corruptSnapshotIsQuarantined()
         }
-        println("P3 PASS: A seek-back ACK; B old Stop/new session; one sender for live/retry; exact ACK; Stop deduplication; closed heartbeat rejection; orphan migration; timeout/cancellation; HTTP failure classification")
+        println("P3 PASS: A seek-back ACK; B old Stop/new session; one sender for live/retry; exact ACK; Stop deduplication; closed heartbeat rejection; orphan migration; timeout/cancellation; HTTP classification; auth pause/relogin; identity switch; bounded read recovery; corruption quarantine; failed flush/close")
     }
 
     private data class Attempt(val event: PendingProgress, val response: CompletableDeferred<Boolean>)
 
-    private class Harness(parent: CoroutineScope) {
+    private class Harness(parent: CoroutineScope, val queue: ProgressQueue = ProgressQueue()) {
         val scope = CoroutineScope(parent.coroutineContext + SupervisorJob(parent.coroutineContext[Job]))
-        val queue = ProgressQueue()
         private val attempts = Channel<Attempt>(Channel.UNLIMITED)
         private var activeRequests = 0
         val sent = mutableListOf<PendingProgress>()
@@ -54,6 +63,10 @@ object P3ProgressChecks {
             sender.start("same-item", 0L, source, playSession, "DirectPlay", false)
 
         suspend fun next(): Attempt = withTimeout(3_000L) { attempts.receive() }
+
+        suspend fun expectNoAttempt() {
+            check(withTimeoutOrNull(50L) { attempts.receive() } == null) { "Authentication failure retried without new credentials" }
+        }
 
         suspend fun drain() {
             while (queue.snapshot().isNotEmpty()) yield()
@@ -210,7 +223,7 @@ object P3ProgressChecks {
     }
 
     private suspend fun httpFailureClassification() = coroutineScope {
-        for (status in listOf(400, 401, 403, 404, 410, 499, 408, 429, 500, 503)) {
+        for (status in listOf(400, 404, 410, 499, 408, 429, 500, 503)) {
             val harness = Harness(this)
             try {
                 harness.start()
@@ -231,6 +244,246 @@ object P3ProgressChecks {
             } finally {
                 harness.close()
             }
+        }
+    }
+
+    private suspend fun authenticationFailureAndReopen() = coroutineScope {
+        for (status in listOf(401, 403)) {
+            val dir = Files.createTempDirectory("lumina-p3-auth-").toFile()
+            val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val io = SerialProgressIo(persistenceScope)
+            val file = File(dir, "account-a.json")
+            val queue = ProgressQueue(file, io = io)
+            val expired = Harness(this, queue)
+            var renewed: Harness? = null
+            try {
+                val session = expired.start()
+                val rejected = expired.next()
+                check(expired.sender.progress(session, 60_000L, false))
+                check(expired.sender.stop(session, 61_000L, true))
+                val beforeRejection = queue.snapshot()
+                check(queue.flushAndAwait())
+                rejected.response.completeExceptionally(EmbyException("HTTP $status", status))
+                expired.expectNoAttempt()
+                check(queue.snapshot() == beforeRejection) { "HTTP $status acknowledged pending progress" }
+
+                repeat(10) { expired.sender.requestFlush() }
+                expired.sender.start("later-item", 0L, null, "later-session", "DirectPlay", false)
+                expired.expectNoAttempt()
+                val pending = queue.snapshot()
+                check(pending.take(beforeRejection.size) == beforeRejection)
+                check(queue.flushAndAwait())
+                expired.close()
+                val closing = queue.close()
+
+                // Switch away without clearing account A; neither outbox may consume the other's data.
+                val other = ProgressQueue(File(dir, "account-b.json"), io = io)
+                val otherEvent = savedEvent(9).copy(itemId = "other-account")
+                other.enqueue(otherEvent)
+                other.close()
+                // Same identity + replacement credentials constructs a new client/sender. Reopen is
+                // intentionally immediate: old close must already precede this read on FIFO IO.
+                val reopened = ProgressQueue(file, io = io)
+                val fresh = Harness(this, reopened)
+                renewed = fresh
+                reopened.awaitLoaded()
+                check(reopened.snapshot() == pending)
+                check(queue.flushAndAwait(closing))
+                check(other.flushAndAwait())
+                for (event in pending) {
+                    val retry = fresh.next()
+                    check(retry.event == event) { "HTTP $status changed an event identity/order on relogin" }
+                    retry.response.complete(true)
+                }
+                fresh.drain()
+                check(fresh.sent == pending)
+                fresh.close()
+                reopened.close()
+                check(reopened.flushAndAwait())
+                val otherReopened = ProgressQueue(File(dir, "account-b.json"), io = io)
+                otherReopened.awaitLoaded()
+                check(otherReopened.snapshot() == listOf(otherEvent))
+                otherReopened.close()
+                check(otherReopened.flushAndAwait())
+            } finally {
+                expired.close()
+                renewed?.close()
+                queue.close()
+                io.closeAndAwait()
+                persistenceScope.cancel()
+                dir.listFiles()?.forEach { it.delete() }
+                dir.delete()
+            }
+        }
+    }
+
+    private fun savedEvent(sequence: Long) = PendingProgress(
+        localSessionId = "saved-session", sequence = sequence, eventId = "saved-event-$sequence",
+        playSessionId = "saved-emby", sourceId = "saved-source", itemId = "saved-item",
+        eventType = ProgressEventType.Progress, positionMs = 60_000L - sequence, paused = true,
+        playMethod = "DirectPlay", at = 100L - sequence,
+    )
+
+    private class ReadFaultStorage(file: File, private val failures: Int, holdRead: Boolean = false) : ProgressStorage {
+        private val delegate = FileProgressStorage(file)
+        val reads = AtomicInteger()
+        val writes = AtomicInteger()
+        val entered = CompletableDeferred<Unit>()
+        val allowRead = CountDownLatch(if (holdRead) 1 else 0)
+
+        override fun read(): String? {
+            val attempt = reads.incrementAndGet()
+            entered.complete(Unit)
+            check(allowRead.await(3, TimeUnit.SECONDS)) { "Read recovery gate timed out" }
+            if (attempt <= failures) throw IOException("injected read failure")
+            return delegate.read()
+        }
+
+        override fun write(json: String) {
+            writes.incrementAndGet()
+            delegate.write(json)
+        }
+    }
+
+    private suspend fun seed(file: File, io: SerialProgressIo, event: PendingProgress) {
+        check(!file.exists())
+        val queue = ProgressQueue(file, io = io)
+        queue.awaitLoaded()
+        check(queue.snapshot().isEmpty())
+        queue.enqueue(event)
+        queue.close()
+        check(queue.flushAndAwait()) { "A genuinely missing snapshot must allow persistence" }
+    }
+
+    private suspend fun readRecoveryPreservesAdmissions() {
+        for (clearBeforeRecovery in listOf(false, true)) {
+            val dir = Files.createTempDirectory("lumina-p3-read-recover-").toFile()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val io = SerialProgressIo(scope)
+            val file = File(dir, "queue.json")
+            val storage = ReadFaultStorage(file, failures = 2, holdRead = true)
+            try {
+                val old = savedEvent(1)
+                val admitted = savedEvent(2)
+                seed(file, io, old)
+                val queue = ProgressQueue(file, storage, io)
+                storage.entered.await()
+                queue.enqueue(old) // Admission before recovery must still deduplicate by eventId.
+                queue.enqueue(admitted)
+                if (clearBeforeRecovery) queue.clear() // Explicit logout must still discard restored rows.
+                val closing = queue.close()
+                val reopened = ProgressQueue(file, io = io)
+                storage.allowRead.countDown()
+                reopened.awaitLoaded()
+                val expected = if (clearBeforeRecovery) emptyList() else listOf(old, admitted)
+                check(queue.snapshot() == expected)
+                check(reopened.snapshot() == expected) { "Closing recovery raced the replacement queue's read" }
+                check(storage.reads.get() == ProgressQueue.LOAD_MAX_ATTEMPTS)
+                check(queue.flushAndAwait(closing))
+                reopened.close()
+                check(reopened.flushAndAwait())
+            } finally {
+                storage.allowRead.countDown()
+                io.closeAndAwait()
+                scope.cancel()
+                dir.listFiles()?.forEach { it.delete() }
+                dir.delete()
+            }
+        }
+    }
+
+    private suspend fun readFailureDoesNotOverwrite() {
+        val dir = Files.createTempDirectory("lumina-p3-read-failure-").toFile()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val io = SerialProgressIo(scope)
+        val file = File(dir, "queue.json")
+        val storage = ReadFaultStorage(file, failures = Int.MAX_VALUE, holdRead = true)
+        try {
+            seed(file, io, savedEvent(1))
+            val original = file.readBytes()
+            val queue = ProgressQueue(file, storage, io)
+            storage.entered.await()
+            val admitted = savedEvent(2)
+            queue.enqueue(admitted)
+            storage.allowRead.countDown()
+            queue.awaitLoaded()
+            check(!queue.flushAndAwait())
+            check(queue.claimNext() == null) { "Unknown disk order must block new reports" }
+            queue.enqueue(savedEvent(3))
+            check(!queue.flushAndAwait())
+            check(queue.snapshot() == listOf(admitted, savedEvent(3)))
+            queue.close()
+            check(!queue.flushAndAwait()) { "Failed close reported durable progress" }
+            check(storage.reads.get() == ProgressQueue.LOAD_MAX_ATTEMPTS) { "Failed reads retried without a bound" }
+            check(storage.writes.get() == 0) { "Read failure allowed a snapshot write" }
+            check(file.readBytes().contentEquals(original))
+            val reopened = ProgressQueue(file, io = io)
+            reopened.awaitLoaded()
+            check(reopened.snapshot() == listOf(savedEvent(1)))
+            reopened.close()
+            check(reopened.flushAndAwait())
+            check(!queue.flushAndAwait()) // A closed failed queue must never schedule a late overwrite.
+
+            val beforeAmbiguousRead = file.readBytes()
+            val ambiguousReads = AtomicInteger()
+            val ambiguousWrites = AtomicInteger()
+            val ambiguousStorage = object : ProgressStorage {
+                override fun read(): String? {
+                    ambiguousReads.incrementAndGet()
+                    return null // An unreadable existing file must not be treated as absent.
+                }
+                override fun write(json: String) {
+                    ambiguousWrites.incrementAndGet()
+                    error("Unconfirmed absence allowed a write")
+                }
+            }
+            val ambiguous = ProgressQueue(file, ambiguousStorage, io)
+            ambiguous.enqueue(savedEvent(4))
+            ambiguous.close()
+            check(!ambiguous.flushAndAwait())
+            check(ambiguousReads.get() == ProgressQueue.LOAD_MAX_ATTEMPTS)
+            check(ambiguousWrites.get() == 0)
+            check(ambiguous.snapshot() == listOf(savedEvent(4)))
+            check(file.readBytes().contentEquals(beforeAmbiguousRead))
+        } finally {
+            storage.allowRead.countDown()
+            io.closeAndAwait()
+            scope.cancel()
+            dir.listFiles()?.forEach { it.delete() }
+            dir.delete()
+        }
+    }
+
+    private suspend fun corruptSnapshotIsQuarantined() {
+        val dir = Files.createTempDirectory("lumina-p3-corrupt-").toFile()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val io = SerialProgressIo(scope)
+        try {
+            val corruptSnapshots = listOf("", "  ", "[{", "[]trailing", "[{\"itemId\":\"valid\"},7]", "[{}]", "[{\"itemId\":null}]")
+            for ((index, contents) in corruptSnapshots.withIndex()) {
+                val file = File(dir, "queue-$index.json")
+                file.writeText(contents)
+                val storage = ReadFaultStorage(file, failures = 0)
+                val queue = ProgressQueue(file, storage, io)
+                queue.enqueue(savedEvent(2))
+                queue.awaitLoaded()
+                check(!queue.flushAndAwait())
+                check(queue.snapshot() == listOf(savedEvent(2)))
+                queue.close()
+                check(!queue.flushAndAwait())
+                check(storage.reads.get() == ProgressQueue.LOAD_MAX_ATTEMPTS)
+                check(storage.writes.get() == 0)
+                check(file.readText() == contents) { "Corrupt original was overwritten" }
+                val copies = dir.listFiles().orEmpty().filter { it.name.startsWith("${file.name}.corrupt-") }
+                check(copies.size == 1 && copies.single().readBytes().contentEquals(file.readBytes())) {
+                    "Corrupt original was not preserved in a quarantine copy"
+                }
+            }
+        } finally {
+            io.closeAndAwait()
+            scope.cancel()
+            dir.listFiles()?.forEach { it.delete() }
+            dir.delete()
         }
     }
 

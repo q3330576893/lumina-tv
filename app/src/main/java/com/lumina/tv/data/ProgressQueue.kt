@@ -6,12 +6,15 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.UUID
 
 class ProgressQueue internal constructor(
-    file: File? = null,
+    private val file: File? = null,
     private val storage: ProgressStorage? = file?.let(::FileProgressStorage),
     private val io: SerialProgressIo = ProgressPersistence.io,
 ) {
@@ -21,6 +24,9 @@ class ProgressQueue internal constructor(
     ))
 
     private val entries = ArrayDeque<PendingProgress>()
+    private enum class LoadState { Loading, Missing, Restored, Failed }
+    private var loadState = if (storage == null) LoadState.Missing else LoadState.Loading
+    private var quarantinedContents: String? = null
     private var inFlight: PendingProgress? = null
     private val loaded = CompletableDeferred<Unit>()
     private var revision = 0L
@@ -37,8 +43,11 @@ class ProgressQueue internal constructor(
             persistedRevision = revision
             loaded.complete(Unit)
         } else io.submit {
-            load()
-            loaded.complete(Unit)
+            try {
+                load()
+            } finally {
+                loaded.complete(Unit)
+            }
         }
     }
 
@@ -51,7 +60,7 @@ class ProgressQueue internal constructor(
     suspend fun flushAndAwait(barrier: ProgressBarrier = barrier(), timeoutMs: Long = STOP_FLUSH_TIMEOUT_MS): Boolean {
         require(barrier.owner === this) { "Foreign progress barrier" }
         val completion = CompletableDeferred<Boolean>()
-        return try {
+        val persisted = try {
             withTimeoutOrNull(timeoutMs) {
                 awaitLoaded()
                 synchronized(this@ProgressQueue) {
@@ -67,6 +76,8 @@ class ProgressQueue internal constructor(
         } finally {
             synchronized(this) { waiters.removeAll { it.second === completion } }
         }
+        if (!persisted) logPersistence("progress flush failed")
+        return persisted
     }
 
     @Synchronized
@@ -84,7 +95,7 @@ class ProgressQueue internal constructor(
     @Synchronized
     internal fun claimNext(): PendingProgress? {
         check(loaded.isCompleted) { "Progress queue has not loaded" }
-        if (closed) return null
+        if (closed || loadState == LoadState.Failed) return null
         check(inFlight == null) { "Only one progress event may be in flight" }
         return entries.firstOrNull()?.also { inFlight = it }
     }
@@ -130,42 +141,104 @@ class ProgressQueue internal constructor(
     }
 
     private fun load() {
-        val restored = runCatching {
-            val array = JSONArray(storage?.read().orEmpty().ifBlank { "[]" })
-            (0 until array.length()).mapNotNull { index ->
-                val item = array.optJSONObject(index) ?: return@mapNotNull null
-                val itemId = item.optString("itemId").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val localSessionId = item.stringOrNull("localSessionId")
-                val eventId = item.stringOrNull("eventId")
-                val sequence = item.optLong("sequence", 0L)
-                val identified = localSessionId != null && eventId != null && sequence > 0L
-                // Legacy rows cannot reveal playback boundaries. Give EACH row an isolated historical
-                // session, persist it on this writer, and never infer a live session from item/source IDs.
-                val orphanId = if (identified) null else UUID.randomUUID().toString()
-                PendingProgress(
-                    localSessionId = if (identified) checkNotNull(localSessionId) else "orphan-$orphanId",
-                    sequence = if (identified) sequence else 1L,
-                    eventId = if (identified) checkNotNull(eventId) else "orphan-event-$orphanId",
-                    playSessionId = item.stringOrNull("playSessionId"),
-                    sourceId = item.stringOrNull("sourceId") ?: item.stringOrNull("mediaSourceId"),
-                    itemId = itemId,
-                    eventType = ProgressEventType.entries.firstOrNull { it.name.equals(item.optString("eventType"), true) }
-                        ?: ProgressEventType.Stop,
-                    positionMs = item.optLong("positionMs").coerceAtLeast(0L),
-                    paused = item.optBoolean("paused", false),
-                    playMethod = item.optString("playMethod", "DirectPlay"),
-                    at = item.optLong("at"),
-                )
+        for (attempt in 1..LOAD_MAX_ATTEMPTS) {
+            if (attempt > 1) {
+                // Stay on FIFO IO: delayed recovery must not overwrite a replacement client's outbox.
+                // Only this background writer waits; admissions and the flush deadline remain bounded.
+                try {
+                    Thread.sleep(LOAD_RETRY_DELAY_MS * (attempt - 1))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
             }
-        }.getOrDefault(emptyList())
+            val result = runCatching {
+                val json = checkNotNull(storage).read()
+                if (json == null) {
+                    // File.exists() may also be false when access is denied. Only confirmed absence
+                    // may initialize an empty outbox; an existing/unknown file must stay untouched.
+                    check(file == null || Files.notExists(file.toPath())) { "Progress snapshot absence is unconfirmed" }
+                    LoadState.Missing to emptyList<PendingProgress>()
+                } else {
+                    val restored = try {
+                        decode(json)
+                    } catch (failure: Exception) {
+                        quarantineCorruptFile(json)
+                        throw failure
+                    }
+                    LoadState.Restored to restored
+                }
+            }.onFailure {
+                logPersistence("progress load failed attempt=$attempt/$LOAD_MAX_ATTEMPTS error=${it.javaClass.simpleName}")
+            }.getOrNull() ?: continue
 
-        // File order is enqueue order. Wall clocks and playback positions may move backwards.
+            // File order is enqueue order. Wall clocks and playback positions may move backwards.
+            synchronized(this) {
+                loadState = result.first
+                val admitted = entries.toList()
+                entries.clear()
+                entries.addAll(((if (discardRestored) emptyList() else result.second) + admitted).distinctBy { it.eventId })
+                trimToCapacity()
+                changed()
+            }
+            return
+        }
+        // Do not turn a failed read into an empty snapshot, including on clear/flush/close.
+        // New admissions stay in memory; a fresh queue gets a new, bounded recovery attempt.
         synchronized(this) {
-            val admitted = entries.toList()
-            entries.clear()
-            entries.addAll(((if (discardRestored) emptyList() else restored) + admitted).distinctBy { it.eventId })
-            trimToCapacity()
-            changed()
+            loadState = LoadState.Failed
+        }
+    }
+
+    private fun decode(json: String): List<PendingProgress> {
+        val input = JSONTokener(json)
+        val array = JSONArray(input)
+        check(input.nextClean() == '\u0000') { "Trailing progress data" }
+        return (0 until array.length()).map { index ->
+            // A malformed row makes the snapshot untrusted; silently skipping it loses progress too.
+            val item = array.getJSONObject(index)
+            val itemId = item.stringOrNull("itemId")
+                ?: error("Missing progress itemId")
+            val localSessionId = item.stringOrNull("localSessionId")
+            val eventId = item.stringOrNull("eventId")
+            val sequence = item.optLong("sequence", 0L)
+            val identified = localSessionId != null && eventId != null && sequence > 0L
+            // Legacy rows cannot reveal playback boundaries. Give EACH row an isolated historical
+            // session, persist it on this writer, and never infer a live session from item/source IDs.
+            val orphanId = if (identified) null else UUID.randomUUID().toString()
+            PendingProgress(
+                localSessionId = if (identified) checkNotNull(localSessionId) else "orphan-$orphanId",
+                sequence = if (identified) sequence else 1L,
+                eventId = if (identified) checkNotNull(eventId) else "orphan-event-$orphanId",
+                playSessionId = item.stringOrNull("playSessionId"),
+                sourceId = item.stringOrNull("sourceId") ?: item.stringOrNull("mediaSourceId"),
+                itemId = itemId,
+                eventType = ProgressEventType.entries.firstOrNull { it.name.equals(item.optString("eventType"), true) }
+                    ?: ProgressEventType.Stop,
+                positionMs = item.optLong("positionMs").coerceAtLeast(0L),
+                paused = item.optBoolean("paused", false),
+                playMethod = item.optString("playMethod", "DirectPlay"),
+                at = item.optLong("at"),
+            )
+        }
+    }
+
+    private fun quarantineCorruptFile(contents: String) {
+        val original = file ?: return
+        if (quarantinedContents == contents) return
+        runCatching {
+            val copy = File(original.parentFile, "${original.name}.corrupt-${UUID.randomUUID()}")
+            original.inputStream().use { input ->
+                FileOutputStream(copy).use { output ->
+                    input.copyTo(output)
+                    output.fd.sync()
+                }
+            }
+        }.onSuccess {
+            quarantinedContents = contents
+            logPersistence("progress corrupt snapshot quarantined; original retained")
+        }.onFailure {
+            logPersistence("progress quarantine failed error=${it.javaClass.simpleName}; original retained")
         }
     }
 
@@ -189,7 +262,7 @@ class ProgressQueue internal constructor(
             persistedRevision = revision
             return
         }
-        if (writeScheduled) return
+        if (writeScheduled || closedPersistence.isCompleted) return
         writeScheduled = true
         io.submit {
             val (version, snapshot, failedWaiters) = synchronized(this) {
@@ -197,8 +270,9 @@ class ProgressQueue internal constructor(
                 val version = revision
                 Triple(version, entries.toList(), waiters.filter { it.first <= version })
             }
-            val success = runCatching { persist(snapshot) }.onFailure {
-                runCatching { PageLog.add("progress persistence failed=${it.javaClass.simpleName}") }
+            val recovered = synchronized(this) { loadState == LoadState.Missing || loadState == LoadState.Restored }
+            val success = recovered && runCatching { persist(snapshot) }.onFailure {
+                logPersistence("progress persistence failed=${it.javaClass.simpleName}")
             }.isSuccess
             synchronized(this) {
                 if (success) persistedRevision = version
@@ -208,7 +282,10 @@ class ProgressQueue internal constructor(
                 val completed = if (success) waiters.filter { it.first <= version } else failedWaiters
                 waiters.removeAll(completed.toSet())
                 completed.forEach { it.second.complete(success) }
-                if (closed && version >= closingRevision && !writeScheduled) closedPersistence.complete(success)
+                if (closed && version >= closingRevision && !writeScheduled) {
+                    closedPersistence.complete(success)
+                    if (!success) logPersistence("progress close persistence failed; pending retained")
+                }
             }
         }
     }
@@ -236,6 +313,12 @@ class ProgressQueue internal constructor(
     companion object {
         const val MAX_ENTRIES = 50
         const val STOP_FLUSH_TIMEOUT_MS = 2_000L
+        internal const val LOAD_MAX_ATTEMPTS = 3
+        private const val LOAD_RETRY_DELAY_MS = 100L
+
+        private fun logPersistence(message: String) {
+            runCatching { PageLog.add(message) }
+        }
 
         private fun JSONObject.stringOrNull(key: String): String? =
             if (isNull(key)) null else optString(key).takeIf { it.isNotBlank() }
