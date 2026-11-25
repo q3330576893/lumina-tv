@@ -104,6 +104,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Job
 
 private val Ink = Color(0xFFF7F5FF)
 private val InkSub = Color(0xFFB7B0C9)
@@ -112,12 +113,56 @@ private val VioletBright = Color(0xFFD6C4FF)
 private val Glass = Color(0x8A10141D)
 private val GlassLine = Color(0x47FFFFFF)
 
+internal fun loginProbeCandidates(address: ServerAddress, onlyPrimary: Boolean): List<String> = buildList {
+    add(address.baseUrl)
+    if (!onlyPrimary) {
+        // Probe ports within the explicitly chosen protocol; crossing protocols needs confirmation.
+        add(address.withEndpoint(address.scheme, if (address.scheme == "https") 8920 else 8096).baseUrl)
+        add(address.withEndpoint(address.scheme, if (address.scheme == "https") 443 else 80).baseUrl)
+    }
+}.distinct()
+
+/** Reserve synchronously, before launching work, and invalidate every completion on screen exit. */
+internal class LoginAttemptGuard {
+    private var generation = 0L
+    private var busy = false
+    private var active = true
+
+    @Synchronized fun acceptPair(): Long? {
+        if (!active || busy) return null
+        return ++generation
+    }
+
+    @Synchronized fun begin(): Long? {
+        if (!active || busy) return null
+        busy = true
+        return generation
+    }
+
+    @Synchronized fun isCurrent(expected: Long): Boolean = active && generation == expected
+
+    @Synchronized fun finish(expected: Long) {
+        if (active && generation == expected) busy = false
+    }
+
+    @Synchronized fun close() {
+        active = false
+        busy = false
+        generation++
+    }
+}
+
+private data class PendingLoginPair(val config: PairConfig, val generation: Long)
+private data class LoginPairSnapshot(val generation: Long, val paired: Boolean, val alias: String?, val note: String?)
+
 @Composable
 fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (String) -> Unit = {}) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     val scope = rememberCoroutineScope()
     val prefs = AppRuntime.prefs
+    val attempts = remember { LoginAttemptGuard() }
+    var loginJob by remember { mutableStateOf<Job?>(null) }
     val initialAddress = remember { prefs?.baseUrl?.let { parseServerAddress(it) } }
     var scheme by remember { mutableStateOf(initialAddress?.scheme ?: "http") }
     var host by remember { mutableStateOf(initialAddress?.hostWithPath.orEmpty()) }
@@ -137,11 +182,17 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     var scanError by remember { mutableStateOf<String?>(null) }
     var unsupportedScan by remember { mutableStateOf(false) }
     var successDialogServer by remember { mutableStateOf<String?>(null) }
-    var pendingPairConfig by remember { mutableStateOf<PairConfig?>(null) }
+    var pendingPairConfig by remember { mutableStateOf<PendingLoginPair?>(null) }
     var pairArrivalTick by remember { mutableStateOf(0) }
     var pairNotice by remember { mutableStateOf<String?>(null) }
     val loginFocusRequester = remember { FocusRequester() }
     val passFocusRequester = remember { FocusRequester() }
+
+    fun leaveLogin() {
+        attempts.close()
+        loginJob?.cancel()
+        onCancel()
+    }
 
     fun fillAddress(address: ServerAddress) {
         scheme = address.scheme
@@ -150,6 +201,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     }
 
     val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (loading || probing || pendingPairConfig != null) return@rememberLauncherForActivityResult
         val parsed = IntentIntegrator.parseActivityResult(result.resultCode, result.data)
         val raw = parsed?.contents
         if (raw.isNullOrBlank()) {
@@ -188,6 +240,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     }
 
     fun launchScan() {
+        if (loading || probing || pendingPairConfig != null) return
         if (activity == null) {
             scanError = "当前设备无法启动扫码界面。"
         } else if (Build.VERSION.SDK_INT >= 23 && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -203,30 +256,78 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         }
     }
 
-    fun loginAt(base: String, name: String, password: String) {
-        scope.launch {
-            loading = true
-            error = null
+    suspend fun loginAt(base: String, name: String, password: String, pair: LoginPairSnapshot) {
+        val client = EmbyClient(baseUrl = base, deviceId = prefs?.deviceId ?: "lumina-tv")
+        val newSession = try { client.login(base, name, password) } finally { client.close() }
+        currentCoroutineContext().ensureActive()
+        if (!attempts.isCurrent(pair.generation)) return
+        val sessionToSave = newSession.copy(
+            serverName = if (pair.paired) pair.alias?.ifBlank { newSession.serverName } ?: newSession.serverName else newSession.serverName,
+        )
+        // applySession commits encrypted credentials before publishing the runtime session.
+        AppRuntime.applySession(sessionToSave)
+        if (AppRuntime.prefs?.saveCurrentServer() == false) {
+            android.widget.Toast.makeText(context, "已登录，但保存服务器凭据失败，请在设置中重试。", android.widget.Toast.LENGTH_LONG).show()
+        }
+        if (pair.paired && attempts.isCurrent(pair.generation)) {
+            prefs?.serverNote = pair.note?.ifBlank { null }
+            AppRuntime.updatePairingStatus("登录成功，电视已连接")
+            AppRuntime.resolvePairRequest("confirmed")
+            successDialogServer = sessionToSave.serverName
+            delay(1200)
+        }
+        currentCoroutineContext().ensureActive()
+        if (attempts.isCurrent(pair.generation)) onLoggedIn()
+    }
+
+    fun submit(name: String = user, password: String = pass) {
+        if (loading || probing || pendingPairConfig != null) return
+        if (host.isBlank() || name.isBlank()) { error = "请填写服务器地址和用户名"; return }
+        val selectedPort = port.trim().ifBlank { if (scheme == "https") "8920" else "8096" }
+        val address = pendingLoginBase?.let { parseServerAddress(it) }
+            ?: parseServerAddress(host, scheme, selectedPort)
+            ?: run { error = "服务器地址或端口无效"; return }
+        val primary = address.baseUrl
+        val onlyPrimary = pendingLoginBase != null || host.contains("://") || paired
+        val generation = attempts.begin() ?: return
+        val pair = LoginPairSnapshot(generation, paired, pairingAlias, pairingNote)
+        pendingLoginBase = null
+        probing = true; error = null
+        loginJob = scope.launch {
             try {
-                val client = EmbyClient(baseUrl = base, deviceId = prefs?.deviceId ?: "lumina-tv")
-                val newSession = client.login(base, name, password)
-                if (AppRuntime.session?.baseUrl?.trimEnd('/') != newSession.baseUrl.trimEnd('/')) {
-                    com.lumina.tv.data.LibraryCache.clear()
+                val candidates = loginProbeCandidates(address, onlyPrimary)
+                val deadlineNanos = System.nanoTime() + 26_000_000_000L
+                var found: String? = null
+                for (candidate in candidates) {
+                    val remainingMs = remainingBudgetMillis(deadlineNanos)
+                    if (remainingMs <= 0L) break
+                    try {
+                        val probe = EmbyClient(candidate, deviceId = prefs?.deviceId ?: "lumina-tv")
+                        try { probe.testConnection(candidate, timeoutMs = remainingMs) } finally { probe.close() }
+                        if (remainingBudgetMillis(deadlineNanos) <= 0L) break
+                        found = candidate
+                        break
+                    } catch (_: CancellationException) {
+                        currentCoroutineContext().ensureActive()
+                    } catch (_: Exception) { }
                 }
-                val sessionToSave = newSession.copy(
-                    serverName = if (paired) pairingAlias?.ifBlank { newSession.serverName } ?: newSession.serverName else newSession.serverName,
-                )
-                AppRuntime.applySession(sessionToSave)
-                AppRuntime.prefs?.saveCurrentServer()
-                if (paired) prefs?.serverNote = pairingNote?.ifBlank { null }
-                AppRuntime.updatePairingStatus("登录成功，电视已连接")
-                if (paired) AppRuntime.resolvePairRequest("confirmed")
-                if (paired) {
-                    successDialogServer = sessionToSave.serverName
-                    kotlinx.coroutines.delay(1200)
+                currentCoroutineContext().ensureActive()
+                if (!attempts.isCurrent(generation)) return@launch
+                if (found == null) {
+                    probing = false
+                    val message = if (remainingBudgetMillis(deadlineNanos) == 0L) "连接超时：请检查服务器响应和网络。" else "服务器连接失败：未找到可用的 Emby 服务，请检查地址、端口和网络。"
+                    error = message
+                    loginErrorDialog = message
+                } else {
+                    if (found != primary) error = "已自动切换至 $found"
+                    probing = false; loading = true
+                    loginAt(found, name, password, pair)
                 }
-                onLoggedIn()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                if (!attempts.isCurrent(generation)) return@launch
                 val message = e.message.orEmpty()
                 loginErrorDialog = when {
                     message.contains("401") || message.contains("账号或密码") || message.contains("Unauthorized", ignoreCase = true) -> "账号或密码错误，请核对后重试。"
@@ -236,61 +337,17 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                     else -> "登录失败：${message.ifBlank { "服务器返回异常，请检查网络和账号信息。" }}"
                 }
                 error = loginErrorDialog
-                AppRuntime.updatePairingStatus(loginErrorDialog.orEmpty())
+                if (pair.paired) AppRuntime.updatePairingStatus(loginErrorDialog.orEmpty())
                 if (AppRuntime.session != null) {
                     android.widget.Toast.makeText(context, loginErrorDialog, android.widget.Toast.LENGTH_LONG).show()
-                    kotlinx.coroutines.delay(1200)
-                    onCancel()
+                    delay(1200)
+                    leaveLogin()
                 }
-            } finally { loading = false; probing = false }
-        }
-    }
-
-    fun submit(name: String = user, password: String = pass) {
-        if (loading || probing) return
-        if (host.isBlank() || name.isBlank()) { error = "请填写服务器地址和用户名"; return }
-        val selectedPort = port.trim().ifBlank { if (scheme == "https") "8920" else "8096" }
-        val address = pendingLoginBase?.let { parseServerAddress(it) }
-            ?: parseServerAddress(host, scheme, selectedPort)
-            ?: run { error = "服务器地址或端口无效"; return }
-        val primary = address.baseUrl
-        val onlyPrimary = pendingLoginBase != null || host.contains("://") || paired
-        pendingLoginBase = null
-        scope.launch {
-            probing = true; error = null
-            val candidates = buildList {
-                add(primary)
-                if (!onlyPrimary && address.scheme == "http") {
-                    add(address.withEndpoint("http", 8096).baseUrl); add(address.withEndpoint("https", 8920).baseUrl)
-                } else if (!onlyPrimary) {
-                    add(address.withEndpoint("https", 8920).baseUrl); add(address.withEndpoint("http", 8096).baseUrl)
+            } finally {
+                if (attempts.isCurrent(generation)) {
+                    loading = false; probing = false
+                    attempts.finish(generation)
                 }
-                if (!onlyPrimary) add(address.withEndpoint("http", 80).baseUrl)
-
-            }.distinct()
-            val deadlineNanos = System.nanoTime() + 26_000_000_000L
-            var found: String? = null
-            for (candidate in candidates) {
-                val remainingMs = remainingBudgetMillis(deadlineNanos)
-                if (remainingMs <= 0L) break
-                try {
-                    EmbyClient(candidate, deviceId = prefs?.deviceId ?: "lumina-tv")
-                        .testConnection(candidate, timeoutMs = remainingMs)
-                    if (remainingBudgetMillis(deadlineNanos) <= 0L) break
-                    found = candidate
-                    break
-                } catch (_: CancellationException) {
-                    currentCoroutineContext().ensureActive()
-                } catch (_: Exception) { }
-            }
-            if (found == null) {
-                probing = false
-                val message = if (remainingBudgetMillis(deadlineNanos) == 0L) "连接超时：请检查服务器响应和网络。" else "服务器连接失败：未找到可用的 Emby 服务，请检查地址、端口和网络。"
-                error = message
-                loginErrorDialog = message
-            } else {
-                if (found != primary) error = "已自动切换至 $found"
-                loginAt(found, name, password)
             }
         }
     }
@@ -304,10 +361,12 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
     DisposableEffect(Unit) {
         AppRuntime.onPairConfig = config@{ server, pairedUser, pairedPass ->
-            if (loading || probing) return@config false
+            if (loading || probing || pendingPairConfig != null || scanLoginRequested || pairedUser.isBlank()) return@config false
             val address = parseServerAddress(server) ?: return@config false
+            attempts.acceptPair() ?: return@config false
             fillAddress(address)
             user = pairedUser; pass = pairedPass; paired = true
+            pairingAlias = null; pairingNote = null
             pairArrivalTick++
             pendingLoginBase = address.baseUrl
             AppRuntime.updatePairingStatus("电视正在连接服务器…")
@@ -315,16 +374,25 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
             true
         }
-        AppRuntime.onPairRequest = { config -> pendingPairConfig = config; true }
+        AppRuntime.onPairRequest = request@{ config ->
+            if (loading || probing || pendingPairConfig != null || scanLoginRequested) return@request false
+            val generation = attempts.acceptPair() ?: return@request false
+            pendingPairConfig = PendingLoginPair(config, generation)
+            true
+        }
         onDispose {
-            AppRuntime.resolvePairRequest("cancelled")
+            attempts.close()
+            loginJob?.cancel()
+            if (paired || pendingPairConfig != null) AppRuntime.resolvePairRequest("cancelled")
             AppRuntime.onPairConfig = null
             AppRuntime.onPairRequest = null
         }
     }
 
     LaunchedEffect(pendingPairConfig) {
-        val config = pendingPairConfig ?: return@LaunchedEffect
+        val pending = pendingPairConfig ?: return@LaunchedEffect
+        if (!attempts.isCurrent(pending.generation)) return@LaunchedEffect
+        val config = pending.config
         val address = parseServerAddress(config.host, config.scheme, config.port, config.path) ?: run {
             error = "配对地址或端口无效"
             AppRuntime.resolvePairRequest("cancelled")
@@ -346,10 +414,13 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
     }
 
     // 从主页切服务器进来时，遥控器返回应该回到主页；首次登录（无 session）才允许系统退出
-    BackHandler(enabled = AppRuntime.session != null) { onCancel() }
+    BackHandler(enabled = AppRuntime.session != null) { leaveLogin() }
 
     LaunchedEffect(Unit) {
         AppRuntime.screenLabel = "登录"
+        prefs?.credentialStorageError?.let {
+            android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_LONG).show()
+        }
     }
 
     if (!loginErrorDialog.isNullOrBlank()) AlertDialog(
@@ -377,6 +448,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
         val savedServers = remember { AppRuntime.prefs?.savedServerList().orEmpty() }
         fun fillFromSaved(server: SavedServer) {
+            if (loading || probing || pendingPairConfig != null) return
             val address = parseServerAddress(server.url) ?: return
             fillAddress(address)
             user = server.userName
@@ -386,7 +458,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
             runCatching { passFocusRequester.requestFocus() }
         }
         val maxCardHeight = maxHeight - 40.dp
-        val goHome: (() -> Unit)? = if (AppRuntime.session != null) onCancel else null
+        val goHome: (() -> Unit)? = if (AppRuntime.session != null) ({ leaveLogin() }) else null
 
         if (wide) {
             Row(

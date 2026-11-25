@@ -45,6 +45,7 @@ fun SettingsAccount(
     var renameServerUrl by remember { mutableStateOf<String?>(null) }
     var renameServerText by remember { mutableStateOf("") }
     var showLogoutConfirmation by remember { mutableStateOf(false) }
+    var accountError by remember { mutableStateOf(prefs?.credentialStorageError) }
     val session = AppRuntime.session
     val savedServerUrls = savedServers.map { it.second }
     val focusTargets = accountFocusTargets(savedServerUrls)
@@ -68,9 +69,10 @@ fun SettingsAccount(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    prefs?.renameSavedServer(url, renameServerText)
+                    val saved = prefs?.renameSavedServer(url, renameServerText) == true
                     savedServers = prefs?.savedServers().orEmpty()
-                    renameServerUrl = null
+                    if (saved) renameServerUrl = null
+                    else accountError = prefs?.credentialStorageError ?: "保存服务器名称失败，请重试。"
                 }) { Text("保存") }
             },
             dismissButton = { TextButton(onClick = { renameServerUrl = null }) { Text("取消") } },
@@ -90,6 +92,13 @@ fun SettingsAccount(
             dismissButton = { TextButton(onClick = { showLogoutConfirmation = false }) { Text("取消") } },
         )
     }
+
+    if (accountError != null) AlertDialog(
+        onDismissRequest = { accountError = null },
+        title = { Text("操作未完成") },
+        text = { Text(accountError.orEmpty()) },
+        confirmButton = { TextButton(onClick = { accountError = null }) { Text("确定") } },
+    )
 
     LazyColumn(state = settingsListState(SettingsCategory.Account), modifier = modifier) {
         item(key = "account:current-label") {
@@ -138,6 +147,7 @@ fun SettingsAccount(
                         currentValue = "切换",
                         onClick = {
                             if (AppRuntime.switchToServer(url)) onServerSwitched()
+                            else accountError = prefs?.credentialStorageError ?: "切换服务器失败，请重新登录后重试。"
                         },
                         focusRequester = requireNotNull(requesters["account:switch:$url"]),
                         leftRequester = railRequester,
@@ -163,7 +173,9 @@ fun SettingsAccount(
                         description = "$name · $url",
                         actionLabel = "删除",
                         onClick = {
-                            prefs?.removeSavedServer(url)
+                            if (prefs?.removeSavedServer(url) != true) {
+                                accountError = prefs?.credentialStorageError ?: "删除已保存服务器失败，请重试。"
+                            }
                             savedServers = prefs?.savedServers().orEmpty()
                         },
                         focusRequester = requireNotNull(requesters["account:delete:$url"]),
@@ -184,7 +196,12 @@ fun SettingsAccount(
                     title = "保存当前服务器",
                     description = "将当前服务器和账号加入已保存列表",
                     actionLabel = "保存",
-                    onClick = { prefs?.saveCurrentServer(); savedServers = prefs?.savedServers().orEmpty() },
+                    onClick = {
+                        if (prefs?.saveCurrentServer() != true) {
+                            accountError = prefs?.credentialStorageError ?: "保存服务器凭据失败，请重试。"
+                        }
+                        savedServers = prefs?.savedServers().orEmpty()
+                    },
                     focusRequester = requireNotNull(requesters["account:save-current"]),
                     leftRequester = railRequester,
                     upRequester = focusTargets.getValue("account:save-current").up?.let(requesters::getValue),

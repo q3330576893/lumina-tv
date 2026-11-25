@@ -15,10 +15,20 @@ data class SavedServer(
 )
 
 /** 极轻量的本地配置存储：服务器、凭证、播放内核偏好。 */
-class Prefs internal constructor(private val sp: SharedPreferences) {
+class Prefs internal constructor(
+    private val sp: SharedPreferences,
+    private val encrypt: (String) -> String? = SecureStore::encrypt,
+    private val decrypt: (String) -> String? = SecureStore::decrypt,
+) {
     constructor(context: Context) : this(context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE))
-    private val sessionStore = SessionStore(sp)
+    private val sessionStore = SessionStore(sp, encrypt, decrypt, legacy = { key ->
+        getSecret(key, if (key == "server_name") "Emby" else "")
+    })
     private var failedServerName: String? = null
+    private var secretStorageError: String? = null
+
+    val credentialStorageError: String?
+        get() = sessionStore.lastError ?: secretStorageError
 
     init {
         if (sp.contains("end_skip_seconds")) {
@@ -32,22 +42,33 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     }
 
     private fun getSecret(key: String, default: String = ""): String =
-        SecureStore.get(key) ?: sp.getString(key, default) ?: default
+        sp.getString(SecureStore.PREFIX + key, null)?.let { runCatching { decrypt(it) }.getOrNull() }
+            ?: sp.getString(key, default) ?: default
 
-    private fun putSecret(key: String, value: String) {
-        if (SecureStore.put(key, value)) {
-            sp.edit().remove(key).apply()
-        } else {
-            // Keystore failure: keep a plaintext fallback for availability, discard stale ciphertext,
-            // and retry encryption on the next startup (including the saved_servers token copies).
-            sp.edit().putString(key, value).remove(SecureStore.PREFIX + key)
-                .putBoolean("secrets_migrated_v1", false).apply()
-        }
-    }
+    private fun writeEncryptedSecret(key: String, value: String): Boolean =
+        encrypt(value)?.takeIf(String::isNotBlank)?.let { ciphertext ->
+            sp.edit().putString(SecureStore.PREFIX + key, ciphertext).commit()
+        } ?: false
+
+    private fun putSecret(key: String, value: String): Boolean = runCatching {
+        check(writeEncryptedSecret(key, value)) { "Secret encryption or commit failed" }
+        // A failed encryption/commit must leave the only legacy copy available for retry.
+        if (sp.contains(key)) check(sp.edit().remove(key).commit())
+        check(sp.edit().putBoolean("secret_migrated_v1_$key", true).commit())
+        secretStorageError = null
+        true
+    }.onFailure {
+        secretStorageError = "无法安全保存服务器凭据，请检查设备安全存储后重试。"
+        PageLog.add("prefs secret save failed=${it.javaClass.simpleName}")
+    }.getOrDefault(false)
 
     private fun migrateLegacySecrets() {
         // SessionStore consumes the five legacy session fields as a single, read-only input.
-        migrateLegacySecrets(sp, SecureStore::get, SecureStore::put, keys = listOf("saved_servers"))
+        if (!migrateLegacySecrets(sp, { key ->
+                sp.getString(SecureStore.PREFIX + key, null)?.let(decrypt)
+            }, ::writeEncryptedSecret, keys = listOf("saved_servers"))) {
+            secretStorageError = "旧服务器凭据尚未完成安全迁移，原有副本已保留，请重试。"
+        }
     }
 
     var declareDtsDirectPlay: Boolean
@@ -169,7 +190,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
 
     var savedServersJson: String
         get() = getSecret("saved_servers", "[]")
-        set(v) = putSecret("saved_servers", v)
+        set(v) { check(putSecret("saved_servers", v)) { credentialStorageError.orEmpty() } }
 
     fun savedServerList(): List<SavedServer> = runCatching {
         val array = org.json.JSONArray(savedServersJson)
@@ -189,42 +210,48 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
 
     fun savedServers(): List<Pair<String, String>> = savedServerList().map { it.name to it.url }
 
-    fun upsertServer(s: SavedServer) {
+    fun upsertServer(s: SavedServer): Boolean {
         val url = s.url.trim().trimEnd('/')
-        if (url.isBlank()) return
+        if (url.isBlank()) return false
         val servers = savedServerList().filterNot { sameServer(it.url, url) }
         val updated = s.copy(url = url, lastUsed = System.currentTimeMillis())
-        savedServersJson = org.json.JSONArray().apply {
+        return putSecret("saved_servers", org.json.JSONArray().apply {
             (servers + updated).forEach { server -> put(server.toJson()) }
-        }.toString()
+        }.toString())
     }
 
     fun currentSavedServer(): SavedServer? = savedServerList().firstOrNull {
         sameServer(it.url, baseUrl)
     }
 
-    fun saveCurrentServer() {
+    fun saveCurrentServer(): Boolean {
         val url = baseUrl.trim().trimEnd('/')
-        if (url.isBlank()) return
-        upsertServer(SavedServer(serverName.ifBlank { url }, url, userName, userId, token, System.currentTimeMillis()))
+        if (url.isBlank()) return false
+        return upsertServer(SavedServer(serverName.ifBlank { url }, url, userName, userId, token, System.currentTimeMillis()))
     }
 
-    fun removeSavedServer(url: String) {
-        val key = canonicalServerKey(url) ?: return
-        savedServersJson = org.json.JSONArray().apply {
+    fun removeSavedServer(url: String): Boolean {
+        val key = canonicalServerKey(url) ?: return false
+        return putSecret("saved_servers", org.json.JSONArray().apply {
             savedServerList().filterNot { canonicalServerKey(it.url) == key }
                 .forEach { put(it.toJson()) }
-        }.toString()
+        }.toString())
     }
 
-    fun renameSavedServer(url: String, name: String) {
-        val key = canonicalServerKey(url) ?: return
-        savedServersJson = org.json.JSONArray().apply {
+    fun renameSavedServer(url: String, name: String): Boolean {
+        val key = canonicalServerKey(url) ?: return false
+        if (!putSecret("saved_servers", org.json.JSONArray().apply {
             savedServerList().forEach { server ->
                 put(server.copy(name = if (canonicalServerKey(server.url) == key) name.trim().ifBlank { server.url } else server.name).toJson())
             }
-        }.toString()
-        if (canonicalServerKey(baseUrl) == key) serverName = name.trim().ifBlank { "Emby" }
+        }.toString())) return false
+        if (canonicalServerKey(baseUrl) == key) {
+            val renamed = name.trim().ifBlank { "Emby" }
+            val session = sessionStore.read(migrate = false)
+            if (session != null) return saveSession(session.copy(serverName = renamed))
+            return sp.edit().putString(SessionStore.DRAFT_NAME, renamed).commit()
+        }
+        return true
     }
 
     private fun sameServer(left: String, right: String): Boolean =
@@ -558,27 +585,37 @@ internal fun migrateLegacySecrets(
     readEncrypted: (String) -> String?,
     writeEncrypted: (String, String) -> Boolean,
     keys: List<String> = listOf("base_url", "token", "user_id", "user_name", "server_name", "saved_servers"),
-) {
-    runCatching {
-        if (sp.getBoolean("secrets_migrated_v1", false)) return@runCatching
-        val edit = sp.edit()
-        for (key in keys) {
-            val legacy = sp.getString(key, null) ?: continue
-            if (sp.getString(SecureStore.PREFIX + key, null) == null) {
-                check(writeEncrypted(key, legacy))
-            } else {
-                // A previous attempt may have persisted only some encrypted values.
-                // Never delete a legacy value unless the existing ciphertext decrypts to it.
-                check(readEncrypted(key) == legacy)
-            }
-            edit.remove(key)
-        }
-        // Delay all plaintext removal and the marker until every value is safely encrypted.
-        edit.putBoolean("secrets_migrated_v1", true).apply()
-    }.onFailure {
-        runCatching { PageLog.add("secureStore op=migrate failed=${it.javaClass.simpleName}") }
+): Boolean = runCatching {
+    if (sp.getBoolean("secrets_migrated_v1", false) && keys.none { sp.getString(it, null) != null }) {
+        return@runCatching true
     }
-}
+    for (key in keys) {
+        val marker = "secret_migrated_v1_$key"
+        val legacy = sp.getString(key, null)
+        if (legacy == null) {
+            // Cleanup may have committed before a previous marker write failed.
+            if (sp.getString(SecureStore.PREFIX + key, null) != null && !sp.getBoolean(marker, false)) {
+                check(readEncrypted(key) != null)
+                check(sp.edit().putBoolean(marker, true).commit())
+            }
+            continue
+        }
+        if (sp.getString(SecureStore.PREFIX + key, null) == null) {
+            check(writeEncrypted(key, legacy))
+        } else {
+            // A previous attempt may have persisted only some encrypted values.
+            // Never delete a legacy value unless the existing ciphertext decrypts to it.
+            check(readEncrypted(key) == legacy)
+        }
+        // Commit each record's ciphertext first, then its cleanup, then its marker.
+        check(sp.edit().remove(key).commit())
+        check(sp.edit().putBoolean(marker, true).commit())
+    }
+    check(sp.edit().putBoolean("secrets_migrated_v1", true).commit())
+    true
+}.onFailure {
+    runCatching { PageLog.add("secureStore op=migrate failed=${it.javaClass.simpleName}") }
+}.getOrDefault(false)
 
 val STREAMING_BITRATE_OPTIONS = setOf(20_000_000L, 40_000_000L, 80_000_000L, 120_000_000L)
 val PLAYBACK_CACHE_OPTIONS = setOf(0L, 256L, 512L, 1024L, 2048L).map { it * 1024L * 1024L }.toSet()

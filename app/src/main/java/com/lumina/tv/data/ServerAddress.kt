@@ -41,7 +41,8 @@ fun parseServerAddress(
     if (!hasScheme && !hasPort && !port.isNullOrBlank()) {
         builder.port(port.trim().toIntOrNull()?.takeIf { it in 1..65535 } ?: return null)
     }
-    var path = basePath?.trim()?.takeIf { it.isNotEmpty() && it != "/" } ?: parsed.encodedPath
+    var path = if (hasScheme) parsed.encodedPath
+        else basePath?.trim()?.takeIf { it.isNotEmpty() && it != "/" } ?: parsed.encodedPath
     path = path.trimEnd('/').removeSuffix("/web/index.html").removeSuffix("/web")
     path = if (path.startsWith('/')) path else "/$path"
     builder.encodedPath(path)

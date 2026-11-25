@@ -33,6 +33,12 @@ data class DiagPayload(
     val uiText: String,
 )
 
+/** Remove the known credential before field/URL masking and before callers impose a size limit. */
+internal fun redactDiagnosticSecrets(text: String, currentToken: String = ""): String {
+    val withoutToken = if (currentToken.isNotBlank()) text.replace(currentToken, "***") else text
+    return LogRedactor.redact(withoutToken)
+}
+
 object DiagExporter {
     private const val MAX_ARCHIVE_BYTES = 2 * 1024 * 1024
 
@@ -182,7 +188,9 @@ object DiagExporter {
                         else -> 120 * 1024
                     }
                     val isJson = name.endsWith(".json", ignoreCase = true)
-                    val sanitized = if (isJson) LogRedactor.redactJson(original) else sanitize(original)
+                    val sanitized = if (isJson) {
+                        LogRedactor.redactJson(original, currentToken())
+                    } else sanitize(original)
                     val bounded = if (isJson) {
                         boundedDiagnosticJson(sanitized, limit)
                     } else {
@@ -202,18 +210,21 @@ object DiagExporter {
     }
 
     fun sanitize(text: String): String {
-        val sanitized = LogRedactor.redact(text)
+        val sanitized = redactDiagnosticSecrets(text, currentToken())
         return if (sanitized.startsWith("[基础]") || sanitized.startsWith("[鍩虹]")) {
             sanitized.replace(Regex("(?m)^视频动态范围:.*(?:\\r?\\n)?"), "") +
                 "\n视频动态范围: ${AppRuntime.currentVideoRange} / 引擎: ${AppRuntime.activePlayerEngine}\n"
         } else sanitized
     }
+
+    private fun currentToken(): String = AppRuntime.session?.token ?: AppRuntime.client?.token
+        ?: AppRuntime.prefs?.token.orEmpty()
 }
 
 /** One redaction policy for both log ingestion and diagnostic export. No Android dependencies. */
 object LogRedactor {
     private const val SECRET_KEYS =
-        "api_key|apikey|x-emby-token|x-emby-authorization|x-mediabrowser-token|access_token|authorization|password|passwd|pw|token|cookie|set-cookie|pass|pwd|secret|jsessionid"
+        "api_key|apikey|x-emby-token|x-emby-authorization|x-mediabrowser-token|access_token|accesstoken|access-token|authorization|password|passwd|pw|token|cookie|set-cookie|pass|pwd|secret|jsessionid"
     private const val BASE_URL_KEYS = "baseUrl|base_url"
     private val encodedKeys = SECRET_KEYS.replace("-", "(?:-|%2d)").replace("_", "(?:_|%5f)")
     private const val QUOTED_VALUE = """"(?:\\.|[^"\\])*+"|'(?:\\.|[^'\\])*+'"""
@@ -239,16 +250,17 @@ object LogRedactor {
     private val secretField = Regex("""(?i)^(?:$SECRET_KEYS)$""")
 
     /** Redact JSON values structurally so punctuation in a string cannot damage the document. */
-    fun redactJson(text: String): String = try {
-        val tokener = org.json.JSONTokener(text)
+    fun redactJson(text: String, currentToken: String = ""): String = try {
+        val withoutToken = if (currentToken.isNotBlank()) text.replace(currentToken, "***") else text
+        val tokener = org.json.JSONTokener(withoutToken)
         val value = tokener.nextValue()
         require(tokener.nextClean() == '\u0000') { "Trailing data after JSON value" }
-        redactJsonValue(value).toString()
+        redactJsonValue(value, currentToken).toString()
     } catch (_: Exception) {
-        redact(text)
+        redactDiagnosticSecrets(text, currentToken)
     }
 
-    private fun redactJsonValue(value: Any?): Any = when (value) {
+    private fun redactJsonValue(value: Any?, currentToken: String): Any = when (value) {
         is JSONObject -> JSONObject().apply {
             val keys = value.keys()
             while (keys.hasNext()) {
@@ -261,14 +273,14 @@ object LogRedactor {
                         null, JSONObject.NULL -> JSONObject.NULL
                         else -> "***"
                     }
-                    else -> redactJsonValue(field)
+                    else -> redactJsonValue(field, currentToken)
                 })
             }
         }
         is JSONArray -> JSONArray().apply {
-            for (index in 0 until value.length()) put(redactJsonValue(value.opt(index)))
+            for (index in 0 until value.length()) put(redactJsonValue(value.opt(index), currentToken))
         }
-        is String -> redact(value)
+        is String -> redactDiagnosticSecrets(value, currentToken)
         null -> JSONObject.NULL
         else -> value
     }

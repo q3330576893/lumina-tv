@@ -13,6 +13,9 @@ internal class SessionStore(
     private val decrypt: (String) -> String? = SecureStore::decrypt,
     private val legacy: (String) -> String? = { SecureStore.get(it) ?: sp.getString(it, null) },
 ) {
+    @Volatile var lastError: String? = null
+        private set
+
     fun hasRecord(): Boolean = sp.contains(KEY) || sp.contains(CHECKSUM)
 
     @Synchronized
@@ -22,7 +25,7 @@ internal class SessionStore(
             val json = when {
                 stored.startsWith("enc:") -> decrypt(stored.removePrefix("enc:"))
                 stored.startsWith("plain:") -> stored.removePrefix("plain:")
-                else -> null // Includes the logout tombstone. Never resurrect legacy credentials.
+                else -> stored.takeUnless { it == "none" } // Raw legacy JSON; keep the logout tombstone final.
             } ?: return null
             if (checksum(json) != sp.getString(CHECKSUM, null)) return null
             val item = JSONObject(json)
@@ -30,39 +33,36 @@ internal class SessionStore(
             val session = Session(item.getString("baseUrl"), item.getString("token"), item.getString("userId"),
                 item.getString("userName"), item.getString("serverName"))
             if (!complete(session)) return null
-            if (migrate && (stored.startsWith("plain:") || hasLegacyFields())) write(session, requireEncryption = true)
+            if (migrate && (!stored.startsWith("enc:") || hasLegacyFields())) write(session)
             return session
         }
         val session = Session(legacy("base_url").orEmpty(), legacy("token").orEmpty(),
             legacy("user_id").orEmpty(), legacy("user_name").orEmpty(), legacy("server_name") ?: "Emby")
         if (!complete(session)) return null
         // An encryption/commit failure keeps the legacy record readable and leaves it for retry.
-        if (migrate) write(session, requireEncryption = true)
+        if (migrate) write(session)
         session
     }.onFailure { failed("read", it) }.getOrNull()
 
     @Synchronized
     fun save(session: Session): Boolean {
         require(complete(session)) { "Incomplete session" }
-        return write(session, requireEncryption = false)
+        return write(session)
     }
 
-    private fun write(session: Session, requireEncryption: Boolean): Boolean = runCatching {
+    private fun write(session: Session): Boolean = runCatching {
         val json = JSONObject().put("version", 2).put("generation", UUID.randomUUID().toString())
             .put("baseUrl", session.baseUrl).put("token", session.token).put("userId", session.userId)
             .put("userName", session.userName).put("serverName", session.serverName).toString()
-        val ciphertext = encrypt(json)
-        if (ciphertext == null && requireEncryption) return false
-        // Preserve the existing Keystore-unavailable availability policy, but for the WHOLE record.
-        val stored = ciphertext?.let { "enc:$it" } ?: "plain:$json"
-        val edit = sp.edit().putString(KEY, stored).putString(CHECKSUM, checksum(json))
-        if (!requireEncryption) removeLegacy(edit)
+        // Do not touch the old record until encryption has succeeded, even for a new login.
+        val ciphertext = checkNotNull(encrypt(json)?.takeIf(String::isNotBlank)) { "Session encryption failed" }
+        val edit = sp.edit().putString(KEY, "enc:$ciphertext").putString(CHECKSUM, checksum(json))
         edit.remove(DRAFT_URL).remove(DRAFT_USER).remove(DRAFT_NAME)
         if (!edit.commit()) {
             failed("write", IllegalStateException("Session commit failed"))
             return false
         }
-        if (requireEncryption && hasLegacyFields()) {
+        if (hasLegacyFields()) {
             // A failed commit can still publish new values in SharedPreferences memory. Keep every
             // legacy field out of that first editor until the encrypted record is confirmed durable.
             val cleanup = sp.edit()
@@ -72,6 +72,7 @@ internal class SessionStore(
                 return false
             }
         }
+        lastError = null
         true
     }.onFailure { failed("write", it) }.getOrDefault(false)
 
@@ -84,6 +85,7 @@ internal class SessionStore(
             failed("clear", IllegalStateException("Session clear failed"))
             return false
         }
+        lastError = null
         true
     }.onFailure { failed("clear", it) }.getOrDefault(false)
 
@@ -94,6 +96,7 @@ internal class SessionStore(
     private fun hasLegacyFields(): Boolean = LEGACY_KEYS.any { sp.contains(it) || sp.contains(SecureStore.PREFIX + it) }
 
     private fun failed(operation: String, error: Throwable) {
+        lastError = "无法安全保存登录凭据，请检查设备安全存储后重试。"
         runCatching { PageLog.add("sessionStore op=$operation failed=${error.javaClass.simpleName}") }
     }
 

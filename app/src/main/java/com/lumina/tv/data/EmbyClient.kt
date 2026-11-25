@@ -34,9 +34,40 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.lumina.tv.diag.NetLog
 import com.lumina.tv.diag.PageLog
+import com.lumina.tv.diag.redactDiagnosticSecrets
 
 internal fun shouldCacheChapterResult(independentSucceeded: Boolean, userItemSucceeded: Boolean): Boolean =
-    independentSucceeded || userItemSucceeded
+    independentSucceeded && userItemSucceeded
+
+/** Client-local chapters expire from insertion time; reads update the LRU order only. */
+internal class ChapterCache(private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L }) {
+    private data class CachedChapters(val insertedAt: Long, val chapters: List<MediaChapter>)
+    private val entries = object : LinkedHashMap<String, CachedChapters>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedChapters>?): Boolean = size > 128
+    }
+    private var closed = false
+
+    @Synchronized operator fun get(itemId: String): List<MediaChapter>? {
+        evictExpired()
+        return entries[itemId]?.chapters
+    }
+
+    @Synchronized operator fun set(itemId: String, chapters: List<MediaChapter>) {
+        if (closed) return
+        evictExpired()
+        entries[itemId] = CachedChapters(nowMs(), chapters.toList())
+    }
+
+    private fun evictExpired() {
+        val now = nowMs()
+        entries.entries.removeAll { now - it.value.insertedAt >= 10 * 60 * 1_000L }
+    }
+
+    @Synchronized fun close() {
+        closed = true
+        entries.clear()
+    }
+}
 
 class EmbyException(message: String, val httpStatus: Int? = null) : Exception(message)
 
@@ -113,7 +144,7 @@ class EmbyClient(
         @Volatile var state: String = "in_progress"
     }
     @Volatile private var lastPrewarmAttempt: PrewarmAttempt? = null
-    private val chapterCache = ConcurrentHashMap<String, List<MediaChapter>>()
+    private val chapterCache = ChapterCache()
     private val trickplayFrames = object : LinkedHashMap<Pair<String, Int>, ByteArray>(24, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, Int>, ByteArray>?): Boolean = size > 24
     }
@@ -236,9 +267,7 @@ class EmbyClient(
             .getOrElse { throw EmbyException("服务器返回了无效数据") }
 
     /** 避免服务端错误正文意外回显访问令牌或认证字段。 */
-    private fun safeErrorBody(body: String): String = body
-        .replace(Regex("(?i)(\\\"?(?:AccessToken|api_key|Token|Pw|Password)\\\"?\\s*[:=]\\s*\\\")([^\\\"]*)(\\\")"), "$1[redacted]$3")
-        .take(200)
+    private fun safeErrorBody(body: String): String = redactDiagnosticSecrets(body, token).take(200)
 
     // ---------------- 认证 ----------------
 
@@ -1730,6 +1759,7 @@ class EmbyClient(
     suspend fun awaitProgressPersistence(): Boolean = progressOutbox.flushAndAwait()
 
     fun close() {
+        chapterCache.close()
         progressSender.close()
         progressOutbox.close()
         progressScope.cancel()

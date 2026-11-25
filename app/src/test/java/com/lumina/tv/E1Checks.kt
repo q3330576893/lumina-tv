@@ -2,14 +2,19 @@ package com.lumina.tv
 
 import android.content.SharedPreferences
 import com.lumina.tv.data.EmbyClient
+import com.lumina.tv.data.ChapterCache
+import com.lumina.tv.data.MediaChapter
 import com.lumina.tv.data.Prefs
 import com.lumina.tv.data.ProgressQueue
 import com.lumina.tv.data.canonicalServerKey
 import com.lumina.tv.data.identityScope
 import com.lumina.tv.data.parseLatestItemsResponse
+import com.lumina.tv.data.parseServerAddress
 import com.lumina.tv.data.stableCacheDigest
 import com.lumina.tv.pair.PairingRequestSession
 import com.lumina.tv.pair.PairingServer
+import com.lumina.tv.ui.screens.LoginAttemptGuard
+import com.lumina.tv.ui.screens.loginProbeCandidates
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -20,16 +25,93 @@ import java.net.URI
 import java.security.MessageDigest
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.Base64
 
 /** Plain JVM assertions against the production parsers and a loopback NanoHTTPD server. */
 object E1Checks {
     @JvmStatic fun main(args: Array<String>) {
         pairingChecks()
+        loginBoundaryChecks()
         latestChecks()
+        chapterChecks()
         identityChecks()
         prefsMigrationChecks()
         switchServerChecks()
-        println("E1 PASS: pairing authorization/one body parse, Latest shapes/fallbacks, canonical identity, settings migration and strict server switching")
+        println("E1 PASS: login protocol/generation boundaries, complete chapter caching/LRU/TTL/close, URL precedence, pairing, Latest, identity and settings migration")
+    }
+
+    private fun loginBoundaryChecks() {
+        for (port in listOf("8920", "443", "9443")) {
+            val address = checkNotNull(parseServerAddress("host/Emby", "https", port))
+            val candidates = loginProbeCandidates(address, onlyPrimary = false)
+            check(candidates.first() == address.baseUrl && candidates.all { it.startsWith("https://") })
+            check(loginProbeCandidates(address, onlyPrimary = true) == listOf(address.baseUrl))
+        }
+        val http = checkNotNull(parseServerAddress("host", "http", "8096"))
+        check(loginProbeCandidates(http, onlyPrimary = false).all { it.startsWith("http://") })
+        val guard = LoginAttemptGuard()
+        val firstPair = checkNotNull(guard.acceptPair())
+        val login = checkNotNull(guard.begin())
+        check(login == firstPair && guard.acceptPair() == null && guard.begin() == null)
+        check(guard.isCurrent(login))
+        guard.finish(login)
+        val nextPair = checkNotNull(guard.acceptPair())
+        check(nextPair != firstPair && !guard.isCurrent(firstPair))
+        check(guard.begin() == nextPair)
+        guard.finish(firstPair) // A stale completion cannot unlock the current login.
+        check(guard.acceptPair() == null)
+        guard.close()
+        check(!guard.isCurrent(nextPair) && guard.begin() == null && guard.acceptPair() == null)
+    }
+
+    private fun chapterChecks() = runBlocking {
+        var now = 0L
+        val cache = ChapterCache { now }
+        val chapters = listOf(MediaChapter("Chapter", 1_000, null))
+        repeat(128) { cache["$it"] = chapters }
+        check(cache["0"] == chapters)
+        cache["128"] = chapters
+        check(cache["1"] == null && cache["0"] == chapters && cache["128"] == chapters)
+        now = 599_999L
+        check(cache["0"] == chapters)
+        now = 600_000L
+        check(cache["0"] == null && cache["128"] == null)
+        cache["empty"] = emptyList()
+        check(cache["empty"] == emptyList<MediaChapter>())
+        cache.close()
+        cache["late"] = chapters
+        check(cache["empty"] == null && cache["late"] == null)
+
+        // Each endpoint may be the one that fails: an incomplete first result must be retried.
+        for (failIndependent in listOf(true, false)) {
+            val fail = AtomicBoolean(true)
+            val requests = CopyOnWriteArrayList<String>()
+            val server = object : NanoHTTPD("127.0.0.1", 0) {
+                override fun serve(session: IHTTPSession): Response {
+                    requests += session.uri
+                    val independent = session.uri.endsWith("/Chapters")
+                    if (fail.get() && independent == failIndependent) {
+                        return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json", "{}")
+                    }
+                    val item = if (independent) """{"Name":"Independent","StartPositionTicks":10000000}"""
+                        else """{"Name":"User item","StartPositionTicks":20000000}"""
+                    return newFixedLengthResponse(if (independent) "[$item]" else """{"Chapters":[$item]}""")
+                }
+            }
+            server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true)
+            val client = EmbyClient("http://127.0.0.1:${server.listeningPort}", userId = "user")
+            val field = EmbyClient::class.java.getDeclaredField("chapterCache").apply { isAccessible = true }
+            val ownedCache = field.get(client) as ChapterCache
+            try {
+                check(client.getChapters("item").size == 1 && requests.size == 2)
+                fail.set(false)
+                val complete = client.getChapters("item")
+                check(complete.map { it.name } == listOf("Independent", "User item") && requests.size == 4)
+                check(client.getChapters("item") == complete && requests.size == 4)
+            } finally { client.close(); server.stop() }
+            check(ownedCache["item"] == null)
+        }
     }
 
     private fun pairingChecks() {
@@ -158,6 +240,10 @@ object E1Checks {
     }
 
     private fun identityChecks() {
+        check(parseServerAddress("https://Host/Emby", "http", "8096", "/other")?.baseUrl == "https://host/Emby")
+        check(parseServerAddress("https://Host", "http", "8096", "/other")?.baseUrl == "https://host")
+        check(parseServerAddress("https://Host/Emby/web/index.html", basePath = "/other")?.baseUrl == "https://host/Emby")
+        check(parseServerAddress("Host", "https", "9443", "/Emby")?.baseUrl == "https://host:9443/Emby")
         check(canonicalServerKey(" HTTPS://Host:443/Emby/// ") == "https://host/Emby")
         check(canonicalServerKey("http://h:80/x") == canonicalServerKey("http://h/x/"))
         check(canonicalServerKey("https://h:443/x/") == canonicalServerKey("https://h/x"))
@@ -247,7 +333,10 @@ object E1Checks {
         val previousPrefs = AppRuntime.prefs
         val previousSession = AppRuntime.session
         val previousClient = AppRuntime.client
-        AppRuntime.prefs = Prefs(memory.sp)
+        // Deterministic fake encryption keeps this JVM check independent of Android Keystore availability.
+        AppRuntime.prefs = Prefs(memory.sp,
+            { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) },
+            { value -> runCatching { String(Base64.getDecoder().decode(value), Charsets.UTF_8) }.getOrNull() })
         AppRuntime.session = null
         AppRuntime.client = null
         try {
