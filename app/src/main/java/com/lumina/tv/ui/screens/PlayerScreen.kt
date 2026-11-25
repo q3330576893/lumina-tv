@@ -4041,6 +4041,11 @@ fun PlayerScreen(
                             modifier = Modifier.padding(bottom = 6.dp),
                         )
                     }
+                    val bufferedMsForBar = if (activeEngine == "media3") {
+                        exo.bufferedPosition.takeIf { it >= 0L } ?: -1L
+                    } else {
+                        mpvState.bufferedPositionMs?.takeIf { it > 0L } ?: -1L
+                    }
                     SeekBar(
                         position = position,
                         duration = duration,
@@ -4052,12 +4057,22 @@ fun PlayerScreen(
                             dismissSpeedPanel()
                             seekPlayerTo(target)
                         },
+                        bufferedMs = bufferedMsForBar,
+                        chapters = chapters,
                     )
                     Spacer(Modifier.height(4.dp))
-                    Row {
-                        Text(formatTime(position), color = TextSub, fontSize = TypeScale.sp14)
-                        Spacer(Modifier.weight(1f))
-                        Text(formatTime(duration), color = TextSub, fontSize = TypeScale.sp14)
+                    if (duration > 0L) {
+                        Row {
+                            Text(formatTime(position), color = TextSub, fontSize = TypeScale.sp14)
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                "-" + formatTime((duration - position).coerceAtLeast(0L)),
+                                color = TextSub,
+                                fontSize = TypeScale.sp14,
+                            )
+                        }
+                    } else {
+                        Text("直播", color = TextSub, fontSize = TypeScale.sp14)
                     }
                 }
 

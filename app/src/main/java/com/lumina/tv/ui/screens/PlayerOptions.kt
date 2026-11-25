@@ -13,8 +13,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,9 +62,13 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -105,6 +109,7 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
+import com.lumina.tv.ui.theme.TypeScale
 import com.lumina.tv.player.SubtitleRenderersFactory
 import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.diag.DiagExporter
@@ -129,9 +134,25 @@ internal fun SeekBar(
     stepMs: Long,
     onFocusedChange: (Boolean) -> Unit = {},
     onSeek: (Long) -> Unit,
+    bufferedMs: Long = -1L,
+    chapters: List<MediaChapter> = emptyList(),
 ) {
     var focused by remember { mutableStateOf(false) }
-    val ratio = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    val playedRatio = if (duration > 0L) {
+        (position.toFloat() / duration).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val bufferedRatio = if (duration > 0L && bufferedMs >= 0L) {
+        (bufferedMs.toFloat() / duration).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val drawnPlayed = if (bufferedRatio > 0f) {
+        minOf(playedRatio, bufferedRatio)
+    } else {
+        playedRatio
+    }
     Box(
         Modifier
             .fillMaxWidth()
@@ -154,26 +175,110 @@ internal fun SeekBar(
             },
         contentAlignment = Alignment.CenterStart,
     ) {
-        Box(
+        val trackH = if (focused) 10.dp else 6.dp
+        Canvas(
             Modifier
                 .fillMaxWidth()
-                .height(if (focused) 10.dp else 6.dp)
-                .background(Color(0x33FFFFFF), RoundedCornerShape(5.dp))
-                .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(5.dp)) else Modifier)
+                .height(trackH)
         ) {
-            Box(
-                Modifier
-                    .fillMaxWidth(ratio)
-                    .height(if (focused) 10.dp else 6.dp)
-                    .background(Brush.horizontalGradient(listOf(Accent, Accent2)), RoundedCornerShape(5.dp))
+            if (duration <= 0L) return@Canvas
+
+            val trackWidth = size.width
+            val centerY = size.height / 2f
+            val trackCorner = CornerRadius(size.height / 2f)
+
+            drawRoundRect(
+                color = Color(0x33FFFFFF),
+                topLeft = Offset(0f, 0f),
+                size = Size(trackWidth, size.height),
+                cornerRadius = trackCorner,
             )
+
+            if (duration >= 60_000L && chapters.isNotEmpty()) {
+                val tickH = 8.dp.toPx()
+                val minGap = 4.dp.toPx()
+                var lastX = -minGap
+                chapters
+                    .filter { it.startMs > 0L && it.startMs < duration }
+                    .sortedBy { it.startMs }
+                    .forEach { chapter ->
+                        val x = ((chapter.startMs.toFloat() / duration) * trackWidth)
+                            .coerceIn(0f, trackWidth)
+                        if (x - lastX >= minGap) {
+                            drawLine(
+                                color = Color(0x66FFFFFF),
+                                start = Offset(x, centerY - tickH / 2f),
+                                end = Offset(x, centerY + tickH / 2f),
+                                strokeWidth = 1.dp.toPx(),
+                            )
+                            lastX = x
+                        }
+                    }
+            }
+
+            if (bufferedMs >= 0L && bufferedRatio > 0f) {
+                drawRoundRect(
+                    color = Color(0x59FFFFFF),
+                    topLeft = Offset(0f, 0f),
+                    size = Size(
+                        (bufferedRatio * trackWidth).coerceAtLeast(size.height),
+                        size.height,
+                    ),
+                    cornerRadius = trackCorner,
+                )
+            }
+
+            val playedW = drawnPlayed * trackWidth
+            if (playedW > 0f) {
+                drawRoundRect(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(Accent, Accent2),
+                        startX = 0f,
+                        endX = playedW,
+                    ),
+                    topLeft = Offset(0f, 0f),
+                    size = Size(playedW.coerceAtLeast(size.height), size.height),
+                    cornerRadius = trackCorner,
+                )
+            }
+
+            val radius = 7.dp.toPx()
+            val centerX = (playedRatio * trackWidth)
+                .coerceIn(radius, (trackWidth - radius).coerceAtLeast(radius))
+            val center = Offset(centerX, centerY)
+            drawCircle(color = Color(0xCC000000), radius = radius, center = center)
+            drawCircle(
+                color = Color.White,
+                radius = radius - 2.dp.toPx(),
+                center = center,
+            )
+
+            if (focused) {
+                drawRoundRect(
+                    color = Color(0x99FFFFFF),
+                    topLeft = Offset(0.75.dp.toPx(), 0.75.dp.toPx()),
+                    size = Size(
+                        trackWidth - 1.5.dp.toPx(),
+                        size.height - 1.5.dp.toPx(),
+                    ),
+                    cornerRadius = trackCorner,
+                    style = Stroke(width = 1.5.dp.toPx()),
+                )
+            }
         }
-        if (focused) {
+        if (focused && duration > 0L) {
             Text(
                 formatTime(position),
                 color = Color.White,
                 fontSize = 11.sp,
                 modifier = Modifier.align(Alignment.TopEnd),
+            )
+        } else if (duration <= 0L) {
+            Text(
+                "直播",
+                color = TextSub,
+                fontSize = TypeScale.sp12,
+                modifier = Modifier.align(Alignment.Center),
             )
         }
     }
