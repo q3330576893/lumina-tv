@@ -993,7 +993,7 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, titleOverlay = true, topPadding = 12.dp, requestInitialFocus = restoreTargetId == RESTORE_FIRST && firstSectionKey == "resume", focusItemId = restoreTargetId, actualFocusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, onItemFocused = { restoreTargetId = null; focusedMediaId = it; focusedMediaSection = "resume" }, onRowFocusChanged = { resumeRowFocused = it }, onItemMenu = { pendingResumeRemoval = it }) { restoreTargetId = it.id; onOpenDetail(it.seriesId ?: it.id) } }
+                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, topPadding = 12.dp, requestInitialFocus = restoreTargetId == RESTORE_FIRST && firstSectionKey == "resume", focusItemId = restoreTargetId, actualFocusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, onItemFocused = { restoreTargetId = null; focusedMediaId = it; focusedMediaSection = "resume" }, onRowFocusChanged = { resumeRowFocused = it }, onItemMenu = { pendingResumeRemoval = it }) { restoreTargetId = it.id; onOpenDetail(it.seriesId ?: it.id) } }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
@@ -1349,7 +1349,7 @@ fun HomeScreen(
                                 item = it,
                                 imageUrl = client?.imageUrl(it),
                                 width = cardWidth,
-                                titleAlwaysVisible = true,
+                                titleAlwaysVisible = tab != HomeTab.Favorites,
                                 requestInitialFocus = requestFocus,
                                 focusRole = gridRoleOf(index),
                                 focusDir = gridFocusDir,

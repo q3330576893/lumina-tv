@@ -620,34 +620,35 @@ fun PosterCard(
         }
         if (!titleOverlay) {
             val titleAlpha by animateFloatAsState(
-                targetValue = if (focused || titleAlwaysVisible) 1f else 0f,
-                animationSpec = if (titleAlwaysVisible) tween(durationMillis = 0) else tween(durationMillis = 160, delayMillis = 40),
+                targetValue = when {
+                    focused -> 1f
+                    titleAlwaysVisible -> 0.72f
+                    else -> 0f
+                },
+                animationSpec = if (titleAlwaysVisible) {
+                    tween(durationMillis = 120)
+                } else {
+                    tween(durationMillis = 160, delayMillis = 40)
+                },
                 label = "posterTitleAlpha",
             )
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
+                    .height(36.dp)
                     .graphicsLayer { this.alpha = titleAlpha }
-                    .padding(top = 14.dp)
+                    .padding(top = 10.dp)
             ) {
                 Text(
                     item.name,
-                    color = Color(0xF2FFFFFF),
-                    fontSize = 15.sp,
+                    color = Color.White,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.2.sp,
                     lineHeight = 20.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    item.subtitle.ifBlank { item.year?.toString().orEmpty() },
-                    color = Color(0x99FFFFFF),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    lineHeight = 15.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 2.dp),
                 )
             }
         }
