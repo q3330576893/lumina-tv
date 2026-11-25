@@ -124,7 +124,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 
-/** 可聚焦进度条：左右键按设置步长调整位置。 */
+/** 可聚焦进度条：左右键累积预览目标，松开后由上层提交。 */
+@Suppress("UNUSED_PARAMETER")
 @Composable
 internal fun SeekBar(
     position: Long,
@@ -133,9 +134,12 @@ internal fun SeekBar(
     upFocus: FocusRequester,
     stepMs: Long,
     onFocusedChange: (Boolean) -> Unit = {},
-    onSeek: (Long) -> Unit,
+    onSeekHold: (Int) -> Unit = {},
+    onSeekRelease: () -> Unit = {},
     bufferedMs: Long = -1L,
     chapters: List<MediaChapter> = emptyList(),
+    previewTargetMs: Long? = null,
+    previewTierSeconds: Int = 0,
 ) {
     var focused by remember { mutableStateOf(false) }
     val playedRatio = if (duration > 0L) {
@@ -165,13 +169,13 @@ internal fun SeekBar(
             }
             .focusable(enabled = duration > 0L)
             .onKeyEvent { ev ->
-                if (ev.type == KeyEventType.KeyDown) {
-                    when (ev.key) {
-                        Key.DirectionLeft -> { onSeek((position - stepMs).coerceAtLeast(0L)); true }
-                        Key.DirectionRight -> { onSeek((position + stepMs).coerceAtMost(duration)); true }
-                        else -> false
-                    }
-                } else false
+                when {
+                    ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft -> { onSeekHold(-1); true }
+                    ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionRight -> { onSeekHold(1); true }
+                    ev.type == KeyEventType.KeyUp && ev.key == Key.DirectionLeft -> { onSeekRelease(); true }
+                    ev.type == KeyEventType.KeyUp && ev.key == Key.DirectionRight -> { onSeekRelease(); true }
+                    else -> false
+                }
             },
         contentAlignment = Alignment.CenterStart,
     ) {
@@ -243,6 +247,34 @@ internal fun SeekBar(
             }
 
             val radius = 7.dp.toPx()
+            val targetRatio = previewTargetMs?.let { (it.toFloat() / duration).coerceIn(0f, 1f) }
+            if (targetRatio != null) {
+                val targetX = targetRatio * trackWidth
+                val bandStartX = minOf(playedRatio * trackWidth, targetX)
+                val bandEndX = maxOf(playedRatio * trackWidth, targetX)
+                drawRoundRect(
+                    color = Accent.copy(alpha = 0.28f),
+                    topLeft = Offset(bandStartX, 0f),
+                    size = Size(bandEndX - bandStartX, size.height),
+                    cornerRadius = trackCorner,
+                )
+                val targetCenterX = targetX.coerceIn(radius, (trackWidth - radius).coerceAtLeast(radius))
+                drawCircle(
+                    color = Color.White,
+                    radius = radius,
+                    center = Offset(targetCenterX, centerY),
+                    style = Stroke(width = 2.dp.toPx()),
+                )
+                val lineHalfHeight = (size.height + 4.dp.toPx()) / 2f
+                val currentX = (playedRatio * trackWidth)
+                    .coerceIn(radius, (trackWidth - radius).coerceAtLeast(radius))
+                drawLine(
+                    color = Color(0xCCFFFFFF),
+                    start = Offset(currentX, centerY - lineHalfHeight),
+                    end = Offset(currentX, centerY + lineHalfHeight),
+                    strokeWidth = 2.dp.toPx(),
+                )
+            }
             val centerX = (playedRatio * trackWidth)
                 .coerceIn(radius, (trackWidth - radius).coerceAtLeast(radius))
             val center = Offset(centerX, centerY)
@@ -272,13 +304,6 @@ internal fun SeekBar(
                 color = Color.White,
                 fontSize = 11.sp,
                 modifier = Modifier.align(Alignment.TopEnd),
-            )
-        } else if (duration <= 0L) {
-            Text(
-                "直播",
-                color = TextSub,
-                fontSize = TypeScale.sp12,
-                modifier = Modifier.align(Alignment.Center),
             )
         }
     }

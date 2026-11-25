@@ -279,6 +279,13 @@ internal fun formatTime(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }
 
+private fun buildSeekPreviewHint(dir: Int, tierSec: Int, targetMs: Long, chapter: String?): String {
+    val arrow = if (dir > 0) "»" else "«"
+    val sign = if (dir > 0) "+" else "-"
+    val body = "$sign${tierSec}s  $arrow  ${formatTime(targetMs)}"
+    return if (chapter.isNullOrBlank()) body else "$body · $chapter"
+}
+
 private inline fun CoroutineScope.safeLaunch(crossinline block: suspend () -> Unit) =
     launch {
         try { block() }
@@ -604,6 +611,36 @@ fun PlayerScreen(
     var previewActive by remember(item.id) { mutableStateOf(false) }
     var previewDisabled by remember(item.id) { mutableStateOf(false) }
     var lastHoldPreviewAt by remember(item.id) { mutableLongStateOf(0L) }
+    var seekPreviewTargetMs by remember(item.id) { mutableStateOf<Long?>(null) }
+    var seekPreviewBaseMs by remember(item.id) { mutableLongStateOf(0L) }
+    var seekPreviewDir by remember(item.id) { mutableIntStateOf(0) }
+    var seekPreviewTierSec by remember(item.id) { mutableIntStateOf(0) }
+    var seekPreviewChapter by remember(item.id) { mutableStateOf<String?>(null) }
+    var seekPreviewJob by remember(item.id) { mutableStateOf<Job?>(null) }
+    fun cancelSeekPreview(reason: String) {
+        seekPreviewJob?.cancel()
+        seekPreviewJob = null
+        seekPreviewTargetMs?.let { PageLog.add("seekPreview cancelled reason=$reason targetMs=$it") }
+        seekPreviewTargetMs = null
+        seekPreviewBaseMs = 0L
+        seekPreviewDir = 0
+        seekPreviewTierSec = 0
+        seekPreviewChapter = null
+        seekHoldActive = false
+        previewActive = false
+        previewFrame = null
+        previewTargetMs = null
+        seekHoldDelta = 0L
+    }
+    fun maybeRefreshTrickplay(targetMs: Long) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        // previewTargetMs is a LaunchedEffect key, so only advance it when the 700ms gate opens.
+        if (now - lastHoldPreviewAt >= 700L) {
+            previewTargetMs = targetMs
+            previewFrame = null
+            lastHoldPreviewAt = now
+        }
+    }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
     var pendingManualAudio by remember(item.id) { mutableStateOf<Pair<String, Int>?>(null) }
     fun rememberConfirmedAudio(index: Int?) {
@@ -994,6 +1031,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(item.id, sessionGeneration) {
+        cancelSeekPreview("load-changed")
         initialLoadPending = false
         delay(400)
         if (!firstFrameRendered && error == null) initialLoadPending = true
@@ -1172,6 +1210,7 @@ fun PlayerScreen(
     }
 
     fun reportError(msg: String) {
+        cancelSeekPreview("terminal-error")
         error = msg
     }
 
@@ -2901,6 +2940,7 @@ fun PlayerScreen(
 
     DisposableEffect(item.id) {
         onDispose {
+            cancelSeekPreview("page-exit")
             reportStopInAppScope()
             prewarmJob?.cancel()
             cancelCreditsCountdown("player-disposed")
@@ -2969,49 +3009,96 @@ fun PlayerScreen(
         }
     }
 
+    fun dismissSpeedPanel() {
+        if (quickPanel != QuickPanel.SPEED) return
+        restoreMenuFocusUntil = android.os.SystemClock.elapsedRealtime() + 300L
+        quickPanel = QuickPanel.NONE
+    }
+
     fun beginSeekHold(direction: Int, repeatCount: Int) {
-        val now = android.os.SystemClock.elapsedRealtime()
-        seekLastKeyAt = now
-        if (repeatCount > 0) {
-            return
-        }
-        seekHoldJob?.cancel()
-        seekHoldDirection = direction
-        seekHoldActive = false
-        seekHoldDelta = direction * seekStepMs
-        seekBy(direction * seekStepMs)
+        seekLastKeyAt = android.os.SystemClock.elapsedRealtime()
+        if (duration <= 0L) return
+        if (seekPreviewTargetMs != null && seekPreviewDir == direction) return
+
+        val base = seekPreviewTargetMs ?: position
+        seekPreviewDir = direction
+        seekPreviewBaseMs = base
+        seekPreviewTierSec = seekStepSeconds
+        seekPreviewChapter = null
+        val stepMs = seekStepSeconds * 1000L
+        val target = (base + direction * stepMs).coerceIn(0L, duration)
+        seekPreviewTargetMs = target
+        seekHoldActive = true
+        previewActive = true
+        seekHint = buildSeekPreviewHint(direction, seekStepSeconds, target, null)
+        maybeRefreshTrickplay(target)
+
+        seekPreviewJob?.cancel()
         val generation = sessionGeneration
-        seekHoldJob = instanceScope.launch {
-            delay(600)
-            if (!isCurrentLoad(generation)) return@launch
-            if (seekHoldDirection != direction) return@launch
-            seekHoldActive = true
-            previewActive = true
-            while (isCurrentLoad(generation) && seekHoldDirection == direction && android.os.SystemClock.elapsedRealtime() - seekLastKeyAt < 1_500L && kotlin.math.abs(seekHoldDelta) < 120_000L) {
-                seekBy(direction * seekStepMs)
-                seekHoldDelta += direction * seekStepMs
-                delay(350)
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        seekPreviewJob = instanceScope.launch {
+            delay(500L)
+            while (isCurrentLoad(generation)) {
+                val active = seekPreviewTargetMs
+                if (active == null || seekPreviewDir != direction) break
+                val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+                val incSec: Int
+                val intervalMs: Long
+                when {
+                    elapsed < 2_000L -> { incSec = seekStepSeconds; intervalMs = 200L }
+                    elapsed < 4_000L -> { incSec = seekStepSeconds * 3 / 2; intervalMs = 160L }
+                    elapsed < 7_000L -> { incSec = seekStepSeconds * 2; intervalMs = 130L }
+                    else -> { incSec = seekStepSeconds * 3; intervalMs = 120L }
+                }
+                delay(intervalMs)
+                val cur = seekPreviewTargetMs ?: break
+                if (seekPreviewDir != direction) break
+                val raw = (cur + direction * incSec * 1000L).coerceIn(0L, duration)
+                if (raw == cur) continue
+                var next = raw
+                var chapterName: String? = null
+                if (incSec <= 45) {
+                    val hit = chapters.firstOrNull { kotlin.math.abs(it.startMs - raw) <= 2_000L }
+                    if (hit != null) {
+                        next = hit.startMs
+                        chapterName = hit.name
+                    }
+                }
+                seekPreviewTargetMs = next
+                seekPreviewTierSec = incSec
+                seekPreviewChapter = chapterName
+                seekHint = buildSeekPreviewHint(direction, incSec, next, chapterName)
+                maybeRefreshTrickplay(next)
             }
-            seekHoldJob = null
-            previewActive = false
-            previewFrame = null
-            previewTargetMs = null
-            seekHoldDirection = 0
-            seekHoldActive = false
-            seekHoldDelta = 0L
+            seekPreviewJob = null
         }
     }
 
     fun endSeekHold(direction: Int) {
-        if (seekHoldDirection != direction) return
-        seekHoldJob?.cancel()
+        if (seekPreviewDir != direction) return
+        seekPreviewJob?.cancel()
+        seekPreviewJob = null
+        val target = seekPreviewTargetMs
+        seekPreviewTargetMs = null
+        seekPreviewBaseMs = 0L
+        seekPreviewDir = 0
+        seekPreviewTierSec = 0
+        seekPreviewChapter = null
+        seekHoldActive = false
         seekHoldJob = null
         previewActive = false
         previewFrame = null
         previewTargetMs = null
         seekHoldDirection = 0
-        seekHoldActive = false
         seekHoldDelta = 0L
+        if (target == null) return
+        if (target == position) {
+            seekHint = formatTime(target)
+            return
+        }
+        dismissSpeedPanel()
+        seekPlayerTo(target)
+        seekHint = "已跳转 ${formatTime(target)}"
     }
 
     fun dispatchHiddenInput(event: HiddenPlaybackEvent): Boolean {
@@ -3036,7 +3123,13 @@ fun PlayerScreen(
     }
     LaunchedEffect(optionMenu, quickPanel, error, sessionGeneration) {
         // A new load, menu or terminal error cancels the previous capture; KeyUp cannot fire short.
+        if (optionMenu || quickPanel != QuickPanel.NONE || error != null || seekPreviewTargetMs != null) {
+            cancelSeekPreview("input-context-change")
+        }
         dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
+    }
+    LaunchedEffect(controlsVisible) {
+        if (!controlsVisible) cancelSeekPreview("controls-hidden")
     }
     val inputLifecycleOwner = LocalLifecycleOwner.current
     val hostActiveEngine by rememberUpdatedState(activeEngine)
@@ -3420,12 +3513,6 @@ fun PlayerScreen(
         restoreMenuFocusUntil = android.os.SystemClock.elapsedRealtime() + 300L
         quickPanel = QuickPanel.NONE
         runCatching { triggerFocus.requestFocus() }
-    }
-
-    fun dismissSpeedPanel() {
-        if (quickPanel != QuickPanel.SPEED) return
-        restoreMenuFocusUntil = android.os.SystemClock.elapsedRealtime() + 300L
-        quickPanel = QuickPanel.NONE
     }
 
     BackHandler {
@@ -4052,13 +4139,16 @@ fun PlayerScreen(
                         focusRequester = seekBarFocus,
                         upFocus = playFocus,
                         stepMs = seekStepMs,
-                        onFocusedChange = { controlHasFocus = it },
-                        onSeek = { target ->
-                            dismissSpeedPanel()
-                            seekPlayerTo(target)
+                        onFocusedChange = {
+                            if (!it) endSeekHold(seekPreviewDir)
+                            controlHasFocus = it
                         },
+                        onSeekHold = { dir -> beginSeekHold(dir, 0) },
+                        onSeekRelease = { endSeekHold(seekPreviewDir) },
                         bufferedMs = bufferedMsForBar,
                         chapters = chapters,
+                        previewTargetMs = seekPreviewTargetMs,
+                        previewTierSeconds = seekPreviewTierSec,
                     )
                     Spacer(Modifier.height(4.dp))
                     if (duration > 0L) {
