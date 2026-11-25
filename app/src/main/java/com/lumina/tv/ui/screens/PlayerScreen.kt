@@ -4148,7 +4148,6 @@ fun PlayerScreen(
                         bufferedMs = bufferedMsForBar,
                         chapters = chapters,
                         previewTargetMs = seekPreviewTargetMs,
-                        previewTierSeconds = seekPreviewTierSec,
                     )
                     Spacer(Modifier.height(4.dp))
                     if (duration > 0L) {

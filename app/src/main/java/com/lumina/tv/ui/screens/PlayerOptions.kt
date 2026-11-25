@@ -139,7 +139,6 @@ internal fun SeekBar(
     bufferedMs: Long = -1L,
     chapters: List<MediaChapter> = emptyList(),
     previewTargetMs: Long? = null,
-    previewTierSeconds: Int = 0,
 ) {
     var focused by remember { mutableStateOf(false) }
     val playedRatio = if (duration > 0L) {

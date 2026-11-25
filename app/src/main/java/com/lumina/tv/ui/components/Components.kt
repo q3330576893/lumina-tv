@@ -98,7 +98,6 @@ import dev.chrisbanes.haze.hazeEffect
 import androidx.compose.animation.core.EaseOutCubic
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.coroutineScope
@@ -269,9 +268,10 @@ private fun FocusFamily.spec(): FocusSpec = when (this) {
  * 未选中直接返回 this；选中时在内容背后叠 3 层逐渐外扩、逐渐变淡的圆角光晕，
  * 再补一圈 1dp 的半透明白内环（圆角与卡片一致）。
  */
-internal fun Modifier.posterFocusGlow(strength: Float, corner: Dp, accent: Color): Modifier {
+internal fun Modifier.posterFocusGlow(strength: () -> Float, corner: Dp, accent: Color): Modifier {
     return this.drawBehind {
-        if (strength <= 0.001f) return@drawBehind
+        val s = strength()
+        if (s <= 0.001f) return@drawBehind
         val cornerPx = corner.toPx()
         val layers = arrayOf(
             3.dp.toPx() to 0.10f,
@@ -280,7 +280,7 @@ internal fun Modifier.posterFocusGlow(strength: Float, corner: Dp, accent: Color
         )
         layers.forEach { (expand, alpha) ->
             drawRoundRect(
-                color = accent.copy(alpha = alpha * strength),
+                color = accent.copy(alpha = alpha * s),
                 topLeft = Offset(-expand, -expand),
                 size = Size(size.width + expand * 2f, size.height + expand * 2f),
                 cornerRadius = CornerRadius(cornerPx + expand),
@@ -291,9 +291,9 @@ internal fun Modifier.posterFocusGlow(strength: Float, corner: Dp, accent: Color
         drawRoundRect(
             brush = Brush.verticalGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = 0.85f * strength),
-                    accent.copy(alpha = 0.45f * strength),
-                    Color.White.copy(alpha = 0.20f * strength),
+                    Color.White.copy(alpha = 0.85f * s),
+                    accent.copy(alpha = 0.45f * s),
+                    Color.White.copy(alpha = 0.20f * s),
                 ),
             ),
             topLeft = Offset(inset, inset),
@@ -428,7 +428,7 @@ fun PosterCard(
     val targetLift = if (focusedNow) -4f else 0f
     val targetAlpha = when (role) {
         PosterFocusRole.FOCUSED -> 1f
-        PosterFocusRole.NEIGHBOR -> 0.78f
+        PosterFocusRole.NEIGHBOR -> 0.80f
         PosterFocusRole.REST -> 0.92f
     }
     val scale = remember { Animatable(targetScale) }
@@ -499,20 +499,16 @@ fun PosterCard(
                 scaleY = scale.value
                 translationY = lift.value.dp.toPx()
                 rotationY = rotY.value
-                cameraDistance = 18f * density
+                cameraDistance = 15f * density
                 transformOrigin = TransformOrigin.Center
                 alpha = alphaCard.value
                 shape = cardShape
                 clip = false
+                this.shadowElevation = shadowElevation.value.dp.toPx()
+                ambientShadowColor = Accent.copy(alpha = 0.30f)
+                spotShadowColor = Accent.copy(alpha = 0.45f)
             }
-            .shadow(
-                elevation = shadowElevation.value.dp,
-                shape = cardShape,
-                clip = false,
-                ambientColor = Accent.copy(alpha = 0.30f),
-                spotColor = Accent.copy(alpha = 0.45f),
-            )
-            .posterFocusGlow(glow.value, cardCorner, Accent)
+            .posterFocusGlow({ glow.value }, cardCorner, Accent)
             .onPreviewKeyEvent { event ->
                 if (onMenuKey != null && event.type == KeyEventType.KeyDown && event.key == Key.Menu &&
                     event.nativeKeyEvent.repeatCount == 0
