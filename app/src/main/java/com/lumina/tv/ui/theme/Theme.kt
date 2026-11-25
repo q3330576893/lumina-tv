@@ -28,12 +28,13 @@ val TextSub = Color(0xFF91A0BA)
 /** 主题预设 */
 data class ThemePreset(val key: String, val label: String, val accent: Color, val accent2: Color)
 
+// 降低饱和度、拉近双色色相，避免“蓝紫渐变”的通用感；金色采用香槟调而非亮黄。
 val THEME_PRESETS = listOf(
-    ThemePreset("blue", "琉璃蓝", Color(0xFF6EA8FF), Color(0xFF9B8CFF)),
-    ThemePreset("purple", "星紫", Color(0xFFB48CFF), Color(0xFF8CA8FF)),
-    ThemePreset("teal", "青碧", Color(0xFF4FD8C4), Color(0xFF6EA8FF)),
-    ThemePreset("pink", "樱粉", Color(0xFFFF8FB8), Color(0xFFC48CFF)),
-    ThemePreset("gold", "暖金", Color(0xFFF2C46D), Color(0xFFFF9E7A)),
+    ThemePreset("blue", "靛蓝", Color(0xFF7C9CF5), Color(0xFF5FD3C4)),
+    ThemePreset("purple", "雾紫", Color(0xFFB6A2E8), Color(0xFFF0A6C0)),
+    ThemePreset("teal", "青瓷", Color(0xFF6FD3C7), Color(0xFFA8C8F0)),
+    ThemePreset("pink", "绛粉", Color(0xFFE89BB4), Color(0xFFC9A6E8)),
+    ThemePreset("gold", "鎏金", Color(0xFFE3C08A), Color(0xFFF0DFC0)),
 )
 
 data class BasePreset(
@@ -47,11 +48,15 @@ data class BasePreset(
 )
 
 val BASE_PRESETS = listOf(
-    BasePreset("ink", "深空蓝", Color(0xFF070A12), Color(0xFF0E1424), Color(0x14FFFFFF), Color(0x1FFFFFFF), Color(0x22FFFFFF)),
-    BasePreset("oled", "纯黑", Color(0xFF000000), Color(0xFF0A0A0C), Color(0x17FFFFFF), Color(0x24FFFFFF), Color(0x26FFFFFF)),
-    BasePreset("graphite", "石墨", Color(0xFF111214), Color(0xFF1A1B1E), Color(0x14FFFFFF), Color(0x1FFFFFFF), Color(0x22FFFFFF)),
-    BasePreset("warm", "暖夜", Color(0xFF0B0908), Color(0xFF14100D), Color(0x16FFFFFF), Color(0x21FFFFFF), Color(0x24FFFFFF)),
-    BasePreset("mint", "墨青", Color(0xFF060D0C), Color(0xFF0C1614), Color(0x15FFFFFF), Color(0x20FFFFFF), Color(0x23FFFFFF)),
+    BasePreset(
+        key = "oled",
+        label = "纯黑",
+        bgTop = Color(0xFF000000),
+        bgCard = Color(0xFF0A0A0C),
+        glassFill = Color(0x17FFFFFF),
+        glassStrong = Color(0x24FFFFFF),
+        glassLine = Color(0x26FFFFFF),
+    ),
 )
 
 /** 玻璃质感档位 */
@@ -68,9 +73,9 @@ val GLASS_PRESETS = listOf(
  * Accent / Accent2 保持 val 语义（getter 读取 state），全部既有调用点无需改动。
  */
 object ThemeRuntime {
-    var bgTop by mutableStateOf(Color(0xFF070A12))
+    var bgTop by mutableStateOf(Color(0xFF000000))
         private set
-    var bgCard by mutableStateOf(Color(0xFF0E1424))
+    var bgCard by mutableStateOf(Color(0xFF0A0A0C))
         private set
     var glassFill by mutableStateOf(Color(0x14FFFFFF))
         private set
@@ -78,9 +83,9 @@ object ThemeRuntime {
         private set
     var glassLine by mutableStateOf(Color(0x22FFFFFF))
         private set
-    var accent by mutableStateOf(Color(0xFF6EA8FF))
+    var accent by mutableStateOf(Color(0xFF7C9CF5))
         private set
-    var accent2 by mutableStateOf(Color(0xFF9B8CFF))
+    var accent2 by mutableStateOf(Color(0xFF5FD3C4))
         private set
     var glassStyle by mutableStateOf("frosted")
         private set

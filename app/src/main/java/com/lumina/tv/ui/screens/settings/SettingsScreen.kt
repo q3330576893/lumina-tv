@@ -45,7 +45,6 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -104,11 +103,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
             Modifier
                 .fillMaxSize()
                 .hazeSource(hazeState)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color(0xFF121A26), Color(0xFF0B1018)),
-                    ),
-                ),
+                .background(Color.Black),
         )
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val railWidth = if (maxWidth < 1100.dp) 192.dp else SettingsTokens.RailWidth

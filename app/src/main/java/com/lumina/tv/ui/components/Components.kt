@@ -391,6 +391,7 @@ fun PosterCard(
     width: Dp? = null,
     aspectRatio: Float = 1.5f,
     titleOverlay: Boolean = false,
+    titleAlwaysVisible: Boolean = false,
     focusScale: Float = FocusScale.POSTER_LARGE,
     requestInitialFocus: Boolean = false,
     focusRequester: FocusRequester? = null,
@@ -619,8 +620,8 @@ fun PosterCard(
         }
         if (!titleOverlay) {
             val titleAlpha by animateFloatAsState(
-                targetValue = if (focused) 1f else 0f,
-                animationSpec = tween(durationMillis = 160, delayMillis = 40),
+                targetValue = if (focused || titleAlwaysVisible) 1f else 0f,
+                animationSpec = if (titleAlwaysVisible) tween(durationMillis = 0) else tween(durationMillis = 160, delayMillis = 40),
                 label = "posterTitleAlpha",
             )
             Column(
