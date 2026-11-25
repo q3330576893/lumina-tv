@@ -86,7 +86,7 @@ object B11Checks {
 
     private fun retryableCaches() {
         check(!shouldCacheChapterResult(false, false))
-        check(shouldCacheChapterResult(true, false) && shouldCacheChapterResult(false, true))
+        check(!shouldCacheChapterResult(true, false) && !shouldCacheChapterResult(false, true) && shouldCacheChapterResult(true, true))
         check(tmdbExternalCacheIsFresh(1_000L, 1_299L, 300L))
         check(!tmdbExternalCacheIsFresh(1_000L, 1_300L, 300L))
         check(!tmdbExternalCacheIsFresh(1_100L, 1_000L, 300L))

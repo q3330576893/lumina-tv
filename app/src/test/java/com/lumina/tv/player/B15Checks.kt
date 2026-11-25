@@ -69,12 +69,20 @@ object B15Checks {
 
     private fun v3EngineCircuitBreaker() {
         val base = PlaybackPath("source", "media3", PlaybackDelivery.DIRECT_PLAY, "1", "auto")
-        for (reason in listOf(PlaybackFailureReason.LOAD, PlaybackFailureReason.HTTP,
-            PlaybackFailureReason.INITIALIZATION, PlaybackFailureReason.DECODING)) {
+        for (reason in listOf(PlaybackFailureReason.INITIALIZATION, PlaybackFailureReason.DECODING)) {
             val failures = PlaybackPathFailures()
             failures.recordEngineFailure(PlaybackPathFailure(base.copy(engine = "mpv"), reason, 1, "injected fatal failure"))
             check(selectPlaybackEngine("mpv", "mpv", base, failures, mpvAvailable = true) == "media3")
             check(selectPlaybackEngine("mpv", "mpv", base.copy(audioMode = "soft", requestVariant = 2), failures, mpvAvailable = true) == "media3")
+            check(!failures.excludes(base.copy(sourceId = "other", engine = "mpv")))
+            failures.clearForManualRetry() // Manual selection starts a fresh attempt and clears the breaker.
+            check(selectPlaybackEngine("mpv", "mpv", base, failures, mpvAvailable = true) == "mpv")
+        }
+        for (reason in listOf(PlaybackFailureReason.HTTP, PlaybackFailureReason.LOAD)) {
+            val failures = PlaybackPathFailures()
+            failures.recordEngineFailure(PlaybackPathFailure(base.copy(engine = "mpv"), reason, 1, "injected path failure"))
+            check(selectPlaybackEngine("mpv", "mpv", base, failures, mpvAvailable = true) == "media3")
+            check(selectPlaybackEngine("mpv", "mpv", base.copy(audioMode = "soft", requestVariant = 2), failures, mpvAvailable = true) == "mpv")
             check(!failures.excludes(base.copy(sourceId = "other", engine = "mpv")))
             failures.clearForManualRetry() // Manual selection starts a fresh attempt and clears the breaker.
             check(selectPlaybackEngine("mpv", "mpv", base, failures, mpvAvailable = true) == "mpv")
@@ -84,7 +92,7 @@ object B15Checks {
         check(!audioFailures.excludes(base.copy(engine = "mpv", audioMode = "soft")))
         val player = File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText()
         check("enginePinned = \"media3\"" in player && "已切回内置内核 Media3" in player)
-        println("B15 PASS V3: source-scoped engine-wide fatal breaker; audio failures stay path-scoped; manual retry clears breaker")
+        println("B15 PASS V3: source-scoped initialization/decoding breaker; HTTP/load/audio failures stay path-scoped; manual retry clears breaker")
     }
 
     private fun v4CrashStatsJson() {
@@ -164,7 +172,8 @@ object B15Checks {
         check(recovered == "media3")
         check(!failures.excludes(recoveredSoftPath)) // AUDIO_OUTPUT stays scoped to the original media3 path.
         check(!failures.excludes(recoveredPassthroughPath))
-        check(failures.excludes(recoveredSoftPath.copy(engine = "mpv"))) // LOAD trips the source-scoped mpv breaker.
+        check(failures.excludes(mpvPath)) // LOAD excludes the original mpv path.
+        check(!failures.excludes(recoveredSoftPath.copy(engine = "mpv"))) // Unfailed mpv variants remain available.
 
         val normalUrl = "Opening https://example.invalid/Videos/stream?DeviceId=33a8cd48625f455e&variant=503"
         check(!isMpvHttpFailureLog(20, normalUrl))
@@ -178,7 +187,7 @@ object B15Checks {
 
         val terminalSelection = selectPlaybackEngine("mpv", "media3", recoveredPassthroughPath, failures, mpvAvailable = true)
         check(terminalSelection != null && recovered == "media3")
-        println("B15 PASS V5: explicit mpv choice, then Media3 AUDIO_OUTPUT -> automatic mpv -> LOAD breaker -> Media3 soft/passthrough; diagnostics do not dead-end")
+        println("B15 PASS V5: explicit mpv choice, then Media3 AUDIO_OUTPUT -> automatic mpv -> path-scoped LOAD failure -> Media3 soft/passthrough; diagnostics do not dead-end")
     }
 
 }

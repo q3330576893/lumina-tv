@@ -96,11 +96,15 @@ internal object B2SessionChecks {
             check(store(B2MemoryPrefs(killed.values)).read(migrate = false) == a)
         }
         val fallback = B2MemoryPrefs()
-        check(store(fallback) { null }.save(b))
-        check((fallback.values[SessionStore.KEY] as String).startsWith("plain:"))
-        check(store(fallback) { null }.read() == b)
-        check(store(fallback).read() == b)
+        // R6-04/R7-4: 加密不可用时必须拒绝写入，且不得留下任何明文副本。
+        check(!store(fallback) { null }.save(b))
+        check(fallback.values[SessionStore.KEY] == null)
+        check(SessionStore.LEGACY_KEYS.none(fallback.values::containsKey))
+        check(store(fallback) { null }.read() == null)
+        // 加密能力恢复后必须能正常写入密文。
+        check(store(fallback).save(b))
         check((fallback.values[SessionStore.KEY] as String).startsWith("enc:"))
+        check(store(fallback).read() == b)
         val oldCiphertext = B2MemoryPrefs(initial.mapKeys { (key, _) ->
             if (key in SessionStore.LEGACY_KEYS) "enc_$key" else key
         }.mapValues { (key, value) -> if (key.startsWith("enc_")) checkNotNull(encrypt(value as String)) else value })
@@ -117,10 +121,10 @@ internal object B2SessionChecks {
         val upper = server("https://host/Emby", "Upper")
         val lower = server("https://host/emby", "Lower")
         val memory = B2MemoryPrefs(mapOf("secrets_migrated_v1" to true) + legacy(a))
-        val prefs = Prefs(memory.sp)
+        val prefs = Prefs(memory.sp, encrypt, decrypt)
         prefs.upsertServer(upper)
         prefs.upsertServer(lower)
-        check(prefs.savedServerList().map { it.url } == listOf(upper.url, lower.url))
+        check(prefs.savedServerList().map { it.url }.toSet() == setOf(upper.url, lower.url))
         check(prefs.currentSavedServer()?.name == "Upper")
         prefs.upsertServer(upper.copy(url = "HTTPS://HOST:443/Emby/", name = "Upper 2"))
         check(prefs.savedServerList().size == 2 && prefs.currentSavedServer()?.name == "Upper 2")
@@ -149,7 +153,7 @@ internal object B2SessionChecks {
         val oldClient = AppRuntime.client
         val memory = B2MemoryPrefs(mapOf("secrets_migrated_v1" to true))
         try {
-            AppRuntime.prefs = Prefs(memory.sp)
+            AppRuntime.prefs = Prefs(memory.sp, encrypt, decrypt)
             AppRuntime.session = null
             AppRuntime.client = null
             AppRuntime.applySession(a)
