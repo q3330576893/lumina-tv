@@ -592,37 +592,37 @@ fun PlayerScreen(
     var subtitleBg by remember { mutableStateOf(AppRuntime.prefs?.subtitleBg ?: false) }
     var subtitlePreference by remember(item.id) { mutableStateOf(AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource)) }
     var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
-    var seekHoldDirection by remember { mutableIntStateOf(0) }
     var seekHoldActive by remember { mutableStateOf(false) }
-    var seekHoldDelta by remember { mutableLongStateOf(0L) }
-    var seekHoldJob by remember { mutableStateOf<Job?>(null) }
     var hiddenInputState by remember(item.id) { mutableStateOf(HiddenPlaybackInputState()) }
     var seekInFlight by remember { mutableStateOf(false) }
     var pendingSeekTarget by remember { mutableStateOf<Long?>(null) }
     var seekTimeoutJob by remember { mutableStateOf<Job?>(null) }
     var seekConfirmation by remember(item.id) { mutableStateOf<PendingSeekConfirmation?>(null) }
     var seekConfirmationJob by remember(item.id) { mutableStateOf<Job?>(null) }
-    var seekLastKeyAt by remember { mutableLongStateOf(0L) }
     var chapters by remember { mutableStateOf<List<MediaChapter>>(emptyList()) }
     var playbackMarkers by remember(item.id) { mutableStateOf<PlaybackMarkers?>(null) }
     var chapterPanel by remember { mutableStateOf(false) }
     var previewTargetMs by remember(item.id) { mutableStateOf<Long?>(null) }
     var previewFrame by remember(item.id) { mutableStateOf<ByteArray?>(null) }
     var previewActive by remember(item.id) { mutableStateOf(false) }
+    var previewRequestInFlight by remember(item.id) { mutableStateOf(false) }
     var previewDisabled by remember(item.id) { mutableStateOf(false) }
     var lastHoldPreviewAt by remember(item.id) { mutableLongStateOf(0L) }
     var seekPreviewTargetMs by remember(item.id) { mutableStateOf<Long?>(null) }
-    var seekPreviewBaseMs by remember(item.id) { mutableLongStateOf(0L) }
     var seekPreviewDir by remember(item.id) { mutableIntStateOf(0) }
     var seekPreviewTierSec by remember(item.id) { mutableIntStateOf(0) }
     var seekPreviewChapter by remember(item.id) { mutableStateOf<String?>(null) }
     var seekPreviewJob by remember(item.id) { mutableStateOf<Job?>(null) }
+    var seekPreviewTimedOut by remember(item.id) { mutableStateOf(false) }
+    var seekCommitHintTargetMs by remember(item.id) { mutableStateOf<Long?>(null) }
     fun cancelSeekPreview(reason: String) {
         seekPreviewJob?.cancel()
         seekPreviewJob = null
-        seekPreviewTargetMs?.let { PageLog.add("seekPreview cancelled reason=$reason targetMs=$it") }
+        seekPreviewTargetMs?.let {
+            PageLog.add("seekPreview cancelled reason=$reason targetMs=$it")
+            seekHint = null
+        }
         seekPreviewTargetMs = null
-        seekPreviewBaseMs = 0L
         seekPreviewDir = 0
         seekPreviewTierSec = 0
         seekPreviewChapter = null
@@ -630,12 +630,11 @@ fun PlayerScreen(
         previewActive = false
         previewFrame = null
         previewTargetMs = null
-        seekHoldDelta = 0L
     }
     fun maybeRefreshTrickplay(targetMs: Long) {
         val now = android.os.SystemClock.elapsedRealtime()
         // previewTargetMs is a LaunchedEffect key, so only advance it when the 700ms gate opens.
-        if (now - lastHoldPreviewAt >= 700L) {
+        if (!previewRequestInFlight && now - lastHoldPreviewAt >= 700L) {
             previewTargetMs = targetMs
             previewFrame = null
             lastHoldPreviewAt = now
@@ -1049,10 +1048,15 @@ fun PlayerScreen(
         previewFrame = null
         val target = previewTargetMs ?: return@LaunchedEffect
         if (!canShowTrickplay || client == null) return@LaunchedEffect
-        val generation = sessionGeneration
-        delay(160)
-        val frame = catchingRequest { client.getTrickplayFrame(item.id, target) }.getOrNull()
-        if (isCurrentLoad(generation)) previewFrame = frame
+        previewRequestInFlight = true
+        try {
+            val generation = sessionGeneration
+            delay(160)
+            val frame = catchingRequest { client.getTrickplayFrame(item.id, target) }.getOrNull()
+            if (isCurrentLoad(generation)) previewFrame = frame
+        } finally {
+            previewRequestInFlight = false
+        }
     }
 
     fun cancelCreditsCountdown(reason: String, allowRestart: Boolean = true) {
@@ -2980,6 +2984,29 @@ fun PlayerScreen(
         }
     }
 
+    LaunchedEffect(seekConfirmation, seekCommitHintTargetMs) {
+        if (seekConfirmation != null) return@LaunchedEffect
+        val preview = seekPreviewTargetMs
+        if (preview != null) {
+            seekHint = buildSeekPreviewHint(seekPreviewDir, seekPreviewTierSec, preview, seekPreviewChapter)
+        }
+        val committedTarget = seekCommitHintTargetMs ?: return@LaunchedEffect
+        seekCommitHintTargetMs = null
+        val confirmation = phaseTimes.optJSONObject("seekConfirmation")
+        if (preview == null && confirmation?.optLong("targetMs", -1L) == committedTarget &&
+            confirmation.optString("state") == SeekConfirmation.CONFIRMED.name) {
+            seekHint = "已跳转 ${formatTime(committedTarget)}"
+        }
+    }
+
+    LaunchedEffect(item.id, sessionGeneration, seekHoldActive) {
+        if (seekHoldActive) {
+            delay(30_000L)
+            seekPreviewTimedOut = true
+            cancelSeekPreview("hold-timeout")
+        }
+    }
+
     fun seekBy(delta: Long) {
         val max = if (duration > 0) duration else Long.MAX_VALUE
         val current = pendingSeekTarget ?: seekConfirmation?.displayTargetMs ?: position
@@ -3016,13 +3043,15 @@ fun PlayerScreen(
     }
 
     fun beginSeekHold(direction: Int, repeatCount: Int) {
-        seekLastKeyAt = android.os.SystemClock.elapsedRealtime()
         if (duration <= 0L) return
+        if (seekPreviewTimedOut) {
+            if (repeatCount > 0) return
+            seekPreviewTimedOut = false
+        }
         if (seekPreviewTargetMs != null && seekPreviewDir == direction) return
 
         val base = seekPreviewTargetMs ?: position
         seekPreviewDir = direction
-        seekPreviewBaseMs = base
         seekPreviewTierSec = seekStepSeconds
         seekPreviewChapter = null
         val stepMs = seekStepSeconds * 1000L
@@ -3053,12 +3082,19 @@ fun PlayerScreen(
                 delay(intervalMs)
                 val cur = seekPreviewTargetMs ?: break
                 if (seekPreviewDir != direction) break
+                if (duration <= 0L) {
+                    cancelSeekPreview("duration-unknown")
+                    return@launch
+                }
                 val raw = (cur + direction * incSec * 1000L).coerceIn(0L, duration)
                 if (raw == cur) continue
                 var next = raw
                 var chapterName: String? = null
                 if (incSec <= 45) {
-                    val hit = chapters.firstOrNull { kotlin.math.abs(it.startMs - raw) <= 2_000L }
+                    val hit = chapters.asSequence()
+                        .filter { it.startMs in 0L..duration }
+                        .minByOrNull { kotlin.math.abs(it.startMs - raw) }
+                        ?.takeIf { kotlin.math.abs(it.startMs - raw) <= 2_000L }
                     if (hit != null) {
                         next = hit.startMs
                         chapterName = hit.name
@@ -3075,30 +3111,31 @@ fun PlayerScreen(
     }
 
     fun endSeekHold(direction: Int) {
+        val preview = seekPreviewTargetMs ?: return
         if (seekPreviewDir != direction) return
+        if (duration <= 0L) {
+            cancelSeekPreview("duration-unknown")
+            return
+        }
         seekPreviewJob?.cancel()
         seekPreviewJob = null
-        val target = seekPreviewTargetMs
+        val target = preview.coerceIn(0L, duration)
         seekPreviewTargetMs = null
-        seekPreviewBaseMs = 0L
         seekPreviewDir = 0
         seekPreviewTierSec = 0
         seekPreviewChapter = null
         seekHoldActive = false
-        seekHoldJob = null
         previewActive = false
         previewFrame = null
         previewTargetMs = null
-        seekHoldDirection = 0
-        seekHoldDelta = 0L
-        if (target == null) return
         if (target == position) {
             seekHint = formatTime(target)
             return
         }
         dismissSpeedPanel()
+        seekCommitHintTargetMs = target
+        seekHint = "正在跳转 ${formatTime(target)}"
         seekPlayerTo(target)
-        seekHint = "已跳转 ${formatTime(target)}"
     }
 
     fun dispatchHiddenInput(event: HiddenPlaybackEvent): Boolean {
@@ -3138,7 +3175,10 @@ fun PlayerScreen(
     val hostSessionGeneration by rememberUpdatedState(sessionGeneration)
     DisposableEffect(inputLifecycleOwner, exo, item.id) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                cancelSeekPreview("host-${event.name}")
+                dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
+            }
             if (event == Lifecycle.Event.ON_STOP) {
                 // Intent also covers negotiation, Surface waits and temporary audio-focus holds.
                 val playbackRequested = loadCoordinator.desiredPlaying
@@ -3173,16 +3213,9 @@ fun PlayerScreen(
         inputLifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             inputLifecycleOwner.lifecycle.removeObserver(observer)
-            seekHoldJob?.cancel()
-            seekHoldJob = null
-            seekHoldDirection = 0
-            seekHoldActive = false
-            seekHoldDelta = 0L
+            cancelSeekPreview("lifecycle-disposed")
             hiddenInputState = HiddenPlaybackInputState()
             speedState = speedState.boost(false)
-            previewActive = false
-            previewFrame = null
-            previewTargetMs = null
         }
     }
 
@@ -4128,11 +4161,14 @@ fun PlayerScreen(
                             modifier = Modifier.padding(bottom = 6.dp),
                         )
                     }
-                    val bufferedMsForBar = if (activeEngine == "media3") {
+                    val bufferedPlayerMsForBar = if (activeEngine == "media3") {
                         exo.bufferedPosition.takeIf { it >= 0L } ?: -1L
                     } else {
                         mpvState.bufferedPositionMs?.takeIf { it > 0L } ?: -1L
                     }
+                    val bufferedMsForBar = bufferedPlayerMsForBar.takeIf { it >= 0L }?.let {
+                        currentTarget?.playerToContentPositionMs(it)
+                    } ?: -1L
                     SeekBar(
                         position = position,
                         duration = duration,
@@ -4143,8 +4179,8 @@ fun PlayerScreen(
                             if (!it) endSeekHold(seekPreviewDir)
                             controlHasFocus = it
                         },
-                        onSeekHold = { dir -> beginSeekHold(dir, 0) },
-                        onSeekRelease = { endSeekHold(seekPreviewDir) },
+                        onSeekHold = { dir, repeat -> beginSeekHold(dir, repeat) },
+                        onSeekRelease = { dir -> endSeekHold(dir) },
                         bufferedMs = bufferedMsForBar,
                         chapters = chapters,
                         previewTargetMs = seekPreviewTargetMs,

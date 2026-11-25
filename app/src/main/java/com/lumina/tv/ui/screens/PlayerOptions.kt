@@ -134,8 +134,8 @@ internal fun SeekBar(
     upFocus: FocusRequester,
     stepMs: Long,
     onFocusedChange: (Boolean) -> Unit = {},
-    onSeekHold: (Int) -> Unit = {},
-    onSeekRelease: () -> Unit = {},
+    onSeekHold: (Int, Int) -> Unit = { _, _ -> },
+    onSeekRelease: (Int) -> Unit = {},
     bufferedMs: Long = -1L,
     chapters: List<MediaChapter> = emptyList(),
     previewTargetMs: Long? = null,
@@ -151,11 +151,6 @@ internal fun SeekBar(
     } else {
         0f
     }
-    val drawnPlayed = if (bufferedRatio > 0f) {
-        minOf(playedRatio, bufferedRatio)
-    } else {
-        playedRatio
-    }
     Box(
         Modifier
             .fillMaxWidth()
@@ -169,10 +164,10 @@ internal fun SeekBar(
             .focusable(enabled = duration > 0L)
             .onKeyEvent { ev ->
                 when {
-                    ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft -> { onSeekHold(-1); true }
-                    ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionRight -> { onSeekHold(1); true }
-                    ev.type == KeyEventType.KeyUp && ev.key == Key.DirectionLeft -> { onSeekRelease(); true }
-                    ev.type == KeyEventType.KeyUp && ev.key == Key.DirectionRight -> { onSeekRelease(); true }
+                    ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft -> { onSeekHold(-1, ev.nativeKeyEvent.repeatCount); true }
+                    ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionRight -> { onSeekHold(1, ev.nativeKeyEvent.repeatCount); true }
+                    ev.type == KeyEventType.KeyUp && ev.key == Key.DirectionLeft -> { onSeekRelease(-1); true }
+                    ev.type == KeyEventType.KeyUp && ev.key == Key.DirectionRight -> { onSeekRelease(1); true }
                     else -> false
                 }
             },
@@ -197,6 +192,32 @@ internal fun SeekBar(
                 cornerRadius = trackCorner,
             )
 
+            if (bufferedMs >= 0L && bufferedRatio > 0f) {
+                drawRoundRect(
+                    color = Color(0x59FFFFFF),
+                    topLeft = Offset(0f, 0f),
+                    size = Size(
+                        (bufferedRatio * trackWidth).coerceAtLeast(size.height),
+                        size.height,
+                    ),
+                    cornerRadius = trackCorner,
+                )
+            }
+
+            val playedW = playedRatio * trackWidth
+            if (playedW > 0f) {
+                drawRoundRect(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(Accent, Accent2),
+                        startX = 0f,
+                        endX = playedW,
+                    ),
+                    topLeft = Offset(0f, 0f),
+                    size = Size(playedW.coerceAtLeast(size.height), size.height),
+                    cornerRadius = trackCorner,
+                )
+            }
+
             if (duration >= 60_000L && chapters.isNotEmpty()) {
                 val tickH = 8.dp.toPx()
                 val minGap = 4.dp.toPx()
@@ -217,32 +238,6 @@ internal fun SeekBar(
                             lastX = x
                         }
                     }
-            }
-
-            if (bufferedMs >= 0L && bufferedRatio > 0f) {
-                drawRoundRect(
-                    color = Color(0x59FFFFFF),
-                    topLeft = Offset(0f, 0f),
-                    size = Size(
-                        (bufferedRatio * trackWidth).coerceAtLeast(size.height),
-                        size.height,
-                    ),
-                    cornerRadius = trackCorner,
-                )
-            }
-
-            val playedW = drawnPlayed * trackWidth
-            if (playedW > 0f) {
-                drawRoundRect(
-                    brush = Brush.horizontalGradient(
-                        colors = listOf(Accent, Accent2),
-                        startX = 0f,
-                        endX = playedW,
-                    ),
-                    topLeft = Offset(0f, 0f),
-                    size = Size(playedW.coerceAtLeast(size.height), size.height),
-                    cornerRadius = trackCorner,
-                )
             }
 
             val radius = 7.dp.toPx()
