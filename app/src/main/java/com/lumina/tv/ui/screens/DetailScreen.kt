@@ -75,7 +75,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
@@ -85,6 +84,11 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -124,7 +128,9 @@ import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.PosterFocusDir
 import com.lumina.tv.ui.components.PosterFocusRole
+import com.lumina.tv.ui.components.DetailHeroParallax
 import com.lumina.tv.ui.components.DetailVideoBackground
+import com.lumina.tv.ui.components.rememberDetailHeroDrift
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.Glass
@@ -152,7 +158,6 @@ import androidx.compose.ui.window.DialogProperties
 import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.components.FrostPanel
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -312,6 +317,7 @@ fun DetailScreen(
     val recommendationRevisions by DetailRecommendationCache.revisions.collectAsState()
     val recommendationRevision = recommendationRevisions[accountScope] ?: 0L
     val detailHazeState = remember { HazeState() }
+    val heroDrift = rememberDetailHeroDrift()
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
     var loadFailed by remember(id, accountScope) { mutableStateOf(false) }
@@ -399,7 +405,10 @@ fun DetailScreen(
     val isPlayed = playedAction.value
     val pageActive = remember(id, client) { java.util.concurrent.atomic.AtomicBoolean(true) }
     androidx.compose.runtime.DisposableEffect(pageActive) {
-        onDispose { pageActive.set(false) }
+        onDispose {
+            pageActive.set(false)
+            heroDrift.reset()
+        }
     }
     fun toggleUserFlag(action: UserFlagMutation, favorite: Boolean) {
         val c = client ?: return
@@ -951,19 +960,28 @@ fun DetailScreen(
         if (extra.isNotEmpty()) item = current.copy(people = extra)
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onPreviewKeyEvent { ev ->
+                if (ev.type == KeyEventType.KeyDown) {
+                    when (ev.key) {
+                        Key.DirectionLeft -> { heroDrift.nudge(-1, 0); false }
+                        Key.DirectionRight -> { heroDrift.nudge(1, 0); false }
+                        Key.DirectionUp -> { heroDrift.nudge(0, -1); false }
+                        Key.DirectionDown -> { heroDrift.nudge(0, 1); false }
+                        else -> false
+                    }
+                } else false
+            }
+    ) {
         val it0 = item
         if (it0 != null) {
-            AsyncImage(
-                model = client?.backdropUrl(it0, 1920),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().blur(42.dp).hazeSource(detailHazeState),
-            )
-            AsyncImage(
-                model = client?.backdropUrl(it0, 1920),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
+            DetailHeroParallax(
+                backdropUrl = client?.backdropUrl(it0, 1920),
+                drift = heroDrift,
+                hazeState = detailHazeState,
+                parallaxEnabled = !previewActive,
                 modifier = Modifier.fillMaxSize(),
             )
             // Navigation animations keep this detail page composed; remove the preview immediately.
