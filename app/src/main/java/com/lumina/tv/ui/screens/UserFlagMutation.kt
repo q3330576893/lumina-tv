@@ -3,7 +3,10 @@ package com.lumina.tv.ui.screens
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
 /** One accepted toggle at a time. Own this state per item, never per reused detail screen. */
@@ -31,12 +34,25 @@ internal class UserFlagMutation(initial: Boolean = false) {
         edited = true
         pending = true
         value = target
-        scope.launch {
+        // Enter the finally block even if the owner was cancelled before this click.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-                request(target).fold(
-                    onSuccess = { actual -> value = actual; onSuccess(actual) },
-                    onFailure = { failure -> value = old; onFailure(failure) },
-                )
+                val actual = try {
+                    coroutineContext.ensureActive()
+                    val result = request(target).getOrThrow()
+                    coroutineContext.ensureActive()
+                    result
+                } catch (cancelled: CancellationException) {
+                    value = old
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    value = old
+                    coroutineContext.ensureActive()
+                    onFailure(failure)
+                    return@launch
+                }
+                value = actual
+                onSuccess(actual)
             } finally {
                 pending = false
             }

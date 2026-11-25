@@ -58,7 +58,9 @@ fun DiagExportDialog(
                 withContext(Dispatchers.IO) {
                     val output = context.contentResolver.openOutputStream(uri)
                         ?: error("无法打开目标文件")
-                    source.inputStream().use { input -> output.use { input.copyTo(it) } }
+                    output.use { destination ->
+                        source.inputStream().use { input -> input.copyTo(destination) }
+                    }
                 }
             }.onSuccess {
                 Toast.makeText(context, "诊断包已保存到所选位置", Toast.LENGTH_LONG).show()

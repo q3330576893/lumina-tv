@@ -17,6 +17,7 @@ import com.lumina.tv.player.MpvAvailabilitySnapshot
 import com.lumina.tv.player.PlaybackLoadDetails
 import com.lumina.tv.player.PlaybackLoadKey
 import com.lumina.tv.ui.screens.SEARCH_REQUEST_TIMEOUT_SECONDS
+import com.lumina.tv.ui.screens.UserFlagMutation
 import com.lumina.tv.ui.screens.finishPlaybackLoadFailure
 import com.lumina.tv.ui.screens.runSearchPageRequest
 import com.lumina.tv.ui.screens.searchErrorPresentation
@@ -24,7 +25,11 @@ import com.lumina.tv.ui.screens.searchFailureMessage
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -64,6 +69,9 @@ object B16Checks {
             }
             verify("W1 nested timeout and successful null") { budgetOwnership() }
             verify("W17 four exports and stale load keys") { diagnosticOwnership() }
+            verify("W-B3 user flag thrown and returned failures") { userFlagFailures() }
+            verify("W-B3 user flag cancellation rollback") { userFlagCancellation() }
+            verify("W-B3 bounded identity-based crash causes") { crashCauseChains() }
             playback.await()
             first.await()
             append.await()
@@ -232,6 +240,111 @@ object B16Checks {
             check(switched.errors.isNull("loadFailure") && switched.errors.isNull("media3"))
             println("B16 PASS W17 successful mpv initialization followed by Media3")
         }
+    }
+
+    private suspend fun userFlagFailures() {
+        val uncaught = mutableListOf<Throwable>()
+        val parent = SupervisorJob()
+        val owner = CoroutineScope(parent + Dispatchers.Unconfined +
+            CoroutineExceptionHandler { _, failure -> uncaught += failure })
+        try {
+            for (returnedFailure in listOf(false, true)) {
+                val action = UserFlagMutation(initial = true)
+                val failure = RequestTimeoutException(20_000L)
+                var feedback = 0
+                action.toggle(owner, { target ->
+                    check(!target && !action.value && action.pending)
+                    if (returnedFailure) Result.failure(failure) else throw failure
+                }, { error("Failed mutation must not report success") }, {
+                    check(it === failure && action.value && action.pending)
+                    feedback++
+                })
+                check(action.value && !action.pending && feedback == 1 && parent.isActive && uncaught.isEmpty())
+                action.toggle(owner, { Result.success(it) }, { check(!it) }, { throw it })
+                check(!action.value && !action.pending && uncaught.isEmpty())
+            }
+            val budget = UserFlagMutation()
+            var timedOut = false
+            budget.toggle(owner, { target -> withRequestBudget(0) { Result.success(target) } },
+                { error("Expired request budget must not report success") }, {
+                    check(it is RequestTimeoutException)
+                    timedOut = true
+                })
+            check(timedOut && !budget.value && !budget.pending && parent.isActive && uncaught.isEmpty())
+        } finally {
+            parent.cancelAndJoin()
+        }
+    }
+
+    private suspend fun userFlagCancellation() {
+        for (mode in listOf("thrown", "returned", "caller", "wrapped")) {
+            val uncaught = mutableListOf<Throwable>()
+            val parent = SupervisorJob()
+            val owner = CoroutineScope(parent + Dispatchers.Unconfined +
+                CoroutineExceptionHandler { _, failure -> uncaught += failure })
+            try {
+                val action = UserFlagMutation(initial = true)
+                val gate = CompletableDeferred<Unit>()
+                val cancelled = CancellationException("cancel mutation: $mode")
+                var feedback = 0
+                action.toggle(owner, {
+                    try {
+                        gate.await()
+                    } catch (failure: CancellationException) {
+                        if (mode == "wrapped") return@toggle Result.failure(RequestTimeoutException(20_000L))
+                        throw failure
+                    }
+                    if (mode == "returned") Result.failure(cancelled) else throw cancelled
+                }, { feedback++ }, { feedback++ })
+                check(!action.value && action.pending)
+                val request = parent.children.single()
+                var completion: Throwable? = null
+                request.invokeOnCompletion { completion = it }
+                if (mode == "caller" || mode == "wrapped") request.cancel(cancelled) else gate.complete(Unit)
+                request.join()
+                check(request.isCancelled && completion === cancelled)
+                check(action.value && !action.pending && feedback == 0 && parent.isActive && uncaught.isEmpty())
+            } finally {
+                parent.cancelAndJoin()
+            }
+        }
+        val parent = SupervisorJob().apply { cancel() }
+        val owner = CoroutineScope(parent + Dispatchers.Unconfined)
+        val action = UserFlagMutation()
+        var touched = false
+        action.toggle(owner, { touched = true; Result.success(it) }, { touched = true }, { touched = true })
+        check(!action.value && !action.pending && !touched)
+        parent.join()
+    }
+
+    private fun crashCauseChains() {
+        for (size in listOf(1, 32, 33, 80)) {
+            val causes = List(size) { IllegalStateException("cause $it") }
+            causes.zipWithNext().forEach { (cause, next) -> cause.initCause(next) }
+            val chain = collectCrashCauseChain(causes.first())
+            check(chain.frames.size == minOf(size, 32) && chain.frames.indices.all { chain.frames[it] === causes[it] })
+            check(if (size > 32) chain.truncation?.contains("limit=32") == true else chain.truncation == null)
+        }
+        val first = IllegalStateException("first")
+        val second = IllegalStateException("second")
+        first.initCause(second)
+        second.initCause(first)
+        val cycle = collectCrashCauseChain(first)
+        check(cycle.frames.size == 2 && cycle.truncation?.contains("cycle") == true)
+        val self = object : Throwable("self") { override val cause: Throwable get() = this }
+        val selfCycle = collectCrashCauseChain(self)
+        check(selfCycle.frames.single() === self && selfCycle.truncation?.contains("cycle") == true)
+
+        class EqualCause(cause: Throwable?) : Throwable("equal", cause) {
+            override fun equals(other: Any?) = other is EqualCause
+            override fun hashCode() = 0
+        }
+        val leaf = EqualCause(null)
+        val middle = EqualCause(leaf)
+        val root = EqualCause(middle)
+        val distinct = collectCrashCauseChain(root)
+        check(distinct.frames.size == 3 && distinct.frames[0] === root &&
+            distinct.frames[1] === middle && distinct.frames[2] === leaf && distinct.truncation == null)
     }
 
     private fun newLoad(generation: Int, itemId: String) = PlaybackLoadDetails(PlaybackLoadKey(generation, itemId, SOURCE.id))

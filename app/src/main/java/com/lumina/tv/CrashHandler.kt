@@ -20,7 +20,26 @@ import java.io.File
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.IdentityHashMap
 import java.util.Locale
+
+internal data class CrashCauseChain(val frames: List<Throwable>, val truncation: String?)
+
+internal fun collectCrashCauseChain(throwable: Throwable): CrashCauseChain {
+    val frames = mutableListOf<Throwable>()
+    val seen = IdentityHashMap<Throwable, Boolean>()
+    var current: Throwable? = throwable
+    while (current != null && frames.size < 32 && seen.put(current, true) == null) {
+        frames += current
+        current = current.cause
+    }
+    val truncation = when {
+        current == null -> null
+        seen.containsKey(current) -> "[Cause chain truncated: cycle detected]"
+        else -> "[Cause chain truncated: limit=32]"
+    }
+    return CrashCauseChain(frames, truncation)
+}
 
 object CrashHandler {
     private fun root(context: Context) = context.getExternalFilesDir(null) ?: context.filesDir
@@ -99,7 +118,8 @@ object CrashHandler {
     }
 
     @Synchronized private fun writeCrash(context: Context, thread: Thread, t: Throwable) {
-        val frames = generateSequence(t as Throwable?) { it.cause }.toList()
+        val chain = collectCrashCauseChain(t)
+        val frames = chain.frames
         val fingerprint = MessageDigest.getInstance("SHA-1").digest(
             frames.firstOrNull()?.stackTrace.orEmpty().take(3).joinToString("\n") { "${it.className}.${it.methodName}:${it.lineNumber}" }.toByteArray()
         ).joinToString("") { "%02x".format(it) }
@@ -116,6 +136,7 @@ object CrashHandler {
                 appendLine("Cause #${i + 1}: ${cause.javaClass.name}: ${cause.message}")
                 cause.stackTrace.take(30).forEach { appendLine("  at $it") }
             }
+            chain.truncation?.let { appendLine(it) }
             appendLine("\n[指纹]\n$fingerprint")
         }
         val safe = DiagExporter.sanitize(report)

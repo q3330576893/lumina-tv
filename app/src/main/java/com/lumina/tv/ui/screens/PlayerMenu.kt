@@ -67,6 +67,7 @@ import kotlinx.coroutines.delay
 
 internal val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 internal fun OptionMenu(
     exo: ExoPlayer,
@@ -131,6 +132,13 @@ internal fun OptionMenu(
 
     val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.length > 0 }
     val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
+    val playerAudioTracks = if (activeEngine == "media3") audioGroups.flatMap { group ->
+        (0 until group.length).map { group to it }
+    }.filter { (group, index) ->
+        audioMapping.embyFor(Media3TrackKey(group.mediaTrackGroup, index)) == null
+    } else emptyList()
+    val hasAudioControls = audioStreams.isNotEmpty() || playerAudioTracks.isNotEmpty() ||
+        (activeEngine == "mpv" && mpvUncertainAudio.isNotEmpty())
 
     var selectedText: Pair<String, Int>? = null
     var selectedAudio: Pair<String, Int>? = null
@@ -149,14 +157,15 @@ internal fun OptionMenu(
     var selectedTab by remember(item.id) { mutableStateOf("字幕") }
     val tabFocuses = remember { tabs.map { FocusRequester() } }
     val contentFocus = remember { FocusRequester() }
+    val hasContentFocusTarget = selectedTab != "音轨" || hasAudioControls
     var contentHasFocus by remember { mutableStateOf(false) }
     var contentFocusRequest by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
         delay(100)
         runCatching { tabFocuses.first().requestFocus() }
     }
-    LaunchedEffect(selectedTab, contentFocusRequest) {
-        if (contentFocusRequest == 0) return@LaunchedEffect
+    LaunchedEffect(selectedTab, contentFocusRequest, hasContentFocusTarget) {
+        if (contentFocusRequest == 0 || !hasContentFocusTarget) return@LaunchedEffect
         contentHasFocus = false
         repeat(15) {
             delay(50)
@@ -190,7 +199,7 @@ internal fun OptionMenu(
                                     left = tabFocuses[(index - 1).coerceAtLeast(0)]
                                     right = tabFocuses[(index + 1).coerceAtMost(tabs.lastIndex)]
                                     up = tabFocuses[index]
-                                    down = contentFocus
+                                    down = if (hasContentFocusTarget) contentFocus else FocusRequester.Cancel
                                 },
                             corner = 8.dp,
                             scaleTo = 1.06f,
@@ -324,15 +333,15 @@ internal fun OptionMenu(
                 }
                 Text("音频输出：$audioStatus", color = TextSub, fontSize = 11.sp)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    audioStreams.forEach { stream ->
+                    audioStreams.forEachIndexed { index, stream ->
                         val label = listOfNotNull(stream.displayTitle ?: stream.title, stream.language, stream.codec?.uppercase()).distinct().joinToString(" · ").ifBlank { "音轨 ${stream.index}" }
                         val decodedTrack = audioMapping.playerFor(stream.index)
                         MenuChip(
                             label = label, width = 148.dp,
                             active = selectedAudioStreamIndex == stream.index,
                             activeColor = Accent,
-                            focusRequester = if (stream == audioStreams.firstOrNull()) contentFocus else null,
-                            onFocusChanged = if (stream == audioStreams.firstOrNull()) ({ contentHasFocus = it }) else null,
+                            focusRequester = if (index == 0) contentFocus else null,
+                            onFocusChanged = if (index == 0) ({ contentHasFocus = it }) else null,
                             onClick = {
                                 val supported = decodedTrack?.let { candidate ->
                                     audioGroups.any { group -> group.mediaTrackGroup == candidate.group &&
@@ -345,21 +354,24 @@ internal fun OptionMenu(
                             },
                         )
                     }
-                    if (activeEngine == "media3") audioGroups.forEach { group ->
-                        for (index in 0 until group.length) {
-                            val key = Media3TrackKey(group.mediaTrackGroup, index)
-                            if (audioMapping.embyFor(key) != null) continue
-                            val format = group.getTrackFormat(index)
-                            MenuChip(label = "播放器音轨 ${format.label ?: format.language ?: (index + 1)}（对应不确定）", width = 210.dp,
-                                active = group.isTrackSelected(index), activeColor = Accent,
-                                onClick = { onPlayerAudioSelected(key, null) })
-                        }
+                    playerAudioTracks.forEachIndexed { position, (group, index) ->
+                        val key = Media3TrackKey(group.mediaTrackGroup, index)
+                        val format = group.getTrackFormat(index)
+                        val firstControl = audioStreams.isEmpty() && position == 0
+                        MenuChip(label = "播放器音轨 ${format.label ?: format.language ?: (index + 1)}（对应不确定）", width = 210.dp,
+                            active = group.isTrackSelected(index), activeColor = Accent,
+                            focusRequester = if (firstControl) contentFocus else null,
+                            onFocusChanged = if (firstControl) ({ contentHasFocus = it }) else null,
+                            onClick = { onPlayerAudioSelected(key, null) })
                     }
-                    if (activeEngine == "mpv") mpvUncertainAudio.forEach { (id, label) ->
+                    if (activeEngine == "mpv") mpvUncertainAudio.forEachIndexed { index, (id, label) ->
+                        val firstControl = audioStreams.isEmpty() && index == 0
                         MenuChip(label = "播放器音轨 $label（对应不确定）", width = 210.dp, active = currentMpvAudioId == id, activeColor = Accent,
+                            focusRequester = if (firstControl) contentFocus else null,
+                            onFocusChanged = if (firstControl) ({ contentHasFocus = it }) else null,
                             onClick = { onPlayerAudioSelected(null, id) })
                     }
-                    if (audioStreams.isEmpty() && audioGroups.isEmpty()) {
+                    if (!hasAudioControls) {
                         Box(Modifier.height(38.dp), contentAlignment = Alignment.Center) {
                             Text("单音轨", color = TextSub.copy(alpha = 0.7f), fontSize = 11.sp)
                         }
