@@ -30,7 +30,10 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -49,16 +52,44 @@ fun SettingsPlayback(
     var endCreditsSeconds by remember { mutableStateOf(AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) }
     var bitrate by remember { mutableStateOf(prefs?.maxStreamingBitrate ?: 120_000_000L) }
     var cacheBytes by remember { mutableStateOf(prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L) }
-    var cacheUsed by remember { mutableStateOf(0L) }
+    var cacheUsed by remember { mutableStateOf<Long?>(null) }
+    var cacheMaintenanceBusy by remember { mutableStateOf(false) }
+    var cacheMaintenanceError by remember { mutableStateOf<String?>(null) }
+    val cacheMaintenanceMutex = remember { Mutex() }
     var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
     var preferredAudioLanguage by remember { mutableStateOf(prefs?.preferredAudioLanguage.orEmpty()) }
     var anime4kMode by remember { mutableStateOf(prefs?.anime4kMode ?: "off") }
 
-    LaunchedEffect(context) {
-        cacheUsed = withContext(Dispatchers.IO) {
-            PlaybackCache.autoTrim(context)
-            PlaybackCache.spaceBytes(context)
+    suspend fun maintainCache(operation: suspend () -> Unit) {
+        cacheMaintenanceMutex.withLock {
+            cacheMaintenanceBusy = true
+            cacheMaintenanceError = null
+            try {
+                val (succeeded, usage) = withContext(Dispatchers.IO) {
+                    val succeeded = try {
+                        operation()
+                        true
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        false
+                    }
+                    succeeded to runCatching { PlaybackCache.spaceBytes(context) }
+                }
+                cacheUsed = usage.getOrNull()
+                cacheMaintenanceError = when {
+                    !succeeded -> "缓存维护失败，请重试"
+                    usage.isFailure -> "无法读取缓存占用，请重试"
+                    else -> null
+                }
+            } finally {
+                cacheMaintenanceBusy = false
+            }
         }
+    }
+
+    LaunchedEffect(context) {
+        maintainCache { PlaybackCache.autoTrim(context).getOrThrow() }
     }
 
     val rowKeys = remember {
@@ -122,19 +153,22 @@ fun SettingsPlayback(
                     bitrate = key.toLong(); prefs?.maxStreamingBitrate = bitrate
                 }, requesters.getValue(rowKeys[4]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[5]))
                 ChoiceRow("playback:playbackCacheBytes", "缓存上限", "每天自动清理一次，超过上限会提前淘汰", cacheOptions, cacheBytes.toString(), { key ->
-                    cacheBytes = key.toLong(); prefs?.playbackCacheBytes = cacheBytes
+                    val selectedBytes = key.toLong()
+                    cacheBytes = selectedBytes; prefs?.playbackCacheBytes = selectedBytes
                     scope.launch {
-                        cacheUsed = withContext(Dispatchers.IO) {
-                            PlaybackCache.setLimit(cacheBytes)
-                            PlaybackCache.autoTrim(context, force = true)
-                            PlaybackCache.spaceBytes(context)
+                        maintainCache {
+                            PlaybackCache.setLimit(selectedBytes)
+                            PlaybackCache.autoTrim(context, force = true).getOrThrow()
                         }
                     }
                 }, requesters.getValue(rowKeys[5]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[4]), downRequester = requesters.getValue(rowKeys[6]))
-                ActionRow("playback:clearCache", "播放缓存", "已用 ${cacheUsed / (1024L * 1024L)} MB / 上限 ${cacheBytes / (1024L * 1024L)} MB · 每天自动清理", "清空", {
-                    scope.launch {
-                        withContext(Dispatchers.IO) { PlaybackCache.clear(context) }
-                        cacheUsed = withContext(Dispatchers.IO) { PlaybackCache.spaceBytes(context) }
+                val usageText = cacheUsed?.let { "已用 ${it / (1024L * 1024L)} MB" } ?: "占用未知"
+                val limitText = if (cacheBytes > 0L) "上限 ${cacheBytes / (1024L * 1024L)} MB" else "缓存已关闭"
+                val cacheDescription = "$usageText / $limitText · 每天自动清理" +
+                    cacheMaintenanceError?.let { " · $it" }.orEmpty()
+                ActionRow("playback:clearCache", "播放缓存", cacheDescription, if (cacheMaintenanceBusy) "处理中" else "清空", {
+                    if (!cacheMaintenanceBusy) scope.launch {
+                        maintainCache { PlaybackCache.clear(context).getOrThrow() }
                     }
                 }, requesters.getValue(rowKeys[6]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[5]), downRequester = requesters.getValue(rowKeys[7]))
                 ToggleRow("playback:forceTranscode", "强制转码", "电视盒子解码异常或画面卡顿时打开", forceTranscode, {

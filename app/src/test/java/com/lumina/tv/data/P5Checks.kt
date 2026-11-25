@@ -2,25 +2,43 @@ package com.lumina.tv.data
 
 import android.content.SharedPreferences
 import com.lumina.tv.ui.screens.loadDetailRecommendations
+import com.lumina.tv.ui.components.VideoSourceProbe
+import com.lumina.tv.ui.components.previewProbeCacheKey
+import com.lumina.tv.ui.components.previewProbeRequestIdentity
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.json.JSONObject
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
+import java.io.File
 import java.lang.reflect.Proxy
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.SocketException
+import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
-/** Account isolation, atomic migration, live recommendation invalidation and reverse-proxy HTTP paths. */
+/** Account isolation, atomic cache commits, credential-scoped probes and reverse-proxy HTTP paths. */
 object P5Checks {
     @JvmStatic fun main(args: Array<String>) = runBlocking {
         addressChecks()
         contentStateChecks()
         previewChecks()
-        withTimeout(20_000L) { recommendationAndHttpChecks() }
-        println("P5 PASS: normalized identity/basePath, account partitions, atomic/idempotent migration, recommendation invalidation, preview versions/recovery, proxy HTTP")
+        homeDiskChecks()
+        withTimeout(20_000L) {
+            previewProbeChecks()
+            recommendationAndHttpChecks()
+        }
+        println("P5 PASS: normalized identity/basePath, account partitions, atomic/idempotent migration, recommendation invalidation, preview versions/recovery, proxy HTTP; R5-04 atomic home commits; R7-3 credential/client-scoped probes")
     }
 
     private fun addressChecks() {
@@ -128,6 +146,138 @@ object P5Checks {
         val corrupt = PreviewCacheRecovery()
         check(corrupt.retry(true, false) && corrupt.shouldRemove(false))
         check(!corrupt.retry(true, false) && !corrupt.shouldRemove(true))
+    }
+
+    private fun homeDiskChecks() {
+        val directory = Files.createTempDirectory("p5-home-disk").toFile()
+        val lock = Any()
+        val account = AtomicReference<String?>("a")
+        val revision = AtomicLong(1L)
+        var now = 100_000L
+        val store = HomeCacheDiskStore(lock, 30_000L, account::get, revision::get) { now }
+        val file = File(directory, "home.json")
+        fun snapshot(write: Boolean = false) = requireNotNull(store.snapshot(file, account.get(), revision.get(), write))
+        fun write(text: String): Boolean = store.write(snapshot(true)) { check(!Thread.holdsLock(lock)); text }
+        try {
+            check(store.snapshot(file, "b", revision.get()) == null)
+            check(store.snapshot(file, "a", 0L) == null)
+            check(write("first") && file.readText() == "first")
+            check(store.snapshot(file, "a", revision.get(), forWrite = true) == null)
+            check(store.read(snapshot()) { check(!Thread.holdsLock(lock)); it } == "first")
+            now += 30_000L
+            val older = snapshot(true)
+            val newer = snapshot(true)
+            check(store.write(newer) { "newest" })
+            check(!store.write(older) { "older" } && file.readText() == "newest")
+
+            store.invalidate()
+            val obsoleteRevision = snapshot(true)
+            revision.incrementAndGet()
+            check(!store.write(obsoleteRevision) { "stale revision" })
+            val obsoleteAccount = snapshot(true)
+            val obsoleteRead = snapshot()
+            account.set("b")
+            check(!store.write(obsoleteAccount) { "wrong account" })
+            check(store.read(obsoleteRead) { it } == null && file.readText() == "newest")
+            account.set("a")
+            store.invalidate()
+
+            val readStarted = CountDownLatch(1)
+            val readRelease = CountDownLatch(1)
+            val result = AtomicReference<String?>("unpublished")
+            val readerSnapshot = snapshot()
+            val reader = thread {
+                result.set(store.read(readerSnapshot) {
+                    check(!Thread.holdsLock(lock))
+                    readStarted.countDown()
+                    check(readRelease.await(3, TimeUnit.SECONDS))
+                    it
+                })
+            }
+            try {
+                check(readStarted.await(3, TimeUnit.SECONDS))
+                synchronized(lock) { revision.incrementAndGet(); store.invalidate() }
+            } finally { readRelease.countDown(); reader.join(3_000L) }
+            check(!reader.isAlive && result.get() == null)
+
+            // A paused serializer must not hold the cache lock or resurrect a removed/account-switched file.
+            for (switchAccount in listOf(false, true)) {
+                store.invalidate()
+                val writeStarted = CountDownLatch(1)
+                val writeRelease = CountDownLatch(1)
+                val committed = AtomicReference<Boolean?>()
+                val pending = snapshot(true)
+                val writer = thread {
+                    committed.set(store.write(pending) {
+                        check(!Thread.holdsLock(lock))
+                        writeStarted.countDown()
+                        check(writeRelease.await(3, TimeUnit.SECONDS))
+                        "stale"
+                    })
+                }
+                try {
+                    check(writeStarted.await(3, TimeUnit.SECONDS))
+                    synchronized(lock) {
+                        if (switchAccount) account.set("b")
+                        store.invalidate(file)
+                    }
+                } finally { writeRelease.countDown(); writer.join(3_000L) }
+                check(!writer.isAlive && committed.get() == false && !file.exists())
+                check(directory.listFiles().orEmpty().none { it.name.endsWith(".tmp") })
+                account.set("a")
+            }
+
+            // A failed replacement leaves the existing document intact and does not consume its retry interval.
+            check(write("retained"))
+            now += 30_000L
+            check(!store.write(snapshot(true)) { throw java.io.IOException("encode failure") })
+            check(file.readText() == "retained" && write("retry") && file.readText() == "retry")
+            val blocked = File(directory, "blocked").also { check(it.mkdir()) }
+            File(blocked, "child").writeText("keep")
+            val blockedSnapshot = requireNotNull(store.snapshot(blocked, "a", revision.get(), true))
+            check(!store.write(blockedSnapshot) { "cannot replace a nonempty directory" })
+            check(File(blocked, "child").readText() == "keep")
+        } finally { directory.deleteRecursively() }
+    }
+
+    private suspend fun previewProbeChecks() {
+        val attempts = AtomicInteger()
+        val firstClient = OkHttpClient.Builder().addInterceptor { chain ->
+            attempts.incrementAndGet()
+            val allowed = chain.request().header("Authorization") == "Bearer restored-secret"
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(if (allowed) 200 else 403).message("probe")
+                .header("Content-Type", if (allowed) "video/mp4" else "application/json")
+                .body((if (allowed) "0000ftypvideo" else "{}").toResponseBody()).build()
+        }.build()
+        val secondClient = firstClient.newBuilder().build()
+        val url = "https://preview.example.test/movie.mp4?api_key=url-secret"
+        val bad = linkedMapOf("Authorization" to "Bearer expired-secret", "Cookie" to "SID=cookie-secret")
+        val good = bad + ("Authorization" to "Bearer restored-secret")
+        try {
+            val key = previewProbeCacheKey(url, "media", bad, firstClient)
+            val reordered = linkedMapOf("cookie" to "SID=cookie-secret", "authorization" to "Bearer expired-secret")
+            check(key == previewProbeCacheKey(url, "media", reordered, firstClient))
+            check(key != previewProbeCacheKey(url, "media", good, firstClient))
+            check(key != previewProbeCacheKey(url, "media", bad, secondClient))
+            check(key != previewProbeCacheKey("$url&v=2", "media", bad, firstClient))
+            check(key != previewProbeCacheKey(url, "other-media", bad, firstClient))
+            check(previewProbeRequestIdentity(bad, null) != previewProbeRequestIdentity(good, null))
+            check(key.resourceDigest.matches(Regex("[0-9a-f]{64}")))
+            for (secret in listOf("expired-secret", "restored-secret", "cookie-secret", "url-secret")) {
+                check(secret !in key.toString())
+            }
+            check(VideoSourceProbe.probe(url, "media", bad, firstClient).valid == false && attempts.get() == 1)
+            check(VideoSourceProbe.probe(url, "media", reordered, firstClient).valid == false && attempts.get() == 1)
+            check(VideoSourceProbe.probe(url, "media", good, firstClient).valid == true && attempts.get() == 2)
+            check(VideoSourceProbe.probe(url, "media", good, firstClient).valid == true && attempts.get() == 3)
+            check(VideoSourceProbe.probe(url, "media", bad, secondClient).valid == false && attempts.get() == 4)
+        } finally {
+            firstClient.connectionPool.evictAll()
+            secondClient.connectionPool.evictAll()
+            firstClient.dispatcher.executorService.shutdownNow()
+            secondClient.dispatcher.executorService.shutdownNow()
+        }
     }
 
     private suspend fun recommendationAndHttpChecks() {

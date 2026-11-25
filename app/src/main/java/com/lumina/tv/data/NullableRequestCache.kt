@@ -4,14 +4,19 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
-/** Caches successful values indefinitely and misses for a bounded retry interval. */
+/** Bounds successful values and misses separately; cache hits refresh recency, not the miss TTL. */
 internal class NullableRequestCache<T : Any>(
     private val missTtlMs: Long,
     private val maxEntries: Int,
     private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
-    private val values = LinkedHashMap<String, T>()
-    private val misses = LinkedHashMap<String, Long>()
+    init {
+        require(maxEntries > 0) { "maxEntries must be positive" }
+        require(missTtlMs >= 0L) { "missTtlMs must not be negative" }
+    }
+
+    private val values = LinkedHashMap<String, T>(16, 0.75f, true)
+    private val misses = LinkedHashMap<String, Long>(16, 0.75f, true)
     private val inFlight = HashMap<String, CompletableDeferred<Unit>>()
 
     suspend fun getOrLoad(key: String, load: suspend () -> T?): T? {
@@ -51,14 +56,16 @@ internal class NullableRequestCache<T : Any>(
                 val result = load()
                 currentCoroutineContext().ensureActive()
                 synchronized(this) {
+                    val now = nowMs()
+                    misses.entries.removeAll { it.value <= now }
                     if (result == null) {
-                        misses[key] = nowMs() + missTtlMs
+                        misses[key] = if (now > Long.MAX_VALUE - missTtlMs) Long.MAX_VALUE else now + missTtlMs
                     } else {
                         values[key] = result
                         misses.remove(key)
                     }
-                    if (values.size > maxEntries) values.clear()
-                    if (misses.size > maxEntries) misses.clear()
+                    trimToCapacity(values)
+                    trimToCapacity(misses)
                 }
                 return result
             } finally {
@@ -67,6 +74,14 @@ internal class NullableRequestCache<T : Any>(
                 }
                 pending.complete(Unit)
             }
+        }
+    }
+
+    private fun <V> trimToCapacity(entries: LinkedHashMap<String, V>) {
+        val oldest = entries.entries.iterator()
+        while (entries.size > maxEntries && oldest.hasNext()) {
+            oldest.next()
+            oldest.remove()
         }
     }
 }

@@ -4,11 +4,16 @@ import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.setValue
+import com.lumina.tv.AppRuntime
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /**
  * 进程内媒体库缓存：避免每次返回首页 / 详情页都重新拉全套数据。
@@ -50,59 +55,62 @@ object LibraryCache {
     private val details = LinkedHashMap<String, DetailData>()
     private data class SeasonEpisodesEntry(val items: List<MediaItem>, val fetchedAt: Long)
     private val seasonEpisodes = HashMap<String, SeasonEpisodesEntry>()
-    private val homeWriteTimes = HashMap<String, Long>()
+    private val homeDisk = HomeCacheDiskStore(this, HOME_WRITE_INTERVAL,
+        currentAccount = { AppRuntime.session?.let { identityScope(it.baseUrl, it.userId) } },
+        currentRevision = { userDataRevision })
 
     private fun homeFile(context: Context, baseUrl: String, userId: String) =
         File(context.filesDir, "home_cache_${stableCacheDigest(baseUrl, userId)}.json")
 
-    suspend fun readHome(context: Context, baseUrl: String, userId: String): HomeData? = withContext(Dispatchers.IO) {
-        synchronized(this@LibraryCache) {
-            runCatching {
-                val json = JSONObject(homeFile(context, baseUrl, userId).readText())
+    suspend fun readHome(context: Context, baseUrl: String, userId: String): HomeData? {
+        val snapshot = synchronized(this) {
+            homeDisk.snapshot(homeFile(context, baseUrl, userId), identityScope(baseUrl, userId), userDataRevision)
+        } ?: return null
+        return withContext(Dispatchers.IO) {
+            homeDisk.read(snapshot) { text ->
+                val json = JSONObject(text)
                 val savedAt = json.optLong("savedAt", 0L)
-                if (savedAt <= 0L) return@runCatching null
-                val cacheAt = if (System.currentTimeMillis() - savedAt > DISK_HOME_TTL) 0L else savedAt
-                HomeData(
-                    resume = json.readItems("resume"), latest = json.readItems("latest"),
-                    movies = json.readItems("movies"), series = json.readItems("series"),
-                    favorites = json.readItems("favorites"), genres = emptyList(),
-                    views = json.readViews(), at = cacheAt,
-                )
-            }.getOrNull()
+                if (savedAt <= 0L) null else {
+                    val cacheAt = if (System.currentTimeMillis() - savedAt > DISK_HOME_TTL) 0L else savedAt
+                    HomeData(
+                        resume = json.readItems("resume"), latest = json.readItems("latest"),
+                        movies = json.readItems("movies"), series = json.readItems("series"),
+                        favorites = json.readItems("favorites"), genres = emptyList(),
+                        views = json.readViews(), at = cacheAt,
+                    )
+                }
+            }
         }
     }
 
     suspend fun writeHome(context: Context, baseUrl: String, userId: String, data: HomeData,
-        revision: Long = userDataRevision) = withContext(Dispatchers.IO) {
-        synchronized(this@LibraryCache) {
-            if (revision != userDataRevision) return@withContext
-            val file = homeFile(context, baseUrl, userId)
-            synchronized(homeWriteTimes) {
-                val now = System.currentTimeMillis()
-                if (now - (homeWriteTimes[file.name] ?: 0L) < HOME_WRITE_INTERVAL) return@withContext
-                homeWriteTimes[file.name] = now
-            }
-            runCatching {
-                val json = JSONObject().put("savedAt", data.at)
-                listOf("resume" to data.resume, "latest" to data.latest, "movies" to data.movies,
-                    "series" to data.series, "favorites" to data.favorites).forEach { (key, items) ->
+        revision: Long = userDataRevision) {
+        val (snapshot, saved) = synchronized(this) {
+            val ticket = homeDisk.snapshot(homeFile(context, baseUrl, userId), identityScope(baseUrl, userId),
+                revision, forWrite = true) ?: return
+            ticket to data.copy(resume = data.resume.toList(), latest = data.latest.toList(),
+                movies = data.movies.toList(), series = data.series.toList(), favorites = data.favorites.toList(),
+                genres = data.genres.toList(), views = data.views.toList())
+        }
+        withContext(Dispatchers.IO) {
+            val requestContext = currentCoroutineContext()
+            homeDisk.write(snapshot) {
+                requestContext.ensureActive()
+                val json = JSONObject().put("savedAt", saved.at)
+                listOf("resume" to saved.resume, "latest" to saved.latest, "movies" to saved.movies,
+                    "series" to saved.series, "favorites" to saved.favorites).forEach { (key, items) ->
                     json.put(key, JSONArray().also { array -> items.forEach { array.put(it.toJson()) } })
                 }
-                json.put("views", JSONArray().also { array -> data.views.forEach { view ->
+                json.put("views", JSONArray().also { array -> saved.views.forEach { view ->
                     array.put(JSONObject().put("id", view.id).put("name", view.name).put("type", view.type).putNullable("imageTag", view.imageTag))
                 } })
-                val temp = File(file.parentFile, "${file.name}.tmp")
-                temp.writeText(json.toString())
-                if (!temp.renameTo(file)) {
-                    temp.copyTo(file, overwrite = true)
-                    temp.delete()
-                }
+                json.toString()
             }
         }
     }
 
     fun removeHomeDisk(context: Context, baseUrl: String, userId: String) {
-        runCatching { homeFile(context, baseUrl, userId).delete() }
+        homeDisk.invalidate(homeFile(context, baseUrl, userId))
     }
 
     private fun MediaItem.toJson() = JSONObject()
@@ -254,7 +262,6 @@ object LibraryCache {
         synchronized(this) {
             FavoritesCache.invalidate(favoritesQueryKey(baseUrl, userId), itemId, favorite, played)
             removeHomeDisk(context, baseUrl, userId)
-            homeWriteTimes.remove(homeFile(context, baseUrl, userId).name)
             home = null
             details.clear()
             seasonEpisodes.clear()
@@ -298,7 +305,85 @@ object LibraryCache {
             seasonEpisodes.clear()
             browse.clear()
             gridPositions.clear()
-            homeWriteTimes.clear()
+            homeDisk.invalidate()
         }
+    }
+}
+
+/** Payload I/O runs outside [lock]; publication and invalidation share its short commit boundary. */
+internal class HomeCacheDiskStore(
+    private val lock: Any,
+    private val writeIntervalMs: Long,
+    private val currentAccount: () -> String?,
+    private val currentRevision: () -> Long,
+    private val nowMs: () -> Long = System::currentTimeMillis,
+) {
+    internal data class Snapshot(val file: File, val account: String, val revision: Long,
+        val generation: Long, val writeId: Long?)
+
+    private var generation = 0L
+    private var nextWriteId = 0L
+    private val writes = HashMap<File, Long>()
+    private val writeTimes = HashMap<File, Long>()
+
+    fun snapshot(file: File, account: String?, revision: Long, forWrite: Boolean = false): Snapshot? = synchronized(lock) {
+        if (account == null || account != currentAccount() || revision != currentRevision()) return@synchronized null
+        val lastWrite = writeTimes[file]
+        if (forWrite && lastWrite != null && nowMs() - lastWrite < writeIntervalMs) return@synchronized null
+        val writeId = if (forWrite) (++nextWriteId).also { writes[file] = it } else null
+        Snapshot(file, account, revision, generation, writeId)
+    }
+
+    private fun isCurrent(snapshot: Snapshot): Boolean = snapshot.generation == generation &&
+        snapshot.account == currentAccount() && snapshot.revision == currentRevision() &&
+        (snapshot.writeId == null || writes[snapshot.file] == snapshot.writeId)
+
+    fun <T> read(snapshot: Snapshot, decode: (String) -> T): T? {
+        val data = try {
+            decode(snapshot.file.readText())
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        return synchronized(lock) { if (isCurrent(snapshot)) data else null }
+    }
+
+    fun write(snapshot: Snapshot, encode: () -> String): Boolean {
+        var temp: File? = null
+        return try {
+            if (!synchronized(lock) { isCurrent(snapshot) && snapshot.writeId != null }) return false
+            val payload = encode()
+            val staged = File.createTempFile(snapshot.file.name, ".tmp", snapshot.file.parentFile)
+            temp = staged
+            staged.writeText(payload)
+            synchronized(lock) {
+                if (!isCurrent(snapshot)) return@synchronized false
+                // Same-directory atomic replacement; never copy over the live file on failure.
+                Files.move(staged.toPath(), snapshot.file.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                writeTimes[snapshot.file] = nowMs()
+                true
+            }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            false
+        } finally {
+            runCatching { temp?.delete() }
+        }
+    }
+
+    fun invalidate(file: File? = null) = synchronized(lock) {
+        generation++
+        if (file == null) {
+            writes.clear()
+            writeTimes.clear()
+        } else {
+            writes.remove(file)
+            writeTimes.remove(file)
+            runCatching { file.delete() }
+        }
+        Unit
     }
 }

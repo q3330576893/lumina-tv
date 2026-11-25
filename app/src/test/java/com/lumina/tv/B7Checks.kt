@@ -61,17 +61,18 @@ import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 object B7Checks {
     @JvmStatic fun main(args: Array<String>) = runBlocking {
         heroNegativeTtlAndInFlight()
+        heroCacheCapacity()
         metadataCancellationAndDeadline()
         metadataClientsAndNestedBudgets()
         if (args.contentEquals(arrayOf("network"))) {
-            println("B7 NETWORK PASS: Q-025 TTL/single-flight/cancelled owners and waiters; Q-026 real TMDB/MDBList JSON readers, body cancellation and inherited whole-chain deadlines")
+            println("B7 NETWORK PASS: Q-025 TTL/single-flight/cancelled owners and waiters; R4-16 bounded LRU/miss retention; Q-026 real TMDB/MDBList JSON readers, body cancellation and inherited whole-chain deadlines")
             return@runBlocking
         }
         heroFocusPolicy()
         hdrPolicyAndDiagnostics()
         searchContinuation()
         sourceWiring()
-        println("B7 PASS: Q-025 negative TTL/single-flight; Q-026 cancel/deadline for TMDB and MDBList transport; Q-032 Hero action focus; E7-A2 HDR capability routing/diagnostics; E7-B5 direct result count and real Compose empty-page continuation capped at 3")
+        println("B7 PASS: Q-025 negative TTL/single-flight; R4-16 bounded LRU/miss retention; Q-026 cancel/deadline for TMDB and MDBList transport; Q-032 Hero action focus; E7-A2 HDR capability routing/diagnostics; E7-B5 direct result count and real Compose empty-page continuation capped at 3")
     }
 
     private suspend fun heroNegativeTtlAndInFlight() = coroutineScope {
@@ -130,6 +131,54 @@ object B7Checks {
         liveOwnerRelease.complete("survived")
         check(liveOwner.await() == "survived")
         check(shared.getOrLoad("cancel-waiter") { error("success should be cached") } == "survived")
+    }
+
+    private suspend fun heroCacheCapacity() {
+        for (capacity in listOf(0, -1, Int.MIN_VALUE)) {
+            check(runCatching { NullableRequestCache<String>(1_000L, capacity) }.exceptionOrNull() is IllegalArgumentException)
+        }
+        check(runCatching { NullableRequestCache<String>(-1L, 2) }.exceptionOrNull() is IllegalArgumentException)
+
+        var now = 1_000L
+        val cache = NullableRequestCache<String>(1_000L, 2) { now }
+        check(cache.getOrLoad("hot") { "hot" } == "hot")
+        check(cache.getOrLoad("cold") { "cold" } == "cold")
+        check(cache.getOrLoad("hot") { error("hot value lost") } == "hot")
+        check(cache.getOrLoad("new") { "new" } == "new")
+        check(cache.getOrLoad("hot") { error("overflow removed a hot value") } == "hot")
+        check(cache.getOrLoad("new") { error("overflow cleared the inserted value") } == "new")
+        check(cache.getOrLoad("cold") { "reloaded" } == "reloaded")
+
+        check(cache.getOrLoad("miss-hot") { null } == null)
+        check(cache.getOrLoad("miss-cold") { null } == null)
+        check(cache.getOrLoad("miss-hot") { error("negative cache lost") } == null)
+        check(cache.getOrLoad("miss-new") { null } == null)
+        check(cache.getOrLoad("miss-hot") { error("overflow removed a hot miss") } == null)
+        check(cache.getOrLoad("miss-new") { error("overflow cleared all misses") } == null)
+        check(cache.getOrLoad("miss-cold") { "retried" } == "retried")
+        repeat(10) { index -> cache.getOrLoad("value-$index") { "value" } }
+        check(cache.getOrLoad("miss-new") { error("value churn removed an unexpired miss") } == null)
+        now += 1_000L
+        check(cache.getOrLoad("miss-hot") { "recovered" } == "recovered") // An evicted miss can recover independently.
+
+        val expiry = NullableRequestCache<String>(1_000L, 2) { now }
+        expiry.getOrLoad("expires-first") { null }
+        now += 500L
+        expiry.getOrLoad("still-valid") { null }
+        now += 499L
+        expiry.getOrLoad("expires-first") { error("miss should still be throttled") }
+        now += 1L
+        expiry.getOrLoad("new-miss") { null }
+        check(expiry.getOrLoad("still-valid") { error("expired hot miss evicted a live miss") } == null)
+        check(expiry.getOrLoad("expires-first") { "recovered" } == "recovered")
+
+        val single = NullableRequestCache<String>(0L, 1) { now }
+        var misses = 0
+        repeat(2) { single.getOrLoad("no-throttle") { misses++; null } }
+        check(misses == 2)
+        single.getOrLoad("a") { "a" }
+        single.getOrLoad("b") { "b" }
+        check(single.getOrLoad("b") { error("capacity one cleared its only value") } == "b")
     }
 
     private suspend fun metadataCancellationAndDeadline() {

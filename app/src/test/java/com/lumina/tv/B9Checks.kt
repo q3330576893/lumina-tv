@@ -19,6 +19,8 @@ import com.lumina.tv.diag.AppLogWriter
 import com.lumina.tv.diag.RollingAppLogFile
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.diag.NetLog
+import com.lumina.tv.data.PlaybackCacheStorage
+import java.util.concurrent.atomic.AtomicReference
 
 /** B9 process startup and crash diagnostics regressions; no Android runtime required. */
 object B9Checks {
@@ -32,7 +34,8 @@ object B9Checks {
         processLogFiles()
         processLogBackpressure()
         processLogWiring()
-        println("B9 PASS: Q-036 boot capability; Q-037 bounded exit text/protobuf; Q-038 stats recovery; Q-039 one process handler; Q-040 fresh latest; Q-041 overlay; Q-042 bounded background redacted process logs/rotation")
+        playbackCacheMaintenance()
+        println("B9 PASS: Q-036 boot capability; Q-037 bounded exit text/protobuf; Q-038 stats recovery; Q-039 one process handler; Q-040 fresh latest; Q-041 overlay; Q-042 bounded background redacted process logs/rotation; R8-06 cache disk usage/serialized maintenance/failures")
     }
 
     private fun crashOverlay() {
@@ -328,6 +331,75 @@ object B9Checks {
         check("BAL acceptance unobservable" in receiver && "EXTRA_BOOT_LAUNCH, true" in receiver)
         check("bootCapability.description" in source("ui/screens/settings/SettingsBackend.kt"))
         check("bootLaunch activity_created" in source("MainActivity.kt"))
+    }
+
+    private fun playbackCacheMaintenance() {
+        val parent = Files.createTempDirectory("b9-playback-cache").toFile()
+        val directory = File(parent, "playback_cache").also { check(it.mkdir()) }
+        val lock = Any()
+        val storage = PlaybackCacheStorage(directory, lock)
+        try {
+            val span = File(directory, "span.exo").also { it.writeBytes(ByteArray(513)) }
+            val nested = File(directory, "nested").also { check(it.mkdir()) }
+            File(nested, "index").writeBytes(ByteArray(27))
+            check(storage.spaceBytes() == 540L) // Does not need an enabled cache instance.
+            var deleted = false
+            check(storage.clear(release = { throw IOException("release failed") }, delete = { deleted = true }).isFailure)
+            check(!deleted && storage.spaceBytes() == 540L)
+            check(storage.clear(release = {}, delete = {}).isFailure) // A silent/partial platform delete is a failure.
+            check(storage.clear(release = {}, delete = { check(span.delete()) }).isFailure)
+            check(storage.spaceBytes() == 27L)
+
+            val deleting = CountDownLatch(1)
+            val allowDelete = CountDownLatch(1)
+            val tryingToOpen = CountDownLatch(1)
+            val opened = CountDownLatch(1)
+            val result = AtomicReference<Result<Unit>?>(null)
+            val openFailure = AtomicReference<Throwable?>()
+            val order = mutableListOf<String>()
+            val clearer = thread {
+                result.set(storage.clear(release = {
+                    check(Thread.holdsLock(lock))
+                    order += "release"
+                }, delete = { target ->
+                    check(Thread.holdsLock(lock) && order == listOf("release"))
+                    deleting.countDown()
+                    check(allowDelete.await(3, TimeUnit.SECONDS))
+                    check(target.deleteRecursively())
+                    order += "delete"
+                }))
+            }
+            var opener: Thread? = null
+            try {
+                check(deleting.await(3, TimeUnit.SECONDS))
+                opener = thread {
+                    tryingToOpen.countDown()
+                    try {
+                        synchronized(lock) {
+                            check(order == listOf("release", "delete"))
+                            check(directory.mkdir())
+                            File(directory, "new-span.exo").writeBytes(ByteArray(4))
+                            order += "open"
+                        }
+                    } catch (error: Throwable) { openFailure.set(error) }
+                    finally { opened.countDown() }
+                }
+                check(tryingToOpen.await(3, TimeUnit.SECONDS))
+                check(!opened.await(100, TimeUnit.MILLISECONDS))
+            } finally {
+                allowDelete.countDown()
+                clearer.join(3_000L)
+                opener?.join(3_000L)
+            }
+            check(!clearer.isAlive && opener?.isAlive == false && openFailure.get() == null)
+            check(result.get()?.isSuccess == true && order == listOf("release", "delete", "open"))
+            check(storage.spaceBytes() == 4L) // Reopened data was not deleted by the earlier clear.
+            check(storage.clear(release = {}, delete = { check(it.deleteRecursively()) }).isSuccess)
+            check(storage.spaceBytes() == 0L)
+        } finally { parent.deleteRecursively() }
+
+        val settings = source("ui/screens/settings/SettingsPlayback.kt")
+        check("PlaybackCache.clear(context).getOrThrow()" in settings && "缓存维护失败，请重试" in settings)
     }
 
     private fun source(path: String): String = File("src/main/java/com/lumina/tv", path).readText()

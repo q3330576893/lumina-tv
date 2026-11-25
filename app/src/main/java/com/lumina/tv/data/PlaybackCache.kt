@@ -7,6 +7,7 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheKeyFactory
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.diag.PageLog
@@ -39,8 +40,7 @@ object PlaybackCache {
         val normalized = bytes.coerceAtLeast(0L)
         synchronized(this) {
             if (limitBytes == normalized) return
-            runCatching { instance?.release() }
-            instance = null
+            releaseLocked()
             limitBytes = normalized
         }
     }
@@ -49,17 +49,26 @@ object PlaybackCache {
 
     fun get(context: Context): SimpleCache? {
         synchronized(this) {
-            initialize(context)
-            if (!enabled()) return null
-            instance?.let { return it }
             return runCatching {
-                SimpleCache(
-                    File(context.applicationContext.filesDir, "playback_cache"),
-                    LeastRecentlyUsedCacheEvictor(limitBytes),
-                    StandaloneDatabaseProvider(context.applicationContext),
-                ).also { instance = it }
+                initialize(context)
+                if (!enabled()) return null
+                openCacheLocked(context)
             }.getOrNull()
         }
+    }
+
+    private fun cacheDirectory(context: Context) = File(context.applicationContext.filesDir, "playback_cache")
+
+    /** Callers hold this object's lock, including maintenance while normal cache use is disabled. */
+    private fun openCacheLocked(context: Context): SimpleCache = instance ?: SimpleCache(
+        cacheDirectory(context),
+        if (enabled()) LeastRecentlyUsedCacheEvictor(limitBytes) else NoOpCacheEvictor(),
+        StandaloneDatabaseProvider(context.applicationContext),
+    ).also { instance = it }
+
+    private fun releaseLocked() {
+        val cache = instance ?: return
+        try { cache.release() } finally { instance = null }
     }
 
     fun dataSourceFactory(context: Context, upstream: androidx.media3.datasource.DataSource.Factory): CacheDataSource.Factory? =
@@ -72,38 +81,47 @@ object PlaybackCache {
                 .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
         }.getOrNull()
 
-    fun spaceBytes(context: Context): Long = get(context)?.cacheSpace ?: 0L
+    fun spaceBytes(context: Context): Long = PlaybackCacheStorage(cacheDirectory(context), this).spaceBytes()
 
-    fun clear(context: Context) {
-        runCatching { get(context)?.let { cache -> cache.keys.toList().forEach(cache::removeResource) } }
-    }
+    fun clear(context: Context): Result<Unit> = PlaybackCacheStorage(cacheDirectory(context), this).clear(
+        release = ::releaseLocked,
+        delete = { directory ->
+            val database = StandaloneDatabaseProvider(context.applicationContext)
+            try { SimpleCache.delete(directory, database) } finally { database.close() }
+        },
+    ).onFailure { PageLog.add("playbackCache clear failed=${it.javaClass.simpleName}") }
 
-    suspend fun autoTrim(context: Context, force: Boolean = false) = withContext(Dispatchers.IO) {
-        initialize(context)
-        if (!enabled()) return@withContext
-        val now = System.currentTimeMillis()
-        if (!force && now - (AppRuntime.prefs?.playbackCacheLastTrimAt ?: 0L) < DAY_MS) return@withContext
-        runCatching {
-            val cache = get(context)
-            if (cache != null) {
-                val spans = cache.keys.flatMap { key ->
-                    cache.getCachedSpans(key).mapNotNull { span -> span.file?.let { file -> span to file } }
-                }
-                spans.filter { (_, file) -> now - file.lastModified() >= DAY_MS }
-                    .forEach { (span, _) -> runCatching { cache.removeSpan(span) } }
+    suspend fun autoTrim(context: Context, force: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
+        synchronized(this@PlaybackCache) {
+            runCatching {
+                initialize(context)
+                val now = System.currentTimeMillis()
+                if (!force && now - (AppRuntime.prefs?.playbackCacheLastTrimAt ?: 0L) < DAY_MS) return@runCatching
+                if (cacheDirectory(context).exists()) {
+                    val cache = openCacheLocked(context)
+                    try {
+                        val spans = cache.keys.flatMap { key ->
+                            cache.getCachedSpans(key).mapNotNull { span -> span.file?.let { file -> span to file } }
+                        }
+                        spans.filter { (_, file) -> now - file.lastModified() >= DAY_MS }
+                            .forEach { (span, _) -> cache.removeSpan(span) }
 
-                val limit = limitBytes
-                if (limit > 0L && cache.cacheSpace > limit * 0.9) {
-                    val oldestFirst = spans.sortedBy { (_, file) -> file.lastModified() }
-                    for ((span, _) in oldestFirst) {
-                        if (cache.cacheSpace <= limit * 0.7) break
-                        runCatching { cache.removeSpan(span) }
+                        val limit = limitBytes
+                        if (limit > 0L && cache.cacheSpace > limit * 0.9) {
+                            val oldestFirst = spans.sortedBy { (_, file) -> file.lastModified() }
+                            for ((span, _) in oldestFirst) {
+                                if (cache.cacheSpace <= limit * 0.7) break
+                                cache.removeSpan(span)
+                            }
+                        }
+                    } finally {
+                        if (!enabled()) releaseLocked()
                     }
                 }
+                AppRuntime.prefs?.playbackCacheLastTrimAt = now
             }
-            AppRuntime.prefs?.playbackCacheLastTrimAt = now
         }.onFailure { error ->
-            PageLog.add("playbackCache autoTrim failed=${error.message ?: error.javaClass.simpleName}")
+            PageLog.add("playbackCache autoTrim failed=${error.javaClass.simpleName}")
         }
     }
 
@@ -138,4 +156,25 @@ object PlaybackCache {
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+}
+
+/** Maintenance shares the instance lock and reports failed/partial deletes instead of claiming success. */
+internal class PlaybackCacheStorage(private val directory: File, private val lock: Any) {
+    fun spaceBytes(): Long = synchronized(lock) { diskBytes(directory) }
+
+    private fun diskBytes(file: File): Long = when {
+        !file.exists() -> 0L
+        file.isFile -> file.length()
+        else -> checkNotNull(file.listFiles()) { "Cannot inspect playback cache" }.sumOf(::diskBytes)
+    }
+
+    fun clear(release: () -> Unit, delete: (File) -> Unit): Result<Unit> = synchronized(lock) {
+        runCatching {
+            release()
+            if (directory.exists()) {
+                delete(directory)
+                check(!directory.exists()) { "Playback cache was only partially cleared" }
+            }
+        }
+    }
 }

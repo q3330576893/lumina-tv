@@ -43,6 +43,7 @@ import com.lumina.tv.data.PreviewCacheRecovery
 import com.lumina.tv.data.previewResourceKey
 import com.lumina.tv.data.catchingRequest
 import com.lumina.tv.data.readCancellable
+import com.lumina.tv.data.stableCacheDigest
 import com.lumina.tv.data.withRequestBudget
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.player.detailPreviewShouldPlay
@@ -50,6 +51,8 @@ import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okio.Buffer
+import java.lang.ref.WeakReference
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -67,13 +70,14 @@ fun DetailVideoBackground(
     loopWholeItem: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    var probeResult by remember(url, mediaKey) { mutableStateOf<String?>(null) }
-    var probeAllowsCache by remember(url, mediaKey) { mutableStateOf(false) }
-    var resourceKey by remember(url, mediaKey) { mutableStateOf(mediaKey) }
-    var contentIsManifest by remember(url, mediaKey) { mutableStateOf(false) }
-    var hlsMalformedFallbackTried by remember(url, mediaKey, previewStage) { mutableStateOf(false) }
+    val probeIdentity = previewProbeRequestIdentity(requestHeaders, requestClient)
+    var probeResult by remember(url, mediaKey, probeIdentity) { mutableStateOf<String?>(null) }
+    var probeAllowsCache by remember(url, mediaKey, probeIdentity) { mutableStateOf(false) }
+    var resourceKey by remember(url, mediaKey, probeIdentity) { mutableStateOf(mediaKey) }
+    var contentIsManifest by remember(url, mediaKey, probeIdentity) { mutableStateOf(false) }
+    var hlsMalformedFallbackTried by remember(url, mediaKey, previewStage, probeIdentity) { mutableStateOf(false) }
 
-    LaunchedEffect(url, mediaKey) {
+    LaunchedEffect(url, mediaKey, probeIdentity) {
         probeResult = null
         probeAllowsCache = false
         contentIsManifest = false
@@ -120,7 +124,7 @@ fun DetailVideoBackground(
     }
 
     if (probeResult == "valid" && !url.isNullOrBlank()) {
-        key(url, resourceKey, playbackStage) {
+        key(url, resourceKey, playbackStage, probeIdentity) {
             DetailVideoPlayback(
                 url = url,
                 mediaKey = resourceKey,
@@ -336,9 +340,37 @@ data class VideoSourceProbeResult(
     val length: String? = null,
 )
 
+/** Only digests enter the process cache; weak client identity neither pins credentials nor aliases hash collisions. */
+internal class PreviewProbeRequestIdentity(private val headersDigest: String, client: OkHttpClient?) {
+    private val clientReference = client?.let { WeakReference(it) }
+    private val clientHash = System.identityHashCode(client)
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PreviewProbeRequestIdentity || headersDigest != other.headersDigest) return false
+        if (clientReference == null) return other.clientReference == null
+        val client = clientReference.get() ?: return false
+        return client === other.clientReference?.get()
+    }
+
+    override fun hashCode(): Int = 31 * headersDigest.hashCode() + clientHash
+}
+
+internal fun previewProbeRequestIdentity(headers: Map<String, String>, client: OkHttpClient?): PreviewProbeRequestIdentity {
+    // Header names are case-insensitive and the last supplied value wins, as in Request.Builder.header.
+    val normalized = headers.entries.associate { it.key.lowercase(Locale.ROOT) to it.value.trim() }.toSortedMap()
+    val digest = stableCacheDigest(*normalized.entries.flatMap { listOf(it.key, it.value) }.toTypedArray())
+    return PreviewProbeRequestIdentity(digest, client)
+}
+
+internal data class PreviewProbeCacheKey(val resourceDigest: String, val requestIdentity: PreviewProbeRequestIdentity)
+
+internal fun previewProbeCacheKey(url: String, mediaKey: String, headers: Map<String, String>, client: OkHttpClient?) =
+    PreviewProbeCacheKey(stableCacheDigest(mediaKey, url), previewProbeRequestIdentity(headers, client))
+
 object VideoSourceProbe {
     private data class Cached(val result: VideoSourceProbeResult, val atMs: Long)
-    private val cache = ConcurrentHashMap<String, Cached>()
+    private val cache = ConcurrentHashMap<PreviewProbeCacheKey, Cached>()
     private val client by lazy {
         OkHttpClient.Builder()
             .connectTimeout(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -356,13 +388,14 @@ object VideoSourceProbe {
 
     suspend fun probe(url: String, mediaKey: String, headers: Map<String, String> = emptyMap(), requestClient: OkHttpClient? = null): VideoSourceProbeResult {
             val now = System.currentTimeMillis()
-            val key = "$mediaKey|$url"
+            val headerSnapshot = headers.toMap()
+            val key = previewProbeCacheKey(url, mediaKey, headerSnapshot, requestClient ?: client)
             cache[key]?.takeIf { now - it.atMs < CACHE_TTL_MS }?.let { return it.result }
             val result = catchingRequest {
                 val builder = Request.Builder().url(url)
                     .header("User-Agent", PREVIEW_USER_AGENT)
                 if (!url.contains(".m3u8", true)) builder.header("Range", "bytes=0-511")
-                headers.forEach { (name, value) -> builder.header(name, value) }
+                headerSnapshot.forEach { (name, value) -> builder.header(name, value) }
                 withRequestBudget(PROBE_TIMEOUT_SECONDS * 1000L) {
                     (requestClient ?: client).readCancellable(builder.build()) { response ->
                     val contentType = response.header("Content-Type").orEmpty()
