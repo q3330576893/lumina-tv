@@ -3,9 +3,14 @@
 面向客厅大屏的 Emby 客户端。基于 Kotlin 与 Jetpack Compose 构建，遥控器优先操作，
 以播放可靠性与界面一致性为核心设计目标。
 
-**当前版本源** v1.24.19（versionCode 163，`app/build.gradle.kts`）· Android 8.0+（minSdk 26）
+**当前版本源** v1.24.20（versionCode 164，`app/build.gradle.kts`）· Android 8.0+（minSdk 26）
 
-2026-11-27 核对：关于页使用 `BuildConfig.VERSION_NAME`，现有版本 APK、unsigned Release 与 Debug APK 的 `aapt2 dump badging` 均为 163 / 1.24.19。此版本号不代表发布已获授权；native 来源发布门禁仍为 **BLOCKED**，详见 [native 来源清单](docs/native-sources.md) 与 [第三方许可](THIRD-PARTY-NOTICES.md)。
+2026-11-27 核对：关于页使用 `BuildConfig.VERSION_NAME`；v1.24.20（164）为 native 播放内核更换版本
+（`dev.jdtech.mpv:libmpv:1.0.0`，二进制实测 mpv v0.41.0 / FFmpeg n8.1）。
+
+native 来源门禁现状：**部分闭环**——新上游 tag、构建脚本与源码归档均可追溯，旧上游"对应源码不可得"问题已通过更换依赖解决；
+但完整对应源码交付（含静态依赖 revision/patch 清单与 NOTICE）尚未完成，因此不宣称完全合规。
+详见 [native 来源清单](docs/native-sources.md) 与 [第三方许可](THIRD-PARTY-NOTICES.md)。设备侧验收项见 [设备验收清单](docs/device-acceptance.md)。
 
 ---
 

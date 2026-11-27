@@ -5,7 +5,19 @@
 
 ---
 
-## 当前工作区：v1.24.19（versionCode 163）
+## v1.24.20（versionCode 164）
+
+2026-11-27 发布。**native 播放内核更换**：`org.jellycine.mpv:libmpv:1.0.4` → `dev.jdtech.mpv:libmpv:1.0.0`。
+
+- 更换原因：旧上游对应源码不可得（无版本 tag、sources.jar 为空、公开 CI 构建失败），无法满足 GPL-3.0 的对应源码义务；新上游 tag 完整、构建脚本公开、源码可追溯。
+- 二进制实测：mpv v0.41.0、FFmpeg n8.1，保留 mediacodec 硬解、libdav1d（AV1）、mbedtls（TLS）、GPL 构建选项；`--disable-filters` 仅关闭 FFmpeg vf 滤镜，不影响 mpv glsl-shaders。
+- 许可：仍为 GPL-3.0-or-later，与本项目 GPL-3.0 一致；wrapper 代码 MIT。详见 `docs/native-sources.md`。
+- 播放器诊断新增 native 版本标识（mpv/FFmpeg/供应方），便于问题定位。
+- 播放器「更多 → 音频解码」现有三档（自动/避免直通/优先直通）在新内核下语义不变。
+- 同时包含 v1.24.19 之后累积的 V6 综合优化 16 单（播放退休许可、音频快照、缓存 schema、收藏分页保护、连播结果分类、协议与签名、焦点与搜索、展示准确性、轨道记忆 v2、诊断 IO、Release CI、依赖校验等）。
+- 已知未验收：真机音频直通/杜比视界/decoder 隔离/连播切换等设备项；详见 `docs/device-acceptance.md`。
+
+## 历史：v1.24.19（versionCode 163）
 
 2026-11-27 技术核对记录，**不是新版本发布记录**。版本取自 `app/build.gradle.kts`，本次未修改版本号；关于页引用 BuildConfig，现有 APK 的 `aapt2 dump badging` 与之相符。原有历史记录从下一节起原样保留；没有补造 v1.22.90 至 v1.24.18 的历史发布说明。
 
