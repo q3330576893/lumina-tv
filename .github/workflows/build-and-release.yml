@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION_NAME: "1.24.19"
-  EXPECTED_VERSION_CODE: "163"
+  EXPECTED_VERSION_NAME: "1.24.20"
+  EXPECTED_VERSION_CODE: "164"
 
 defaults:
   run:
