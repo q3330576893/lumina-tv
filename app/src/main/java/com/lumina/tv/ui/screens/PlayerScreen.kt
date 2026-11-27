@@ -14,6 +14,8 @@ import com.lumina.tv.player.SeekConfirmation
 import com.lumina.tv.player.CERTIFICATE_ERROR_MESSAGE
 import com.lumina.tv.player.MpvTlsPolicy
 import com.lumina.tv.player.MpvRetirementFence
+import com.lumina.tv.player.RetirementBlockedException
+import com.lumina.tv.player.Media3DecoderRetirements
 import com.lumina.tv.player.ServerCertificateErrors
 import com.lumina.tv.player.isCertificateFailure
 import com.lumina.tv.player.HiddenPlaybackKey
@@ -166,6 +168,7 @@ import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.PlaybackCache
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.NextEpisodeResult
 import com.lumina.tv.data.DeviceCodecCapabilities
 import com.lumina.tv.data.MediaChapter
 import com.lumina.tv.data.PlaybackMarkers
@@ -184,7 +187,7 @@ import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.TypeScale
-import com.lumina.tv.player.SubtitleRenderersFactory
+import com.lumina.tv.player.AudioOutputRenderersFactory
 import com.lumina.tv.player.Anime4kConfig
 import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.player.MpvAvailabilityProbe
@@ -194,8 +197,8 @@ import com.lumina.tv.player.PlaybackLoadKey
 import com.lumina.tv.player.shouldSyncMpvAudioTrack
 import com.lumina.tv.player.audioMimeForSourceHint
 import com.lumina.tv.player.MpvAudioDiagnostics
-import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
+import com.lumina.tv.diag.releaseWithDiagnosticSnapshot
 import com.lumina.tv.ui.components.DiagExportDialog
 import com.lumina.tv.player.PlaybackErrorCategory
 import com.lumina.tv.player.PlaybackErrorRoute
@@ -232,6 +235,9 @@ import com.lumina.tv.player.playbackSourceJson
 import com.lumina.tv.player.serverTranscodingAvailable
 import com.lumina.tv.player.withStopPositionSample
 import com.lumina.tv.player.PlaybackWatchdog
+import com.lumina.tv.player.PlaybackLoadPermit
+import com.lumina.tv.player.WatchdogLoadIdentity
+import com.lumina.tv.player.sampleWatchdogTimeline
 import com.lumina.tv.player.WatchdogReason
 import com.lumina.tv.player.StabilityMetrics
 import com.lumina.tv.player.AudioFocusGuard
@@ -241,7 +247,18 @@ import com.lumina.tv.player.audioRouteNeedsRecovery
 import com.lumina.tv.player.AudioCodecMatrix
 import com.lumina.tv.player.AudioRouteMonitor
 import com.lumina.tv.player.AudioSupport
+import com.lumina.tv.player.AudioOutputBinding
+import com.lumina.tv.player.AudioOutputConfidence
+import com.lumina.tv.player.AudioOutputSnapshot
+import com.lumina.tv.player.AudioOutputSnapshotLedger
+import com.lumina.tv.player.Media3AudioPath
+import com.lumina.tv.player.media3AudioPath
 import com.lumina.tv.player.AudioTrackCandidate
+import com.lumina.tv.player.ManualTrackSelection
+import com.lumina.tv.player.TrackMemoryType
+import com.lumina.tv.player.TrackMemoryIdentity
+import com.lumina.tv.player.sameTrackMemoryIdentity
+import com.lumina.tv.player.trackMemoryIdentity
 import com.lumina.tv.player.TrackMapping
 import com.lumina.tv.player.TrackMappingContext
 import com.lumina.tv.player.Media3TrackKey
@@ -264,7 +281,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -295,6 +311,7 @@ private inline fun CoroutineScope.safeLaunch(crossinline block: suspend () -> Un
     }
 
 private fun playbackNetworkMessage(error: Throwable): String {
+    if (error is RetirementBlockedException) return "旧播放资源未能确认释放，已停止新播放"
     val causeChain = generateSequence(error) { it.cause }.toList()
     val message = causeChain.joinToString(" ") { it.message.orEmpty() }
     val status = causeChain.filterIsInstance<com.lumina.tv.data.EmbyException>().firstNotNullOfOrNull { it.httpStatus }
@@ -642,15 +659,6 @@ fun PlayerScreen(
         }
     }
     var subtitleSelectionApplied by remember(item.id) { mutableStateOf(false) }
-    var pendingManualAudio by remember(item.id) { mutableStateOf<Pair<String, Int>?>(null) }
-    fun rememberConfirmedAudio(index: Int?) {
-        val source = playbackSource ?: return
-        val pending = pendingManualAudio ?: return
-        if (pending.first == com.lumina.tv.player.trackMemoryIdentity(source, "Audio") && pending.second == index) {
-            AppRuntime.prefs?.rememberAudioTrack(item.id, pending.second, source)
-            pendingManualAudio = null
-        }
-    }
     var audioMapping by remember(item.id) { mutableStateOf(TrackMapping<Media3TrackKey>(emptyList())) }
     var subtitleMapping by remember(item.id) { mutableStateOf(TrackMapping<Media3TrackKey>(emptyList())) }
     var audioSelectionApplied by remember(item.id) { mutableStateOf(false) }
@@ -742,7 +750,11 @@ fun PlayerScreen(
             .setUserAgent("LuminaTV/1.5 (Android)")
     }
 
-    val subtitleRenderersFactory = remember(item.id) { SubtitleRenderersFactory(context) }
+    val audioOutputLedger = remember(item.id) { AudioOutputSnapshotLedger() }
+    val currentAudioDecodeMode by rememberUpdatedState(audioDecodeMode)
+    val subtitleRenderersFactory = remember(item.id) {
+        AudioOutputRenderersFactory(context) { currentAudioDecodeMode }
+    }
     val fastStart = AppRuntime.prefs?.fastStart != false
     val trackSelector = remember(item.id, rebuildRetry, fastStart) {
         androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context).apply {
@@ -888,6 +900,35 @@ fun PlayerScreen(
     val instanceJob = remember(exo, item.id) { SupervisorJob(scope.coroutineContext[Job]) }
     val instanceScope = remember(instanceJob) { CoroutineScope(scope.coroutineContext + instanceJob) }
     val creditsCountdown = remember(exo, item.id) { CreditsCountdown<MediaItem>(instanceScope, { PageLog.add(it) }) }
+    val inputLifecycleOwner = LocalLifecycleOwner.current
+    var autoNextForeground by remember(inputLifecycleOwner) {
+        mutableStateOf(inputLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    val manualTrackInstance = remember(exo, item.id) { java.util.UUID.randomUUID().toString() }
+    var pendingManualAudio by remember(exo, item.id) { mutableStateOf<ManualTrackSelection?>(null) }
+    var pendingManualSubtitle by remember(exo, item.id) { mutableStateOf<ManualTrackSelection?>(null) }
+    fun manualSelection(source: MediaSource, type: TrackMemoryType, index: Int) = ManualTrackSelection(
+        item.id, source.id, type, index, manualTrackInstance, sessionGeneration,
+        trackMemoryIdentity(source, type.name), source)
+    fun matchesCurrentManual(selection: ManualTrackSelection, source: MediaSource?) = selection.matchesCurrent(
+        item.id, source, selection.type, manualTrackInstance, sessionGeneration, trackMemoryIdentity(source, selection.type.name))
+    fun rememberConfirmedAudio(index: Int?) {
+        val source = playbackSource ?: return
+        val pending = pendingManualAudio ?: return
+        if (matchesCurrentManual(pending, source) && pending.index == index) {
+            AppRuntime.prefs?.rememberAudioTrack(item.id, pending.index, source)
+            pendingManualAudio = null
+        }
+    }
+    fun rememberConfirmedSubtitle(index: Int?) {
+        val source = playbackSource ?: return
+        val pending = pendingManualSubtitle ?: return
+        if (matchesCurrentManual(pending, source) && pending.index == index) {
+            AppRuntime.prefs?.rememberSubtitleTrack(item.id, "track:emby:${pending.index}", source)
+            pendingManualSubtitle = null
+        }
+    }
+    var playbackLoadPermit by remember(exo, item.id) { mutableStateOf<PlaybackLoadPermit?>(null) }
     var media3LoadGeneration by remember(exo, item.id) { mutableIntStateOf(-1) }
     fun isCurrentLoad(generation: Int): Boolean =
         instanceJob.isActive && currentExo === exo && loadCoordinator.accepts(generation)
@@ -899,6 +940,20 @@ fun PlayerScreen(
         if (eventTime.windowIndex !in 0 until eventTime.timeline.windowCount) return false
         return eventTime.timeline.getWindow(eventTime.windowIndex, window).mediaItem.mediaId == "${item.id}:$media3LoadGeneration"
     }
+
+    fun bindAudioOutput(
+        sourceId: String?,
+        trackId: String?,
+        engine: String = activeEngine,
+        generation: Int = sessionGeneration,
+    ): AudioOutputBinding = audioOutputLedger.bind(
+        scopeId = playbackDiagnostics.sessionId,
+        itemId = item.id,
+        sourceId = sourceId,
+        trackId = trackId,
+        engine = engine,
+        generation = generation,
+    )
 
     fun showTimelineNotice(message: String) {
         playbackStatusNotice = message
@@ -1019,9 +1074,25 @@ fun PlayerScreen(
             reportStopInAppScope()
             instanceJob.cancel()
             attachedPlayerView.getAndSet(null)?.player = null
-            runCatching { exo.clearVideoSurface() }
-            runCatching { exo.release() }
-                .onSuccess { PlayerLifecycle.registry.released(exo, "playback-disposed") }
+            val retirement = Media3DecoderRetirements.begin(exo)
+            MpvRetirementFence.track(retirement)
+            var cleanupFailure: Throwable? = null
+            runCatching { exo.clearVideoSurface() }.onFailure { cleanupFailure = it }
+            val released = runCatching { exo.release() }.fold(
+                onSuccess = { true },
+                onFailure = {
+                    if (cleanupFailure == null) cleanupFailure = it else cleanupFailure?.addSuppressed(it)
+                    false
+                },
+            )
+            if (cleanupFailure == null) {
+                Media3DecoderRetirements.released(exo)
+                PlayerLifecycle.registry.released(exo, "playback-disposed")
+            } else {
+                Media3DecoderRetirements.fail(exo, retirement, cleanupFailure!!)
+                PageLog.add("media3 retirement failed gen=$sessionGeneration cause=${cleanupFailure!!::class.java.simpleName}")
+                if (released) PlayerLifecycle.registry.released(exo, "playback-disposed-after-cleanup-error")
+            }
         }
     }
 
@@ -1085,12 +1156,14 @@ fun PlayerScreen(
     }
 
     fun startAutoNext(reportStop: Boolean = true) {
-        if (AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null || onPlayNext == null || playbackPaused()) return
+        if (AppRuntime.prefs?.autoNextEpisode != true || item.seriesId == null || onPlayNext == null || playbackPaused() || !autoNextForeground) return
         val generation = sessionGeneration
-        creditsCountdown.start(
+        val permit = playbackLoadPermit ?: return
+        creditsCountdown.startForLoad(
             seconds = ((AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) / 10).coerceIn(1, 6),
-            next = { client?.getNextEpisode(item)?.takeIf { isCurrentLoad(generation) } },
-            canContinue = { isCurrentLoad(generation) && !playbackPaused() },
+            next = { client?.getNextEpisode(item) ?: NextEpisodeResult.NonRetryableFailure(IllegalStateException("No client")) },
+            loadCoordinator = loadCoordinator, generation = generation, permit = permit,
+            canContinue = { isCurrentLoad(generation) && !reloadPending && error == null && autoNextForeground && !playbackPaused() },
             onComplete = { next -> switchEpisode(next, reportStop) },
         )
     }
@@ -1385,7 +1458,7 @@ fun PlayerScreen(
             else -> "服务器转码也未能恢复播放"
         }
         val recoveryMessage = if (audioMpvKey() in audioMpvAttempts || audioMpvKey() in audioMpvFailures)
-            "软解未能恢复" else "自动恢复次数已用完"
+            "本机解码路径未能恢复" else "自动恢复次数已用完"
         return "该片音轨（$codec）本机无法硬解，$recoveryMessage，$serverMessage。请换片源或音轨。"
     }
 
@@ -1519,7 +1592,7 @@ fun PlayerScreen(
             updateStalled(true)
             if (tryMpv) {
                 audioMpvAttempts += mpvKey
-                audioDecodeNotice = "当前音轨本机无可用解码器，已切换软解内核"
+                audioDecodeNotice = "当前音轨本机解码能力未知，已切换至 mpv 播放路径"
                 engineSwitchTrace.add("audio-recovery:mpv:$reason")
                 PageLog.add("audioRecovery route=mpv-auto reason=$reason")
                 enginePinned = "mpv"
@@ -1533,7 +1606,7 @@ fun PlayerScreen(
                     audioAlternativeAttempts += "$sourceKey:${alternative.group.id}:${alternative.index}"
                     audioRecoveryTrack = alternative
                     audioRecoverySourceId = sourceKey
-                    audioDecodeNotice = "软解未能播放，正在切换本机支持的音轨"
+                    audioDecodeNotice = "当前音轨未能播放，正在切换设备报告支持的音轨"
                     PageLog.add("audioRecovery action=supported-track index=${alternative.index} attempts=${recoveryBudget.attempts}")
                 } else {
                     reloadForceTranscode = true
@@ -1612,6 +1685,7 @@ fun PlayerScreen(
     }
 
     val latestAudioRouteHandler by rememberUpdatedState<(AudioCapabilities) -> Unit> { changedCaps ->
+            audioOutputLedger.routeChanged()
             audioCaps = changedCaps
             val source = playbackSource ?: mediaSources.firstOrNull { it.id == currentSourceId }
             val mpvSelected = if (activeEngine == "mpv") mpvBackend?.currentAudioEmbyIndex() else null
@@ -1623,12 +1697,13 @@ fun PlayerScreen(
             )
             if (currentAudio == null) {
                 PageLog.add("audioRoute selection=unknown action=preserve-user-preference")
+                if (currentTarget != null && !reloadPending) requestPlaybackReload(sessionGeneration)
                 return@rememberUpdatedState
             }
-            val codec = listOfNotNull(currentAudio?.codec, currentAudio?.profile).joinToString(" ").lowercase()
+            val codec = listOfNotNull(currentAudio.codec, currentAudio.profile).joinToString(" ").lowercase()
             val mime = audioMime(codec)
             val enc = AudioCodecMatrix.encoding(mime, codec)
-            audioSupport = AudioCodecMatrix.support(context, enc, currentAudio?.channels ?: 2, currentAudio?.sampleRate ?: 0, changedCaps, mime)
+            audioSupport = AudioCodecMatrix.support(context, enc, currentAudio.channels ?: 2, currentAudio.sampleRate ?: 0, changedCaps, mime)
             audioDecodeNotice = when (audioSupport) {
                 AudioSupport.PASSTHROUGH -> "音频输出已变化：当前音轨可直通"
                 AudioSupport.DECODE_ONLY -> null
@@ -1638,9 +1713,13 @@ fun PlayerScreen(
                 PageLog.add("audioRoute action=recover selectedIndex=${currentAudio.index} support=${audioSupport.name} mode=$audioDecodeMode")
                 if (activeEngine == "mpv") {
                     audioDecodeNotice = "当前音频输出不支持已选轨道，请选择其他音轨"
+                    if (currentTarget != null && !reloadPending) requestPlaybackReload(sessionGeneration)
                 } else {
                     requestAudioRecovery("audio-route-unsupported")
                 }
+            } else if (currentTarget != null && !reloadPending) {
+                // Re-negotiate under the existing load permit so Media3/mpv observes the new route.
+                requestPlaybackReload(sessionGeneration)
             }
     }
     DisposableEffect(context, item.id) {
@@ -1655,12 +1734,23 @@ fun PlayerScreen(
         forceTranscode: Boolean,
         sourceId: String? = currentSourceId,
         audioStreamIndex: Int? = playbackSource?.takeIf { it.id == sourceId }?.let { source ->
-            pendingManualAudio?.takeIf { it.first == com.lumina.tv.player.trackMemoryIdentity(source, "Audio") }?.second
+            pendingManualAudio?.takeIf { matchesCurrentManual(it, source) &&
+                sameTrackMemoryIdentity(it.identity, trackMemoryIdentity(source, "Audio")) }?.index
                 ?: AppRuntime.prefs?.audioTrackFor(item.id, source)
         },
     ) {
         if (!instanceJob.isActive || currentExo !== exo) return
         val c = client ?: return
+        val previousGeneration = sessionGeneration
+        val previousSource = playbackSource
+        val audioForPreparation = pendingManualAudio?.takeIf { matchesCurrentManual(it, previousSource) &&
+            sameTrackMemoryIdentity(it.identity, trackMemoryIdentity(previousSource, "Audio")) }
+        val subtitleForPreparation = pendingManualSubtitle?.takeIf { matchesCurrentManual(it, previousSource) &&
+            sameTrackMemoryIdentity(it.identity, trackMemoryIdentity(previousSource, "Subtitle")) }
+        val droppedManualSelection = pendingManualAudio != null && audioForPreparation == null ||
+            pendingManualSubtitle != null && subtitleForPreparation == null
+        pendingManualAudio = null
+        pendingManualSubtitle = null
         audioMapping = TrackMapping(emptyList())
         subtitleMapping = TrackMapping(emptyList())
         selectedAudioStreamIndex = null
@@ -1693,6 +1783,7 @@ fun PlayerScreen(
         loadJob?.cancel()
         rangeProbeJob?.cancel()
         val generation = loadCoordinator.beginLoad(sourceId)
+        playbackLoadPermit = null
         seekConfirmationJob?.cancel()
         seekConfirmation = null
         pendingSeekTarget = null
@@ -1711,14 +1802,29 @@ fun PlayerScreen(
         dvDecoderPath = null
         failurePhase = "解析"
         playbackDiagnostics.begin(generation, loadStartedAt)
+        bindAudioOutput(sourceId, null, activeEngine, generation)
         mpvBackend?.release("external-load-replaced")
         mpvBackend = null
         mpvState = MpvPlayerController.State()
-        exo.pause()
+        val exoRetirement = Media3DecoderRetirements.begin(exo)
+        MpvRetirementFence.track(exoRetirement)
+        var exoCleanupFailure: Throwable? = null
+        fun retireExoStep(action: () -> Unit) {
+            runCatching(action).onFailure { failure ->
+                if (exoCleanupFailure == null) exoCleanupFailure = failure
+                else exoCleanupFailure?.addSuppressed(failure)
+            }
+        }
+        retireExoStep { exo.pause() }
         // pause() retains MediaCodec and its buffers. Retire the old media before negotiating
         // another load/engine, so mpv cannot start alongside a suspended Media3 decoder.
-        exo.stop()
-        exo.clearMediaItems()
+        retireExoStep { exo.stop() }
+        retireExoStep { exo.clearMediaItems() }
+        if (exoCleanupFailure == null) {
+            Media3DecoderRetirements.finish(exo, exoRetirement)
+        } else {
+            Media3DecoderRetirements.fail(exo, exoRetirement, exoCleanupFailure!!)
+        }
         PageLog.add("playback reload session=${playbackDiagnostics.sessionId} load=${playbackDiagnostics.identity} gen=$generation fromGen=${generation - 1} positionMs=$resumePosition engine=$activeEngine")
         playStartAt = android.os.SystemClock.elapsedRealtime()
         phaseTimes = JSONObject().put("identity", playbackDiagnostics.identityJson())
@@ -1735,26 +1841,26 @@ fun PlayerScreen(
             readyWithoutFrameSince = 0L
             bufferingTimedOut = false
             try {
-                if (withTimeoutOrNull(3_000L) { MpvRetirementFence.await() } == null) {
-                    PageLog.add("mpvRetirementFence timeout, continue load")
-                }
+                val retirementPermit = MpvRetirementFence.awaitPermit()
+                val loadPermit = loadCoordinator.grantPermit(generation, retirementPermit) ?: return@launch
                 if (!isCurrentLoad(generation) || reloadPending) return@launch
+                playbackLoadPermit = loadPermit
                 val maxStreamingBitrate = AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
                 val strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy()
                 val preparedTracks = c.preparePlaybackTracks(item.id, sourceId, audioStreamIndex, strategy,
-                    playbackSource?.takeIf { it.id == sourceId }?.let { com.lumina.tv.player.trackMemoryIdentity(it, "Audio") })
+                    audioForPreparation, subtitleForPreparation)
                 if (!isCurrentLoad(generation) || reloadPending || !loadCoordinator.resolveSource(generation, preparedTracks.source.id)) return@launch
                 details.bindSource(preparedTracks.source.id)
                 if (client === c && AppRuntime.client === c && preparedTracks.availableSources.isNotEmpty()) {
                     mediaSources = preparedTracks.availableSources
                 }
                 val requestVariant = loadCoordinator.requestVariant
-                val cachedTarget = if (requestVariant.stage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, audioStreamIndex, forceDirectNext, maxStreamingBitrate, strategy,
+                val cachedTarget = if (requestVariant.stage == 0) c.cachedPlaybackTarget(item.id, forceTranscode, sourceId, preparedTracks.intent.audioIndex, forceDirectNext, maxStreamingBitrate, strategy,
                     loadIntent, resumePosition, manualAudioStreamSelection, trackIntent = preparedTracks.intent)
                     else null
                 if (requestVariant.stage != 0) PageLog.add("prewarm miss nextId=${item.id} reason=fallback_request")
                 val resolvedTarget = cachedTarget ?: c.resolvePlayback(
-                        item, forceTranscode, sourceId, loadIntent, audioStreamIndex,
+                        item, forceTranscode, sourceId, loadIntent, preparedTracks.intent.audioIndex,
                         forceDirect = forceDirectNext,
                         removeSubtitleParams = requestVariant.removeSubtitleParams,
                         preferDirectStreamUrl = requestVariant.preferDirectStreamUrl,
@@ -1781,8 +1887,13 @@ fun PlayerScreen(
                 failurePhase = "连接"
                 currentSourceId = target.source?.id ?: sourceId
                 playbackSource = target.source
-                if (pendingManualAudio?.first != com.lumina.tv.player.trackMemoryIdentity(target.source, "Audio")) {
-                    pendingManualAudio = null
+                pendingManualAudio = audioForPreparation?.forLoad(item.id, target.source, manualTrackInstance,
+                    previousGeneration, generation, trackMemoryIdentity(target.source, "Audio"))
+                pendingManualSubtitle = subtitleForPreparation?.forLoad(item.id, target.source, manualTrackInstance,
+                    previousGeneration, generation, trackMemoryIdentity(target.source, "Subtitle"))
+                if (droppedManualSelection || audioForPreparation != null && pendingManualAudio == null ||
+                    subtitleForPreparation != null && pendingManualSubtitle == null) {
+                    playbackStatusNotice = "片源版本无法验证或轨道已变化，已按默认规则播放，请重新选择音轨/字幕"
                 }
                 val sourceVideoRange = target.source?.streams?.firstOrNull { it.type == "Video" }?.videoRangeType.orEmpty().uppercase()
                 AppRuntime.currentVideoRange = when {
@@ -1822,9 +1933,9 @@ fun PlayerScreen(
                 val sourceKey = target.source?.id ?: sourceId ?: item.id
                 val plannedAudio = audioRecoveryTrack?.takeIf { audioRecoverySourceId == sourceKey }
                     ?.let { "media3:${it.group.id}:${it.index}" }
-                    ?: preferredAudioStream(audioStreamIndex, AppRuntime.prefs?.preferredAudioLanguage,
+                    ?: preferredAudioStream(target.audioStreamIndex, AppRuntime.prefs?.preferredAudioLanguage,
                         target.source?.audioStreams.orEmpty())?.index?.toString()
-                    ?: audioStreamIndex?.toString()
+                    ?: target.audioStreamIndex?.toString()
                 val path = PlaybackPath(sourceKey, activeEngine, when {
                     target.playMethod.equals("Transcode", true) -> PlaybackDelivery.TRANSCODE
                     target.playMethod.equals("DirectStream", true) -> PlaybackDelivery.DIRECT_STREAM
@@ -1877,10 +1988,11 @@ fun PlayerScreen(
                     dvDecoderPath = "hevc-fallback"
                 }
                 if (audioCodec.isNotBlank() && audioSupport == AudioSupport.UNSUPPORTED && !softDecodeNoticeShown) {
-                    audioDecodeNotice = "当前音轨（${audioCodec.trim().ifBlank { "未知 codec" }}）本机可能无法解码，可切换其他音轨或改软解"
+                    audioDecodeNotice = "当前音轨（${audioCodec.trim().ifBlank { "未知 codec" }}）本机可能无法解码，可切换其他音轨或避免直通"
                     softDecodeNoticeShown = true
                 }
                 activeEngine = selectedEngine
+                bindAudioOutput(target.source?.id ?: sourceId, null, selectedEngine, generation)
                 exo.setAudioAttributes(
                     AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
                     selectedEngine != "mpv",
@@ -2009,12 +2121,31 @@ fun PlayerScreen(
                         }
                         playbackDiagnostics.activate(load, android.os.SystemClock.elapsedRealtime())
                         phaseTimes.put("identity", playbackDiagnostics.identityJson())
+                        audioOutputLedger.bindTrack(owner.currentAudioEmbyIndex()?.toString())
+                        val outputBinding = audioOutputLedger.current()?.binding
+                        if (outputBinding != null) {
+                            val outputReadback = owner.diagnosticReadback(load)
+                            val outputParams = listOf("audio-out-params/format", "audio-out-params/channels", "audio-out-params/samplerate")
+                                .filter { !outputReadback[it].isNullOrBlank() && outputReadback[it] !in setOf("null", "unknown", "unavailable") }
+                            val ao = outputReadback["current-ao"]?.takeIf { it.isNotBlank() && it !in setOf("null", "unknown", "unavailable") }
+                            val confidence = when {
+                                ao != null && outputParams.isNotEmpty() -> AudioOutputConfidence.OBSERVED
+                                ao != null || outputParams.isNotEmpty() -> AudioOutputConfidence.SUSPICIOUS
+                                else -> AudioOutputConfidence.UNKNOWN
+                            }
+                            audioOutputLedger.record(AudioOutputSnapshot(
+                                binding = outputBinding,
+                                sampledAtElapsedRealtimeMs = android.os.SystemClock.elapsedRealtime(),
+                                confidence = confidence,
+                                values = outputReadback,
+                            ))
+                        }
                         val becameReady = state.ready && !mpvState.ready
                         if (becameReady || state.trackListChanged) mpvMenuTrackRevision++
                         val pendingAudio = pendingManualAudio
                         val mappedSource = playbackSource
                         val hasPendingManualAudio = pendingAudio != null && mappedSource != null &&
-                            pendingAudio.first == com.lumina.tv.player.trackMemoryIdentity(mappedSource, "Audio")
+                            matchesCurrentManual(pendingAudio, mappedSource)
                         mpvState = state
                         if (shouldSyncMpvAudioTrack(
                                 state.ready,
@@ -2023,6 +2154,9 @@ fun PlayerScreen(
                                 hasPendingManualAudio,
                             )) {
                             rememberConfirmedAudio(owner.currentAudioEmbyIndex())
+                        }
+                        if (state.ready && (becameReady || state.trackListChanged || pendingManualSubtitle != null)) {
+                            rememberConfirmedSubtitle(owner.currentSubtitleEmbyIndex())
                         }
                         if (state.subtitleNotice != null) {
                             playbackStatusNotice = state.subtitleNotice
@@ -2072,7 +2206,8 @@ fun PlayerScreen(
                         if (state.error != null) {
                             handleMpvFailure(state.failureKind ?: MpvPlayerController.FailureKind.LOAD, state.error, generation)
                         }
-                    }, anime4k = anime4kConfig).also { mpvBackend = it }
+                    }, anime4k = anime4kConfig, audioDecodeMode = audioDecodeMode, audioCaps = audioCaps).also { mpvBackend = it }
+                    if (!loadCoordinator.accepts(loadPermit)) return@launch
                     val initialization = backend.initialize()
                     if (initialization is MpvPlayerController.InitializationResult.Failed) {
                         handleMpvFailure(MpvPlayerController.FailureKind.INITIALIZATION, initialization.reason, generation)
@@ -2121,7 +2256,7 @@ fun PlayerScreen(
                         handleMpvFailure(MpvPlayerController.FailureKind.SURFACE, "播放画面未就绪（Surface 未创建）", generation)
                         return@launch
                     }
-                    if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
+                    if (!isCurrentLoad(generation) || !loadCoordinator.accepts(loadPermit)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                     backend.attachSurface(surface)
                     if (!isCurrentLoad(generation) || reloadPending || mpvBackend !== backend) return@launch
                     val externalSubtitles = subs.mapNotNull { stream ->
@@ -2130,7 +2265,7 @@ fun PlayerScreen(
                     backend.setExternalSubtitleIdentities(externalSubtitles.zip(subs.map { it.index }).toMap())
                     backend.setSpeed(speedState.effectiveSpeed)
                     backend.setAspectMode(resizeMode)
-                    if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
+                    if (!isCurrentLoad(generation) || !loadCoordinator.accepts(loadPermit)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                     backend.load(target.url, target.playerStartPositionMs, externalSubtitles, target.headers, paused = !desiredPlaying)
                     pendingStartIntent = null
                 } else {
@@ -2176,14 +2311,15 @@ fun PlayerScreen(
                         .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                         .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                         .build()
-                    if (!isCurrentLoad(generation)) return@launch
+                    if (!isCurrentLoad(generation) || !loadCoordinator.accepts(loadPermit)) return@launch
                     media3LoadGeneration = generation
-                    if (!loadCoordinator.commit(generation) { playing ->
+                    if (!loadCoordinator.commit(loadPermit) { playing ->
                         exo.playWhenReady = playing
                         progressSession = c.reportStart(item.id, target.startPositionMs, srcId, target.playMethod,
                             target.playSessionId, paused = !playing)
                     }) return@launch
                     exo.setMediaSource(videoSource)
+                    if (!isCurrentLoad(generation) || !loadCoordinator.accepts(loadPermit)) return@launch
                     exo.prepare()
                     if (tunnelingActuallyEnabled && tunnelingGeneration == generation) {
                         tunnelingFallbackJob?.cancel()
@@ -2229,7 +2365,11 @@ fun PlayerScreen(
         }
     }
 
+    val diagnosticSessionId = remember(item.id) { ExitSessionDiagnostics.newSession() }
+
     fun buildDiagPayload(outcome: String): DiagPayload {
+        check(android.os.Looper.myLooper() == exo.applicationLooper)
+        check(exo.applicationLooper == android.os.Looper.getMainLooper())
         phaseTimes.put("failedPaths", failureDiagnostics()).put("recoveryAttempts", recoveryBudget.attempts)
         val load = loadDetails.snapshot(currentLoadKey())
         val source = playbackSource?.takeIf { load.current && load.urlType in setOf("static", "hls") && it.id == load.key.sourceId }
@@ -2241,7 +2381,7 @@ fun PlayerScreen(
             controlsVisible, isActuallyStalled, error.takeIf { load.current }, position,
             activeVideoDecoder.takeIf { load.current }, dvDecoderPath.takeIf { load.current }, playbackStatusNotice.takeIf { load.current },
             phaseTimes.takeIf { load.current } ?: JSONObject(), droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
-            duration, playbackDiagnostics, selectedAudioStreamIndex,
+            duration, playbackDiagnostics, selectedAudioStreamIndex, audioOutputLedger.current().takeIf { load.current },
         )
     }
 
@@ -2415,7 +2555,7 @@ fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
                 if (!isCurrentMedia3()) return
-                val errorClass = classifyPlaybackError(err)
+                val errorClass = classifyPlaybackError(err, client?.baseUrl.orEmpty())
                 if (tunnelingEnabled && tunnelingGeneration == sessionGeneration && !firstFrameRendered &&
                     errorClass.category == PlaybackErrorCategory.DECODING && !tunnelingFallbackTried
                 ) {
@@ -2596,7 +2736,9 @@ fun PlayerScreen(
                     PageLog.add("playbackRecovery route=network-retry action=terminal retryLimit=2 retryAfterWithinBudget=${networkRetryDelay != null}")
                 } else if (errorRoute == PlaybackErrorRoute.PERMISSION_DENIED) {
                     updateStalled(false)
-                    reportError("媒体服务器拒绝了播放请求（权限或认证失败）")
+                    reportError(if (errorClass.action == "refresh_link_or_change_source")
+                        "片源服务器拒绝了播放请求，链接可能已过期，请刷新链接或切换片源"
+                    else "媒体服务器拒绝了播放请求（权限或认证失败）")
                 } else if (isBadHttpStatus && loadCoordinator.advanceHttp400(sessionGeneration)) {
                     updateStalled(true)
                     error = null
@@ -2609,7 +2751,7 @@ fun PlayerScreen(
                     requestAudioRecovery("decoder-unsupported")
                 } else if (audioDecodeMode != "passthrough" && decodingUnsupported && canTryMpvPath()) {
                     updateStalled(false)
-                    audioDecodeNotice = "本机解码不支持该音轨，已自动切到 mpv 本地软解"
+                    audioDecodeNotice = "本机 Media3 解码器不支持该音轨，已自动切到 mpv 播放路径"
                     enginePinned = "mpv"
                     reloadForceTranscode = false
                     requestAutomaticReload(sessionGeneration, "media3-decoding")
@@ -2747,8 +2889,13 @@ fun PlayerScreen(
                     singleOutput = target?.direct == false))
                 if (textTable != subtitleMapping) PageLog.add("Media3 subtitle mapping load=$sessionGeneration ${textTable.summary()}")
                 subtitleMapping = textTable
+                val selectedSubtitleIndex = mediaSubs.firstOrNull { (group, index) -> group.isTrackSelected(index) }
+                    ?.let { (group, index) -> textTable.embyFor(Media3TrackKey(group.mediaTrackGroup, index)) }
+                rememberConfirmedSubtitle(selectedSubtitleIndex)
                 selectedAudioStreamIndex = mediaAudio.firstOrNull { (group, index) -> group.isTrackSelected(index) }
                     ?.let { (group, index) -> table.embyFor(Media3TrackKey(group.mediaTrackGroup, index)) }
+                bindAudioOutput(currentTarget?.source?.id ?: currentSourceId,
+                    selectedAudioStreamIndex?.toString(), "media3", sessionGeneration)
                 rememberConfirmedAudio(selectedAudioStreamIndex)
                 if (!audioSelectionApplied && audioCandidates.isNotEmpty()) {
                     val streamIndex = target?.audioStreamIndex
@@ -2890,6 +3037,7 @@ fun PlayerScreen(
 
             override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
                 PlayerLifecycle.registry.decoderReleased(exo, decoderName)
+                Media3DecoderRetirements.decoderReleased(exo, decoderName)
                 if (!isCurrentMedia3Event(eventTime)) return
                 playbackDiagnostics.identity?.let { playbackDiagnostics.decoder(it, false, null) }
             }
@@ -2900,10 +3048,27 @@ fun PlayerScreen(
                 if (!isCurrentMedia3Event(eventTime)) return
                 val encoding = audioTrackConfig.encoding
                 val offload = audioTrackConfig.offload
-                val passthrough = encoding != C.ENCODING_PCM_16BIT || offload
-                PageLog.add("audioSink passthrough=$passthrough encoding=$encoding offload=$offload")
+                val outputPath = media3AudioPath(encoding)
+                val passthrough = outputPath == Media3AudioPath.ENCODED_PASSTHROUGH
+                PageLog.add("audioSink path=${outputPath.name} encoding=$encoding offload=$offload")
                 activeAudioPassthrough = passthrough
                 passthroughVolumeAdjustments = 0
+                audioOutputLedger.current()?.binding?.takeIf { it.engine == "media3" }?.let { binding ->
+                    audioOutputLedger.record(AudioOutputSnapshot(
+                        binding = binding,
+                        sampledAtElapsedRealtimeMs = android.os.SystemClock.elapsedRealtime(),
+                        confidence = AudioOutputConfidence.OBSERVED,
+                        values = mapOf(
+                            "driver" to "AudioTrack",
+                            "encoding" to encoding.toString(),
+                            "sampleRate" to audioTrackConfig.sampleRate.toString(),
+                            "channelConfig" to audioTrackConfig.channelConfig.toString(),
+                            "outputPath" to outputPath.name,
+                            "offload" to offload.toString(),
+                            "deviceWireFormat" to "unknown",
+                        ),
+                    ))
+                }
                 playbackDiagnostics.identity?.let { load ->
                     playbackDiagnostics.audioTrack(load, audioTrackConfig.encoding, audioTrackConfig.sampleRate,
                         audioTrackConfig.channelConfig, audioTrackConfig.offload)
@@ -2916,6 +3081,7 @@ fun PlayerScreen(
                 if (!isCurrentMedia3Event(eventTime)) return
                 activeAudioPassthrough = false
                 passthroughVolumeAdjustments = 0
+                audioOutputLedger.invalidateSample()
                 playbackDiagnostics.identity?.let { playbackDiagnostics.releaseAudioTrack(it) }
             }
 
@@ -2926,6 +3092,7 @@ fun PlayerScreen(
                 initializationDurationMs: Long,
             ) {
                 PlayerLifecycle.registry.decoderInitialized(exo, decoderName)
+                Media3DecoderRetirements.decoderInitialized(exo, decoderName)
                 if (!isCurrentMedia3Event(eventTime)) return
                 activeVideoDecoder = decoderName
                 playbackDiagnostics.identity?.let { playbackDiagnostics.decoder(it, false, decoderName) }
@@ -3012,23 +3179,26 @@ fun PlayerScreen(
             prewarmJob?.cancel()
             cancelCreditsCountdown("player-disposed")
             watchdog.reset()
-            val session = JSONObject()
-                .put("itemId", item.id).put("itemName", item.name).put("engine", activeEngine)
-                .put("positionMs", position).put("durationMs", duration)
-                .put("codec", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.codec ?: JSONObject.NULL)
-                .put("videoRange", AppRuntime.currentVideoRange)
-                .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
-                .put("surfaceSize", currentSurfaceSize?.let { "${it.first}x${it.second}" } ?: JSONObject.NULL)
-                .put("phaseTimes", phaseTimes)
-                .put("startedAt", playStartAt).put("endedAt", android.os.SystemClock.elapsedRealtime())
-                .put("endReason", error ?: playbackStatusNotice ?: "player-exit")
-            runCatching {
-                val root = context.getExternalFilesDir(null) ?: context.filesDir
-                java.io.File(root, "last-session.json").writeText(session.toString(2), Charsets.UTF_8)
-            }
             val backend = mpvBackend
-            backend?.release("player-disposed")
-            if (mpvBackend === backend) mpvBackend = null
+            releaseWithDiagnosticSnapshot(snapshot = {
+                JSONObject()
+                    .put("itemId", item.id).put("itemName", item.name).put("engine", activeEngine)
+                    .put("positionMs", position).put("durationMs", duration)
+                    .put("codec", playbackSource?.streams?.firstOrNull { it.type == "Video" }?.codec ?: JSONObject.NULL)
+                    .put("videoRange", AppRuntime.currentVideoRange)
+                    .put("decoderName", activeVideoDecoder ?: JSONObject.NULL)
+                    .put("surfaceSize", currentSurfaceSize?.let { "${it.first}x${it.second}" } ?: JSONObject.NULL)
+                    .put("phaseTimes", phaseTimes)
+                    .put("startedAt", playStartAt).put("endedAt", android.os.SystemClock.elapsedRealtime())
+                    .put("endReason", error ?: playbackStatusNotice ?: "player-exit")
+                    // Freeze nested phaseTimes on main before release can change any shared state.
+                    .toString()
+            }, release = {
+                backend?.release("player-disposed")
+            }, submit = { frozenSession ->
+                if (mpvBackend === backend) mpvBackend = null
+                ExitSessionDiagnostics.enqueue(context, diagnosticSessionId, frozenSession)
+            })
         }
     }
 
@@ -3231,7 +3401,6 @@ fun PlayerScreen(
     LaunchedEffect(controlsVisible) {
         if (!controlsVisible) cancelSeekPreview("controls-hidden")
     }
-    val inputLifecycleOwner = LocalLifecycleOwner.current
     val hostActiveEngine by rememberUpdatedState(activeEngine)
     val hostMpvBackend by rememberUpdatedState(mpvBackend)
     val hostResumedByBackground by rememberUpdatedState(resumedByBackground)
@@ -3239,9 +3408,12 @@ fun PlayerScreen(
     DisposableEffect(inputLifecycleOwner, exo, item.id) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                autoNextForeground = false
+                if (creditsCountdown.active) cancelCreditsCountdown("host-${event.name}")
                 cancelSeekPreview("host-${event.name}")
                 dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
             }
+            if (event == Lifecycle.Event.ON_RESUME) autoNextForeground = true
             if (event == Lifecycle.Event.ON_STOP) {
                 // Intent also covers negotiation, Surface waits and temporary audio-focus holds.
                 val playbackRequested = loadCoordinator.desiredPlaying
@@ -3323,14 +3495,26 @@ fun PlayerScreen(
             if (!instanceJob.isActive || currentExo !== exo) return@LaunchedEffect
             val target = currentTarget
             val now = android.os.SystemClock.elapsedRealtime()
-            val playerPosition = observedPlayerPositionMs()
-            val playerDuration = when (activeEngine) {
-                "mpv" -> mpvBackend?.durationMs()
-                else -> exo.duration.takeIf { isCurrentMedia3() && it > 0L }
-            }
+            val watchdogEngine = activeEngine
+            val watchdogBackend = mpvBackend
+            val watchdogMpvLoad = if (watchdogEngine == "mpv") watchdogBackend?.diagnosticLoadIdentity() else null
+            val nativeTimeline = sampleWatchdogTimeline(
+                sessionGeneration = sessionGeneration,
+                loadIdentity = {
+                    if (reloadPending || activeEngine != watchdogEngine || !loadCoordinator.accepts(playbackLoadPermit)) null
+                    else if (watchdogEngine == "media3") {
+                        if (isCurrentMedia3()) WatchdogLoadIdentity(media3LoadGeneration) else null
+                    } else if (mpvBackend === watchdogBackend) {
+                        watchdogBackend?.diagnosticLoadIdentity()?.let { WatchdogLoadIdentity(it.generation, it.physicalId) }
+                    } else null
+                },
+                position = { observedPlayerPositionMs() },
+                duration = { if (watchdogEngine == "mpv") watchdogBackend?.durationMs() else exo.duration },
+            )
+            val playerPosition = nativeTimeline?.positionMs
+            val playerDuration = nativeTimeline?.durationMs
             target?.let { observeTimelinePosition(it, playerPosition, playerDuration, now) }
             target?.let { checkStrmResume(it, now) }
-            val watchdogMpvLoad = if (activeEngine == "mpv") mpvBackend?.diagnosticLoadIdentity() else null
             val mpvBufferedPosition = mpvState.bufferedPositionMs.takeIf { watchdogMpvLoad != null }
             val previousMpvBuffer = mpvBufferProgress
             val mpvBufferGrowthAtMs = when {
@@ -3365,16 +3549,14 @@ fun PlayerScreen(
             val ownsEngine = if (activeEngine == "media3") isCurrentMedia3() else watchdogMpvLoad != null && !reloadPending &&
                 com.lumina.tv.player.mpvEndAllowsRecovery(mpvState.endKind)
             val reason = if (ownsEngine) watchdog.onTick(
-                positionMs = playerPosition ?: 0L,
+                timeline = nativeTimeline,
+                expectedLoad = WatchdogLoadIdentity(sessionGeneration, watchdogMpvLoad?.physicalId),
                 bufferedMs = if (activeEngine == "media3") exo.bufferedPosition.takeIf { it >= 0L } else mpvState.bufferedPositionMs,
                 state = if (activeEngine == "media3") exo.playbackState else if (isActuallyStalled) Player.STATE_BUFFERING else if (mpvState.ready) Player.STATE_READY else Player.STATE_IDLE,
                 playWhenReady = if (activeEngine == "media3") exo.playWhenReady else mpvState.playing,
                 isSeeking = seekConfirmation != null || seekInFlight || seekHint != null || seekHoldActive || previewActive,
-                sessionGeneration = sessionGeneration,
-                durationMs = duration,
                 bytesLoaded = bytesLoaded,
                 isLoading = isLoading,
-                mpvLoadId = watchdogMpvLoad?.physicalId,
                 downloadInProgress = mpvDownloadInProgress,
                 nowMs = now,
             ) else null
@@ -3393,14 +3575,19 @@ fun PlayerScreen(
             ) {
                 startAutoNext(reportStop = false)
             }
-            if (contentTimelineKnown && duration > 0 && item.seriesId != null && prewarmedEpisodeId == null &&
+            if (contentTimelineKnown && autoNextForeground && !playbackPaused() && duration > 0 && item.seriesId != null && prewarmedEpisodeId == null &&
                 position >= duration - 30_000L
             ) {
                 prewarmedEpisodeId = "pending"
+                val prewarmGeneration = sessionGeneration
+                val prewarmPermit = playbackLoadPermit
                 instanceScope.launch {
                     val c = client ?: return@launch
-                    val next = catchingRequest { c.getNextEpisode(item) }.getOrNull()
-                    if (next != null) {
+                    val result = c.getNextEpisode(item)
+                    if (!isCurrentLoad(prewarmGeneration) || !loadCoordinator.accepts(prewarmPermit) ||
+                        reloadPending || !autoNextForeground || playbackPaused()) return@launch
+                    if (result is NextEpisodeResult.Found) {
+                        val next = result.item
                         prewarmedEpisodeId = next.id
                         val skipReason = try {
                             prewarmNextSkipReason(context, next)
@@ -3413,7 +3600,11 @@ fun PlayerScreen(
                             return@launch
                         }
                         prewarmNext(next)
-                    } else prewarmedEpisodeId = "none"
+                    } else prewarmedEpisodeId = when (result) {
+                        NextEpisodeResult.NoNext -> "none"
+                        is NextEpisodeResult.RetryableFailure -> "retryable-failure"
+                        else -> "non-retryable-failure"
+                    }
                 }
             }
             if (activeEngine == "media3" && exo.playbackState == Player.STATE_BUFFERING) {
@@ -4637,6 +4828,7 @@ fun PlayerScreen(
                 onPlayerAudioSelected = { key, mpvId ->
                     // A real player track is selectable even without an Emby identity; never persist it.
                     pendingManualAudio = null
+                    AppRuntime.prefs?.rememberAudioTrack(item.id, -1, playbackSource)
                     audioSelectionApplied = true
                     if (activeEngine == "mpv" && mpvId != null) {
                         mpvBackend?.selectPlayerAudioTrack(mpvId)
@@ -4662,7 +4854,10 @@ fun PlayerScreen(
                         val mapped = if (activeEngine == "mpv")
                             mpvBackend?.hasAudioMapping(streamIndex) == true else audioMapping.playerFor(streamIndex) != null
                         if (mapped || requiresNegotiation) currentPath = currentPath?.copy(audioTrack = streamIndex.toString())
-                        pendingManualAudio = com.lumina.tv.player.trackMemoryIdentity(source, "Audio") to streamIndex
+                        pendingManualAudio = manualSelection(source, TrackMemoryType.Audio, streamIndex)
+                        if (pendingManualAudio?.identity is TrackMemoryIdentity.Unavailable) {
+                            AppRuntime.prefs?.rememberAudioTrack(item.id, streamIndex, source)
+                        }
                         manualAudioStreamSelection = true
                         if (requiresNegotiation) {
                             loadSource(forceTranscode = currentTarget?.playMethod == "Transcode", audioStreamIndex = streamIndex)
@@ -4688,7 +4883,10 @@ fun PlayerScreen(
                 },
                 onServerSubtitleSelected = { index ->
                     playbackSource?.let { source ->
-                        AppRuntime.prefs?.rememberSubtitleTrack(item.id, "track:emby:$index", source)
+                        pendingManualSubtitle = manualSelection(source, TrackMemoryType.Subtitle, index)
+                        if (pendingManualSubtitle?.identity is TrackMemoryIdentity.Unavailable) {
+                            AppRuntime.prefs?.rememberSubtitleTrack(item.id, "track:emby:$index", source)
+                        }
                         subtitlePreference = "track:emby:$index"
                         subtitleSelectionApplied = true
                         val mapped = subtitleMapping.playerFor(index)
@@ -4696,6 +4894,7 @@ fun PlayerScreen(
                             loadSource(forceTranscode = currentTarget?.playMethod == "Transcode")
                         } else if (activeEngine == "mpv") {
                             mpvBackend?.setSubtitleTrack(index)
+                            rememberConfirmedSubtitle(mpvBackend?.currentSubtitleEmbyIndex())
                         } else if (mapped != null && exo.currentTracks.groups.any {
                                 it.mediaTrackGroup == mapped.group && it.isTrackSupported(mapped.index)
                             }) {
@@ -4726,7 +4925,18 @@ fun PlayerScreen(
                         localKey != null -> "track:emby:$localKey"
                         else -> null
                     }
-                    if (serverPreference != null) AppRuntime.prefs?.rememberSubtitleTrack(item.id, serverPreference, playbackSource)
+                    pendingManualSubtitle = null
+                    val source = playbackSource
+                    val serverIndex = serverPreference?.removePrefix("track:emby:")?.toIntOrNull()
+                    if (source != null && serverIndex != null && source.subtitleStreams.count { it.index == serverIndex } == 1) {
+                        pendingManualSubtitle = manualSelection(source, TrackMemoryType.Subtitle, serverIndex)
+                        if (pendingManualSubtitle?.identity is TrackMemoryIdentity.Unavailable) {
+                            AppRuntime.prefs?.rememberSubtitleTrack(item.id, serverPreference, source)
+                        }
+                    } else {
+                        // OFF/AUTO are durable modes. Unmapped local choices retire an earlier TRACK.
+                        AppRuntime.prefs?.rememberSubtitleTrack(item.id, serverPreference?.takeIf { it == "off" || it == "auto" }, source)
+                    }
                     subtitlePreference = stored
                     if (currentTarget?.direct == false && serverPreference != null) {
                         loadSource(forceTranscode = currentTarget?.playMethod == "Transcode")
@@ -4736,6 +4946,7 @@ fun PlayerScreen(
                         if (key == null) mpvBackend?.disableSubtitle()
                         else if (key == "auto") mpvBackend?.enableSubtitleAuto()
                         else key.removePrefix("emby:").toIntOrNull()?.let { mpvBackend?.setSubtitleTrack(it) }
+                        rememberConfirmedSubtitle(mpvBackend?.currentSubtitleEmbyIndex())
                     } else {
                         when {
                             key == null -> exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
@@ -4770,9 +4981,8 @@ fun PlayerScreen(
                     audioDecodeMode = mode
                     AppRuntime.prefs?.audioDecodeMode = mode
                     audioDecodeNotice = when (mode) {
-                        "soft" -> if (activeEngine == "mpv") "全部音轨将在 mpv 本地软解"
-                            else "使用本地软解时，请在「播放内核」中选择 mpv"
-                        "passthrough" -> "已尝试音频直通（设备报告支持，实际输出以电视/功放为准）"
+                        "soft" -> "已请求避免编码直通，实际解码路径以运行快照为准"
+                        "passthrough" -> "已请求优先编码直通，实际输出以运行快照为准"
                         else -> "已切换到自动音频解码"
                     }
                     if (mode == "passthrough") enginePinned = "media3"
@@ -4800,6 +5010,7 @@ fun PlayerScreen(
                 onSwitchSource = { sid ->
                     closeOptionMenu()
                     pendingManualAudio = null
+                    pendingManualSubtitle = null
                     AppRuntime.prefs?.rememberSource(item.id, sid)
                     directFallbackTried = false
                     transcodeFallbackTried = false
@@ -4850,7 +5061,7 @@ fun PlayerScreen(
             Box(Modifier.fillMaxSize().background(Color(0x99000000)), contentAlignment = Alignment.Center) {
                 GlassPanel(Modifier.width(520.dp), corner = 8.dp, fillColor = Color(0xF018202B)) {
                     Text(
-                        "当前为音频直通，音量由电视/功放控制；按 OK 切换本地软解",
+                        "当前观测到编码直通路径，音量可能由电视/功放控制；按 OK 尝试其他输出策略",
                         Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
                         color = TextMain,
                         fontSize = TypeScale.sp16,
@@ -4896,8 +5107,8 @@ fun PlayerScreen(
         }
     }
     DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
-        val payload = buildDiagPayload(outcome)
-        withContext(Dispatchers.IO) { DiagExporter.export(context, payload, "playback") }
+        val payload = withContext(Dispatchers.Main.immediate) { buildDiagPayload(outcome) }
+        exportDiagnosticBundle(context, payload, "playback")
     }
 }
 

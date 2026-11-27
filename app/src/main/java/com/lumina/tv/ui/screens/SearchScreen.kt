@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -24,6 +25,8 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
@@ -33,20 +36,30 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -129,9 +142,15 @@ fun SearchScreen(
     var appendError by remember { mutableStateOf<String?>(null) }
     var pageStart by remember { mutableIntStateOf(0) }
     var autoLoadedEmptyPages by remember { mutableIntStateOf(0) }
+    var emptyPageContinuation by remember { mutableIntStateOf(0) }
     var searchNow by remember { mutableIntStateOf(0) }
     var handledSearchNow by remember { mutableIntStateOf(0) }
-    var history by remember { mutableStateOf(prefs?.searchHistory().orEmpty()) }
+    var history by remember { mutableStateOf(prefs?.searchHistory().orEmpty().distinct()) }
+    val historyRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    history.forEach { historyRequesters.getOrPut(it) { FocusRequester() } }
+    var pendingHistoryFocus by remember { mutableStateOf<String?>(null) }
+    var focusedHistoryEntry by remember { mutableStateOf<String?>(null) }
+    var inputHasFocus by remember { mutableStateOf(false) }
     var focusedItemId by rememberSaveable { mutableStateOf<String?>(null) }
     var focusedLatestId by remember { mutableStateOf<String?>(null) }
     var typeFilter by rememberSaveable { mutableIntStateOf(0) }
@@ -142,10 +161,39 @@ fun SearchScreen(
     var searchGridHasFocus by remember { mutableStateOf(false) }
     var latestGridHasFocus by remember { mutableStateOf(false) }
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val searchGeneration = remember { SearchRequestGeneration() }
+    val searchTicket = searchGeneration.update(listOf(client, keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow))
+
+    fun invalidateSearchFocus() {
+        searchGeneration.invalidate()
+        focusedItemId = null
+        focusedLatestId = null
+    }
 
     fun submitSearch(query: String = keyword) {
+        invalidateSearchFocus()
         keyword = query
         searchNow++
+    }
+
+    LaunchedEffect(pendingHistoryFocus, history, keyword) {
+        val entry = pendingHistoryFocus ?: return@LaunchedEffect
+        if (keyword.isBlank()) {
+            val index = history.indexOf(entry)
+            latestGridState.scrollToItem(if (index >= 0) index + 1 else 0)
+            val requester = if (index >= 0) historyRequesters.getValue(entry) else inputFocus
+            var restored = false
+            for (attempt in 0 until 3) {
+                withFrameNanos { }
+                if (!searchGeneration.accepts(searchTicket)) break
+                runCatching { requester.requestFocus() }
+                withFrameNanos { }
+                restored = if (index >= 0) focusedHistoryEntry == entry else inputHasFocus
+                if (restored) break
+            }
+            if (!restored && searchGeneration.accepts(searchTicket)) runCatching { inputFocus.requestFocus() }
+        }
+        pendingHistoryFocus = null
     }
 
     BackHandler {
@@ -166,7 +214,8 @@ fun SearchScreen(
         }
     }
 
-    LaunchedEffect(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow) {
+    LaunchedEffect(client, keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow) {
+        if (!searchGeneration.accepts(searchTicket)) return@LaunchedEffect
         val query = keyword.trim()
         if (query.isBlank()) {
             results = emptyList()
@@ -192,6 +241,7 @@ fun SearchScreen(
         appendError = null
         gridState.requestScrollToItem(0)
         if (searchNow != handledSearchNow) handledSearchNow = searchNow else delay(400)
+        searchGeneration.ensureCurrent(searchTicket)
         val currentClient = client ?: run {
             searched = true
             loading = false
@@ -207,7 +257,7 @@ fun SearchScreen(
             2 -> "Series"
             else -> null
         }
-        runSearchPageRequest(onFailure = { e ->
+        runSearchPageRequest(isCurrent = { searchGeneration.accepts(searchTicket) }, onFailure = { e ->
             searchError = searchFailureMessage(e)
             hasMore = false
         }, onFinished = { loading = false }) {
@@ -217,18 +267,21 @@ fun SearchScreen(
                 fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
                 requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
             )
+            currentCoroutineContext().ensureActive()
+            searchGeneration.ensureCurrent(searchTicket)
             results = page
             pageStart = page.size
             hasMore = page.size == 40 && pageStart < 300
             prefs?.rememberSearch(query)
-            history = prefs?.searchHistory().orEmpty()
+            history = prefs?.searchHistory().orEmpty().distinct()
         }
     }
 
-    LaunchedEffect(gridState, results.size, hasMore, loading, keyword, typeFilter, favoritesOnly, unwatchedOnly) {
+    LaunchedEffect(gridState, results.size, hasMore, loading, keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow, client) {
         snapshotFlow { gridState.layoutInfo.visibleItemsInfo.any { it.key == "search-load-more" } }
             .distinctUntilChanged()
             .collect { loadMoreVisible ->
+                if (!searchGeneration.accepts(searchTicket)) return@collect
                 if (!shouldAppendSearchPage(
                         reachedVisibleEnd = loadMoreVisible,
                         loadedItemCount = pageStart,
@@ -245,7 +298,7 @@ fun SearchScreen(
                     "IsUnplayed".takeIf { unwatchedOnly },
                 ).joinToString(",").ifBlank { null }
                 val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
-                runSearchPageRequest(onFailure = { e ->
+                runSearchPageRequest(isCurrent = { searchGeneration.accepts(searchTicket) }, onFailure = { e ->
                     appendError = searchFailureMessage(e)
                     hasMore = false
                 }, onFinished = { loadingMore = false }) {
@@ -255,6 +308,8 @@ fun SearchScreen(
                         fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
                         requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
                     )
+                    currentCoroutineContext().ensureActive()
+                    searchGeneration.ensureCurrent(searchTicket)
                     results = (results + page).distinctBy { it.id }
                     appendError = null
                     pageStart += page.size
@@ -284,13 +339,15 @@ fun SearchScreen(
     }
     val errorPresentation = searchErrorPresentation(visibleResults.size, searchError, appendError)
     EmptySearchPageEffect(
-        searchKey = listOf(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow),
+        searchKey = listOf(keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow) + listOfNotNull(client),
         loadedItemCount = pageStart,
         visibleCount = visibleResults.size,
         hasMore = { hasMore },
         loading = { loading || loadingMore },
         automaticallyLoadedPages = { autoLoadedEmptyPages },
+        continuationRequest = { emptyPageContinuation },
     ) {
+        if (!searchGeneration.accepts(searchTicket)) return@EmptySearchPageEffect
         val currentClient = client ?: return@EmptySearchPageEffect
         val filters = listOfNotNull(
             "IsFavorite".takeIf { favoritesOnly },
@@ -299,7 +356,7 @@ fun SearchScreen(
         val types = when (typeFilter) { 1 -> "Movie"; 2 -> "Series"; else -> null }
         autoLoadedEmptyPages++
         loadingMore = true
-        runSearchPageRequest(onFailure = { e ->
+        runSearchPageRequest(isCurrent = { searchGeneration.accepts(searchTicket) }, onFailure = { e ->
             appendError = searchFailureMessage(e)
             hasMore = false
         }, onFinished = { loadingMore = false }) {
@@ -309,6 +366,8 @@ fun SearchScreen(
                 fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
                 requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
             )
+            currentCoroutineContext().ensureActive()
+            searchGeneration.ensureCurrent(searchTicket)
             results = (results + page).distinctBy { it.id }
             appendError = null
             pageStart += page.size
@@ -318,6 +377,8 @@ fun SearchScreen(
 
     fun retryAppend() {
         appendError = null
+        autoLoadedEmptyPages = 0
+        emptyPageContinuation++
         hasMore = true
     }
 
@@ -333,7 +394,7 @@ fun SearchScreen(
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = keyword,
-                onValueChange = { keyword = it },
+                onValueChange = { if (keyword != it) { invalidateSearchFocus(); keyword = it } },
                 placeholder = { Text("按 OK 调出键盘，输入片名或拼音首字母", color = TextSub.copy(alpha = 0.7f), fontSize = 13.sp) },
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp),
@@ -341,7 +402,7 @@ fun SearchScreen(
                 keyboardActions = KeyboardActions(onSearch = { submitSearch() }),
                 trailingIcon = {
                     if (keyword.isNotEmpty()) FocusSurface(Modifier.width(42.dp).height(42.dp), corner = 21.dp,
-                        onClick = { keyword = "" }) { focused ->
+                        onClick = { invalidateSearchFocus(); keyword = "" }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
                             Text("清除", color = TextSub, fontSize = 11.sp)
                         }
@@ -351,7 +412,14 @@ fun SearchScreen(
                     focusedTextColor = TextMain, unfocusedTextColor = TextMain,
                     focusedBorderColor = Accent.copy(alpha = 0.62f), unfocusedBorderColor = GlassLine, cursorColor = Accent,
                 ),
-                modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(inputFocus),
+                modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(inputFocus)
+                    .onFocusChanged { inputHasFocus = it.isFocused; if (it.isFocused) focusedHistoryEntry = null }
+                    .onPreviewKeyEvent { event ->
+                        if (keyword.isBlank() && history.isNotEmpty() && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                            pendingHistoryFocus = history.first()
+                            true
+                        } else false
+                    },
             )
             Spacer(Modifier.width(12.dp))
             FocusSurface(Modifier.height(52.dp).width(96.dp), corner = 16.dp,
@@ -371,20 +439,23 @@ fun SearchScreen(
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("全部", "电影", "剧集").forEachIndexed { index, label ->
-                FilterChip(label, typeFilter == index) { typeFilter = index }
+                FilterChip(label, typeFilter == index) {
+                    if (typeFilter != index) { invalidateSearchFocus(); typeFilter = index }
+                }
             }
-            FilterChip("收藏", favoritesOnly) { favoritesOnly = !favoritesOnly }
-            FilterChip("未看", unwatchedOnly) { unwatchedOnly = !unwatchedOnly }
+            FilterChip("收藏", favoritesOnly) { invalidateSearchFocus(); favoritesOnly = !favoritesOnly }
+            FilterChip("未看", unwatchedOnly) { invalidateSearchFocus(); unwatchedOnly = !unwatchedOnly }
         }
 
         Spacer(Modifier.height(10.dp))
         when {
             loading && results.isEmpty() -> LoadingView(text = "搜索中…")
             keyword.isNotBlank() && searched && errorPresentation.primary != null -> {
-                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                    EmptyView(errorPresentation.primary!!)
+                Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(errorPresentation.primary!!, color = TextSub, fontSize = 14.sp)
                     FocusSurface(Modifier.padding(top = 8.dp).height(42.dp).width(112.dp), corner = 12.dp,
-                        onClick = { submitSearch() }) { focused ->
+                        onClick = { if (appendError != null) retryAppend() else submitSearch() }) { focused ->
                         Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
                             Text("重试", color = TextMain, fontSize = 13.sp)
                         }
@@ -398,8 +469,22 @@ fun SearchScreen(
                     Text(filterDescription, color = TextSub, fontSize = 11.sp)
                 }
                 if (visibleResults.isEmpty()) {
-                    if (loadingMore || hasMore && autoLoadedEmptyPages < SEARCH_EMPTY_AUTO_PAGE_LIMIT) LoadingView(text = "继续搜索中…")
-                    else EmptyView("没有找到相关内容")
+                    when {
+                        loadingMore || hasMore && autoLoadedEmptyPages < SEARCH_EMPTY_AUTO_PAGE_LIMIT -> LoadingView(text = "继续搜索中…")
+                        incompleteEmptySearch(visibleResults.size, hasMore, loading || loadingMore, autoLoadedEmptyPages) ->
+                            Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("尚未搜完，可手动继续搜索", color = TextSub, fontSize = 14.sp)
+                                FocusSurface(Modifier.padding(top = 12.dp).heightIn(min = 44.dp).widthIn(min = 136.dp),
+                                    corner = 12.dp, onClick = { retryAppend() }) { focused ->
+                                    Box(Modifier.background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF))
+                                        .padding(horizontal = 18.dp, vertical = 12.dp), contentAlignment = Alignment.Center) {
+                                        Text("继续搜索", color = TextMain, fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                        else -> EmptyView("没有找到相关内容")
+                    }
                 } else {
                     val focusColumns = remember(gridState.layoutInfo) {
                         val visible = gridState.layoutInfo.visibleItemsInfo
@@ -451,8 +536,8 @@ fun SearchScreen(
                                 focusDir = focusDir,
                                 snapAnimation = gridState.isScrollInProgress || requestFocus,
                                 roleDriven = true,
-                                onFocused = { focusedItemId = item.id }) {
-                                onOpenDetail(item.seriesId ?: item.id)
+                                onFocused = { searchGeneration.accept(searchTicket) { focusedItemId = item.id } }) {
+                                searchGeneration.accept(searchTicket) { onOpenDetail(item.seriesId ?: item.id) }
                             }
                         }
                         if (hasMore || loadingMore || errorPresentation.append != null) item(key = "search-load-more") {
@@ -478,7 +563,7 @@ fun SearchScreen(
             }
             else -> {
                 val latestFocusColumns = remember(latestGridState.layoutInfo) {
-                    val visible = latestGridState.layoutInfo.visibleItemsInfo.filter { it.index >= 2 }
+                    val visible = latestGridState.layoutInfo.visibleItemsInfo.filter { it.key.toString().startsWith("latest:") }
                     visible.firstOrNull()?.let { first ->
                         visible.count { it.index in first.index until (first.index + 50) && it.offset.y == first.offset.y }
                             .coerceAtLeast(1)
@@ -519,43 +604,49 @@ fun SearchScreen(
                     modifier = Modifier.fillMaxSize().onFocusChanged { latestGridHasFocus = it.hasFocus },
                 ) {
                     if (history.isNotEmpty()) {
-                        item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
-                            Column {
-                                Text("最近搜索", color = TextSub, fontSize = 12.sp)
-                                Spacer(Modifier.height(8.dp))
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    history.forEach { entry ->
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            FilterChip(entry.take(12), false) { submitSearch(entry) }
-                                            FocusSurface(Modifier.width(30.dp).height(32.dp), corner = 15.dp,
-                                                onClick = { prefs?.removeSearch(entry); history = prefs?.searchHistory().orEmpty() }) { focused ->
-                                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
-                                                    Text("×", color = TextSub, fontSize = 16.sp)
-                                                }
-                                            }
-                                        }
+                        item(key = "search-history-heading", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                            Text("最近搜索", color = TextSub, fontSize = 12.sp)
+                        }
+                        items(history, key = { searchHistoryItemKey(it) }) { entry ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                FilterChip(entry.take(12), false,
+                                    modifier = Modifier.weight(1f).heightIn(min = 40.dp)
+                                        .focusRequester(historyRequesters.getValue(entry))
+                                        .semantics { contentDescription = "搜索历史：$entry" },
+                                    onFocused = { searchGeneration.accept(searchTicket) { focusedLatestId = null; focusedHistoryEntry = entry } },
+                                ) { searchGeneration.accept(searchTicket) { submitSearch(entry) } }
+                                FocusSurface(Modifier.width(40.dp).heightIn(min = 40.dp)
+                                    .semantics { contentDescription = "删除搜索历史：$entry" }, corner = 15.dp,
+                                    onFocused = { searchGeneration.accept(searchTicket) { focusedLatestId = null; focusedHistoryEntry = null } },
+                                    onClick = {
+                                        prefs?.removeSearch(entry)
+                                        val updated = prefs?.searchHistory().orEmpty().distinct()
+                                        pendingHistoryFocus = focusNeighborAfterRemoval(history, entry, updated) ?: ""
+                                        history = updated
+                                    }) { focused ->
+                                    Box(Modifier.fillMaxWidth().heightIn(min = 40.dp)
+                                        .background(if (focused) Color(0x33FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
+                                        Text("×", color = TextSub, fontSize = 16.sp)
                                     }
                                 }
-                                Spacer(Modifier.height(12.dp))
                             }
                         }
                     }
-                    item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                    item(key = "search-latest-heading", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
                         Text("最近添加", color = TextMain, fontSize = 16.sp, modifier = Modifier.padding(bottom = 2.dp))
                     }
                     itemsIndexed(latest, key = { _, it -> "latest:${it.id}" }) { index, item ->
-                        val requestFocus = item == latest.firstOrNull()
                         PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp,
-                            requestInitialFocus = requestFocus,
+                            requestInitialFocus = false,
                             focusRole = latestRoleOf(index),
                             focusDir = latestFocusDir,
-                            snapAnimation = latestGridState.isScrollInProgress || requestFocus,
+                            snapAnimation = latestGridState.isScrollInProgress,
                             roleDriven = true,
-                            onFocused = { focusedLatestId = item.id }) {
-                            onOpenDetail(item.seriesId ?: item.id)
+                            onFocused = { searchGeneration.accept(searchTicket) { focusedLatestId = item.id; focusedHistoryEntry = null } }) {
+                            searchGeneration.accept(searchTicket) { onOpenDetail(item.seriesId ?: item.id) }
                         }
                     }
-                    if (latest.isEmpty()) item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                    if (latest.isEmpty()) item(key = "search-latest-empty", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
                         when {
                             latestState.loading -> Text("正在读取最近添加…", color = TextSub, fontSize = 13.sp)
                             latestState.error != null -> Column {
@@ -588,20 +679,30 @@ internal fun EmptySearchPageEffect(
     hasMore: () -> Boolean,
     loading: () -> Boolean,
     automaticallyLoadedPages: () -> Int,
+    continuationRequest: () -> Int = { 0 },
     loadPage: suspend () -> Unit,
 ) {
-    LaunchedEffect(searchKey, loadedItemCount, visibleCount) {
-        snapshotFlow { Triple(visibleCount, hasMore(), loading()) }
-            .distinctUntilChanged()
-            .collect { (visibleCount, more, isLoading) ->
-                val autoLoadedEmptyPages = automaticallyLoadedPages()
-                if (!shouldAutoLoadEmptySearchPage(visibleCount, more, isLoading, false, autoLoadedEmptyPages)) return@collect
-                loadPage()
-            }
+    val currentLoadPage by rememberUpdatedState(loadPage)
+    val continuation = continuationRequest()
+    key(continuation) {
+        LaunchedEffect(searchKey, loadedItemCount, visibleCount) {
+            var requestedPage = false
+            snapshotFlow { Triple(visibleCount, hasMore(), loading()) }
+                .distinctUntilChanged()
+                .collect { (visibleCount, more, isLoading) ->
+                    val autoLoadedEmptyPages = automaticallyLoadedPages()
+                    if (continuationRequest() != continuation) return@collect
+                    if (requestedPage) return@collect
+                    if (!shouldAutoLoadEmptySearchPage(visibleCount, more, isLoading, false, autoLoadedEmptyPages)) return@collect
+                    requestedPage = true
+                    currentLoadPage()
+                }
+        }
     }
 }
 
 internal suspend inline fun runSearchPageRequest(
+    isCurrent: () -> Boolean = { true },
     onFailure: (Exception) -> Unit,
     onFinished: () -> Unit,
     request: () -> Unit,
@@ -612,9 +713,9 @@ internal suspend inline fun runSearchPageRequest(
         throw cancelled
     } catch (failure: Exception) {
         currentCoroutineContext().ensureActive()
-        onFailure(failure)
+        if (isCurrent()) onFailure(failure)
     } finally {
-        onFinished()
+        if (isCurrent()) onFinished()
     }
 }
 
@@ -635,8 +736,8 @@ internal fun searchFailureMessage(error: Throwable): String {
 }
 
 @Composable
-private fun FilterChip(label: String, active: Boolean, onClick: () -> Unit) {
-    FocusSurface(Modifier.height(32.dp).widthIn(min = 54.dp).padding(horizontal = 0.dp), corner = 16.dp, scaleTo = 1f, onClick = onClick) { focused ->
+private fun FilterChip(label: String, active: Boolean, modifier: Modifier = Modifier, onFocused: (() -> Unit)? = null, onClick: () -> Unit) {
+    FocusSurface(modifier.heightIn(min = 32.dp).widthIn(min = 54.dp).padding(horizontal = 0.dp), corner = 16.dp, scaleTo = 1f, onFocused = onFocused, onClick = onClick) { focused ->
         Box(Modifier.background(
             if (active) Accent.copy(alpha = 0.18f) else if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
             RoundedCornerShape(16.dp))

@@ -2,6 +2,7 @@ package com.lumina.tv
 
 import com.lumina.tv.data.TimelinePosition
 import com.lumina.tv.data.MediaItem
+import com.lumina.tv.data.NextEpisodeResult
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.player.*
 import com.lumina.tv.ui.screens.rememberHomeHeroItems
@@ -28,6 +29,7 @@ object E4Checks {
         stopSamples()
         heroRecomposition()
         decoderLifetimes()
+        retirementPermits()
         playbackSpeeds()
         creditsCountdowns()
         continuationPauseIntent()
@@ -197,6 +199,74 @@ object E4Checks {
         check(lifecycle.liveVideoDecoders == 0 && logs.none { it.startsWith("decoder: overlap") })
     }
 
+    private suspend fun CoroutineScope.retirementPermits() {
+        val delayedFence = LoadRetirementFence()
+        val delayedRetirement = LoadRetirement()
+        delayedFence.track(delayedRetirement)
+        val delayedWait = async { delayedFence.awaitPermit() }
+        delay(3_050L)
+        check(!delayedWait.isCompleted && delayedRetirement.outcome == RetirementOutcome.Pending)
+        delayedRetirement.succeed()
+        check(delayedWait.await().isValid())
+
+        val neverFence = LoadRetirementFence()
+        val neverRetires = LoadRetirement()
+        neverFence.track(neverRetires)
+        check(withTimeoutOrNull(50L) { neverFence.awaitPermit() } == null)
+        check(neverRetires.outcome == RetirementOutcome.Pending)
+
+        val cleanupIo = LoadScopedIo("cleanup-fails", { true }, {})
+        val cleanupRetirement = cleanupIo.retire { throw IllegalStateException("injected destroy failure") }
+        val cleanupFence = LoadRetirementFence().apply { track(cleanupRetirement) }
+        val cleanupOutcome = cleanupRetirement.await()
+        check(cleanupOutcome is RetirementOutcome.Failed)
+        val cleanupBlock = runCatching { cleanupFence.awaitPermit() }.exceptionOrNull()
+        check(cleanupBlock is RetirementBlockedException)
+
+        val cancelFence = LoadRetirementFence()
+        val cancelRetirement = LoadRetirement()
+        cancelFence.track(cancelRetirement)
+        val cancelledWait = async { cancelFence.awaitPermit() }
+        yield()
+        cancelledWait.cancelAndJoin()
+        check(cancelRetirement.outcome == RetirementOutcome.Pending)
+        cancelRetirement.succeed()
+        check(cancelFence.awaitPermit().isValid())
+
+        val staleFence = LoadRetirementFence()
+        val staleRetirement = LoadRetirement()
+        staleFence.track(staleRetirement)
+        val coordinator = PlaybackLoadCoordinator()
+        val oldGeneration = coordinator.beginLoad("A")
+        val delayedGrant = async {
+            coordinator.grantPermit(oldGeneration, staleFence.awaitPermit())
+        }
+        yield()
+        val currentGeneration = coordinator.beginLoad("B")
+        staleRetirement.succeed()
+        check(delayedGrant.await() == null) // Late retirement success cannot revive an old generation.
+        val currentPermit = checkNotNull(coordinator.grantPermit(currentGeneration, staleFence.awaitPermit()))
+        check(coordinator.commit(currentPermit) { })
+        val switchedGeneration = coordinator.beginLoad("C")
+        check(!coordinator.commit(currentPermit) { error("stale commit") })
+        val switchedPermit = checkNotNull(coordinator.grantPermit(switchedGeneration, staleFence.awaitPermit()))
+        check(coordinator.commit(switchedPermit) { })
+
+        val lifecycle = PlayerLifecycleRegistry { }
+        val exo = Any()
+        lifecycle.created(exo, "media3", "playback")
+        lifecycle.decoderInitialized(exo, "hevc")
+        val decoderFence = LoadRetirementFence()
+        Media3DecoderRetirements.decoderInitialized(exo, "hevc")
+        val decoderRetirement = Media3DecoderRetirements.begin(exo)
+        decoderFence.track(decoderRetirement)
+        Media3DecoderRetirements.finish(exo, decoderRetirement)
+        check(withTimeoutOrNull(50L) { decoderFence.awaitPermit() } == null)
+        lifecycle.decoderReleased(exo, "hevc")
+        Media3DecoderRetirements.decoderReleased(exo, "hevc")
+        check(decoderFence.awaitPermit().isValid())
+    }
+
     private fun playbackSpeeds() {
         for (selected in listOf(0.75f, 1f, 1.5f, 2f)) {
             val user = PlaybackSpeedState(selected)
@@ -221,7 +291,7 @@ object E4Checks {
         val countdown = CreditsCountdown<String>(this, logs::add) { ticks.receive() }
         var playing = true
         var lookups = 0
-        fun start() = countdown.start(3, next = { lookups++; "next" }, canContinue = { playing }, onComplete = completed::add)
+        fun start() = countdown.start(3, next = { lookups++; NextEpisodeResult.Found("next") }, canContinue = { playing }, onComplete = completed::add)
         suspend fun tick() { ticks.send(Unit); yield() }
         val window = creditsWindowStartMs(600_000L, 580_000L, 30)
         check(window == 580_000L && creditsWindowStartMs(600_000L, null, 30) == 570_000L)
@@ -278,7 +348,7 @@ object E4Checks {
         val slow = CreditsCountdown<String>(this, logs::add) { ticks.receive() }
         slow.start(3, next = {
             lookupStarted.complete(Unit)
-            withContext(NonCancellable) { lookupResult.await() }
+            NextEpisodeResult.Found(withContext(NonCancellable) { lookupResult.await() })
         }, canContinue = { true }, onComplete = { error("Cancelled lookup completed playback") })
         lookupStarted.await()
         slow.cancel("pause-during-lookup")

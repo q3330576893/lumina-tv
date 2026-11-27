@@ -78,15 +78,18 @@ internal fun FavoritesScreen(
         val target = pager.anchor
         restoring = true
         restoreFocusId = null
-        pager.refresh(preview)
-        if (pager.state.items.isNotEmpty()) {
-            withFrameNanos { }
-            gridState.scrollToItem(target.indexIn(pager.state.items), target.offset)
-            withFrameNanos { }
-            focusedId = target.focusIn(pager.state.items)
-            restoreFocusId = focusedId
+        try {
+            pager.refresh(preview)
+            if (!pager.state.refreshRequired && pager.state.items.isNotEmpty()) {
+                withFrameNanos { }
+                gridState.scrollToItem(target.indexIn(pager.state.items), target.offset)
+                withFrameNanos { }
+                focusedId = target.focusIn(pager.state.items)
+                restoreFocusId = focusedId
+            }
+        } finally {
+            restoring = false
         }
-        restoring = false
     }
     LaunchedEffect(pager, gridState) {
         snapshotFlow { listOf(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset,
@@ -95,11 +98,10 @@ internal fun FavoritesScreen(
     LaunchedEffect(pager, gridState) {
         snapshotFlow {
             val s = pager.state
-            val ready = !restoring && !s.refreshing && !s.appending && !s.refreshRequired && s.error == null &&
-                s.nextOffset != null && s.items.isNotEmpty() &&
+            val ready = !restoring && s.canAutoAppend &&
                 (gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1) >= s.items.lastIndex - 8
             ready to s.nextOffset
-        }.collect { (ready, _) -> if (ready) pager.append() }
+        }.collect { (ready, _) -> if (ready) pager.append(automatic = true) }
     }
 
     Box(Modifier.fillMaxSize()) {

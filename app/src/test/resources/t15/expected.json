@@ -1,0 +1,11 @@
+{
+  "task": "V6-T15",
+  "version": {
+    "versionCode": 163,
+    "versionName": "1.24.19"
+  },
+  "native_count": 24,
+  "history_heading": "## v1.22.89",
+  "historical_changelog_sha256": "ffb6d2b6be8a6468a49445fbffd4d0f3994a85b542343de3455f62637b712cb0",
+  "license_file_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+}

@@ -49,6 +49,29 @@ sealed interface PlayableItemResult {
     data class Ready(val item: MediaItem) : PlayableItemResult
     data class ReplayAvailable(val firstEpisode: MediaItem, val allWatched: Boolean) : PlayableItemResult
     data object Unavailable : PlayableItemResult
+    data object RetryableFailure : PlayableItemResult
+}
+
+/** Incomplete disk rows are display data until the existing item endpoint revalidates them. */
+internal suspend fun resolveCachedPlayableItem(
+    item: MediaItem,
+    loadItem: suspend (String) -> MediaItem?,
+    isCurrent: () -> Boolean,
+    resolve: suspend (MediaItem) -> PlayableItemResult,
+): PlayableItemResult {
+    if (item.isMissing) return PlayableItemResult.Unavailable
+    if (!isCurrent()) return PlayableItemResult.RetryableFailure
+    val verified = if (CacheMediaItemCodec.requiresRefresh(item)) {
+        val fresh = try { loadItem(item.id) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { null }
+        if (!isCurrent() || fresh == null || fresh.id != item.id) return PlayableItemResult.RetryableFailure
+        if (fresh.isMissing) return PlayableItemResult.Unavailable
+        if (CacheMediaItemCodec.requiresRefresh(fresh) || fresh.type.isBlank()) return PlayableItemResult.RetryableFailure
+        fresh
+    } else item
+    val result = resolve(verified)
+    return if (isCurrent()) result else PlayableItemResult.RetryableFailure
 }
 
 /** Fetch progress at click time; never use a detail page's selected-season snapshot. */
@@ -58,6 +81,7 @@ suspend fun resolvePlayableItem(
     probeSource: suspend (MediaItem) -> EpisodeSourceAvailability,
 ): PlayableItemResult {
     if (item.isMissing) return PlayableItemResult.Unavailable
+    if (CacheMediaItemCodec.requiresRefresh(item)) return PlayableItemResult.RetryableFailure
     if (item.type == "Movie" || item.type == "Episode") return PlayableItemResult.Ready(item)
     if (item.type != "Series") return PlayableItemResult.Unavailable
     val episodes = loadEpisodes(item.id).filter { it.type == "Episode" && !it.isMissing }

@@ -143,7 +143,6 @@ import com.lumina.tv.ui.theme.ThemeRuntime
 import com.lumina.tv.ui.theme.TypeScale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -173,6 +172,44 @@ import com.lumina.tv.data.previewCacheKey
 import com.lumina.tv.data.previewSourceVersion
 import com.lumina.tv.data.resolveTmdbMetadataItem
 import com.lumina.tv.data.tmdbMediaPath
+
+/** Each request owns its joined values; UI recompositions are never the cache's data source. */
+internal data class DetailRequestParts(
+    val directory: SeasonDirectoryLoadState<MediaItem>,
+    val sources: List<MediaSource>,
+) {
+    fun cacheData(item: MediaItem, at: Long = System.currentTimeMillis()): LibraryCache.DetailData? {
+        if (item.type == "Series" && directory.status != SeasonDirectoryStatus.SUCCESS) return null
+        // Episodes have a separate, season-keyed cache and must not be borrowed from another selection.
+        return LibraryCache.DetailData(item, directory.seasons, emptyList(), sources, at)
+    }
+}
+
+internal fun detailRequestIsCurrent(client: com.lumina.tv.data.EmbyClient, revision: Long): Boolean =
+    AppRuntime.client === client && revision == LibraryCache.userDataRevision
+
+internal suspend fun loadDetailParts(
+    main: MediaItem,
+    fetchSeasons: suspend () -> List<MediaItem>,
+    fetchSources: suspend () -> List<MediaSource>,
+    fallbackSources: List<MediaSource> = emptyList(),
+    onSeasons: (SeasonDirectoryLoadState<MediaItem>) -> Unit = {},
+    onSources: (List<MediaSource>) -> Unit = {},
+): DetailRequestParts = coroutineScope {
+    val seasonJob = async {
+        val seasonResult = if (main.type == "Series") catchingRequest { fetchSeasons() }
+            else Result.success(emptyList())
+        val directory = if (main.type == "Series" && seasonResult.getOrNull()?.isEmpty() == true) {
+            SeasonDirectoryLoadState<MediaItem>(error = IllegalStateException("empty-season-directory"))
+        } else completeSeasonDirectoryLoad(seasonResult)
+        onSeasons(directory)
+        directory
+    }
+    val sourceJob = async {
+        catchingRequest { fetchSources() }.getOrDefault(fallbackSources).also(onSources)
+    }
+    DetailRequestParts(seasonJob.await(), sourceJob.await())
+}
 
 private val failedDetailBackgroundKeys = java.util.Collections.synchronizedMap(mutableMapOf<String, Long>())
 @OptIn(ExperimentalFoundationApi::class)
@@ -365,18 +402,19 @@ fun DetailScreen(
     val detailHazeState = remember { HazeState() }
     val heroDrift = rememberDetailHeroDrift()
     val scope = rememberCoroutineScope()
-    var loading by remember { mutableStateOf(true) }
+    val detailRevision = LibraryCache.userDataRevision
+    var loading by remember(id, client) { mutableStateOf(true) }
     var loadFailed by remember(id, accountScope) { mutableStateOf(false) }
     var itemNotFound by remember(id, accountScope) { mutableStateOf(false) }
     var detailRetry by remember(id, accountScope) { mutableStateOf(0) }
     var item by remember(id, client) { mutableStateOf<MediaItem?>(null) }
-    var seasonDirectory by remember { mutableStateOf(beginSeasonDirectoryLoad<MediaItem>()) }
+    var seasonDirectory by remember(id, client) { mutableStateOf(beginSeasonDirectoryLoad<MediaItem>()) }
     val seasons = seasonDirectory.seasons
-    var episodes by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var episodes by remember(id, client) { mutableStateOf<List<MediaItem>>(emptyList()) }
     var episodeLoading by remember { mutableStateOf(false) }
     var episodeLoadError by remember { mutableStateOf<String?>(null) }
     var episodeReloadTick by remember { mutableIntStateOf(0) }
-    var selectedSeason by remember { mutableStateOf<MediaItem?>(null) }
+    var selectedSeason by remember(id, client) { mutableStateOf<MediaItem?>(null) }
     val episodePages = remember(id, client, LibraryCache.userDataRevision) { EpisodePickerPages<MediaItem>() }
     fun selectSeason(seriesId: String, season: MediaItem?) {
         val sid = season?.id
@@ -564,7 +602,7 @@ fun DetailScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(id, accountScope, detailRetry) {
+    LaunchedEffect(id, client, accountScope, detailRevision, detailRetry) {
         seasonDirectory = beginSeasonDirectoryLoad()
         previewMetadataReady = false
         val cacheRevision = LibraryCache.userDataRevision
@@ -582,59 +620,51 @@ fun DetailScreen(
             return@LaunchedEffect
         }
 
+        if (!detailRequestIsCurrent(c, cacheRevision)) return@LaunchedEffect
         // 命中缓存：立即渲染，不再转圈
         val cached = LibraryCache.detail(id)?.takeIf { it.item != null }
         if (cached != null) {
-            item = cached.item
+            val cachedItem = checkNotNull(cached.item)
+            item = cachedItem
             seasonDirectory = completeSeasonDirectoryLoad(Result.success(cached.seasons))
             sources = cached.sources
-            favoriteAction.syncFromServer(cached.item?.isFavorite ?: false)
-            playedAction.syncFromServer(cached.item?.played ?: false)
+            favoriteAction.syncFromServer(cachedItem.isFavorite)
+            playedAction.syncFromServer(cachedItem.played)
             selectSeason(id, cached.seasons.firstOrNull())
             loading = false
+            loadFailed = false
+            itemNotFound = false
             sourcesLoading = true
             val startedAt = System.currentTimeMillis()
             PageLog.add("detailLoad id=$id stage=cache-main ms=0")
-            val freshItemJob = launch {
-                val freshItem = catchingRequest { c.getItem(id) }.getOrNull()
-                if (freshItem != null) {
-                    item = freshItem
-                    favoriteAction.syncFromServer(freshItem.isFavorite)
-                    playedAction.syncFromServer(freshItem.played)
+            val freshItemJob = async {
+                catchingRequest { c.getItem(id) }.getOrNull().also { freshItem ->
+                    if (freshItem != null && detailRequestIsCurrent(c, cacheRevision)) {
+                        item = freshItem
+                        favoriteAction.syncFromServer(freshItem.isFavorite)
+                        playedAction.syncFromServer(freshItem.played)
+                    }
+                    PageLog.add("detailLoad id=$id stage=main-refresh ms=${System.currentTimeMillis() - startedAt}")
                 }
-                PageLog.add("detailLoad id=$id stage=main-refresh ms=${System.currentTimeMillis() - startedAt}")
             }
-            val sourceJob = launch {
-                sources = catchingRequest { c.getMediaSources(id) }.getOrDefault(cached.sources)
-                sourcesLoading = false
-                PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - startedAt}")
-            }
-            val seasonRefreshJob = if (cached.item?.type == "Series") launch {
-                val refreshedSeasons = catchingRequest { c.getSeasons(id) }.getOrNull()
-                if (!refreshedSeasons.isNullOrEmpty()) {
-                    seasonDirectory = completeSeasonDirectoryLoad(Result.success(refreshedSeasons))
-                    if (selectedSeason == null) selectSeason(id, refreshedSeasons.first())
-                }
-                PageLog.add("detailLoad id=$id stage=seasons-refresh ms=${System.currentTimeMillis() - startedAt}")
-            } else null
-            launch {
-                joinAll(freshItemJob, sourceJob)
-                seasonRefreshJob?.join()
-                previewMetadataReady = true
-                if (cached.item?.type != "Series" || seasonDirectory.seasons.isNotEmpty()) {
-                    LibraryCache.putDetail(
-                        id,
-                        cached.copy(
-                            item = item ?: cached.item,
-                            seasons = seasonDirectory.seasons,
-                            sources = sources,
-                            at = System.currentTimeMillis(),
-                        ),
-                        cacheRevision,
-                    )
-                }
-                PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - startedAt}")
-            }
+            val parts = loadDetailParts(cachedItem, { c.getSeasons(id) }, { c.getMediaSources(id) }, cached.sources,
+                onSeasons = { directory ->
+                    if (detailRequestIsCurrent(c, cacheRevision) && directory.status == SeasonDirectoryStatus.SUCCESS) {
+                        seasonDirectory = directory
+                        if (directory.seasons.none { it.id == selectedSeason?.id }) selectSeason(id, directory.seasons.first())
+                    }
+                    PageLog.add("detailLoad id=$id stage=seasons-refresh ms=${System.currentTimeMillis() - startedAt}")
+                },
+                onSources = { loaded ->
+                    if (detailRequestIsCurrent(c, cacheRevision)) { sources = loaded; sourcesLoading = false }
+                    PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - startedAt}")
+                })
+            val refreshedItem = freshItemJob.await() ?: cachedItem
+            currentCoroutineContext().ensureActive()
+            if (!detailRequestIsCurrent(c, cacheRevision)) return@LaunchedEffect
+            previewMetadataReady = true
+            parts.cacheData(refreshedItem)?.let { LibraryCache.putDetail(id, it, cacheRevision) }
+            PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - startedAt}")
             return@LaunchedEffect
         }
 
@@ -679,6 +709,8 @@ fun DetailScreen(
         } finally {
             mainWaitNotice.cancel()
         }
+        currentCoroutineContext().ensureActive()
+        if (!detailRequestIsCurrent(c, cacheRevision)) return@LaunchedEffect
         if (loadError != null) {
             loading = false
             sourcesLoading = false
@@ -697,31 +729,23 @@ fun DetailScreen(
         sourcesLoading = true
         PageLog.add("detailLoad id=$id stage=main-ready ms=${System.currentTimeMillis() - loadStartedAt}")
         if (it0 != null) {
-            val seasonJob = launch {
-                val seasonResult: Result<List<MediaItem>> = if (it0.type == "Series") catchingRequest { c.getSeasons(id) }
-                    else Result.success(emptyList())
-                seasonDirectory = if (it0.type == "Series" && seasonResult.getOrNull()?.isEmpty() == true) {
-                    SeasonDirectoryLoadState(error = IllegalStateException("empty-season-directory"))
-                } else {
-                    completeSeasonDirectoryLoad(seasonResult)
-                }
-                val loadedSeasons = seasonDirectory.seasons
-                selectSeason(id, loadedSeasons.firstOrNull())
-                PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
-            }
-            val sourceJob = launch {
-                sources = catchingRequest { c.getMediaSources(id) }.getOrDefault(emptyList())
-                sourcesLoading = false
-                PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - loadStartedAt}")
-            }
-            launch {
-                joinAll(seasonJob, sourceJob)
-                previewMetadataReady = true
-                if (it0.type != "Series" || seasons.isNotEmpty()) {
-                    LibraryCache.putDetail(id, LibraryCache.DetailData(it0, seasons, episodes, sources, System.currentTimeMillis()), cacheRevision)
-                }
-                PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - loadStartedAt}")
-            }
+            val parts = loadDetailParts(it0, { c.getSeasons(id) }, { c.getMediaSources(id) },
+                onSeasons = { directory ->
+                    if (detailRequestIsCurrent(c, cacheRevision)) {
+                        seasonDirectory = directory
+                        selectSeason(id, directory.seasons.firstOrNull())
+                    }
+                    PageLog.add("detailLoad id=$id stage=seasons ms=${System.currentTimeMillis() - loadStartedAt}")
+                },
+                onSources = { loaded ->
+                    if (detailRequestIsCurrent(c, cacheRevision)) { sources = loaded; sourcesLoading = false }
+                    PageLog.add("detailLoad id=$id stage=sources ms=${System.currentTimeMillis() - loadStartedAt}")
+                })
+            currentCoroutineContext().ensureActive()
+            if (!detailRequestIsCurrent(c, cacheRevision)) return@LaunchedEffect
+            previewMetadataReady = true
+            parts.cacheData(it0)?.let { LibraryCache.putDetail(id, it, cacheRevision) }
+            PageLog.add("detailLoad id=$id stage=complete ms=${System.currentTimeMillis() - loadStartedAt}")
         }
     }
 
@@ -758,6 +782,8 @@ fun DetailScreen(
             val loaded = episodePages.fetch(sid, { c.getEpisodes(it0.id, sid) }) { list ->
                 LibraryCache.putEpisodes(it0.id, sid, list, cacheRevision)
             }
+            currentCoroutineContext().ensureActive()
+            if (!detailRequestIsCurrent(c, cacheRevision)) return@LaunchedEffect
             episodeLoading = false
             if (loaded.error == null) episodes = loaded.episodes
             episodeLoadError = loaded.error?.message ?: if (loaded.error != null) "剧集读取失败，请重试" else null
@@ -1888,7 +1914,7 @@ private fun PickerDialog(
 
 @Composable
 private fun SettingRow(label: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
-    FocusSurface(Modifier.fillMaxWidth().height(52.dp), corner = 10.dp, scaleTo = 1f, onClick = onClick) { focused ->
+    FocusSurface(Modifier.fillMaxWidth().height(52.dp), corner = 10.dp, scaleTo = 1f, enabled = enabled, onClick = onClick) { focused ->
         Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(10.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("$label：$value", color = if (enabled) TextMain else TextSub.copy(alpha = 0.65f), fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Text("›", color = if (enabled) Accent else TextSub.copy(alpha = 0.5f), fontSize = TypeScale.sp20)
@@ -2126,10 +2152,11 @@ private fun videoBadges(stream: MediaStream, audio: MediaStream?): List<MediaBad
         audioTags.contains("TRUEHD") -> add(MediaBadge.TrueHd)
     }
     if (videoTags.contains("IMAX")) add(MediaBadge.Imax)
+    val rasterLabel = com.lumina.tv.data.mediaResolutionLabel(stream.width, stream.height)
     when {
-        (stream.width ?: 0) >= 3840 || (stream.height ?: 0) >= 2160 -> add(MediaBadge.FourK)
-        (stream.width ?: 0) >= 1920 || (stream.height ?: 0) >= 1080 -> add(MediaBadge.FullHd)
-        (stream.width ?: 0) >= 1280 || (stream.height ?: 0) >= 720 -> add(MediaBadge.Hd720)
+        rasterLabel?.startsWith("4K") == true -> add(MediaBadge.FourK)
+        rasterLabel == "1080P" -> add(MediaBadge.FullHd)
+        rasterLabel == "720P" -> add(MediaBadge.Hd720)
     }
     when (audio?.channels) {
         8 -> add(MediaBadge.Surround71)
@@ -2189,7 +2216,7 @@ private fun TrackSheet(
                 Text("播放设置", color = TextMain, fontSize = TypeScale.sp16, fontWeight = FontWeight.SemiBold)
                 content()
                 Spacer(Modifier.height(2.dp))
-                FocusSurface(Modifier.fillMaxWidth().height(44.dp), corner = 22.dp, onClick = onDismiss) { focused ->
+                FocusSurface(Modifier.fillMaxWidth().height(44.dp), corner = 22.dp, requestFocus = true, onClick = onDismiss) { focused ->
                     Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
                         Text("完成", color = TextMain, fontSize = TypeScale.sp13)
                     }

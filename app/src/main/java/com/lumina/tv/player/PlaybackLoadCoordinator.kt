@@ -14,9 +14,12 @@ internal class PlaybackLoadCoordinator(initialSourceId: String? = null) {
     var sourceId: String? = initialSourceId
         private set
     val requestVariant: Http400RequestVariant get() = Http400RequestVariant(badHttpFallbackStage)
+    private var permitSequence = 0L
+    private var activePermit: PlaybackLoadPermit? = null
 
     fun beginLoad(source: String?): Int {
         generation++
+        activePermit = null
         selectSource(source)
         return generation
     }
@@ -45,13 +48,28 @@ internal class PlaybackLoadCoordinator(initialSourceId: String? = null) {
 
     fun playingFor(load: Int): Boolean? = desiredPlaying.takeIf { accepts(load) }
 
-    /** Read at the commit point, never before a suspension such as negotiation/Surface waiting. */
-    fun commit(load: Int, apply: (playing: Boolean) -> Unit): Boolean {
-        val playing = playingFor(load) ?: return false
+    fun grantPermit(load: Int, retirement: RetirementPermit): PlaybackLoadPermit? {
+        if (!accepts(load) || !retirement.isValid()) return null
+        return PlaybackLoadPermit(load, ++permitSequence, retirement).also { activePermit = it }
+    }
+
+    fun accepts(permit: PlaybackLoadPermit?): Boolean = permit != null &&
+        permit.generation == generation && activePermit === permit && permit.retirement.isValid()
+
+    /** Recheck generation and retirement authority at the commit point after all suspension. */
+    fun commit(permit: PlaybackLoadPermit, apply: (playing: Boolean) -> Unit): Boolean {
+        if (!accepts(permit)) return false
+        val playing = playingFor(permit.generation) ?: return false
         apply(playing)
         return true
     }
 }
+
+internal class PlaybackLoadPermit internal constructor(
+    internal val generation: Int,
+    internal val sequence: Long,
+    internal val retirement: RetirementPermit,
+)
 
 internal data class Http400RequestVariant(val stage: Int) {
     val removeSubtitleParams: Boolean get() = stage == 1

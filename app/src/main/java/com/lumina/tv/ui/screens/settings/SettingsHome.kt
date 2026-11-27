@@ -15,7 +15,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -26,11 +25,36 @@ import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.LibraryView
+import com.lumina.tv.data.EmbyClient
+import com.lumina.tv.data.catchingRequest
+import com.lumina.tv.ui.screens.collectionTypeToItemTypes
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+
+/** Count precisely the same user's parent/type scope used by library browsing. */
+internal suspend fun loadLibraryCounts(client: EmbyClient, views: List<LibraryView>): Map<String, Int?> = coroutineScope {
+    val permits = Semaphore(4)
+    views.map { view ->
+        async {
+            view.id to if (client.userId.isBlank()) null else catchingRequest {
+                permits.withPermit {
+                    client.getItemsPage(parentId = view.id, types = collectionTypeToItemTypes(view.type),
+                        limit = 1, fields = "", requestTimeoutSeconds = 8).totalRecordCount
+                }
+            }.getOrNull()
+        }
+    }.awaitAll().toMap()
+}
+
+internal fun libraryItemCountDescription(count: Int?, complete: Boolean): String =
+    count?.let { "$it 个条目" } ?: if (complete) "条目数未知" else "正在获取条目数"
 
 @Composable
 fun SettingsHome(
@@ -41,10 +65,12 @@ fun SettingsHome(
 ) {
     val prefs = AppRuntime.prefs
     val views = LibraryCache.home?.views.orEmpty()
-    val accountScope = prefs?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
+    val client = AppRuntime.client
+    val revision = LibraryCache.userDataRevision
+    val accountScope = client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
     var hiddenIds by remember(accountScope) { mutableStateOf(prefs?.hiddenViewIds.orEmpty()) }
-    val itemCounts = remember { mutableStateMapOf<String, Int>() }
-    var countLoadComplete by remember { mutableStateOf(false) }
+    var itemCounts by remember(client, accountScope, revision, views) { mutableStateOf<Map<String, Int?>>(emptyMap()) }
+    var countLoadComplete by remember(client, accountScope, revision, views) { mutableStateOf(false) }
     val requesters = remember(views.map(LibraryView::id)) {
         buildMap {
             views.forEachIndexed { index, view ->
@@ -56,15 +82,14 @@ fun SettingsHome(
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
 
-    LaunchedEffect(views) {
+    LaunchedEffect(views, client, accountScope, revision) {
+        itemCounts = emptyMap()
         countLoadComplete = false
-        if (views.isEmpty()) return@LaunchedEffect
-        val counts = coroutineScope {
-            views.map { view ->
-                async { view.id to runCatching { AppRuntime.client?.getLibraryItemCount(view.id) }.getOrNull() }
-            }.awaitAll()
-        }
-        counts.forEach { (id, count) -> if (count != null) itemCounts[id] = count }
+        val c = client ?: run { countLoadComplete = true; return@LaunchedEffect }
+        val counts = loadLibraryCounts(c, views)
+        currentCoroutineContext().ensureActive()
+        if (AppRuntime.client !== c || revision != LibraryCache.userDataRevision) return@LaunchedEffect
+        itemCounts = counts
         countLoadComplete = true
     }
 
@@ -89,8 +114,7 @@ fun SettingsHome(
                 ToggleRow(
                     focusKey = view.id,
                     title = view.name,
-                    description = itemCounts[view.id]?.let { "$it 个条目" }
-                        ?: if (countLoadComplete) "条目数未知" else "正在获取条目数",
+                    description = libraryItemCountDescription(itemCounts[view.id], countLoadComplete),
                     checked = view.id !in hiddenIds,
                     onCheckedChange = {
                         prefs?.toggleViewHidden(view.id)

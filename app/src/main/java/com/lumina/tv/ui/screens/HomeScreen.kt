@@ -80,6 +80,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.animation.core.Animatable
@@ -116,6 +117,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInputModeManager
@@ -183,6 +186,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.withPermit
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
 import androidx.lifecycle.repeatOnLifecycle
 
 /** Sentinel for "restore focus to the first card of the grid/row", used by [restoreTargetId]. */
@@ -202,7 +206,7 @@ private enum class HomeTab(val label: String) {
     Favorites("收藏"),
 }
 
-private fun collectionTypeToItemTypes(type: String?): String = when (type?.lowercase()) {
+internal fun collectionTypeToItemTypes(type: String?): String = when (type?.lowercase(java.util.Locale.ROOT)) {
     "movies" -> "Movie"
     "tvshows" -> "Series"
     "music" -> "Audio,MusicAlbum"
@@ -225,7 +229,6 @@ fun HomeScreen(
     val context = LocalContext.current
     val homeIdentity = client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
     val prefetchSemaphore = remember { kotlinx.coroutines.sync.Semaphore(3) }
-    val countSemaphore = remember { kotlinx.coroutines.sync.Semaphore(4) }
     val hazeState = remember { HazeState() }
     LaunchedEffect(context) {
         ThemeRuntime.updateDeviceBlurSupported(
@@ -256,8 +259,8 @@ fun HomeScreen(
     }
     val favoritesGridState = remember(favoritesPager) { LazyGridState() }
     val mediaLibraryGridState = rememberSaveable(client, saver = LazyGridState.Saver) { LazyGridState() }
-    var views by remember { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
-    var libraryCounts by remember { mutableStateOf<Map<String, Int?>>(emptyMap()) }
+    var views by remember(homeIdentity) { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
+    var libraryCounts by remember(client, homeIdentity, userDataRevision, views) { mutableStateOf<Map<String, Int?>>(emptyMap()) }
     var libraryRecentBackdropUrls by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
 
     var tab by rememberSaveable { mutableStateOf(HomeTab.Recommend) }
@@ -440,7 +443,7 @@ fun HomeScreen(
     var focusedMediaSection by rememberSaveable { mutableStateOf<String?>(null) }
     var focusedLibraryId by rememberSaveable(client) { mutableStateOf<String?>(null) }
     var heroIndex by rememberSaveable { mutableStateOf(0) }
-    var unavailableHeroIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var unavailableHeroIds by remember(homeIdentity) { mutableStateOf<Set<String>>(emptySet()) }
     var heroHasFocus by remember { mutableStateOf(false) }
     var restoreHeroFocus by rememberSaveable { mutableStateOf(false) }
     var heroResetPending by remember { mutableStateOf(false) }
@@ -602,16 +605,13 @@ fun HomeScreen(
         viewContents = viewContents + prefetchedViews.associate { it.first.id to it.second }
     }
 
-    LaunchedEffect(views, client, reloadToken) {
+    LaunchedEffect(views, client, reloadToken, userDataRevision) {
+        libraryCounts = emptyMap()
         val c = client ?: return@LaunchedEffect
-        val counts = coroutineScope {
-            views.map { view ->
-                async {
-                    view.id to catchingRequest { countSemaphore.withPermit { c.getLibraryItemCount(view.id) } }.getOrNull()
-                }
-            }.awaitAll()
-        }
-        libraryCounts = libraryCounts + counts
+        val counts = com.lumina.tv.ui.screens.settings.loadLibraryCounts(c, views)
+        currentCoroutineContext().ensureActive()
+        if (AppRuntime.client !== c || userDataRevision != LibraryCache.userDataRevision) return@LaunchedEffect
+        libraryCounts = counts
     }
 
     LaunchedEffect(resume, favorites, latest, movies, series, viewContents) {
@@ -776,7 +776,20 @@ fun HomeScreen(
         if (cached.isNotEmpty()) viewContents = viewContents + cached
     }
 
-    val heroItems = rememberHomeHeroItems(latest, movies, series, favorites, unavailableHeroIds, ::pickHeroItems)
+    val heroLifecycle = LocalLifecycleOwner.current.lifecycle
+    var heroHour by remember(homeIdentity) { mutableLongStateOf(heroHourContext(System.currentTimeMillis())) }
+    LaunchedEffect(active, heroLifecycle, homeIdentity) {
+        if (!active) return@LaunchedEffect
+        heroLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                val now = System.currentTimeMillis()
+                heroHour = heroHourContext(now)
+                delay(3_600_000L - Math.floorMod(now, 3_600_000L))
+            }
+        }
+    }
+    val heroItems = rememberScopedHomeHeroItems(homeIdentity, heroHour,
+        latest, movies, series, favorites, unavailableHeroIds, heroExposureHistory)
     LaunchedEffect(heroItems.size) {
         if (heroItems.isEmpty()) heroIndex = 0
         else if (heroIndex > heroItems.lastIndex) heroIndex = heroItems.lastIndex
@@ -970,6 +983,9 @@ fun HomeScreen(
                                 }
                             },
                             onItemUnavailable = { itemId -> unavailableHeroIds = unavailableHeroIds + itemId },
+                            onItemVisible = { account, itemId ->
+                                if (AppRuntime.client === client && account == homeIdentity) heroExposureHistory.record(account, itemId)
+                            },
                             hazeState = hazeState,
                         )
                     }
@@ -1541,7 +1557,8 @@ private fun ServerCapsule(
         ) {
             Box(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 Text(
-                    AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() }
+                    AppRuntime.serverDisplayName?.takeIf { it.isNotBlank() }
+                        ?: AppRuntime.prefs?.serverName?.takeIf { it.isNotBlank() }
                         ?: AppRuntime.session?.serverName ?: "Emby",
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp).align(Alignment.Center),
                     color = Color.White.copy(alpha = 0.94f),
@@ -2084,10 +2101,54 @@ private fun TopButton(icon: androidx.compose.ui.graphics.vector.ImageVector, lab
     }
 }
 
-/**
- * 轮播选片：按小时打乱前 40 个候选，并降低最近展示条目的权重。
- */
-private val recentlyShownHeroIds = mutableListOf<String>()
+/** Bounded account-local exposure history. Merely selecting or preloading a candidate never writes it. */
+internal class HeroExposureHistory(private val maxAccounts: Int = 8, private val maxItems: Int = 12) {
+    init { require(maxAccounts > 0 && maxItems > 0) }
+    private val accounts = LinkedHashMap<String, MutableList<String>>()
+    @Synchronized fun snapshot(account: String?): Set<String> = accounts[account]?.toSet().orEmpty()
+    @Synchronized fun record(account: String, itemId: String) {
+        if (account.isBlank() || itemId.isBlank()) return
+        val recent = accounts.remove(account) ?: mutableListOf()
+        recent.remove(itemId)
+        recent.add(itemId)
+        while (recent.size > maxItems) recent.removeAt(0)
+        accounts[account] = recent
+        while (accounts.size > maxAccounts) accounts.remove(accounts.keys.first())
+    }
+}
+
+private val heroExposureHistory = HeroExposureHistory()
+
+internal fun heroHourContext(nowMs: Long): Long = Math.floorDiv(nowMs, 3_600_000L)
+
+@Composable
+internal fun rememberScopedHomeHeroItems(
+    account: String?, hour: Long,
+    latest: List<MediaItem>, movies: List<MediaItem>, series: List<MediaItem>, favorites: List<MediaItem>,
+    unavailableIds: Set<String>, history: HeroExposureHistory,
+): List<MediaItem> = key(account, hour) {
+    rememberHomeHeroItems(latest, movies, series, favorites, unavailableIds) { pool, recent, size ->
+        pickHeroItems(pool, recent, size, seed = hour xor (account.orEmpty().hashCode().toLong() shl 32),
+            shownIds = history.snapshot(account))
+    }
+}
+
+/** All measurements are pixels; the area ratio is unchanged by display density. */
+internal fun heroViewportVisible(width: Float, height: Float, visibleWidth: Float, visibleHeight: Float): Boolean =
+    width > 0f && height > 0f && visibleWidth > 0f && visibleHeight > 0f &&
+        visibleWidth.coerceAtMost(width) * visibleHeight.coerceAtMost(height) >= width * height * 0.5f
+
+/** Invoked after drawContent, with the owning (possibly transitioning) bitmap, never from selection. */
+internal class HeroExposureTracker {
+    private var lastRecorded: Pair<String, String>? = null
+    fun onDraw(account: String?, layer: HeroImageLayer?, active: Boolean, foreground: Boolean,
+        viewportVisible: Boolean, imageReady: Boolean, onVisible: (String, String) -> Unit) {
+        val current = if (!account.isNullOrBlank() && layer != null && active && foreground && viewportVisible && imageReady)
+            account to layer.itemId else null
+        if (current != null && current != lastRecorded) onVisible(current.first, current.second)
+        lastRecorded = current
+    }
+}
 
 internal data class HeroImageLayer(val itemId: String, val imageUrl: String)
 
@@ -2098,10 +2159,10 @@ internal fun heroDisplayLayer(
     pastWipeMidpoint: Boolean,
 ): HeroImageLayer? = top?.takeIf { topLoaded && pastWipeMidpoint } ?: bottom
 
-internal fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: Int = 6): List<MediaItem> {
+/** Weighted sampling without replacement, deterministic for a seed and independent of input order. */
+internal fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: Int = 6,
+    seed: Long = heroHourContext(System.currentTimeMillis()), shownIds: Set<String> = emptySet()): List<MediaItem> {
     if (pool.isEmpty() || size <= 0) return emptyList()
-    val seed = System.currentTimeMillis() / 3_600_000L
-    val shownIds = synchronized(recentlyShownHeroIds) { recentlyShownHeroIds.toSet() }
     fun score(item: MediaItem): Double {
         var s = 0.0
         if (item.backdropTags.isNotEmpty() || !item.backdropTag.isNullOrBlank()) s += 3.0
@@ -2110,27 +2171,28 @@ internal fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: 
         if (item.id in recentIds) s += 2.0
         if (item.id in shownIds) s -= 4.0
         if (item.played) s -= 2.0
-        // 60 分钟以内多半是花絮/预告，不该占轮播位
         val minutes = (item.runtimeTicks ?: 0L) / 600_000_000L
         if (minutes in 1..59) s -= 3.0
-        val rating = item.communityRating ?: item.rating ?: 0.0
-        s += (rating / 3.0).coerceAtMost(3.0)
-        return s
+        val rating = (item.communityRating ?: item.rating ?: 0.0).takeIf { it.isFinite() } ?: 0.0
+        return s + (rating / 3.0).coerceIn(0.0, 3.0)
     }
-    val ranked = pool.sortedByDescending { score(it) }
-    val candidates = ranked.take(40).shuffled(java.util.Random(seed))
-    val picked = mutableListOf<MediaItem>()
+    val candidates = pool.filter { it.id.isNotBlank() }.distinctBy { it.id }
+        .sortedWith(compareByDescending<MediaItem> { score(it) }.thenBy { it.id }).take(40)
+    val random = java.util.Random(seed)
     val remaining = candidates.toMutableList()
+    val picked = mutableListOf<MediaItem>()
     while (picked.size < size && remaining.isNotEmpty()) {
-        val previousGenre = picked.lastOrNull()?.genres?.firstOrNull()?.trim()?.lowercase()
-        val nextIndex = if (previousGenre == null) 0 else remaining.indexOfFirst {
-            it.genres.firstOrNull()?.trim()?.lowercase() != previousGenre
-        }.takeIf { it >= 0 } ?: 0
-        picked += remaining.removeAt(nextIndex)
-    }
-    synchronized(recentlyShownHeroIds) {
-        recentlyShownHeroIds.addAll(picked.map { it.id })
-        while (recentlyShownHeroIds.size > 12) recentlyShownHeroIds.removeAt(0)
+        val previousGenre = picked.lastOrNull()?.genres?.firstOrNull()?.trim()?.lowercase(java.util.Locale.ROOT)
+        val weights = remaining.map { candidate ->
+            val genre = candidate.genres.firstOrNull()?.trim()?.lowercase(java.util.Locale.ROOT)
+            val diversity = if (!previousGenre.isNullOrBlank() && genre == previousGenre) 0.35 else 1.0
+            kotlin.math.exp(score(candidate) / 3.0) * diversity
+        }
+        val draw = random.nextDouble() * weights.sum()
+        var cumulative = 0.0
+        val next = weights.indexOfFirst { weight -> cumulative += weight; draw < cumulative }
+            .takeIf { it >= 0 } ?: remaining.lastIndex
+        picked += remaining.removeAt(next)
     }
     PageLog.add("heroPool candidates=${pool.size} ranked=${candidates.size} excluded=${(pool.size - picked.size).coerceAtLeast(0)} top3=${picked.take(3).joinToString(",") { it.id }}")
     return picked
@@ -2151,6 +2213,7 @@ private fun Hero(
     onNavigateDown: () -> Boolean,
     onHeroFocusChanged: (Boolean) -> Unit,
     onItemUnavailable: (String) -> Unit,
+    onItemVisible: (String, String) -> Unit,
     hazeState: HazeState,
     active: Boolean = true,
 ) {
@@ -2180,9 +2243,9 @@ private fun Hero(
     val actionWidth = ((titleWidth - 12.dp) / 2).coerceAtLeast(0.dp)
     val thumbnailWidth = if (compact) minOf(64.dp, heroWidth * 0.21f) else minOf(112.dp, heroWidth * 0.14f)
     var focusedHeroAction by remember { mutableStateOf(HeroActionFocus.NONE) }
-    var tmdbBackdrops by remember(items) { mutableStateOf<Map<String, String>>(emptyMap()) }
-    var tmdbResolvedIds by remember(items) { mutableStateOf<Set<String>>(emptySet()) }
-    LaunchedEffect(items, active, lifecycle) {
+    var tmdbBackdrops by remember(items, client) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var tmdbResolvedIds by remember(items, client) { mutableStateOf<Set<String>>(emptySet()) }
+    LaunchedEffect(items, client, active, lifecycle) {
         if (!active) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             if (tmdbResolvedIds.isNotEmpty()) return@repeatOnLifecycle
@@ -2213,6 +2276,11 @@ private fun Hero(
         items.associate { it.id to heroImageCandidates(it) }
     }
     val heroItemsById = remember(items) { items.associateBy { it.id } }
+    val accountScope = client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
+    val lifecycleState by lifecycle.currentStateAsState()
+    var viewportVisible by remember(client) { mutableStateOf(false) }
+    val exposureTracker = remember(client) { HeroExposureTracker() }
+    var loadedHeroImages by remember(client) { mutableStateOf<Set<String>>(emptySet()) }
     var failedHeroImages by remember(client) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
     var failedThumbImages by remember(client) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
     val lastHeroImageLogs = remember(client) { mutableMapOf<String, Pair<String, Boolean>>() }
@@ -2242,6 +2310,7 @@ private fun Hero(
         if (width <= 0 || height <= 0 || (source != "poster" && width <= height)) {
             rejectHeroImage(media, image)
         } else {
+            loadedHeroImages = loadedHeroImages + image
             logHeroImage(media, image, true)
         }
     }
@@ -2354,11 +2423,11 @@ private fun Hero(
         }
     }
     // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
-    val embyLogo = remember(displayItem.id, displayItem.logoTag) {
-        AppRuntime.client?.logoUrl(displayItem)?.takeIf { it.isNotBlank() }
+    val embyLogo = remember(client, displayItem.id, displayItem.logoTag) {
+        client?.logoUrl(displayItem)?.takeIf { it.isNotBlank() }
     }
-    var tmdbInfo by remember(displayItem.id) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
-    LaunchedEffect(displayItem.id, active, lifecycle) {
+    var tmdbInfo by remember(client, displayItem.id) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
+    LaunchedEffect(client, displayItem.id, active, lifecycle) {
         if (!active) return@LaunchedEffect
         if (embyLogo != null && (displayItem.communityRating ?: displayItem.rating) != null) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -2389,6 +2458,17 @@ private fun Hero(
             .fillMaxWidth()
             .height(heroHeight)
             .clipToBounds()
+            .onGloballyPositioned { coordinates ->
+                val bounds = coordinates.boundsInWindow()
+                viewportVisible = heroViewportVisible(coordinates.size.width.toFloat(), coordinates.size.height.toFloat(),
+                    bounds.width, bounds.height)
+            }
+            .drawWithContent {
+                drawContent()
+                exposureTracker.onDraw(accountScope, displayLayer, active, lifecycleState.isAtLeast(Lifecycle.State.STARTED),
+                    viewportVisible, displayLayer?.imageUrl in loadedHeroImages && !isRejectedHeroImage(displayLayer?.imageUrl),
+                    onItemVisible)
+            }
             .onFocusChanged { onHeroFocusChanged(it.hasFocus) }
             .onPreviewKeyEvent { event ->
                 if (focusedHeroAction == HeroActionFocus.NONE || event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false

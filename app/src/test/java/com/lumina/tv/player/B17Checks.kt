@@ -69,6 +69,7 @@ object B17Checks {
             "B4 EOF seeks restore into a new load" to ::eofSeek,
             "W4 Surface pause wiring" to ::surfaceWiring,
             "W4 transient/delayed focus and latest pause intent" to ::focusPause,
+            "T03 retirement permit and Media3 decoder wiring" to ::retirementPermitWiring,
         )
         val failures = checks.mapNotNull { (name, test) ->
             runCatching(test).fold({ println("B17 PASS $name"); null }, {
@@ -267,5 +268,34 @@ object B17Checks {
             check(reduceMpvFocus(awaitingGain, MpvFocusSignal.GAIN, false, false).effect == MpvFocusEffect.NONE)
             check(shouldPauseMpv(true, false))
         }
+    }
+
+    private fun retirementPermitWiring() {
+        val screen = File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText()
+        check("mpvRetirementFence timeout, continue load" !in screen)
+        check("withTimeoutOrNull(3_000L) { MpvRetirementFence.await() }" !in screen)
+        val loadSource = screen.substringAfter("fun loadSource(").substringBefore("loadJob = instanceScope.launch")
+        check("loadJob?.cancel()" in loadSource && "exo.stop()" in loadSource && "exo.clearMediaItems()" in loadSource)
+        check(loadSource.indexOf("exo.stop()") < loadSource.indexOf("exo.clearMediaItems()"))
+        check("Media3DecoderRetirements.begin(exo)" in loadSource)
+        check("Media3DecoderRetirements.finish(exo, exoRetirement)" in loadSource)
+
+        val loadJob = screen.substringAfter("val retirementPermit = MpvRetirementFence.awaitPermit()")
+            .substringBefore("} catch (e: Exception)")
+        check(loadJob.indexOf("loadCoordinator.grantPermit(generation, retirementPermit)") >= 0)
+        check(loadJob.indexOf("loadCoordinator.grantPermit(generation, retirementPermit)") <
+            loadJob.indexOf("exo.setMediaSource(videoSource)"))
+        check(loadJob.indexOf("exo.setMediaSource(videoSource)") < loadJob.indexOf("exo.prepare()"))
+        check("loadCoordinator.commit(loadPermit)" in loadJob)
+        check("loadCoordinator.accepts(loadPermit)" in loadJob)
+
+        val analytics = screen.substringAfter("DisposableEffect(exo) {")
+            .substringBefore("exo.addAnalyticsListener(analytics)")
+        val decoderReleased = analytics.substringAfter("override fun onVideoDecoderReleased")
+            .substringBefore("override fun onAudioTrackInitialized")
+        val decoderInitialized = analytics.substringAfter("override fun onVideoDecoderInitialized")
+            .substringBefore("override fun onRenderedFirstFrame")
+        check("Media3DecoderRetirements.decoderReleased(exo, decoderName)" in decoderReleased)
+        check("Media3DecoderRetirements.decoderInitialized(exo, decoderName)" in decoderInitialized)
     }
 }

@@ -1,8 +1,14 @@
 package com.lumina.tv.diag
 
-/** One wrapper and one previous-exit collection per process owner, including concurrent installation. */
-internal class ProcessCrashHandler {
+import java.util.concurrent.Executors
+
+/** Install synchronously; only historical evidence collection is scheduled in the background. */
+internal class ProcessCrashHandler(
+    private val schedulePreviousExit: (() -> Unit) -> Unit = { previousExits.execute(it) },
+) {
     private var installed = false
+    @Volatile var previousExitFailure: String? = null
+        private set
 
     @Synchronized fun install(
         write: (Thread, Throwable) -> Unit,
@@ -12,10 +18,21 @@ internal class ProcessCrashHandler {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try { write(thread, throwable) } catch (_: Throwable) { }
-            // Diagnostics must never prevent Android's original fatal-exception handling.
             try { previous?.uncaughtException(thread, throwable) } catch (_: Throwable) { }
         }
         installed = true
-        collectPreviousExit()
+        try {
+            schedulePreviousExit {
+                try { collectPreviousExit() } catch (error: Throwable) {
+                    previousExitFailure = error.javaClass.simpleName
+                }
+            }
+        } catch (error: Exception) { previousExitFailure = error.javaClass.simpleName }
+    }
+
+    companion object {
+        private val previousExits = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "lumina-previous-exit").apply { isDaemon = true }
+        }
     }
 }

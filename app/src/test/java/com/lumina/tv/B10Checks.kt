@@ -12,8 +12,10 @@ import java.io.File
 
 object B10Checks {
     @JvmStatic fun main(args: Array<String>) {
+        com.lumina.tv.data.T04Checks.main(args)
         pairingDelivery()
         diagnostics()
+        T11Checks.main(emptyArray())
         httpStatuses()
         println("B10 PASS: Q-043 no-receiver pending revocation; Q-044 IO-only logcat; Q-045 parseable JSON bounds; Q-046 Cookie redaction; Q-047 SAF/FileProvider; Q-049 HTTP classifications")
     }
@@ -51,7 +53,7 @@ object B10Checks {
         check(boundedDiagnosticJson("\"scalar\"", cap) == "\"scalar\"")
         val malformed = JSONObject(boundedDiagnosticJson("{broken", cap))
         check(malformed.getBoolean("invalidJson") && !malformed.has("truncated") &&
-            malformed.getString("reason") == "parse_failed" && "broken" in malformed.getString("preview"))
+            malformed.getString("reason") == "parse_failed" && "input omitted" in malformed.getString("preview"))
 
         val privateCookie = "session=must-not-escape"
         val sanitized = LogRedactor.redactJson(

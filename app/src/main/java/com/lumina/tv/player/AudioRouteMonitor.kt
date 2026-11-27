@@ -46,11 +46,12 @@ class AudioRouteMonitor(
 
     private fun refresh() {
         val newCaps = detect(appContext)
-        if (newCaps == lastCaps) return
+        val capsChanged = newCaps != lastCaps
         lastCaps = newCaps
         val encodings = newCaps.profiles.keys.filter { it != android.media.AudioFormat.ENCODING_PCM_16BIT }.sorted()
         val maxChannels = newCaps.profiles.values.flatten().maxOfOrNull { it.maxChannels } ?: 2
-        Log.i("LuminaTV", "audioRoute changed encodings=$encodings maxCh=$maxChannels")
+        Log.i("LuminaTV", "audioRoute event capsChanged=$capsChanged encodings=$encodings maxCh=$maxChannels")
+        // A route can change without changing the advertised encodings. It still invalidates output evidence.
         onCapsChanged(newCaps)
     }
 }

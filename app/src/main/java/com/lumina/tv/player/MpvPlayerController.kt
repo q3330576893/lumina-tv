@@ -12,14 +12,15 @@ import com.lumina.tv.data.nativePlaybackHeaders
 import com.lumina.tv.diag.PageLog
 import org.jellycine.mpv.MPVLib
 import java.io.File
-import java.util.ArrayDeque
+import com.lumina.tv.diag.DiagnosticLogBuffer
+import com.lumina.tv.diag.LatestDiagnosticWrite
+import com.lumina.tv.diag.appendDiagnosticLog
+import com.lumina.tv.diag.readDiagnosticTail
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import kotlinx.coroutines.CompletableDeferred
 import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.json.JSONArray
-import kotlin.math.roundToInt
 
 internal fun mpvLoadAcceptsSeek(terminal: Boolean, ended: Boolean, endKind: MpvEndKind?): Boolean =
     !terminal && !ended && endKind == null
@@ -129,6 +130,8 @@ class MpvPlayerController(
     private val onPhysicalLoad: (MpvPlayerController, LoadIdentity, Boolean) -> Unit = { _, _, _ -> },
     private val onState: (MpvPlayerController, LoadIdentity, State) -> Unit,
     private val anime4k: Anime4kConfig = Anime4kConfig.Off,
+    audioDecodeMode: String = "auto",
+    audioCaps: AudioCaps = AudioCapabilities(emptyMap()),
 ) {
     data class LoadIdentity(val generation: Int, val physicalId: Long, val software: Boolean)
     enum class FailureKind { INITIALIZATION, SURFACE, HTTP, DECODING, FIRST_FRAME_TIMEOUT, LOAD, CERT_INVALID }
@@ -182,9 +185,10 @@ class MpvPlayerController(
             override fun logMessage(prefix: String, level: Int, text: String) {
                 val at = timestamp()
                 endFileEvidence.log(level, text)
+                // Log ingress is bounded before dispatching to main; keep playback error handling unchanged.
+                if (isActive(this@NativeLoad)) appendMpvLog("$at load=${identity.physicalId} $prefix/$level $text")
+                if (!isMpvErrorLogLevel(level)) return
                 enqueue(this@NativeLoad, requireStarted = false) {
-                    appendMpvLog("$at load=${identity.physicalId} $prefix/$level $text")
-                    if (!isMpvErrorLogLevel(level)) return@enqueue
                     if (isMpvCertificateFailure(text)) {
                         failureKind = FailureKind.CERT_INVALID
                         emit(this@NativeLoad, buffering = false, error = CERTIFICATE_ERROR_MESSAGE, failureKind = FailureKind.CERT_INVALID)
@@ -249,14 +253,21 @@ class MpvPlayerController(
     private val handler = Handler(Looper.getMainLooper())
     private val fallbackSurfaceWidth = context.resources.displayMetrics.widthPixels.coerceAtLeast(1)
     private val fallbackSurfaceHeight = context.resources.displayMetrics.heightPixels.coerceAtLeast(1)
-    private val logLock = Any()
     private val sessionLogFile = File(context.applicationContext.filesDir, "mpv-session.log")
     private val sessionStateFile = File(context.applicationContext.filesDir, "mpv-session-state.json")
     private val previousCrashFile = File(context.applicationContext.filesDir, "mpv-previous-abnormal.txt")
-    private val diagnosticLines = ArrayDeque<String>()
+    private val logSessionId = logSessionIds.incrementAndGet()
+    private val diagnosticLogBuffer = DiagnosticLogBuffer(
+        execute = { sessionFiles.execute(it) },
+        writeBatch = { batch ->
+            if (logSessionId == logSessionIds.get()) appendDiagnosticLog(sessionLogFile, batch, MAX_SESSION_LOG_BYTES)
+        },
+        report = { PageLog.add(it) },
+    )
     private val observedProperties = linkedMapOf<String, String>()
     private val audioDiagnostics = MpvAudioDiagnostics(context)
     private val audioFocus = MpvAudioFocusController(context)
+    private val audioSpdifCodecs = mpvAudioSpdifCodecs(audioDecodeMode, audioCaps)
     private var softwareRetryCount = 0
     var unavailableReason: String? = null
         private set
@@ -271,7 +282,7 @@ class MpvPlayerController(
     private var pendingPositionMs: Long? = null
     private var pauseIntent = false
     private var audioFocusHold = false
-    private var duckedVolume: Double? = null
+    private var volumeDucked = false
     private var attachedSurface: Surface? = null
     private var lastSurfaceWidth = -1
     private var lastSurfaceHeight = -1
@@ -285,7 +296,7 @@ class MpvPlayerController(
     private var subtitleMappingNotice: String? = null
     private var subtitleFallbackToAuto = false
     private val subtitleDownload = ExternalSubtitleDownload(subtitleHttpClient)
-    private var lastRetirement: CompletableDeferred<Unit>? = null
+    private var lastRetirement: LoadRetirement? = null
     private var audioSilentCodec: String? = null
     private var cacheSpeedBytesPerSecond = 0L
     private var bufferedPositionMs: Long? = null
@@ -327,7 +338,7 @@ class MpvPlayerController(
                 "cache" to "yes",
                 "keep-open" to "no",
                 "sub-scale" to "1.0",
-                "audio-spdif" to "ac3,eac3,dts,truehd",
+                "audio-spdif" to audioSpdifCodecs,
                 "demuxer-max-bytes" to "64MiB",
                 "demuxer-max-back-bytes" to "32MiB",
             ).forEach { (key, value) -> engine.setOptionString(key, value) }
@@ -371,21 +382,32 @@ class MpvPlayerController(
         }
     }
 
-    private fun destroyNativeLoad(load: NativeLoad): CompletableDeferred<Unit> {
+    private fun destroyNativeLoad(load: NativeLoad): LoadRetirement {
         checkMainThread()
         load.endFileEvidence.stop()
-        restoreDuckedVolume(load)
         loadGate.retire(load)
         handler.removeCallbacksAndMessages(load)
         audioFocus.pauseByUser()
         audioFocusHold = false
         val retirement = load.subtitleIo.retire {
-            runCatching { load.engine.removeObserver(load.observer) }
-            runCatching { load.engine.removeLogObserver(load.logObserver) }
-            runCatching { load.engine.detachSurface() }
+            var failure: Throwable? = null
+            fun cleanupStep(action: () -> Unit) {
+                runCatching(action).onFailure { error ->
+                    if (failure == null) failure = error else failure?.addSuppressed(error)
+                }
+            }
+            cleanupStep { load.engine.removeObserver(load.observer) }
+            cleanupStep { load.engine.removeLogObserver(load.logObserver) }
+            cleanupStep { load.engine.detachSurface() }
             // This serial executor owns both subtitle JNI and destruction. Never wait on the UI.
-            runCatching { load.engine.destroy() }
-            load.subtitleFiles.forEach(File::delete)
+            cleanupStep { load.engine.destroy() }
+            load.subtitleFiles.forEach { file ->
+                if (file.exists() && !file.delete()) {
+                    val error = IllegalStateException("Unable to delete subtitle file ${file.name}")
+                    if (failure == null) failure = error else failure?.addSuppressed(error)
+                }
+            }
+            failure?.let { throw it }
         }
         lastRetirement = retirement
         MpvRetirementFence.track(retirement)
@@ -627,7 +649,7 @@ class MpvPlayerController(
             subtitleOptions.forEach { (key, value) -> load.engine.setOptionString(key, value) }
             load.engine.setPropertyDouble("sub-delay", subtitleDelayMs / 1000.0)
             load.engine.setPropertyDouble("speed", playbackSpeed.toDouble())
-            load.engine.setPropertyDouble("volume", requestedVolumePercent.toDouble())
+            load.engine.setPropertyDouble("volume", outputVolumePercent().toDouble())
             // Apply pause before loadfile as well, so a paused load cannot briefly start audio.
             load.engine.setPropertyBoolean("pause", pauseForLoad)
             onPhysicalLoad(this, load.identity, pauseForLoad)
@@ -720,10 +742,8 @@ class MpvPlayerController(
         duck = { duck ->
             if (!isActive(load)) return@PlaybackTarget false
             if (duck) {
-                if (duckedVolume == null) duckedVolume = runCatching { load.engine.getPropertyDouble("volume") }
-                    .getOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
-                val current = duckedVolume ?: return@PlaybackTarget false
-                runCatching { load.engine.setPropertyDouble("volume", current * 0.2) }.isSuccess
+                volumeDucked = true
+                runCatching { load.engine.setPropertyDouble("volume", outputVolumePercent().toDouble()) }.isSuccess
             } else {
                 restoreDuckedVolume(load)
                 true
@@ -732,10 +752,14 @@ class MpvPlayerController(
     )
 
     private fun restoreDuckedVolume(load: NativeLoad? = activeLoad) {
-        val volume = duckedVolume ?: return
-        duckedVolume = null
-        load?.takeIf(::isActive)?.let { owner -> runCatching { owner.engine.setPropertyDouble("volume", volume) } }
+        if (!volumeDucked) return
+        volumeDucked = false
+        load?.takeIf(::isActive)?.let { owner ->
+            runCatching { owner.engine.setPropertyDouble("volume", outputVolumePercent().toDouble()) }
+        }
     }
+
+    private fun outputVolumePercent(): Int = mpvOutputVolumePercent(requestedVolumePercent, volumeDucked)
 
     fun seekTo(ms: Long) {
         checkMainThread()
@@ -757,15 +781,11 @@ class MpvPlayerController(
         requestedVolumePercent = percent.coerceIn(0, 100)
         PageLog.add("mpvVolume pct=$requestedVolumePercent")
         activeLoad?.takeIf(::isActive)?.let { load ->
-            runCatching { load.engine.setPropertyDouble("volume", requestedVolumePercent.toDouble()) }
+            runCatching { load.engine.setPropertyDouble("volume", outputVolumePercent().toDouble()) }
         }
     }
 
-    fun volumePercent(): Int? = activeLoad?.takeIf(::isActive)?.let { load ->
-        runCatching {
-            load.engine.getPropertyDouble("volume")?.takeIf { it.isFinite() }?.roundToInt()?.coerceIn(0, 100)
-        }.getOrNull()
-    }
+    fun volumePercent(): Int = requestedVolumePercent
 
     fun positionMs(): Long = positionMs
     /** Only time-pos observations count; neither load --start nor seek commands update this value. */
@@ -775,11 +795,8 @@ class MpvPlayerController(
     fun containerFps(): Float? = runCatching {
         mpv?.getPropertyString("container-fps")?.toFloatOrNull()?.takeIf { it > 0f }
     }.getOrNull()
-    fun diagnosticLog(): String {
-        val previous = runCatching { previousCrashFile.takeIf(File::exists)?.readText(Charsets.UTF_8) }.getOrNull().orEmpty()
-        val current = synchronized(logLock) { diagnosticLines.toList() }.joinToString("\n")
-        return listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
-    }
+    /** Memory snapshot only; previous-session file tails are read/redacted by the IO exporter. */
+    fun diagnosticLog(): String = diagnosticLogBuffer.snapshot()
     fun anime4kShaderCount(): Int = anime4k.shaderPaths.size
     fun softwareRetryCount(): Int = softwareRetryCount
     fun diagnosticLoadIdentity(): LoadIdentity? = activeLoad?.takeIf(::isActive)?.identity
@@ -961,47 +978,41 @@ class MpvPlayerController(
         val params = properties["audio-params"].orEmpty()
         val ao = properties["current-ao"].orEmpty()
         // Retain A1's missing-output check. System AudioTrackImpl '[zero]' is not an AO name.
-        val abnormalAo = ao.isBlank() || ao.lowercase() in setOf("null", "unknown", "no")
-        if (params.isBlank() || params == "null" || params == "{}" || abnormalAo) {
-            val codec = audioStreams.firstOrNull { it.index == preferredAudioIndex }?.codec
-                ?: audioStreams.firstOrNull { it.isDefault }?.codec
-                ?: audioStreams.firstOrNull()?.codec ?: "unknown"
-            audioSilentCodec = codec
-            emit(load)
+        val health = mpvAudioOutputHealth(params, ao)
+        when (health) {
+            MpvAudioOutputHealth.CONFIRMED_NO_OUTPUT -> {
+                audioSilentCodec = currentAudioEmbyIndex()?.let { selected ->
+                    audioStreams.singleOrNull { it.index == selected }?.codec
+                } ?: "unknown"
+                emit(load)
+            }
+            MpvAudioOutputHealth.CONFIGURED -> if (audioSilentCodec != null) {
+                audioSilentCodec = null
+                PageLog.add("mpvAudio health=configuration-restored load=${load.identity.physicalId}")
+                emit(load)
+            }
+            MpvAudioOutputHealth.SUSPICIOUS, MpvAudioOutputHealth.UNKNOWN ->
+                // Property readback alone cannot prove silence. Keep this sample unknown/suspicious.
+                PageLog.add("mpvAudio health=$health load=${load.identity.physicalId}")
         }
     }
 
     private fun clearSessionLog() {
-        synchronized(logLock) {
-            diagnosticLines.clear()
-        }
         sessionFiles.execute {
+            if (logSessionId != logSessionIds.get()) return@execute
             recordPreviousAbnormalSession()
             runCatching { sessionLogFile.writeText("", Charsets.UTF_8) }
         }
     }
 
     private fun appendMpvLog(line: String) {
-        synchronized(logLock) {
-            if (diagnosticLines.size >= MAX_DIAGNOSTIC_LINES) diagnosticLines.removeFirst()
-            diagnosticLines.addLast(line)
-        }
-        sessionFiles.execute {
-            runCatching {
-                sessionLogFile.appendText("$line\n", Charsets.UTF_8)
-                if (sessionLogFile.length() > MAX_SESSION_LOG_BYTES) {
-                    val bytes = sessionLogFile.readBytes()
-                    val start = bytes.copyOfRange(bytes.size - MAX_SESSION_LOG_BYTES / 2, bytes.size).indexOf('\n'.code.toByte())
-                    sessionLogFile.writeBytes(bytes.copyOfRange(bytes.size - MAX_SESSION_LOG_BYTES / 2 + start + 1, bytes.size))
-                }
-            }.onFailure { Log.w(TAG, "Failed to persist mpv session log", it) }
-        }
+        diagnosticLogBuffer.add(line)
     }
 
     private fun recordPreviousAbnormalSession() {
-        val prior = runCatching { JSONObject(sessionStateFile.readText(Charsets.UTF_8)) }.getOrNull() ?: return
+        val prior = runCatching { JSONObject(readDiagnosticTail(sessionStateFile, 32 * 1024)) }.getOrNull() ?: return
         if (!prior.optBoolean("active", false)) return
-        val oldTail = runCatching { sessionLogFile.readText(Charsets.UTF_8).takeLast(6000) }.getOrDefault("")
+        val oldTail = runCatching { readDiagnosticTail(sessionLogFile, 8 * 1024) }.getOrDefault("")
         val summary = buildString {
             appendLine("上次 mpv 会话异常结束")
             appendLine("state=${prior}")
@@ -1015,9 +1026,10 @@ class MpvPlayerController(
     private fun persistSessionState() {
         val identity = activeLoad?.identity ?: return
         val properties = observedProperties.toMap()
-        val lastLog = synchronized(logLock) { diagnosticLines.lastOrNull() ?: "none" }
+        val lastLog = diagnosticLogBuffer.lastLine()
         val at = timestamp()
-        sessionFiles.execute {
+        sessionStateWrites.submit(logSessionId) {
+            if (logSessionId != logSessionIds.get()) return@submit
             val runtime = Runtime.getRuntime()
             val state = JSONObject()
             .put("active", true)
@@ -1038,7 +1050,7 @@ class MpvPlayerController(
                 .put("usedBytes", runtime.totalMemory() - runtime.freeMemory())
                 .put("maxBytes", runtime.maxMemory()))
             .put("lastLog", lastLog)
-            runCatching { sessionStateFile.writeText(state.toString(), Charsets.UTF_8) }
+            runCatching { sessionStateFile.writeText(com.lumina.tv.diag.LogRedactor.redactJson(state.toString()), Charsets.UTF_8) }
         }
     }
 
@@ -1052,14 +1064,30 @@ class MpvPlayerController(
         handler.removeCallbacksAndMessages(null)
         audioDiagnostics.close()
         val retirement = activeLoad?.let { destroyNativeLoad(it) } ?: lastRetirement
-        val cleanup = {
-            tlsCaFile.delete()
-            PlayerLifecycle.registry.released(this, reason)
+        val releaseRetirement = LoadRetirement()
+        MpvRetirementFence.track(releaseRetirement)
+        fun finishRelease(outcome: RetirementOutcome) {
+            var failure = (outcome as? RetirementOutcome.Failed)?.cause
+            if (outcome == RetirementOutcome.Succeeded) {
+                if (tlsCaFile.exists() && !tlsCaFile.delete()) {
+                    failure = IllegalStateException("Unable to delete mpv TLS certificate file")
+                }
+                PlayerLifecycle.registry.released(this, reason)
+            }
+            if (failure == null) releaseRetirement.succeed() else releaseRetirement.fail(failure)
         }
-        if (retirement == null) cleanup() else retirement.invokeOnCompletion { cleanup() }
+        if (retirement == null) finishRelease(RetirementOutcome.Succeeded) else retirement.invokeOnCompletion { outcome ->
+            finishRelease(outcome)
+            if (outcome is RetirementOutcome.Failed) {
+                PageLog.add("mpv retirement failed gen=$generation reason=$reason cause=${outcome.cause::class.java.simpleName}")
+            }
+        }
         loadGate.close()
         attachedSurface = null
-        sessionFiles.execute {
+        diagnosticLogBuffer.finish()
+        PageLog.add(diagnosticLogBuffer.summary())
+        sessionStateWrites.submit(logSessionId) {
+            if (logSessionId != logSessionIds.get()) return@submit
             runCatching { sessionStateFile.writeText(JSONObject().put("active", false).put("endedAt", timestamp()).put("reason", reason).toString(), Charsets.UTF_8) }
         }
     }
@@ -1096,9 +1124,17 @@ class MpvPlayerController(
         val retirement = destroyNativeLoad(load)
         fileLoaded = false
         ready = false
-        retirement.invokeOnCompletion {
+        retirement.invokeOnCompletion { outcome ->
             handler.post {
                 if (released || activeLoad != null) return@post
+                if (outcome != RetirementOutcome.Succeeded) {
+                    val failure = (outcome as? RetirementOutcome.Failed)?.cause
+                    onState(this, load.identity, State(
+                        error = "mpv native cleanup failed${failure?.message?.let { ": $it" }.orEmpty()}",
+                        failureKind = FailureKind.INITIALIZATION,
+                    ))
+                    return@post
+                }
                 // Surface callbacks can run during retirement. Rebind the latest surface, not a
                 // stale pre-retirement snapshot or a surface cached while activeLoad was null.
                 val surface = attachedSurface
@@ -1303,6 +1339,8 @@ class MpvPlayerController(
 
     private companion object {
         val physicalIds = AtomicLong()
+        val logSessionIds = AtomicLong()
+        val sessionStateWrites = LatestDiagnosticWrite<() -> Unit>({ sessionFiles.execute(it) }, { it() })
         val sessionFiles = Executors.newSingleThreadExecutor { task -> Thread(task, "mpv-session-files").apply { isDaemon = true } }
         val SESSION_AUDIO_PROPERTIES = setOf("aid", "audio-params", "audio-out-params", "current-ao", "audio-device")
         const val TAG = "MpvPlayerController"

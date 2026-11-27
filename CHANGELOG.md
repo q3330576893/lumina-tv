@@ -5,6 +5,16 @@
 
 ---
 
+## 当前工作区：v1.24.19（versionCode 163）
+
+2026-11-27 技术核对记录，**不是新版本发布记录**。版本取自 `app/build.gradle.kts`，本次未修改版本号；关于页引用 BuildConfig，现有 APK 的 `aapt2 dump badging` 与之相符。原有历史记录从下一节起原样保留；没有补造 v1.22.90 至 v1.24.18 的历史发布说明。
+
+- 当前依赖已包含 Media3 1.7.1、Jellyfin FFmpeg 音频扩展 1.6.1+2、JellyCine libmpv 1.0.4 与默认关闭的 Anime4K shader。
+- T15 修正文档中的旧版本、旧签名配置及「仅记录时间线诊断」说明；关于页许可弹窗增加组件名、许可证声明、来源入口和待核实项。
+- 新增 [native 来源清单](docs/native-sources.md) 与机器可读逐文件清单，核对双 ABI 共 24 个 `.so` 的实际 SHA-256。可找到的上游候选提交、编译选项和 patch 分别标明证据；缺少源码与二进制绑定的项仍为 BLOCKED。
+- [第三方许可](THIRD-PARTY-NOTICES.md) 修正 NanoHTTPD 为 BSD-3-Clause，区分 wrapper 的 MIT 声明、mpv GPL 构建与 FFmpeg 的许可信息；撤回「仓库同一提交即足够源码」的未经证实表述。根目录 `LICENSE` 保持不变。
+- T14 的 Wrapper / 依赖校验已存在；Linux AAPT2 校验输入缺失仍是既有阻塞，不因本机验证或本次文档更新而解除。
+
 ## v1.22.89
 
 **横版图候选链与缓存**

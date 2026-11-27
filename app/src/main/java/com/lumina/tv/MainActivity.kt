@@ -221,6 +221,12 @@ private fun AppRoot(
 ) {
     val context = LocalContext.current
     var showCrashLog by remember { mutableStateOf(false) }
+    var crashLogText by remember { mutableStateOf("正在读取…") }
+    LaunchedEffect(showCrashLog) {
+        if (showCrashLog) crashLogText = withContext(Dispatchers.IO) {
+            runCatching { CrashHandler.diagnosticReport(context) }.getOrDefault("无法读取崩溃日志")
+        }
+    }
     val backStack = remember {
         androidx.compose.runtime.mutableStateListOf(
             BackStackEntry(if (AppRuntime.session != null) Screen.Home else Screen.Login)
@@ -293,8 +299,7 @@ private fun AppRoot(
                 title = { Text("上次崩溃日志") },
                 text = {
                     Text(
-                        runCatching { CrashHandler.crashFile(context).readText().take(8000) }
-                            .getOrDefault("无法读取崩溃日志"),
+                        crashLogText,
                         maxLines = 24,
                     )
                 },

@@ -1,6 +1,8 @@
 package com.lumina.tv.player
 
 import androidx.media3.common.PlaybackException
+import com.lumina.tv.data.ORIGIN_AUTH_RESPONSE_HEADER
+import com.lumina.tv.data.isSameOrigin
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -17,12 +19,24 @@ import kotlin.coroutines.resume
 
 data class PlaybackErrorClassification(val category: PlaybackErrorCategory, val code: Int, val action: String)
 
-fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification {
+fun classifyPlaybackError(error: PlaybackException, embyServerUrl: String? = null): PlaybackErrorClassification {
     val causes = playbackErrorCauses(error).toList()
-    val statusCodes = causes.mapNotNull { (it as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode }
+    val responses = causes.filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>()
+    val statusCodes = responses.map { it.responseCode }
+    val authResponses = responses.filter { it.responseCode == 401 || it.responseCode == 403 }
+    val embyAuthFailure = authResponses.any { response ->
+        when (response.headerFields.entries.firstOrNull { it.key.equals(ORIGIN_AUTH_RESPONSE_HEADER, true) }?.value?.singleOrNull()) {
+            "emby" -> true
+            "external" -> false
+            // Preserve unscoped callers; playback supplies an explicit server, including an empty
+            // value when unavailable. With that context, unknown origin is never session evidence.
+            else -> embyServerUrl == null || isSameOrigin(embyServerUrl, response.dataSpec?.uri?.toString())
+        }
+    }
     val category = when {
         isCertificateFailure(error) -> PlaybackErrorCategory.CERT_INVALID
-        statusCodes.any { it == 401 || it == 403 } -> PlaybackErrorCategory.AUTH_FAILED
+        embyAuthFailure -> PlaybackErrorCategory.AUTH_FAILED
+        authResponses.isNotEmpty() -> PlaybackErrorCategory.HTTP_PERMISSION
         statusCodes.any { it == 404 || it == 410 } -> PlaybackErrorCategory.SOURCE_GONE
         statusCodes.any { it == 408 || it == 429 || it in 500..599 } -> PlaybackErrorCategory.NETWORK_TRANSIENT
         error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
@@ -51,7 +65,9 @@ fun classifyPlaybackError(error: PlaybackException): PlaybackErrorClassification
         ) -> PlaybackErrorCategory.DECODING
         else -> PlaybackErrorCategory.OTHER
     }
-    return PlaybackErrorClassification(category, error.errorCode, playbackErrorAction(category))
+    val action = if (category == PlaybackErrorCategory.HTTP_PERMISSION && authResponses.isNotEmpty())
+        "refresh_link_or_change_source" else playbackErrorAction(category)
+    return PlaybackErrorClassification(category, error.errorCode, action)
 }
 
 internal fun playbackErrorCauses(error: Throwable): Sequence<Throwable> = sequence {

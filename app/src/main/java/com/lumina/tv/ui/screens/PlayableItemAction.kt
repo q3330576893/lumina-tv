@@ -16,9 +16,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import com.lumina.tv.AppRuntime
+import com.lumina.tv.data.LibraryCache
 import com.lumina.tv.data.MediaItem
 import com.lumina.tv.data.PlayableItemRequestGate
 import com.lumina.tv.data.PlayableItemResult
+import com.lumina.tv.data.resolveCachedPlayableItem
 import com.lumina.tv.diag.PageLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -39,7 +41,8 @@ fun rememberPlayableItemAction(contextKey: Any, active: Boolean = true, onResolv
     val account = AppRuntime.session
     val userId = client?.userId
     val server = client?.baseUrl
-    val requestContext = listOf(contextKey, client, account, userId, server, active)
+    val revision = LibraryCache.userDataRevision
+    val requestContext = listOf(contextKey, client, account, userId, server, active, revision)
     val gate = remember(requestContext) { PlayableItemRequestGate().apply { updateContext(requestContext) } }
     var resolving by remember(requestContext) { mutableStateOf(false) }
     var slow by remember(requestContext) { mutableStateOf(false) }
@@ -65,7 +68,8 @@ fun rememberPlayableItemAction(contextKey: Any, active: Boolean = true, onResolv
     BackHandler(enabled = active && resolving) { cancelLookup() }
 
     fun current(ticket: Long) = gate.accepts(ticket) && AppRuntime.client === client &&
-        AppRuntime.session === account && client?.userId == userId && client?.baseUrl == server
+        AppRuntime.session === account && client?.userId == userId && client?.baseUrl == server &&
+        LibraryCache.userDataRevision == revision
     fun dismissReplay() {
         replay?.let { gate.finish(it.ticket) }
         replay = null
@@ -114,7 +118,11 @@ fun rememberPlayableItemAction(contextKey: Any, active: Boolean = true, onResolv
                 var keepTicket = false
                 try {
                     val result = resolveWithSlowNotice(onSlow = { if (current(ticket)) slow = true }) {
-                        client?.resolvePlayableItem(item) ?: PlayableItemResult.Unavailable
+                        resolveCachedPlayableItem(item,
+                            loadItem = { client?.getItem(it) },
+                            isCurrent = { current(ticket) },
+                            resolve = { client?.resolvePlayableItem(it) ?: PlayableItemResult.RetryableFailure },
+                        )
                     }
                     if (current(ticket)) {
                         when (result) {
@@ -128,6 +136,8 @@ fun rememberPlayableItemAction(contextKey: Any, active: Boolean = true, onResolv
                             }
                             PlayableItemResult.Unavailable -> Toast.makeText(context,
                                 "暂无可播放的单集或片源", Toast.LENGTH_LONG).show()
+                            PlayableItemResult.RetryableFailure -> Toast.makeText(context,
+                                "媒体信息尚未核实，请重试", Toast.LENGTH_LONG).show()
                         }
                     } else PageLog.add("playableItem action=stale-result-dropped")
                 } catch (cancelled: CancellationException) {

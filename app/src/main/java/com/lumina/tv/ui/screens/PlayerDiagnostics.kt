@@ -1,6 +1,17 @@
 package com.lumina.tv.ui.screens
 
 import android.content.Context
+import android.os.Looper
+import com.lumina.tv.diag.LatestDiagnosticWrite
+import com.lumina.tv.diag.LogRedactor
+import com.lumina.tv.diag.PageLog
+import com.lumina.tv.diag.boundedDiagnosticJson
+import com.lumina.tv.diag.readDiagnosticTail
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.nio.file.AtomicMoveNotSupportedException
 import androidx.media3.exoplayer.ExoPlayer
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.MediaItem
@@ -8,9 +19,16 @@ import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
+import com.lumina.tv.diag.DiagnosticCapture
+import com.lumina.tv.diag.AppLog
+import com.lumina.tv.diag.NetLog
+import com.lumina.tv.player.MpvAvailabilityProbe
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import com.lumina.tv.player.AudioCapabilities
 import com.lumina.tv.player.AudioCodecMatrix
 import com.lumina.tv.player.AudioSupport
+import com.lumina.tv.player.AudioOutputSnapshot
 import com.lumina.tv.player.MpvAvailabilitySnapshot
 import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.player.PlaybackDiagnostics
@@ -54,7 +72,10 @@ internal fun buildPlayerDiagPayload(
     duration: Long,
     playbackDiagnostics: PlaybackDiagnostics,
     selectedAudioStreamIndex: Int?,
+    audioOutputSnapshot: AudioOutputSnapshot?,
 ): DiagPayload {
+    check(Looper.myLooper() == Looper.getMainLooper()) { "Player diagnostics require main" }
+    check(exo.applicationLooper == Looper.getMainLooper()) { "Player applicationLooper must be main" }
     val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
     val isDolbyVision = videoStream?.let {
         val range = it.videoRangeType.orEmpty().uppercase().filter(Char::isLetterOrDigit)
@@ -73,9 +94,17 @@ internal fun buildPlayerDiagPayload(
     val progress = phases.optJSONObject("progress") ?: JSONObject().put("timelineUnverified", true)
     val readback = if (activeEngine == "mpv") mpvBackend?.diagnosticReadback(playbackDiagnostics.identity).orEmpty() else emptyMap()
     val actualDecoder = if (load.current) playbackDiagnostics.actualDecoder(activeEngine, readback) else JSONObject.NULL
-    val actualOutput = if (load.current) playbackDiagnostics.actualAudioOutput(activeEngine, readback) else JSONObject.NULL
-    val displayHdrTypes = readDisplayHdrTypes(context)
     val actualAudioIndex = if (activeEngine == "mpv") mpvBackend?.currentAudioEmbyIndex() else selectedAudioStreamIndex
+    val actualOutputSnapshot = audioOutputSnapshot?.takeIf { snapshot ->
+        val binding = snapshot.binding
+        load.current && binding.scopeId == playbackDiagnostics.sessionId && binding.itemId == item.id &&
+            binding.sourceId == (load.key.sourceId ?: "unknown") && binding.engine == activeEngine &&
+            binding.generation == load.key.generation &&
+            binding.trackId == (actualAudioIndex?.toString() ?: "unknown")
+    }
+    val actualOutput = if (!load.current) JSONObject.NULL else actualOutputSnapshot?.json()
+        ?: JSONObject().put("value", "unknown").put("confidence", "UNKNOWN")
+    val displayHdrTypes = readDisplayHdrTypes(context)
     val audioStream = playbackSource?.audioStreams?.firstOrNull { it.index == actualAudioIndex }
     val audioCapabilitySummary = AudioCodecMatrix.currentAudioSupport(audioCaps)
     if (activeEngine == "mpv") listOf("decoderInitMs", "compatMappingMs", "firstFrameMs", "stableOutputMs").forEach { key ->
@@ -200,13 +229,7 @@ internal fun buildPlayerDiagPayload(
         streamsJson = JSONObject().put("MediaStreams", streams).toString(2),
         tracksJson = JSONObject().put("groups", tracks).toString(2),
         errorsJson = errors.toString(2),
-        mpvLog = mpvBackend?.diagnosticLog()?.ifBlank { null }
-            ?: runCatching {
-                val previous = File(context.filesDir, "mpv-previous-abnormal.txt").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty()
-                val current = File(context.filesDir, "mpv-session.log").takeIf(File::exists)?.readText(Charsets.UTF_8).orEmpty()
-                listOf(previous, current).filter(String::isNotBlank).joinToString("\n\n")
-            }.getOrNull()?.ifBlank { "No mpv log messages captured" }
-            ?: "mpv log unavailable: no session log file",
+        mpvLog = mpvBackend?.diagnosticLog().orEmpty(),
         appLog = "",
         uiText = buildString {
             appendLine("screen=${AppRuntime.screenLabel}")
@@ -229,3 +252,119 @@ internal fun buildPlayerDiagPayload(
         },
     )
 }
+
+
+/** Called only on IO after the applicationLooper has produced the immutable payload. */
+internal fun completePlayerDiagnosticLogs(context: Context, payload: DiagPayload): DiagPayload {
+    check(Looper.myLooper() != Looper.getMainLooper()) { "Diagnostic file IO requires background" }
+    val previous = readDiagnosticTail(File(context.filesDir, "mpv-previous-abnormal.txt"), 32 * 1024)
+    val current = readDiagnosticTail(File(context.filesDir, "mpv-session.log"), 128 * 1024)
+    return payload.copy(mpvLog = DiagExporter.sanitize(listOf(previous, current, payload.mpvLog)
+        .filter(String::isNotBlank).joinToString("\n\n").ifBlank { "No mpv log messages captured" }))
+}
+
+/** Independent of a disposed composition. Snapshots are immutable strings and writes are serialized. */
+internal object ExitSessionDiagnostics {
+    private val sessions = AtomicLong()
+    private val worker = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "lumina-exit-diagnostics").apply { isDaemon = true }
+    }
+    private data class Snapshot(val directory: () -> File, val json: String)
+    private val writes = LatestDiagnosticWrite<Snapshot>({ worker.execute(it) }) { snapshot ->
+        val root = snapshot.directory().apply { mkdirs() }
+        val safe = boundedDiagnosticJson(LogRedactor.redactJson(snapshot.json), 120 * 1024)
+        val temporary = Files.createTempFile(root.toPath(), "last-session-", ".tmp")
+        try {
+            Files.write(temporary, safe.toByteArray(Charsets.UTF_8))
+            try { Files.move(temporary, File(root, "last-session.json").toPath(),
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING) }
+            catch (_: AtomicMoveNotSupportedException) {
+                Files.move(temporary, File(root, "last-session.json").toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (error: Exception) {
+            PageLog.add("exitDiagnostic writeFailed=${error.javaClass.simpleName}")
+            throw error
+        } finally { Files.deleteIfExists(temporary) }
+    }
+
+    fun newSession(): Long = sessions.incrementAndGet()
+    fun enqueue(context: Context, session: Long, frozenJson: String) {
+        val app = context.applicationContext
+        if (!writes.submit(session, Snapshot({ app.getExternalFilesDir(null) ?: app.filesDir }, frozenJson))) {
+            PageLog.add("exitDiagnostic staleSession=$session ignored")
+        }
+    }
+}
+
+
+/** Environment capture has no player access and leaves log IO to the common bounded export path. */
+internal fun environmentDiagnosticPayload(context: Context, outcome: String): DiagPayload {
+    val engine = MpvAvailabilityProbe.process.snapshot(context).addTo(JSONObject()
+        .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown").put("active", "unknown")
+        .put("kernels", JSONArray().put("media3").put("mpv")))
+    val unavailable = JSONObject().put("reason", "No playback in progress").toString()
+    return DiagPayload(
+        metaJson = DiagExporter.baseMeta(context, outcome).put("engine", engine).toString(),
+        playbackInfoJson = unavailable, streamsJson = unavailable, tracksJson = unavailable,
+        errorsJson = JSONObject().put("reason", AppRuntime.prefs?.lastPlaybackAudioFailure?.ifBlank { null }
+            ?: "No playback error recorded").toString(),
+        mpvLog = "", appLog = "",
+        uiText = "screen=${AppRuntime.screenLabel}\nplaying=${AppRuntime.nowPlaying}\nactiveEngine=unknown\nbuffering=unknown\ndegraded=unknown",
+    )
+}
+
+/** Both UI entry points use this IO boundary; the ZIP formatter itself remains shared. */
+internal suspend fun exportDiagnosticBundle(context: Context, payload: DiagPayload, kind: String): File =
+    runInterruptible(Dispatchers.IO) {
+        val logs = completePlayerDiagnosticLogs(context, payload)
+        val root = context.getExternalFilesDir(null) ?: context.filesDir
+        val directory = File(root, "diag").apply { mkdirs() }
+        val out = Files.createTempFile(directory.toPath(), "lumina-diag-$kind-", ".zip").toFile()
+        fun tail(directory: File, name: String, limit: Int = 120 * 1024): String =
+            readDiagnosticTail(File(directory, name), limit)
+        fun json(name: String): String {
+            val file = File(root, name)
+            if (!file.isFile) return "{}"
+            // JSON is a structured record, not a line log. Read a bounded prefix, then validate it.
+            val bytes = file.inputStream().use { input ->
+                val buffer = ByteArray(120 * 1024 + 1)
+                var size = 0
+                while (size < buffer.size) {
+                    val count = input.read(buffer, size, buffer.size - size)
+                    if (count < 0) break
+                    size += count
+                }
+                buffer.copyOf(size)
+            }
+            return boundedDiagnosticJson(LogRedactor.redactJson(bytes.toString(Charsets.UTF_8)), 120 * 1024)
+        }
+        try {
+            val capture = DiagnosticCapture.read(120 * 1024, 1500L) { resources ->
+                resources.process(ProcessBuilder("logcat", "-d", "-v", "epoch", "-t", "800", "--pid=${android.os.Process.myPid()}")
+                    .redirectErrorStream(true).start()).inputStream
+            }
+            if (Thread.currentThread().isInterrupted) throw InterruptedException("Diagnostic export cancelled")
+            val appLog = AppLog.snapshot() + "\n[logcat] status=${capture.status} truncated=${capture.truncated}\n" +
+                LogRedactor.redact(capture.bytes.toString(Charsets.UTF_8))
+            val files = linkedMapOf(
+                "meta.json" to logs.metaJson, "playback-info.json" to logs.playbackInfoJson,
+                "streams.json" to logs.streamsJson, "tracks.json" to logs.tracksJson, "errors.json" to logs.errorsJson,
+                "mpv.log" to logs.mpvLog, "app.log" to appLog,
+                "mpv-audio.jsonl" to tail(context.filesDir, "mpv-audio.jsonl", 384 * 1024),
+                "mpv-audio-system.log" to tail(context.filesDir, "mpv-audio-system.log", 384 * 1024),
+                "ui.txt" to logs.uiText,
+                "net.json" to NetLog.tail(), "pages.txt" to PageLog.tail(),
+                "crash-stats.json" to json("crash-stats.json"), "lastSession.json" to json("last-session.json"),
+                "exitReason.json" to json("exit-reason.json"),
+                "anr-latest.txt" to tail(root, "anr-latest.txt"), "native-latest.txt" to tail(root, "native-latest.txt"),
+            )
+            File(context.filesDir, "app-prev.log").takeIf(File::isFile)?.let { files["app-prev.log"] = readDiagnosticTail(it) }
+            (1..5).forEach { n -> File(root, "crash-$n.txt").takeIf(File::isFile)?.let { files["crash-$n.txt"] = readDiagnosticTail(it) } }
+            File(root, "crash-latest.txt").takeIf(File::isFile)?.let { files["crash-latest.txt"] = readDiagnosticTail(it) }
+            // Explicit allowlist above: private raw native protobufs never enter a diagnostic bundle.
+            DiagExporter.writeArchive(out, files)
+        } catch (error: Throwable) {
+            out.delete()
+            throw error
+        }
+    }

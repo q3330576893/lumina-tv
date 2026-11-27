@@ -67,19 +67,7 @@ object LibraryCache {
             homeDisk.snapshot(homeFile(context, baseUrl, userId), identityScope(baseUrl, userId), userDataRevision)
         } ?: return null
         return withContext(Dispatchers.IO) {
-            homeDisk.read(snapshot) { text ->
-                val json = JSONObject(text)
-                val savedAt = json.optLong("savedAt", 0L)
-                if (savedAt <= 0L) null else {
-                    val cacheAt = if (System.currentTimeMillis() - savedAt > DISK_HOME_TTL) 0L else savedAt
-                    HomeData(
-                        resume = json.readItems("resume"), latest = json.readItems("latest"),
-                        movies = json.readItems("movies"), series = json.readItems("series"),
-                        favorites = json.readItems("favorites"), genres = emptyList(),
-                        views = json.readViews(), at = cacheAt,
-                    )
-                }
-            }
+            homeDisk.read(snapshot, ::decodeHome)
         }
     }
 
@@ -96,15 +84,7 @@ object LibraryCache {
             val requestContext = currentCoroutineContext()
             homeDisk.write(snapshot) {
                 requestContext.ensureActive()
-                val json = JSONObject().put("savedAt", saved.at)
-                listOf("resume" to saved.resume, "latest" to saved.latest, "movies" to saved.movies,
-                    "series" to saved.series, "favorites" to saved.favorites).forEach { (key, items) ->
-                    json.put(key, JSONArray().also { array -> items.forEach { array.put(it.toJson()) } })
-                }
-                json.put("views", JSONArray().also { array -> saved.views.forEach { view ->
-                    array.put(JSONObject().put("id", view.id).put("name", view.name).put("type", view.type).putNullable("imageTag", view.imageTag))
-                } })
-                json.toString()
+                encodeHome(saved)
             }
         }
     }
@@ -113,66 +93,57 @@ object LibraryCache {
         homeDisk.invalidate(homeFile(context, baseUrl, userId))
     }
 
-    private fun MediaItem.toJson() = JSONObject()
-        .put("id", id).put("name", name).put("type", type)
-        .putNullable("imageTag", imageTag).putNullable("overview", overview).putNullable("year", year)
-        .putNullable("rating", rating).putNullable("runtimeTicks", runtimeTicks).putNullable("seriesId", seriesId)
-        .putNullable("seasonId", seasonId).putNullable("indexNumber", indexNumber).putNullable("parentIndexNumber", parentIndexNumber)
-        .putNullable("seriesName", seriesName).put("positionTicks", positionTicks).put("played", played)
-        .put("playedPercentage", playedPercentage).putNullable("primaryImageAspectRatio", primaryImageAspectRatio)
-        .putNullable("backdropTag", backdropTag)
-        .put("backdropTags", JSONObject().also { json -> backdropTags.forEach { (index, tag) -> json.put(index.toString(), tag) } })
-        .putNullable("parentBackdropItemId", parentBackdropItemId)
-        .put("parentBackdropTags", JSONObject().also { json -> parentBackdropTags.forEach { (index, tag) -> json.put(index.toString(), tag) } })
-        .putNullable("logoTag", logoTag).put("sourceCount", sourceCount)
-        .putNullable("communityRating", communityRating).put("genres", JSONArray(genres)).put("isFavorite", isFavorite)
-        .putNullable("resolution", resolution).put("isHdr", isHdr).put("isDolbyVision", isDolbyVision)
-        .putNullable("audioFormat", audioFormat)
-        .put("people", JSONArray().also { array -> people.forEach { p -> array.put(JSONObject()
-            .putNullable("id", p.id).put("name", p.name).putNullable("role", p.role)
-            .putNullable("type", p.type).putNullable("imageTag", p.imageTag)) } })
-        .put("providerIds", JSONObject(providerIds))
+    internal fun encodeHome(saved: HomeData): String {
+        val json = JSONObject().put("schemaVersion", CacheMediaItemCodec.SCHEMA_VERSION).put("savedAt", saved.at)
+        listOf("resume" to saved.resume, "latest" to saved.latest, "movies" to saved.movies,
+            "series" to saved.series, "favorites" to saved.favorites).forEach { (key, items) ->
+            json.put(key, JSONArray().also { array -> items.forEach { array.put(it.toJson()) } })
+        }
+        json.put("genres", JSONArray(saved.genres))
+        json.put("views", JSONArray().also { array -> saved.views.forEach { view ->
+            array.put(JSONObject().put("id", view.id).put("name", view.name).put("type", view.type).putNullable("imageTag", view.imageTag))
+        } })
+        return json.toString()
+    }
+
+    internal fun decodeHome(text: String): HomeData? = try {
+        val json = JSONObject(text)
+        val version = json.opt("schemaVersion")
+        // Future/invalid home schemas are cache misses; leave the file available to a compatible reader.
+        if (json.has("schemaVersion") && version != CacheMediaItemCodec.SCHEMA_VERSION) null else {
+            if (version != null) {
+                listOf("resume", "latest", "movies", "series", "favorites", "genres", "views").forEach {
+                    require(json.get(it) is JSONArray)
+                }
+            }
+            val timestamp = json.get("savedAt")
+            require(timestamp is Long || timestamp is Int)
+            val savedAt = (timestamp as Number).toLong()
+            if (savedAt <= 0L) null else {
+                val cacheAt = if (System.currentTimeMillis() - savedAt > DISK_HOME_TTL) 0L else savedAt
+                val genres = json.optJSONArray("genres")?.let { array ->
+                    (0 until array.length()).map { array.get(it) as String }
+                }.orEmpty()
+                HomeData(
+                    resume = json.readItems("resume"), latest = json.readItems("latest"),
+                    movies = json.readItems("movies"), series = json.readItems("series"),
+                    favorites = json.readItems("favorites"), genres = genres,
+                    views = json.readViews(), at = cacheAt,
+                )
+            }
+        }
+    } catch (_: Exception) { null }
+
+    private fun MediaItem.toJson() = CacheMediaItemCodec.encode(this)
 
     private fun JSONObject.putNullable(key: String, value: Any?) = put(key, value ?: JSONObject.NULL)
     private fun JSONObject.nullableString(key: String) = optString(key).takeUnless { it == "null" || it.isBlank() }
 
-    private fun JSONObject.readIndexedTags(key: String): Map<Int, String> =
-        optJSONObject(key)?.let { tags ->
-            tags.keys().asSequence().mapNotNull { rawIndex ->
-                rawIndex.toIntOrNull()?.takeIf { it >= 0 }?.let { index ->
-                    tags.nullableString(rawIndex)?.let { index to it }
-                }
-            }.toMap()
-        }.orEmpty()
-
     private fun JSONObject.readItems(key: String): List<MediaItem> {
         val array = optJSONArray(key) ?: return emptyList()
-        return (0 until array.length()).mapNotNull { i -> array.optJSONObject(i)?.let { j ->
-            fun <T> optional(key: String, value: T): T? = if (j.has(key) && !j.isNull(key)) value else null
-            val people = j.optJSONArray("people") ?: JSONArray()
-            MediaItem(
-                id = j.optString("id"), name = j.optString("name"), type = j.optString("type"),
-                imageTag = j.nullableString("imageTag"), overview = j.nullableString("overview"),
-                year = optional("year", j.optInt("year")), rating = optional("rating", j.optDouble("rating")),
-                runtimeTicks = optional("runtimeTicks", j.optLong("runtimeTicks")), seriesId = j.nullableString("seriesId"),
-                seasonId = j.nullableString("seasonId"), indexNumber = optional("indexNumber", j.optInt("indexNumber")),
-                parentIndexNumber = optional("parentIndexNumber", j.optInt("parentIndexNumber")), seriesName = j.nullableString("seriesName"),
-                positionTicks = j.optLong("positionTicks"), played = j.optBoolean("played"), playedPercentage = j.optDouble("playedPercentage"),
-                primaryImageAspectRatio = optional("primaryImageAspectRatio", j.optDouble("primaryImageAspectRatio")),
-                backdropTag = j.nullableString("backdropTag"),
-                backdropTags = j.readIndexedTags("backdropTags"),
-                parentBackdropItemId = j.nullableString("parentBackdropItemId"),
-                parentBackdropTags = j.readIndexedTags("parentBackdropTags"),
-                logoTag = j.nullableString("logoTag"), sourceCount = j.optInt("sourceCount"),
-                communityRating = optional("communityRating", j.optDouble("communityRating")),
-                genres = j.optJSONArray("genres")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty(),
-                isFavorite = j.optBoolean("isFavorite"), resolution = j.nullableString("resolution"), isHdr = j.optBoolean("isHdr"),
-                isDolbyVision = j.optBoolean("isDolbyVision"), audioFormat = j.nullableString("audioFormat"),
-                people = (0 until people.length()).mapNotNull { n -> people.optJSONObject(n)?.let { p -> MediaPerson(
-                    p.nullableString("id"), p.optString("name"), p.nullableString("role"), p.nullableString("type"), p.nullableString("imageTag")) } },
-                providerIds = j.optJSONObject("providerIds")?.let { ids -> ids.keys().asSequence().associateWith { ids.optString(it) } }.orEmpty(),
-            ).takeIf { it.id.isNotBlank() }
-        } }
+        return (0 until array.length()).mapNotNull { i ->
+            array.optJSONObject(i)?.let(CacheMediaItemCodec::decode)?.item
+        }
     }
 
     private fun JSONObject.readViews(): List<LibraryView> {

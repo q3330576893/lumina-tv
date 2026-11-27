@@ -34,6 +34,7 @@ object E5Checks {
         accountFocus()
         seriesSourceProbe()
         latestItemsRequests()
+        com.lumina.tv.data.T08Checks.run()
         println("E5 PASS: season failure/empty/cache and old-row clearing, retryable library append, filtered search continuation capped at 3 pages, registered acyclic account focus, source probe tri-state and cancellation")
     }
 

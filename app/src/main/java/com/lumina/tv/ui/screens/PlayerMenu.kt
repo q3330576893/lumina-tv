@@ -328,7 +328,7 @@ internal fun OptionMenu(
                 MenuLabel("音轨")
                 val audioStatus = when (audioSupport) {
                     AudioSupport.PASSTHROUGH -> "设备报告：可直通"
-                    AudioSupport.DECODE_ONLY -> "本地解码"
+                    AudioSupport.DECODE_ONLY -> "本机解码路径"
                     AudioSupport.UNSUPPORTED -> "可能无法解码"
                 }
                 Text("音频输出：$audioStatus", color = TextSub, fontSize = 11.sp)
@@ -385,7 +385,7 @@ internal fun OptionMenu(
                 MenuLabel("常用")
                 MenuLabel("音频解码")
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("auto" to "自动", "soft" to "本地软解", "passthrough" to "强制直通").forEachIndexed { index, (mode, label) ->
+                    listOf("auto" to "自动", "soft" to "避免直通", "passthrough" to "优先直通").forEachIndexed { index, (mode, label) ->
                         MenuChip(
                             label = label,
                             width = 112.dp,

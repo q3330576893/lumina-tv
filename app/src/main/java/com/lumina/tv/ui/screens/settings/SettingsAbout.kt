@@ -35,8 +35,9 @@ import com.lumina.tv.BuildConfig
 import com.lumina.tv.CrashHandler
 import com.lumina.tv.data.UpdateCheckHttp
 import com.lumina.tv.data.readCancellable
-import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.ui.components.DiagExportDialog
+import com.lumina.tv.ui.screens.exportDiagnosticBundle
+import com.lumina.tv.ui.screens.environmentDiagnosticPayload
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
@@ -45,6 +46,28 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONObject
+
+private data class AboutLicenseNotice(val library: String, val license: String, val source: String)
+
+// License declarations and source evidence are audited in THIRD-PARTY-NOTICES.md.
+// A wrapper's license does not describe all native code bundled in its AAR.
+private val aboutLicenseNotices = listOf(
+    AboutLicenseNotice("Lumina TV", "GPL-3.0（仓库 LICENSE）；发布合规仍待复核", "https://github.com/q3330576893/lumina-tv/blob/main/LICENSE"),
+    AboutLicenseNotice("AndroidX / Compose / TV / Media3 1.7.1", "Apache-2.0（组件 POM 声明）；native path 来源另行核对", "https://github.com/androidx/media/blob/1.7.1/LICENSE"),
+    AboutLicenseNotice("Haze 1.5.0", "Apache-2.0（POM 声明）", "https://github.com/chrisbanes/haze"),
+    AboutLicenseNotice("OkHttp 4.12.0", "Apache-2.0（POM 声明）", "https://github.com/square/okhttp/tree/parent-4.12.0"),
+    AboutLicenseNotice("Coil 2.7.0", "Apache-2.0（POM 声明）", "https://github.com/coil-kt/coil/tree/2.7.0"),
+    AboutLicenseNotice("NanoHTTPD 2.3.1", "BSD-3-Clause（上游 LICENSE.md）", "https://github.com/NanoHttpd/nanohttpd/blob/nanohttpd-project-2.3.1/LICENSE.md"),
+    AboutLicenseNotice("ZXing Core 3.5.3", "Apache-2.0（上游 LICENSE）", "https://github.com/zxing/zxing/blob/zxing-3.5.3/LICENSE"),
+    AboutLicenseNotice("ZXing Android Embedded 4.3.0", "Apache-2.0（POM 声明）", "https://github.com/journeyapps/zxing-android-embedded"),
+    AboutLicenseNotice("TinyPinyin 2.0.3", "Apache-2.0（上游 LICENSE）", "https://github.com/promeG/TinyPinyin/blob/c4c65b9c0c82cc8e60ef081e91f3cc66b7829dcc/LICENSE"),
+    AboutLicenseNotice("Anime4K shaders", "MIT；Copyright (c) 2019-2021 bloc97（随附 shader 头部）", "https://github.com/bloc97/Anime4K"),
+    AboutLicenseNotice("JellyCine libmpv 1.0.4 / libplayer", "MIT（wrapper / POM 声明）；所含 native 完整许可待核实", "https://github.com/sureshfizzy/libmpv-android/tree/920dd825f245d3b86fb964c7115948bf5b502b4b"),
+    AboutLicenseNotice("mpv v0.41.0（产物自报）", "上游默认 GPL-2.0-or-later；产物含 GPL 功能，完整许可组合待核实", "https://github.com/mpv-player/mpv/blob/v0.41.0/Copyright"),
+    AboutLicenseNotice("FFmpeg n9.0.1（libmpv 内产物自报）", "GPL-3.0-or-later（产物自报）；对应源码与静态依赖许可待核实", "https://ffmpeg.org/legal.html"),
+    AboutLicenseNotice("Jellyfin Media3 FFmpeg decoder 1.6.1+2", "GPL-3.0（POM 声明）；libffmpegJNI 产物与源码对应关系待核实", "https://github.com/jellyfin/jellyfin-androidx-media/tree/414d3fca8321b4875a5272f852a2abebe24b1bfe"),
+    AboutLicenseNotice("LLVM libc++_shared", "Apache-2.0 WITH LLVM-exception（上游）；确切 NDK / revision 待核实", "https://github.com/llvm/llvm-project/blob/main/libcxx/LICENSE.TXT"),
+)
 
 @Composable
 fun SettingsAbout(
@@ -145,15 +168,21 @@ fun SettingsAbout(
                 }, requesters.getValue(rowKeys[2]), railRequester, onFocused,
                     upRequester = requesters.getValue(rowKeys[1]), downRequester = requesters.getValue(rowKeys[3]))
                 ActionRow("about:copyCrashReport", "复制崩溃报告", "复制脱敏后的最近报告", "复制", {
-                    runCatching {
-                        val report = CrashHandler.crashFile(context).takeIf(java.io.File::exists)?.readText().orEmpty()
-                        if (report.isBlank()) error("暂无崩溃报告")
-                        clipboard.setText(AnnotatedString(DiagExporter.sanitize(report)))
-                    }.onSuccess { Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show() }
-                        .onFailure { Toast.makeText(context, it.message ?: "复制失败", Toast.LENGTH_SHORT).show() }
+                    scope.launch {
+                        try {
+                            val report = withContext(Dispatchers.IO) { CrashHandler.diagnosticReport(context) }
+                            if (report.isBlank()) error("暂无崩溃报告")
+                            clipboard.setText(AnnotatedString(report))
+                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            Toast.makeText(context, failure.message ?: "复制失败", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }, requesters.getValue(rowKeys[3]), railRequester, onFocused,
                     upRequester = requesters.getValue(rowKeys[2]), downRequester = requesters.getValue(rowKeys[4]))
-                NavigationRow("about:licenses", "开源许可", "Media3 与 mpv", "查看", {
+                NavigationRow("about:licenses", "开源许可", "组件许可、来源与待核实项", "查看", {
                     licensesOpen = true
                 }, requesters.getValue(rowKeys[4]), railRequester, onFocused,
                     upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[4]), showDivider = false)
@@ -164,12 +193,32 @@ fun SettingsAbout(
     if (licensesOpen) AlertDialog(
         onDismissRequest = { licensesOpen = false },
         title = { Text("开源许可") },
-        text = { Text("Media3\nmpv") },
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Text("技术来源核对，不构成法律合规结论。native 来源证据尚未齐备，发布门禁为 BLOCKED。完整清单见仓库 THIRD-PARTY-NOTICES.md 与 docs/native-sources.md。")
+                }
+                items(aboutLicenseNotices.size, key = { aboutLicenseNotices[it].library }) { index ->
+                    val notice = aboutLicenseNotices[index]
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(notice.library)
+                        Text(notice.license, fontSize = TypeScale.sp11)
+                        TextButton(onClick = {
+                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(notice.source))) }
+                                .onFailure { Toast.makeText(context, "无法打开来源链接", Toast.LENGTH_SHORT).show() }
+                        }) { Text("来源与许可（浏览器）") }
+                    }
+                }
+            }
+        },
         confirmButton = { TextButton(onClick = { licensesOpen = false }) { Text("关闭") } },
     )
     DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
         withContext(Dispatchers.IO) {
-            DiagExporter.export(context, DiagExporter.environmentPayload(context, outcome), "environment")
+            exportDiagnosticBundle(context, environmentDiagnosticPayload(context, outcome), "environment")
         }
     }
 }

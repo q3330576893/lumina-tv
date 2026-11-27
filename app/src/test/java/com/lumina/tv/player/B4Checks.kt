@@ -5,7 +5,9 @@ import androidx.media3.common.Player
 object B4Checks {
     @JvmStatic fun main(args: Array<String>) {
         watchdog()
+        T06WatchdogChecks.run()
         audioProfilesAndTracks()
+        outputSnapshotEncodingAndDuck()
         errorRoutes()
         audioFocus()
     }
@@ -14,9 +16,10 @@ object B4Checks {
         fun PlaybackWatchdog.tick(second: Long, bufferedMs: Long? = 1_000L,
             loading: Boolean = true, downloading: Boolean = false, playing: Boolean = true, seeking: Boolean = false,
             generation: Int = 1, physicalId: Long? = 1L) = onTick(
-            positionMs = 1_000L, bufferedMs = bufferedMs, state = Player.STATE_BUFFERING,
-            playWhenReady = playing, isSeeking = seeking, sessionGeneration = generation, durationMs = 120_000L,
-            bytesLoaded = 0L, isLoading = loading, mpvLoadId = physicalId, downloadInProgress = downloading,
+            timeline = WatchdogTimelineSample(WatchdogLoadIdentity(generation, physicalId), 1_000L, 120_000L),
+            expectedLoad = WatchdogLoadIdentity(generation, physicalId), bufferedMs = bufferedMs, state = Player.STATE_BUFFERING,
+            playWhenReady = playing, isSeeking = seeking,
+            bytesLoaded = 0L, isLoading = loading, downloadInProgress = downloading,
             nowMs = second * 1_000L,
         )
 
@@ -65,6 +68,57 @@ object B4Checks {
         check(!audioRouteNeedsRecovery(selectionKnown = true, support = AudioSupport.DECODE_ONLY))
         check(audioRouteNeedsRecovery(selectionKnown = true, support = AudioSupport.UNSUPPORTED))
         println("B4 PASS Q-016/Q-017/Q-018: paired profiles, aliases/cues, ambiguity rejection and selected non-default route policy")
+    }
+
+    private fun outputSnapshotEncodingAndDuck() {
+        val pcmEncodings = listOf(
+            android.media.AudioFormat.ENCODING_PCM_16BIT,
+            android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED,
+            android.media.AudioFormat.ENCODING_PCM_32BIT,
+            android.media.AudioFormat.ENCODING_PCM_FLOAT,
+        )
+        pcmEncodings.forEach { check(media3AudioPath(it) == Media3AudioPath.PCM) }
+        val pcmCaps = AudioCapabilities(pcmEncodings.associateWith {
+            listOf(AudioProfileInfo(8, setOf(AudioCodecMatrix.channelMask(8)), setOf(48_000)))
+        })
+        pcmEncodings.forEach { encoding ->
+            check(!AudioCodecMatrix.canPassthrough(encoding, 2, 48_000, pcmCaps))
+        }
+        check(media3AudioPath(5) == Media3AudioPath.ENCODED_PASSTHROUGH)
+        check(media3DirectOutputDisabled("soft", "audio/ac3"))
+        check(!media3DirectOutputDisabled("soft", "audio/raw"))
+        check(!media3DirectOutputDisabled("auto", "audio/ac3"))
+
+        val directProfile = listOf(AudioProfileInfo(8, setOf(AudioCodecMatrix.channelMask(8)), setOf(48_000)))
+        val routeCaps = AudioCapabilities(mapOf(
+            5 to directProfile, 6 to directProfile, 7 to directProfile, 14 to directProfile,
+            android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED to emptyList(),
+        ))
+        check(mpvAudioSpdifCodecs("auto", routeCaps) == "ac3,eac3,dts,truehd")
+        check(mpvAudioSpdifCodecs("soft", routeCaps).isEmpty())
+
+        check(mpvOutputVolumePercent(80, true) == 16)
+        check(mpvOutputVolumePercent(35, true) == 7) // User adjustment stays ducked.
+        check(mpvOutputVolumePercent(35, false) == 35) // Unduck uses the latest request.
+
+        val ledger = AudioOutputSnapshotLedger()
+        val initial = ledger.bind("scope", "item", "source-a", "track-2", "media3", 4)
+        val observed = AudioOutputSnapshot(initial, 900L, AudioOutputConfidence.OBSERVED, mapOf("encoding" to "5"))
+        check(ledger.record(observed))
+        check(ledger.current()?.sampledAtElapsedRealtimeMs == 900L)
+        val changedRoute = checkNotNull(ledger.routeChanged()) // A same-capability event still revokes old evidence.
+        check(changedRoute.routeRevision == initial.routeRevision + 1)
+        check(ledger.current()?.confidence == AudioOutputConfidence.UNKNOWN)
+        check(ledger.current()?.sampledAtElapsedRealtimeMs == null)
+        check(!ledger.record(observed))
+        ledger.bindTrack("track-3")
+        check(ledger.current()?.confidence == AudioOutputConfidence.UNKNOWN)
+        val routeSample = AudioOutputSnapshot(checkNotNull(ledger.current()).binding, 1_100L,
+            AudioOutputConfidence.OBSERVED)
+        check(ledger.record(routeSample))
+        ledger.bind("scope", "item", "source-b", "track-3", "mpv", 5)
+        check(ledger.current()?.confidence == AudioOutputConfidence.UNKNOWN)
+        println("B4 PASS T02: PCM/direct separation, route-specific mpv spdif, latest-request ducking and identity-bound snapshots")
     }
 
     private fun errorRoutes() {

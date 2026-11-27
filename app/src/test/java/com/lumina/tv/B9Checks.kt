@@ -44,7 +44,8 @@ object B9Checks {
         check(".zIndex(1f)" in snackbar)
         check("showCrashLog = true; onConsumeCrashNotice()" in snackbar)
         check("dismissAction = { TextButton(onClick = onConsumeCrashNotice)" in snackbar)
-        check("AlertDialog(" in snackbar && "CrashHandler.crashFile(context)" in snackbar)
+        check("AlertDialog(" in snackbar && "crashLogText" in snackbar)
+        check("withContext(Dispatchers.IO)" in root && "CrashHandler.diagnosticReport(context)" in root)
         // The tested modifier belongs to the root Snackbar; pages remain in the lower sibling.
         check(root.indexOf("Snackbar(") < root.indexOf("AnimatedContent("))
         check("targetState = screen" in root.substringAfter("AnimatedContent("))
@@ -62,7 +63,7 @@ object B9Checks {
                 check(actualThread === current && actualError === failure)
                 forwarded.incrementAndGet()
             }
-            val owner = ProcessCrashHandler()
+            val owner = ProcessCrashHandler { it() }
             owner.install({ _, _ -> written.incrementAndGet() }, { collected.incrementAndGet() })
             val first = Thread.getDefaultUncaughtExceptionHandler()!!
             val ready = CountDownLatch(12)
@@ -82,8 +83,9 @@ object B9Checks {
 
             // Persistence and previous-exit collection failures must still leave a working wrapper.
             Thread.setDefaultUncaughtExceptionHandler { _, _ -> forwarded.incrementAndGet() }
-            val failing = ProcessCrashHandler()
-            check(runCatching { failing.install({ _, _ -> throw IOException() }, { throw IOException() }) }.isFailure)
+            val failing = ProcessCrashHandler { it() }
+            failing.install({ _, _ -> throw IOException() }, { throw IOException() })
+            check(failing.previousExitFailure == "IOException")
             val failedCollectorHandler = Thread.getDefaultUncaughtExceptionHandler()!!
             failing.install({ _, _ -> error("reinstalled after collection failure") }, {})
             check(Thread.getDefaultUncaughtExceptionHandler() === failedCollectorHandler)

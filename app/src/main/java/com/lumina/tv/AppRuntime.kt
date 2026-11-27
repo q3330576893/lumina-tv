@@ -37,6 +37,12 @@ object AppRuntime {
     var client: EmbyClient? = null
     var session: Session? = null
 
+    // Display-only changes must not replace the authentication snapshot used by in-flight work.
+    private data class SessionDisplayMetadata(val owner: Session, val serverName: String)
+    private var sessionDisplayMetadata by mutableStateOf<SessionDisplayMetadata?>(null)
+    val serverDisplayName: String?
+        get() = sessionDisplayMetadata?.takeIf { it.owner === session }?.serverName ?: session?.serverName
+
     var pairing: PairingServer? = null
 
     /** 配对地址必须走 Compose 状态：配对服务是异步启动的，普通 var 不会触发重组，二维码会一直是空白。 */
@@ -95,6 +101,7 @@ object AppRuntime {
         }
     }
 
+    @Synchronized
     fun restore(): Session? {
         val p = prefs ?: return null
         val s = p.readSession() ?: return null
@@ -102,6 +109,7 @@ object AppRuntime {
         return s
     }
 
+    @Synchronized
     fun applySession(s: Session) {
         require(com.lumina.tv.data.SessionStore.complete(s)) { "Incomplete session" }
         check(prefs?.saveSession(s) != false) { "无法保存登录会话，请检查设备存储后重试" }
@@ -118,6 +126,7 @@ object AppRuntime {
         }
         // Switching identities seals the old outbox; only explicit logout discards its pending reports.
         client?.close()
+        sessionDisplayMetadata = null
         session = s
         client = EmbyClient(
             baseUrl = s.baseUrl,
@@ -130,6 +139,27 @@ object AppRuntime {
         )
     }
 
+    /** Persist first, then publish only metadata belonging to the exact session that opened the editor. */
+    @Synchronized
+    fun renameSavedServer(url: String, name: String, expectedSession: Session? = session): Boolean {
+        if (session !== expectedSession) return false
+        val p = prefs ?: return false
+        val expectedClient = client
+        val persistedBefore = p.readSession()
+        if (expectedSession != null && (persistedBefore == null ||
+                persistedBefore.copy(serverName = expectedSession.serverName) != expectedSession)) return false
+        if (!p.renameSavedServer(url, name, expectedSession = persistedBefore)) return false
+        val persistedAfter = p.readSession()
+        if (session !== expectedSession || client !== expectedClient) return false
+        if (expectedSession != null && persistedBefore != null && persistedAfter != null &&
+            canonicalServerKey(url) == canonicalServerKey(expectedSession.baseUrl) &&
+            persistedAfter.copy(serverName = persistedBefore.serverName) == persistedBefore) {
+            sessionDisplayMetadata = SessionDisplayMetadata(expectedSession, persistedAfter.serverName)
+        }
+        return true
+    }
+
+    @Synchronized
     fun switchToServer(url: String): Boolean {
         val p = prefs ?: return false
         val serverKey = canonicalServerKey(url) ?: return false
@@ -151,6 +181,7 @@ object AppRuntime {
         return true
     }
 
+    @Synchronized
     fun logout(): Boolean {
         if (prefs?.clearSession() == false) return false
         client?.clearPendingProgress()
@@ -159,6 +190,7 @@ object AppRuntime {
             applicationContext?.let { com.lumina.tv.data.LibraryCache.removeHomeDisk(it, current.baseUrl, current.userId) }
         }
         com.lumina.tv.data.LibraryCache.clear()
+        sessionDisplayMetadata = null
         session = null
         client = null
         return true
@@ -233,7 +265,7 @@ object AppRuntime {
     fun stateJson(): String = JSONObject()
         .put("screen", screenLabel)
         .put("playing", nowPlaying)
-        .put("server", session?.serverName ?: "")
+        .put("server", serverDisplayName ?: "")
         .put("user", session?.userName ?: "")
         .put("pairingStatus", pairingStatus)
         .toString()

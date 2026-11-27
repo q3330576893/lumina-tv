@@ -3,7 +3,9 @@
 面向客厅大屏的 Emby 客户端。基于 Kotlin 与 Jetpack Compose 构建，遥控器优先操作，
 以播放可靠性与界面一致性为核心设计目标。
 
-**当前版本** v1.22.89（versionCode 130）· Android 8.0+（minSdk 26）
+**当前版本源** v1.24.19（versionCode 163，`app/build.gradle.kts`）· Android 8.0+（minSdk 26）
+
+2026-11-27 核对：关于页使用 `BuildConfig.VERSION_NAME`，现有版本 APK、unsigned Release 与 Debug APK 的 `aapt2 dump badging` 均为 163 / 1.24.19。此版本号不代表发布已获授权；native 来源发布门禁仍为 **BLOCKED**，详见 [native 来源清单](docs/native-sources.md) 与 [第三方许可](THIRD-PARTY-NOTICES.md)。
 
 ---
 
@@ -28,6 +30,7 @@ Lumina TV 是原生 Android TV 应用，通过 Emby Server 访问个人媒体库
 | --- | --- |
 | 双内核与看门狗 | Media3 / mpv 协作；卡住时有界恢复，先保留位置重载，再换源，最多 3 次 |
 | `rebuildRetry`（重建播放器重试） | 播放失败时重建播放器并重试；不提供 FFmpeg 解码能力 |
+| Media3 FFmpeg 音频扩展 | 已集成 Jellyfin `media3-ffmpeg-decoder:1.6.1+2`，播放器启用扩展音频 renderer；实际解码能力仍受该 native 构建与设备限制 |
 | 自动降级 | 直连 → 转码 → 切换片源 → 全部尝试后回落 mpv，各环节自动衔接 |
 | 内核保持 | 手动指定或已因解码失败回落后，内核选择保持不变，避免反复切换 |
 | Dolby Vision P7 | 识别 Profile 7 双层封装后直接交由 mpv 解码，跳过无效尝试 |
@@ -40,6 +43,7 @@ Lumina TV 是原生 Android TV 应用，通过 Emby Server 访问个人媒体库
 | 缓存 | 播放缓存每天自动清理，超过上限时提前淘汰，无需手动清理 |
 | 详情页播放 | 「继续播放」与「从头播放」分离 |
 | 多轨与画面 | 音轨与字幕切换、字幕样式与缩放、画面比例调整 |
+| Anime4K | 可选 mpv shader，默认关闭；效率 / 画质两档，不适用于 Media3 |
 
 ### 浏览
 
@@ -99,7 +103,7 @@ Lumina TV 是原生 Android TV 应用，通过 Emby Server 访问个人媒体库
 | --- | --- |
 | 语言与运行时 | Kotlin、Coroutines |
 | 界面 | Jetpack Compose |
-| 播放 | Media3 ExoPlayer 1.7.1、libmpv 1.0.4 |
+| 播放 | Media3 ExoPlayer 1.7.1、Jellyfin FFmpeg decoder 1.6.1+2、JellyCine libmpv 1.0.4（Maven 包版本，非 mpv upstream 版本） |
 | 网络 | OkHttp |
 | 图像 | Coil |
 | 元数据 | Emby Server API、TMDB API |
@@ -120,18 +124,20 @@ compileSdk 36 / targetSdk 35 / minSdk 26
 **构建命令**
 
 ```bash
-./gradlew :app:assembleRelease
+./gradlew :app:verifyOffline :app:assembleDebug
+# 不启用发布签名的 Release；不是发布指令：
+./gradlew -PreleaseSigning=false :app:assembleRelease
 ```
 
 **纯函数断言**
 
-`SamplesMain` 依次运行原有 9 组 samples 及 A1 可靠性断言，每组打印 START / PASS，异常直接让 Gradle 失败，使用 `fun main()` + `check()`，不依赖 JUnit。
+`SamplesMain` 运行 samples 及可靠性断言，每组打印 START / PASS，异常直接让 Gradle 失败，使用 `fun main()` + `check()`，不依赖 JUnit。`verifyOffline` 还汇总已接入的 P / B / E / T 系列检查，以 `app/build.gradle.kts` 中的任务依赖为准。
 JVM JSON 运行库固定为 `org.json:json:20240303`，通过独立的 `samplesJson` 配置解析，不进入 APK。在仓库根目录执行：
 
 ```bash
-gradle :app:verifyOffline
+./gradlew :app:verifyOffline
 # SDK 和依赖首次缓存后可完全离线重跑：
-gradle --offline :app:verifyOffline
+./gradlew --offline :app:verifyOffline
 ```
 
 不需要 `local.properties`、签名库或服务端密钥；SDK 可通过 `ANDROID_HOME` 指定。A1 只连接本机回环 HTTP 服务。
@@ -140,18 +146,17 @@ gradle --offline :app:verifyOffline
 
 **配置**
 
-签名信息与第三方密钥从 `local.properties` 读取，该文件不纳入版本控制。
-需在工程根目录创建：
+SDK 路径与可选第三方 API 密钥从未入库的 `local.properties` 读取：
 
 ```properties
 sdk.dir=/path/to/android-sdk
 TMDB_API_KEY=你的 TMDB 密钥
-LUMINA_STORE_PASSWORD=签名库密码
-LUMINA_KEY_ALIAS=lumina
-LUMINA_KEY_PASSWORD=签名密钥密码
+MDBLIST_API_KEY=你的 MDBList 密钥
 ```
 
-签名库 `lumina.jks` 置于工程根目录。缺少该文件时 release 构建不执行签名。
+Release 签名仅在显式传入 `-PreleaseSigning=true` 时启用，并要求环境变量 `LUMINA_KEYSTORE_PATH`、`LUMINA_STORE_PASSWORD`、`LUMINA_KEY_ALIAS`、`LUMINA_KEY_PASSWORD` 全部可用；缺失即失败，不回退 Debug 签名。日常验证不需要签名凭据。
+
+Wrapper 固定 Gradle 8.11.1 并校验发行 ZIP 的 SHA-256；依赖校验基线见 `gradle/verification-metadata.xml`。T14 已核实 Windows 严格离线构建，但 Linux AAPT2 `8.10.1-12782657` 输入与校验元数据尚缺，不应据本机成功宣称 Ubuntu CI 已通过。
 
 ---
 
@@ -179,7 +184,7 @@ app/src/main/java/com/lumina/tv/
 - **系统模糊**：仅在 Android 12（API 31）及以上生效，低版本使用等效的半透明层叠方案
 - **`rebuildRetry`（重建播放器重试）**：仅重建 Media3 播放器并重试，不提供 FFmpeg 解码能力；
   Media3 无法识别的封装仍依赖 mpv 或服务端转码
-- **转码流时间线**：seek 坐标仍需直放、remux、转码三种样片验证；当前只记录诊断，不做坐标修正
+- **转码流时间线**：代码已区分播放器位置与内容位置，并按观测校准；无法确认的时间线保留 `timelineUnverified`。直放、remux、转码的真实设备样片仍需覆盖，不能据离线断言宣称全部验证完成
 - **音频直通状态**：以设备报告为准，UI 标注「设备报告」，不代表功放一定点亮
 - **容器支持**：AVI、RMVB、ISO 原盘与 BDMV 目录缺少 Media3 解封装器，
   依赖 mpv 或服务端转码
@@ -187,6 +192,7 @@ app/src/main/java/com/lumina/tv/
   但直连要求终端具备对应解码能力
 - **网盘直链条目**：此类条目通常返回网页而非媒体流，视频背景会自动跳过，仅显示静态背景
 - **背景缓存**：视频背景占用最多 300MB 本地缓存，随使用情况自动淘汰
+- **native 来源与许可证**：24 个 `.so` 的实际 SHA-256、候选 revision、编译信息与缺证项见 [来源清单](docs/native-sources.md)。已核实许可证声明不等于对应源码交付或法律合规已完成；当前发布门禁为 BLOCKED
 
 ---
 

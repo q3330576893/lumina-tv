@@ -12,6 +12,18 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
+/** Language rank is independent of response order; ties have a stable path order. */
+internal fun preferredTmdbLogoPath(logos: org.json.JSONArray): String? =
+    (0 until logos.length()).mapNotNull { index ->
+        val logo = logos.optJSONObject(index) ?: return@mapNotNull null
+        val file = logo.optString("file_path", "").trim()
+            .takeIf { it.isNotEmpty() && it != "null" } ?: return@mapNotNull null
+        val language = logo.optString("iso_639_1", "").trim()
+            .replace('_', '-').substringBefore('-').lowercase(java.util.Locale.ROOT)
+        val rank = when (language) { "zh", "cn" -> 0; "en" -> 1; else -> 2 }
+        rank to file
+    }.minWithOrNull(compareBy<Pair<Int, String>> { it.first }.thenBy { it.second })?.second
+
 internal fun tmdbExternalCacheIsFresh(cachedAtMs: Long, nowMs: Long, ttlMs: Long): Boolean =
     nowMs >= cachedAtMs && nowMs - cachedAtMs < ttlMs
 
@@ -241,20 +253,10 @@ object TmdbClient {
 
     /** 取中文优先的透明标题图，其次英文，最后任意。 */
     private suspend fun fetchLogo(path: String, id: Int): String? {
-        val url = "https://api.tmdb.org/3/$path/$id/images?include_image_language=zh,en,null&api_key=${BuildConfig.TMDB_API_KEY}"
+        val url = "https://api.tmdb.org/3/$path/$id/images?api_key=${BuildConfig.TMDB_API_KEY}"
         val json = getJson(url) ?: return null
         val logos = json.optJSONArray("logos") ?: return null
-        if (logos.length() == 0) return null
-        var fallback: String? = null
-        for (i in 0 until logos.length()) {
-            val logo = logos.optJSONObject(i) ?: continue
-            val file = logo.optString("file_path", "")
-            if (file.isBlank()) continue
-            if (fallback == null) fallback = file
-            val lang = logo.optString("iso_639_1", "")
-            if (lang == "zh" || lang == "cn") return "https://image.tmdb.org/t/p/w500$file"
-        }
-        return fallback?.let { "https://image.tmdb.org/t/p/w500$it" }
+        return preferredTmdbLogoPath(logos)?.let { "https://image.tmdb.org/t/p/w500$it" }
     }
 
     private suspend fun getJson(url: String): JSONObject? {

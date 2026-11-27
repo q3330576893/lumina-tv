@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.media3.ui.AspectRatioFrameLayout
+import com.lumina.tv.data.NextEpisodeResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -35,6 +36,7 @@ internal fun shouldCancelCreditsForSeek(fromMs: Long, targetMs: Long, windowStar
 internal class CreditsCountdown<T>(
     private val scope: CoroutineScope,
     private val log: (String) -> Unit,
+    private val awaitRetry: suspend (Long) -> Unit = { delay(it) },
     private val awaitTick: suspend () -> Unit = { delay(1_000L) },
 ) {
     var remainingSeconds by mutableIntStateOf(0)
@@ -43,41 +45,73 @@ internal class CreditsCountdown<T>(
         private set
     var triggered = false
         private set
+    var lookupResult by mutableStateOf<NextEpisodeResult<T>?>(null)
+        private set
     private var job: Job? = null
+    private var revision = 0L
     val active: Boolean get() = job?.isActive == true
 
     private fun stopInternal(reason: String, allowRestart: Boolean) {
         job = null
         remainingSeconds = 0
         nextItem = null
+        lookupResult = null
         triggered = !allowRestart
         log("creditsCountdown cancel reason=$reason restart=$allowRestart")
     }
 
     fun cancel(reason: String, allowRestart: Boolean = true) {
+        revision++
         job?.cancel()
         stopInternal(reason, allowRestart)
     }
 
-    fun start(seconds: Int, next: suspend () -> T?, canContinue: () -> Boolean, onComplete: (T) -> Unit) {
+    /** T03 authority is captured once; a new permit, even in the same generation, revokes it. */
+    fun startForLoad(
+        seconds: Int, next: suspend () -> NextEpisodeResult<T>,
+        loadCoordinator: PlaybackLoadCoordinator, generation: Int, permit: PlaybackLoadPermit,
+        canContinue: () -> Boolean, onComplete: (T) -> Unit,
+    ) = start(seconds, next, canContinue = {
+        loadCoordinator.accepts(generation) && loadCoordinator.accepts(permit) && canContinue()
+    }, onComplete = onComplete)
+
+    fun start(seconds: Int, next: suspend () -> NextEpisodeResult<T>, canContinue: () -> Boolean, onComplete: (T) -> Unit) {
         if (triggered) return
         triggered = true
+        val ticket = ++revision
         job = scope.launch {
-            val item = next() ?: return@launch
-            currentCoroutineContext().ensureActive()
-            if (!canContinue()) {
+            suspend fun stillCurrent(): Boolean {
+                currentCoroutineContext().ensureActive()
+                if (ticket != revision) return false
+                if (canContinue()) return true
                 stopInternal("playback-paused-or-replaced", allowRestart = true)
-                return@launch
+                return false
             }
+            var attempts = 0
+            var item: T
+            while (true) {
+                if (!stillCurrent()) return@launch
+                val result = next()
+                if (!stillCurrent()) return@launch
+                attempts++
+                lookupResult = result
+                when (result) {
+                    is NextEpisodeResult.Found -> { item = result.item; break }
+                    NextEpisodeResult.NoNext -> { log("creditsCountdown result=NoNext"); return@launch }
+                    is NextEpisodeResult.NonRetryableFailure -> { log("creditsCountdown result=NonRetryableFailure"); return@launch }
+                    is NextEpisodeResult.RetryableFailure -> {
+                        log("creditsCountdown result=RetryableFailure attempt=$attempts")
+                        if (attempts >= 3) return@launch
+                        awaitRetry(attempts * 1_000L)
+                    }
+                }
+            }
+            log("creditsCountdown result=Found attempts=$attempts")
             nextItem = item
             remainingSeconds = seconds.coerceAtLeast(1)
             while (remainingSeconds > 0) {
                 awaitTick()
-                currentCoroutineContext().ensureActive()
-                if (!canContinue()) {
-                    stopInternal("playback-paused-or-replaced", allowRestart = true)
-                    return@launch
-                }
+                if (!stillCurrent()) return@launch
                 remainingSeconds--
             }
             onComplete(item)

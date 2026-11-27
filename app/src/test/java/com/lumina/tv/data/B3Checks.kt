@@ -16,6 +16,7 @@ object B3Checks {
         nextEpisodeFiltering()
         sourceInventoryRetryState()
         sourceInventoryReuse()
+        T06NextEpisodeChecks.run()
         println("B3 PASS Q-007/Q-009/Q-010/Q-011/Q-029: byte-aware playback keys, season TTL, missing-episode filtering, shared source inventory and explicit directory failures")
     }
 
@@ -75,7 +76,8 @@ object B3Checks {
         check(failure.status == SeasonDirectoryStatus.FAILURE && failure.error != null && failure.seasons.isEmpty())
 
         val detail = File("src/main/java/com/lumina/tv/ui/screens/DetailScreen.kt").readText()
-        check("if (it0.type != \"Series\" || seasons.isNotEmpty())" in detail)
+        check("parts.cacheData(it0)?.let { LibraryCache.putDetail(id, it, cacheRevision) }" in detail)
+        check("item.type == \"Series\" && directory.status != SeasonDirectoryStatus.SUCCESS" in detail)
         check("seasonResult.getOrNull()?.isEmpty() == true" in detail && "empty-season-directory" in detail)
         check("episodesStaleOf" in detail && "episodeReloadTick" in detail)
         val player = File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText()

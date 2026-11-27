@@ -29,8 +29,10 @@ fun EmbyClient.wideImageCandidates(
         add(WideImageCandidate(backdropUrlUntagged(item.id, 0, maxWidth, quality), "emby"))
 
         item.parentBackdropItemId?.takeIf(String::isNotBlank)?.let { parentId ->
-            item.parentBackdropTags[0]?.let { tag ->
-                backdropUrl(parentId, tag, maxWidth, quality)?.let { add(WideImageCandidate(it, "parent")) }
+            for ((index, tag) in item.parentBackdropTags.toSortedMap()) {
+                if (index >= 0 && tag.isNotBlank()) {
+                    backdropUrl(parentId, index, tag, maxWidth, quality)?.let { add(WideImageCandidate(it, "parent")) }
+                }
             }
             add(WideImageCandidate(backdropUrlUntagged(parentId, 0, maxWidth, quality), "parent"))
         }

@@ -2,17 +2,22 @@ package com.lumina.tv.data
 
 import com.lumina.tv.player.normalizeLanguage
 import com.lumina.tv.player.trackMemoryIdentity
+import com.lumina.tv.player.TrackMemoryIdentity
 import org.json.JSONObject
 
 enum class SubtitleIntentMode { AUTO, OFF, TRACK }
 
 data class PlaybackTrackIntent(
     val sourceId: String,
-    val audioIdentity: String,
-    val subtitleIdentity: String,
+    val audioIdentity: TrackMemoryIdentity,
+    val subtitleIdentity: TrackMemoryIdentity,
     val audioIndex: Int?,
     val subtitleMode: SubtitleIntentMode,
     val subtitleIndex: Int?,
+    // A preparation nonce prevents reusing prewarm results without content attestation.
+    // It is intentionally ephemeral and is never a content identity or persisted preference.
+    val preparationNonce: String? = if (audioIdentity is TrackMemoryIdentity.Available &&
+        subtitleIdentity is TrackMemoryIdentity.Available) null else java.util.UUID.randomUUID().toString(),
 ) {
     val subtitlePreference: String get() = when (subtitleMode) {
         SubtitleIntentMode.OFF -> "off"
@@ -32,23 +37,25 @@ data class PlaybackTrackIntent(
 }
 
 fun resolvePlaybackTrackIntent(source: MediaSource, rememberedAudio: Int?, rememberedSubtitle: String?,
-    audioLanguage: String?, subtitleLanguage: String?, explicitAudio: Int? = null): PlaybackTrackIntent {
+    audioLanguage: String?, subtitleLanguage: String?, explicitAudio: Int? = null, explicitSubtitle: Int? = null): PlaybackTrackIntent {
     val audio = source.audioStreams
     val subtitles = source.subtitleStreams
-    val audioIndex = explicitAudio?.takeIf { index -> audio.any { it.index == index } }
-        ?: rememberedAudio?.takeIf { index -> audio.any { it.index == index } }
+    val audioIndex = explicitAudio?.takeIf { index -> audio.count { it.index == index } == 1 }
+        ?: rememberedAudio?.takeIf { index -> audio.count { it.index == index } == 1 }
         ?: normalizeLanguage(audioLanguage)?.let { language ->
             val matches = audio.filter { normalizeLanguage(it.language) == language }
             (matches.firstOrNull { it.isDefault } ?: matches.firstOrNull())?.index
-        } ?: source.defaultAudioStreamIndex?.takeIf { index -> audio.any { it.index == index } }
+        } ?: source.defaultAudioStreamIndex?.takeIf { index -> audio.count { it.index == index } == 1 }
         ?: audio.firstOrNull { it.isDefault }?.index ?: audio.firstOrNull()?.index
+    val selectedSubtitle = explicitSubtitle?.takeIf { index -> index >= 0 && subtitles.count { it.index == index } == 1 }
     val rememberedIndex = rememberedSubtitle?.takeIf { it.startsWith("track:emby:") }
-        ?.removePrefix("track:emby:")?.toIntOrNull()?.takeIf { index -> subtitles.any { it.index == index } }
+        ?.removePrefix("track:emby:")?.toIntOrNull()?.takeIf { index -> subtitles.count { it.index == index } == 1 }
     val validRemembered = rememberedSubtitle?.takeIf { it == "off" || it == "auto" || rememberedIndex != null }
     val language = normalizeLanguage(subtitleLanguage)
     val languageMatch = subtitles.filter { language != null && normalizeLanguage(it.language) == language }
         .let { matches -> matches.firstOrNull { it.isDefault } ?: matches.firstOrNull() }
     val mode = when {
+        selectedSubtitle != null -> SubtitleIntentMode.TRACK
         validRemembered == "off" -> SubtitleIntentMode.OFF
         validRemembered == "auto" -> SubtitleIntentMode.AUTO
         rememberedIndex != null -> SubtitleIntentMode.TRACK
@@ -58,8 +65,8 @@ fun resolvePlaybackTrackIntent(source: MediaSource, rememberedAudio: Int?, remem
     }
     val subtitleIndex = when (mode) {
         SubtitleIntentMode.OFF -> null
-        SubtitleIntentMode.TRACK -> rememberedIndex ?: languageMatch?.index
-        SubtitleIntentMode.AUTO -> source.defaultSubtitleStreamIndex?.takeIf { index -> index == -1 || subtitles.any { it.index == index } }
+        SubtitleIntentMode.TRACK -> selectedSubtitle ?: rememberedIndex ?: languageMatch?.index
+        SubtitleIntentMode.AUTO -> source.defaultSubtitleStreamIndex?.takeIf { index -> index == -1 || subtitles.count { it.index == index } == 1 }
             ?: subtitles.firstOrNull { it.isDefault }?.index
     }
     return PlaybackTrackIntent(source.id, trackMemoryIdentity(source, "Audio"), trackMemoryIdentity(source, "Subtitle"),
@@ -71,3 +78,13 @@ data class PreparedPlaybackTracks(val source: MediaSource, val intent: PlaybackT
 
 // PlaybackRequestKey/PlaybackProtocol remain unchanged; C03 adds the resolved track identity here.
 internal data class TrackAwarePlaybackKey(val request: PlaybackRequestKey, val tracks: PlaybackTrackIntent)
+
+/** Retain the original inventory for player mapping, but never borrow a different response's
+ * validator to attest that inventory. A missing response validator is not the old validator. */
+internal fun trackSourceAfterPlaybackInfo(probed: MediaSource, response: MediaSource): MediaSource = response.copy(
+    streams = probed.streams,
+    defaultAudioStreamIndex = probed.defaultAudioStreamIndex,
+    defaultSubtitleStreamIndex = probed.defaultSubtitleStreamIndex,
+    contentValidator = response.contentValidator.takeIf { response.id == probed.id &&
+        response.contentValidator == probed.contentValidator && response.contentVersion == probed.contentVersion },
+)

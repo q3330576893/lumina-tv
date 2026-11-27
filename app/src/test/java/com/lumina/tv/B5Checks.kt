@@ -8,12 +8,24 @@ import com.lumina.tv.player.applyMpvHttpHeaders
 import com.lumina.tv.player.B17HeaderBinding
 import com.lumina.tv.player.detailPreviewShouldPlay
 import com.lumina.tv.player.reducePlayerHostLifecycle
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
+import java.lang.ref.ReferenceQueue
 import java.lang.ref.WeakReference
+import java.lang.reflect.Modifier
+import java.util.Collections
+import java.util.IdentityHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /** Offline regressions for the B5 player lifecycle and renderer details. */
 object B5Checks {
@@ -53,21 +65,121 @@ object B5Checks {
     }
 
     private suspend fun subtitleOffsetPublication() {
+        val writers = mutableListOf<Thread>()
+        val recordWriter: (Thread) -> Unit = { writers += it }
+        verifySubtitleOffsetPublication(recordWriter)
+        check(writers.none { it.isAlive })
+
+        val injectedCheckFailure = IllegalStateException("injected subtitle publication assertion failure")
+        val checkFailure = runCatching {
+            verifySubtitleOffsetPublication(recordWriter, afterPositive = { throw injectedCheckFailure })
+        }.exceptionOrNull()
+        check(checkFailure === injectedCheckFailure) { "Publication assertion failure was lost: $checkFailure" }
+        check(injectedCheckFailure.suppressed.isEmpty()) { "Publication cleanup failed" }
+        check(writers.none { it.isAlive }) { "Assertion failure retained a subtitle writer" }
+
+        val injectedWriterFailure = IllegalStateException("injected subtitle writer failure")
+        val writerFailure = runCatching {
+            verifySubtitleOffsetPublication(recordWriter, injectedWriterFailure = injectedWriterFailure)
+        }.exceptionOrNull()
+        check(writerFailure === injectedWriterFailure) { "Writer failure was lost: $writerFailure" }
+        check(writers.none { it.isAlive }) { "Writer failure retained a subtitle writer" }
+
+        coroutineScope {
+            val entered = CompletableDeferred<Unit>()
+            val cancellationSeen = CompletableDeferred<CancellationException>()
+            val job = launch {
+                try {
+                    verifySubtitleOffsetPublication(recordWriter, afterPositive = {
+                        entered.complete(Unit)
+                        awaitCancellation()
+                    })
+                } catch (cancelled: CancellationException) {
+                    cancellationSeen.complete(cancelled)
+                    throw cancelled
+                }
+            }
+            withTimeout(5_000L) { entered.await() }
+            job.cancelAndJoin()
+            check(job.isCancelled && cancellationSeen.isCompleted)
+            check(cancellationSeen.await().suppressed.isEmpty()) { "Cancellation cleanup failed" }
+            check(writers.none { it.isAlive }) { "Cancellation retained a subtitle writer" }
+        }
+        check(writers.size == 4 && writers.none { it.isAlive })
+        check(writers.none { it.isDaemon }) { "Writer cleanup must not depend on daemon threads" }
+    }
+
+    private suspend fun verifySubtitleOffsetPublication(
+        onWriter: (Thread) -> Unit,
+        injectedWriterFailure: Throwable? = null,
+        afterPositive: suspend () -> Unit = {},
+    ) {
         val state = SubtitleOffsetState()
         val positiveWritten = CompletableDeferred<Unit>()
-        val negativeWritten = CompletableDeferred<Unit>()
-        val writer = Thread {
-            state.offsetMs = 250L
-            positiveWritten.complete(Unit)
-            runBlocking { negativeWritten.await() }
-            state.offsetMs = -500L
+        val negativeWritten = CountDownLatch(1)
+        val writerError = AtomicReference<Throwable?>(null)
+        val writer = Thread({
+            try {
+                state.offsetMs = 250L
+                positiveWritten.complete(Unit)
+                check(negativeWritten.await(5L, TimeUnit.SECONDS)) { "Subtitle writer release timed out" }
+                injectedWriterFailure?.let { throw it }
+                state.offsetMs = -500L
+            } catch (failure: Throwable) {
+                writerError.set(failure)
+                positiveWritten.completeExceptionally(failure)
+            }
+        }, "b5-subtitle-offset-writer").apply { isDaemon = false }
+        onWriter(writer)
+        var primaryFailure: Throwable? = null
+        try {
+            writer.start()
+            withTimeout(5_000L) { positiveWritten.await() }
+            check(state.offsetMs == 250L)
+            afterPositive()
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            // No suspension here: cancellation cannot skip releasing or joining the JVM thread.
+            negativeWritten.countDown()
+            val joinFailure = runCatching { joinSubtitleWriter(writer) }.exceptionOrNull()
+            val asynchronousFailure = writerError.get()
+            val failure = primaryFailure ?: joinFailure ?: asynchronousFailure
+            if (failure != null) {
+                if (joinFailure != null && joinFailure !== failure) failure.addSuppressed(joinFailure)
+                if (asynchronousFailure != null && asynchronousFailure !== failure) failure.addSuppressed(asynchronousFailure)
+                if (primaryFailure == null) throw failure
+            }
         }
-        writer.start()
-        positiveWritten.await()
-        check(state.offsetMs == 250L)
-        negativeWritten.complete(Unit)
-        writer.join()
         check(state.offsetMs == -500L)
+    }
+
+    private fun joinSubtitleWriter(writer: Thread) {
+        var interrupted = false
+        fun awaitUntil(deadline: Long) {
+            while (writer.isAlive) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0L) return
+                try {
+                    TimeUnit.NANOSECONDS.timedJoin(writer, remaining)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                    writer.interrupt()
+                }
+            }
+        }
+        try {
+            awaitUntil(System.nanoTime() + TimeUnit.SECONDS.toNanos(5L))
+            if (writer.isAlive) {
+                writer.interrupt()
+                awaitUntil(System.nanoTime() + TimeUnit.SECONDS.toNanos(5L))
+            }
+            check(!writer.isAlive) { "Subtitle writer did not terminate after release and interrupt" }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+        if (interrupted) throw InterruptedException("Interrupted while joining subtitle writer")
     }
 
     private fun hostLifecycleTransitions() {
@@ -94,38 +206,111 @@ object B5Checks {
         check(!detailPreviewShouldPlay(requested = false, hostResumed = true))
     }
 
-    private suspend fun weakPlayerRegistry() {
+    private fun weakPlayerRegistry() {
         val logs = mutableListOf<String>()
-        val registry = PlayerLifecycleRegistry(logs::add)
+        val registry = PlayerLifecycleRegistry { line -> logs += line }
         check(registry.liveVideoDecoders == 0)
-        val player = registerEphemeralPlayer(registry)
-        repeat(40) {
-            if (player.get() == null) return@repeat
-            System.gc()
-            allocatePressure()
-            Thread.sleep(5)
-        }
-        check(player.get() == null) { "player registry retained a player without an external owner" }
+        val first = EqualPlayer()
+        val second = EqualPlayer()
+        check(first !== second && first == second && first.hashCode() == second.hashCode())
+        val firstId = registry.created(first, "media3", "weak-check")
+        val secondId = registry.created(second, "media3", "weak-check-equal")
+        check(firstId != secondId) { "Equal players must have distinct registry identities" }
+        check(registry.created(first, "media3", "ignored-repeat") == firstId)
+        registry.decoderInitialized(first, "hevc")
+        registry.decoderInitialized(second, "hevc")
+        check(registry.liveVideoDecoders == 2)
+        registry.decoderReleased(first, "hevc")
+        check(registry.liveVideoDecoders == 1)
+        registry.decoderInitialized(first, "hevc")
+        check(registry.liveVideoDecoders == 2)
+
+        val playersField = PlayerLifecycleRegistry::class.java.getDeclaredField("players").apply { isAccessible = true }
+        val entries = playersField.get(registry) as? Map<*, *> ?: error("Registry players must be a map")
+        check(entries.size == 2)
+        check(entries.keys.all { it is WeakReference<*> }) { "Registry keys must be actual weak references" }
+        val keys = entries.keys.map { it as WeakReference<*> }
+        val firstKey = keys.single { it.get() === first }
+        val secondKey = keys.single { it.get() === second }
+        check(firstKey !== secondKey && firstKey != secondKey)
+        check(firstKey.hashCode() == System.identityHashCode(first))
+        check(secondKey.hashCode() == System.identityHashCode(second))
+        val players = listOf(first, second)
+        assertNoStrongPlayerReferences(registry, players)
+        val retainedPlayer = runCatching { assertNoStrongPlayerReferences(listOf(first), players) }.exceptionOrNull()
+        check(retainedPlayer is IllegalStateException) { "Strong-reference inspection must reject a retained player" }
+
+        // Exercise the real registered key and ReferenceQueue without depending on JVM GC timing.
+        firstKey.clear()
+        check(firstKey.get() == null)
+        check(registry.liveVideoDecoders == 2) { "A cleared key must be removed through its queue notification" }
+        check(firstKey.enqueue()) { "First weak key was not registered for queue cleanup" }
+        check(registry.liveVideoDecoders == 1)
+        check(entries.size == 1 && entries.keys.single() === secondKey)
+        check(registry.created(second, "media3", "ignored-repeat") == secondId)
+        registry.released(first, "cleared-key")
+        check(registry.liveVideoDecoders == 1) { "Releasing the stale identity affected an equal player" }
+        registry.decoderReleased(second, "hevc")
         check(registry.liveVideoDecoders == 0)
+        registry.decoderInitialized(second, "av1")
+        check(registry.liveVideoDecoders == 1)
+        registry.released(second, "explicit-release")
+        check(registry.liveVideoDecoders == 0 && entries.isEmpty())
+        secondKey.clear()
+        check(secondKey.enqueue())
+        check(registry.liveVideoDecoders == 0 && entries.isEmpty())
         check(logs.first().startsWith("playerLifecycle event=create engine=media3 id=1 owner=weak-check players=1"))
     }
 
-    private fun registerEphemeralPlayer(registry: PlayerLifecycleRegistry): WeakReference<Any> {
-        val player = Any()
-        registry.created(player, "media3", "weak-check")
-        registry.decoderInitialized(player, "hevc")
-        check(registry.liveVideoDecoders == 1)
-        return WeakReference(player)
+    private class EqualPlayer {
+        override fun equals(other: Any?): Boolean = other is EqualPlayer
+        override fun hashCode(): Int = 1
     }
 
-    private fun allocatePressure() { ByteArray(64 * 1024) }
+    private fun assertNoStrongPlayerReferences(root: Any, players: List<Any>) {
+        val visited = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
+        fun visit(value: Any?) {
+            if (value == null) return
+            check(players.none { it === value }) { "Registry has a strong path to a player" }
+            if (!visited.add(value)) return
+            when (value) {
+                is String, is Number, is Boolean, is Char, is Enum<*>, is Class<*> -> return
+                is Map<*, *> -> {
+                    value.forEach { (key, entry) -> visit(key); visit(entry) }
+                    return
+                }
+                is Iterable<*> -> {
+                    value.forEach { visit(it) }
+                    return
+                }
+                is Array<*> -> {
+                    value.forEach { visit(it) }
+                    return
+                }
+                // ReferenceQueue contains reference notifications, not strong referent ownership.
+                is ReferenceQueue<*> -> return
+            }
+            var type: Class<*> = value.javaClass
+            // Inspect custom weak-key fields, but never follow WeakReference's weak referent.
+            while (type != Any::class.java && type != WeakReference::class.java) {
+                check(!type.name.startsWith("java.")) { "Unhandled registry reference container: ${type.name}" }
+                for (field in type.declaredFields) {
+                    if (Modifier.isStatic(field.modifiers)) continue
+                    field.isAccessible = true
+                    visit(field.get(value))
+                }
+                type = type.superclass ?: break
+            }
+        }
+        visit(root)
+    }
 
     private suspend fun creditsCountdownSelfStop() = coroutineScope {
         val ticks = Channel<Unit>(Channel.UNLIMITED)
         val logs = mutableListOf<String>()
         val countdown = CreditsCountdown<String>(this, logs::add) { ticks.receive() }
         var canContinue = true
-        countdown.start(2, next = { "next" }, canContinue = { canContinue }, onComplete = { error("unexpected completion") })
+        countdown.start(2, next = { com.lumina.tv.data.NextEpisodeResult.Found("next") }, canContinue = { canContinue }, onComplete = { error("unexpected completion") })
         yield()
         check(countdown.active && countdown.remainingSeconds == 2)
         canContinue = false

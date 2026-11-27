@@ -5,6 +5,7 @@ import com.lumina.tv.player.MpvFocusEffect
 import com.lumina.tv.player.MpvFocusPolicyState
 import com.lumina.tv.player.MpvFocusSignal
 import com.lumina.tv.player.PlaybackLoadCoordinator
+import com.lumina.tv.player.LoadRetirementFence
 import com.lumina.tv.player.MpvTlsPolicy
 import com.lumina.tv.player.PlaybackErrorCategory
 import com.lumina.tv.player.PlaybackErrorRoute
@@ -132,11 +133,12 @@ object B13Checks {
             for (stage in listOf("negotiation", "surface", "focus")) coroutineScope {
                 val coordinator = PlaybackLoadCoordinator("A")
                 val generation = coordinator.beginLoad("A")
+                val permit = checkNotNull(coordinator.grantPermit(generation, LoadRetirementFence().awaitPermit()))
                 val ready = CompletableDeferred<Unit>()
                 var committedPlaying: Boolean? = null
                 val lateLoad = async {
                     ready.await()
-                    coordinator.commit(generation) { committedPlaying = it }
+                    coordinator.commit(permit) { committedPlaying = it }
                 }
                 yield()
                 val stopped = reducePlayerHostLifecycle(false, PlayerHostLifecycleEvent.ON_STOP,

@@ -21,7 +21,7 @@ object StabilityMetrics {
     }
 }
 
-class PlaybackWatchdog {
+internal class PlaybackWatchdog {
     private var generation = -1
     private var physicalLoadId: Long? = null
     private var generationAt = 0L
@@ -31,7 +31,7 @@ class PlaybackWatchdog {
     private var loading = false
     private var byteAt = 0L
     private var lastBytes = -1L
-    private var lastPositionMs = -1L
+    private var lastPositionMs: Long? = null
     private var lastPositionAt = 0L
     private var lastBufferedMs: Long? = null
     private var lastBufferedAt: Long? = null
@@ -47,7 +47,7 @@ class PlaybackWatchdog {
         loading = false
         byteAt = 0L
         lastBytes = -1L
-        lastPositionMs = -1L
+        lastPositionMs = null
         lastPositionAt = 0L
         lastBufferedMs = null
         lastBufferedAt = null
@@ -55,12 +55,20 @@ class PlaybackWatchdog {
     }
 
     fun onTick(
-        positionMs: Long, bufferedMs: Long?, state: Int, playWhenReady: Boolean,
-        isSeeking: Boolean, sessionGeneration: Int, durationMs: Long, bytesLoaded: Long, isLoading: Boolean,
-        mpvLoadId: Long? = null, downloadInProgress: Boolean = false,
+        timeline: WatchdogTimelineSample?, expectedLoad: WatchdogLoadIdentity,
+        bufferedMs: Long?, state: Int, playWhenReady: Boolean,
+        isSeeking: Boolean, bytesLoaded: Long, isLoading: Boolean,
+        downloadInProgress: Boolean = false,
         nowMs: Long = SystemClock.elapsedRealtime(),
     ): WatchdogReason? {
         val now = nowMs
+        // Rejected samples cannot rebase the watchdog onto a retired physical load.
+        if (timeline == null) { reset(); return null }
+        if (timeline.load != expectedLoad) return null
+        val positionMs = timeline.positionMs?.takeIf { it >= 0L }
+        val durationMs = timeline.durationMs?.takeIf { it > 0L }
+        val sessionGeneration = expectedLoad.generation
+        val mpvLoadId = expectedLoad.physicalId
         onPlaybackStateChanged(state, now)
         if (generation != sessionGeneration || physicalLoadId != mpvLoadId) {
             generation = sessionGeneration
@@ -82,13 +90,13 @@ class PlaybackWatchdog {
             return null
         }
         if (bytesLoaded != lastBytes) { lastBytes = bytesLoaded; byteAt = now }
-        if (positionMs != lastPositionMs) { lastPositionMs = positionMs; lastPositionAt = now }
+        if (positionMs == null || positionMs != lastPositionMs) { lastPositionMs = positionMs; lastPositionAt = now }
         updateBuffered(now, bufferedMs)
         val bufferedAge = lastBufferedAt?.let { now - it }
         val reason = playbackWatchdogReason(PlaybackWatchdogInput(
             positionMs = positionMs,
             durationMs = durationMs,
-            positionAgeMs = now - lastPositionAt,
+            positionAgeMs = positionMs?.let { now - lastPositionAt },
             bufferedAgeMs = bufferedAge,
             stateAgeMs = now - stateSince,
             bytesUnchangedForMs = now - byteAt,
@@ -120,7 +128,7 @@ class PlaybackWatchdog {
         stateSince = nowMs
     }
 
-    private fun updatePositions(now: Long, positionMs: Long, bufferedMs: Long?, bytesLoaded: Long) {
+    private fun updatePositions(now: Long, positionMs: Long?, bufferedMs: Long?, bytesLoaded: Long) {
         lastPositionMs = positionMs; lastPositionAt = now
         updateBuffered(now, bufferedMs, rebase = true)
         if (bytesLoaded != lastBytes) { lastBytes = bytesLoaded; byteAt = now }

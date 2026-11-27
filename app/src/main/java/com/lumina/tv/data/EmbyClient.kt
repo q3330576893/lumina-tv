@@ -36,6 +36,21 @@ import com.lumina.tv.diag.NetLog
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.diag.redactDiagnosticSecrets
 
+/** Preserve the actual raster for cropped/ultrawide video instead of inventing scanlines. */
+internal fun mediaResolutionLabel(width: Int?, height: Int?): String? {
+    val w = width?.takeIf { it > 0 }
+    val h = height?.takeIf { it > 0 }
+    if (w == null) return h?.let { "${it}p" }
+    if (h == null) return "${w}px 宽"
+    val raster = "${w}×${h}"
+    return when {
+        w in 3800..4096 -> if ((w == 3840 || w == 4096) && h == 2160) "4K" else "4K · $raster"
+        w == 1920 && h == 1080 -> "1080P"
+        w == 1280 && h == 720 -> "720P"
+        else -> raster
+    }
+}
+
 internal fun shouldCacheChapterResult(independentSucceeded: Boolean, userItemSucceeded: Boolean): Boolean =
     independentSucceeded && userItemSucceeded
 
@@ -70,6 +85,26 @@ internal class ChapterCache(private val nowMs: () -> Long = { System.nanoTime() 
 }
 
 class EmbyException(message: String, val httpStatus: Int? = null) : Exception(message)
+
+/** Auto-next must distinguish a confirmed end from an unavailable lookup. */
+sealed interface NextEpisodeResult<out T> {
+    data class Found<T>(val item: T) : NextEpisodeResult<T>
+    data object NoNext : NextEpisodeResult<Nothing>
+    data class RetryableFailure(val cause: Exception) : NextEpisodeResult<Nothing>
+    data class NonRetryableFailure(val cause: Exception) : NextEpisodeResult<Nothing>
+}
+
+internal fun nextEpisodeFailure(failure: Exception): NextEpisodeResult<Nothing> {
+    if (failure is CancellationException) throw failure
+    val retryable = when (failure) {
+        is javax.net.ssl.SSLException -> false
+        is IOException -> true
+        is EmbyException -> failure.httpStatus in setOf(408, 429) || failure.httpStatus in 500..599
+        else -> false
+    }
+    return if (retryable) NextEpisodeResult.RetryableFailure(failure)
+        else NextEpisodeResult.NonRetryableFailure(failure)
+}
 
 data class DetailPreviewResolution(
     val url: String?,
@@ -131,7 +166,7 @@ class EmbyClient(
     // AppRuntime owns this client. Playback screens only submit snapshots; they never own HTTP jobs.
     private val progressSender = ProgressSender(progressScope, progressOutbox, send = ::sendProgressEvent)
     private val trickplayMutex = Mutex()
-    private val trickplayFiles = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
+    private val trickplayFiles = LinkedHashMap<String, BifIndex>(16, 0.75f, true)
     private var trickplayBytes = 0L
     private val playbackTargetCache = ConcurrentHashMap<TrackAwarePlaybackKey, Pair<Long, PlaybackTarget>>()
     // Diagnostic state lives with the client so it survives the next-episode screen replacement.
@@ -516,7 +551,7 @@ class EmbyClient(
             })
             parseItems(arr)
         }.getOrNull()
-        val minimal = mapOf<String, String?>("Limit" to limit.toString())
+        val minimal = mapOf<String, String?>("Limit" to limit.toString(), "ParentId" to parentId)
         query("/Users/$userId/Items/Latest", minimal)?.let { return@withMetadataContext it }
         val withFields = mutableMapOf<String, String?>("Limit" to limit.toString(), "Fields" to fields)
         if (parentId != null) withFields["ParentId"] = parentId
@@ -631,31 +666,71 @@ class EmbyClient(
         }.getOrDefault(PlaybackMarkers())
     }
 
-    suspend fun getNextEpisode(item: MediaItem): MediaItem? = withMetadataContext {
-        val seriesId = item.seriesId ?: return@withMetadataContext null
-        suspend fun firstPlayable(candidates: List<MediaItem>): MediaItem? = selectNextPlayableEpisode(candidates) { episode ->
-            episodeSourceAvailability(getMediaSourcesResult(episode.id))
-        }
-        val current = item.seasonId?.let { seasonId ->
-            catchingRequest { getEpisodes(seriesId, seasonId) }.getOrElse { return@withMetadataContext null }
-        }.orEmpty()
-        val orderedCurrent = current.sortedWith(compareBy<MediaItem> { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
-        val currentIndex = orderedCurrent.indexOfFirst { it.id == item.id }
-        if (currentIndex >= 0) {
-            firstPlayable(orderedCurrent.drop(currentIndex + 1))?.let { return@withMetadataContext it }
-        }
+    suspend fun getNextEpisode(item: MediaItem): NextEpisodeResult<MediaItem> = try {
+        withMetadataContext {
+            val seriesId = item.seriesId ?: return@withMetadataContext NextEpisodeResult.NoNext
+            // Strict, fresh directories: malformed/partial responses cannot mean "last episode".
+            suspend fun directory(kind: String, seasonId: String? = null): List<MediaItem> {
+                val items = mutableListOf<MediaItem>()
+                val seen = mutableSetOf<String>()
+                var start = 0
+                repeat(100) {
+                    val page = getJson(url("/Shows/$seriesId/$kind", mapOf(
+                        "UserId" to userId, "SeasonId" to seasonId,
+                        "Fields" to "UserData,MediaSources,IsMissing,LocationType",
+                        "StartIndex" to start.toString(), "Limit" to "200",
+                    )))
+                    val rows = page.getJSONArray("Items")
+                    val parsed = parseItems(rows)
+                    if (parsed.size != rows.length() || parsed.any { it.id.isBlank() || it.type.isBlank() }) {
+                        throw JSONException("Invalid next-episode directory")
+                    }
+                    val fresh = parsed.filter { seen.add(it.id) }
+                    if (parsed.isNotEmpty() && fresh.isEmpty()) throw EmbyException("Next-episode directory did not advance")
+                    items += fresh
+                    start += parsed.size
+                    val total = page.optInt("TotalRecordCount", -1)
+                    if (parsed.isEmpty()) {
+                        if (total > start) throw EmbyException("Incomplete next-episode directory")
+                        return items
+                    }
+                    if (total >= 0 && start >= total || total < 0 && parsed.size < 200) return items
+                }
+                throw EmbyException("Next-episode directory limit exceeded")
+            }
+            suspend fun firstPlayable(candidates: List<MediaItem>): MediaItem? {
+                for (episode in candidates.filter { it.type == "Episode" && !it.isMissing }.distinctBy { it.id }) {
+                    // Even a cached SourceCount is only a hint. A failed probe is never Found,
+                    // and must not silently skip an episode whose availability is still unknown.
+                    val sources = getMediaSourcesResult(episode.id, requireInventory = true).getOrThrow()
+                    currentCoroutineContext().ensureActive()
+                    if (sources.isNotEmpty()) return episode
+                }
+                return null
+            }
+            val episodeOrder = compareBy<MediaItem> { it.parentIndexNumber ?: Int.MAX_VALUE }
+                .thenBy { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id }
+            val current = directory("Episodes", item.seasonId).sortedWith(episodeOrder)
+            val currentIndex = current.indexOfFirst { it.id == item.id }
+            if (currentIndex < 0) throw EmbyException("Current episode absent from directory")
+            firstPlayable(current.drop(currentIndex + 1))?.let { return@withMetadataContext NextEpisodeResult.Found(it) }
+            if (item.seasonId == null) return@withMetadataContext NextEpisodeResult.NoNext
 
-        val seasons = catchingRequest { getSeasons(seriesId) }.getOrElse { return@withMetadataContext null }
-            .sortedWith(compareBy<MediaItem> { it.indexNumber ?: it.parentIndexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
-        val seasonIndex = seasons.indexOfFirst { it.id == item.seasonId }
-        if (seasonIndex < 0) return@withMetadataContext null
-        for (season in seasons.drop(seasonIndex + 1)) {
-            val seasonEpisodes = catchingRequest { getEpisodes(seriesId, season.id) }
-                .getOrElse { return@withMetadataContext null }
-                .sortedWith(compareBy<MediaItem> { it.indexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
-            firstPlayable(seasonEpisodes)?.let { return@withMetadataContext it }
+            val seasons = directory("Seasons")
+                .sortedWith(compareBy<MediaItem> { it.indexNumber ?: it.parentIndexNumber ?: Int.MAX_VALUE }.thenBy { it.id })
+            val seasonIndex = seasons.indexOfFirst { it.id == item.seasonId }
+            if (seasonIndex < 0) throw EmbyException("Current season absent from directory")
+            for (season in seasons.drop(seasonIndex + 1)) {
+                firstPlayable(directory("Episodes", season.id).sortedWith(episodeOrder))?.let {
+                    return@withMetadataContext NextEpisodeResult.Found(it)
+                }
+            }
+            NextEpisodeResult.NoNext
         }
-        return@withMetadataContext null
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Exception) {
+        nextEpisodeFailure(failure)
     }
 
     private fun playbackTargetKey(itemId: String, forceTranscode: Boolean, sourceId: String?, audioStreamIndex: Int?,
@@ -747,14 +822,7 @@ class EmbyClient(
                         }
                         output.toByteArray()
                     }
-                    if (bytes.size < 72 || !bytes.copyOfRange(0, 8).contentEquals(BIF_MAGIC)) {
-                        throw IOException("Invalid BIF header")
-                    }
-                    val count = readLeInt(bytes, 8)
-                    val multiplier = readLeInt(bytes, 16).let { if (it == 0) 1000 else it }
-                    if (count <= 0 || count > MAX_TRICKPLAY_FRAMES || multiplier <= 0 || 64L + count * 8L > bytes.size) {
-                        throw IOException("Invalid BIF index")
-                    }
+                    val index = BifIndex.parse(bytes)
                     currentCoroutineContext().ensureActive()
                     synchronized(trickplayFiles) {
                         while (trickplayBytes + bytes.size > MAX_TRICKPLAY_BYTES) {
@@ -762,33 +830,15 @@ class EmbyClient(
                             trickplayBytes -= eldest.value.size
                             trickplayFiles.remove(eldest.key)
                         }
-                        trickplayFiles[itemId] = bytes
+                        trickplayFiles[itemId] = index
                         trickplayBytes += bytes.size
                     }
-                    bytes
+                    index
                 }
             } ?: return@withMetadataContext null
-            val count = readLeInt(file, 8)
-            val multiplier = readLeInt(file, 16).let { if (it == 0) 1000 else it }
-            var low = 0
-            var high = count
-            while (low < high) {
-                val middle = low + (high - low) / 2
-                val timestampMs = (readLeInt(file, 64 + middle * 8).toLong() and 0xFFFFFFFFL) * multiplier
-                if (timestampMs <= positionMs) {
-                    low = middle + 1
-                } else {
-                    high = middle
-                }
-            }
-            val frameIndex = (low - 1).coerceAtLeast(0)
+            val frameIndex = file.frameIndex(positionMs)
             synchronized(trickplayFrames) { trickplayFrames[itemId to frameIndex]?.let { return@withMetadataContext it } }
-            val entryOffset = 64 + frameIndex * 8
-            val start = readLeInt(file, entryOffset + 4)
-            val end = if (frameIndex == count - 1) file.size else readLeInt(file, entryOffset + 12)
-            if (start < 0 || end <= start || end > file.size) return@withMetadataContext null
-            val jpeg = file.copyOfRange(start, end)
-            if (jpeg.size < 4 || jpeg[0] != 0xFF.toByte() || jpeg[1] != 0xD8.toByte()) return@withMetadataContext null
+            val jpeg = file.frame(frameIndex) ?: return@withMetadataContext null
             currentCoroutineContext().ensureActive()
             synchronized(trickplayFrames) { trickplayFrames[itemId to frameIndex] = jpeg }
             jpeg
@@ -797,14 +847,6 @@ class EmbyClient(
         } catch (_: Exception) {
             null
         }
-    }
-
-    private fun readLeInt(bytes: ByteArray, offset: Int): Int {
-        if (offset < 0 || offset + 4 > bytes.size) return -1
-        return (bytes[offset].toInt() and 0xFF) or
-            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
-            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
-            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
     }
 
     /** Emby returns cast/crew in People when requested through Fields=People. */
@@ -938,12 +980,7 @@ class EmbyClient(
                 }
             }
         }
-        val res = when {
-            w >= 3800 || h >= 2100 -> "4K"
-            w >= 1900 || h >= 1000 -> "1080P"
-            w >= 1200 || h >= 700 -> "720P"
-            else -> null
-        }
+        val res = mediaResolutionLabel(w, h)
         return MediaItem(
             contentVersion = previewContentVersion(o),
             id = o.optString("Id"),
@@ -1054,9 +1091,13 @@ class EmbyClient(
         return url("/Items/${item.id}/Images/Logo", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
     }
 
-    fun backdropUrl(id: String, tag: String?, maxWidth: Int = 1920, quality: Int = 80): String? {
+    fun backdropUrl(id: String, tag: String?, maxWidth: Int = 1920, quality: Int = 80): String? =
+        backdropUrl(id, 0, tag, maxWidth, quality)
+
+    fun backdropUrl(id: String, index: Int, tag: String?, maxWidth: Int = 1920, quality: Int = 80): String? {
+        require(index >= 0)
         if (tag == null) return null
-        return url("/Items/$id/Images/Backdrop/0", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to quality.toString()))
+        return url("/Items/$id/Images/Backdrop/$index", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to quality.toString()))
     }
 
     /** Resolves a detail backdrop using validated HLS, direct stream, then the controlled static fallback. */
@@ -1266,14 +1307,7 @@ class EmbyClient(
                         ?: s.optDouble("AverageFrameRate", 0.0).takeIf { it > 0 },
                 )
                 if (s.optString("Type") == "Video" && resolution == null) {
-                    val h = s.optInt("Height", 0)
-                    resolution = when {
-                        h >= 2000 -> "4K"
-                        h >= 1000 -> "${h}p"
-                        h >= 700 -> "720p"
-                        h > 0 -> "${h}p"
-                        else -> null
-                    }
+                    resolution = mediaResolutionLabel(s.optInt("Width", 0), s.optInt("Height", 0))
                 }
             }
         }
@@ -1303,7 +1337,7 @@ class EmbyClient(
     suspend fun getMediaSources(itemId: String): List<MediaSource> =
         getMediaSourcesResult(itemId).getOrDefault(emptyList())
 
-    internal suspend fun getMediaSourcesResult(itemId: String): Result<List<MediaSource>> = withMetadataContext {
+    internal suspend fun getMediaSourcesResult(itemId: String, requireInventory: Boolean = false): Result<List<MediaSource>> = withMetadataContext {
         probeMediaSources {
             fun playbackInfoBody(includeDeviceProfile: Boolean) = JSONObject()
                 .put("UserId", userId)
@@ -1311,10 +1345,14 @@ class EmbyClient(
                 .put("AutoOpenLiveStream", false)
                 .apply { if (includeDeviceProfile) put("DeviceProfile", deviceProfile()) }
             fun parseSources(info: JSONObject): List<MediaSource> {
-                val sources = info.optJSONArray("MediaSources") ?: JSONArray()
-                return (0 until sources.length()).mapNotNull { i ->
+                val sources = if (requireInventory) info.getJSONArray("MediaSources") else info.optJSONArray("MediaSources") ?: JSONArray()
+                val parsed = (0 until sources.length()).mapNotNull { i ->
                     sources.optJSONObject(i)?.let { parseMediaSource(it) }
                 }
+                if (requireInventory && (parsed.size != sources.length() || parsed.any { it.id.isBlank() })) {
+                    throw JSONException("Invalid next-episode source inventory")
+                }
+                return parsed
             }
             val playbackUrl = url("/Items/$itemId/PlaybackInfo", mapOf("UserId" to userId))
             val initial = parseSources(postJson(playbackUrl, playbackInfoBody(false).toString()))
@@ -1323,7 +1361,9 @@ class EmbyClient(
                 val retried = catchingRequest {
                     parseSources(postJson(playbackUrl, playbackInfoBody(true).toString()))
                 }
-                recoveredSourceInventory(initial, retried).getOrThrow()
+                // Auto-next needs a completed playable probe. Other inventory callers retain
+                // T01's fallback to a nonempty initial inventory when enrichment fails/empties.
+                if (requireInventory) retried.getOrThrow() else recoveredSourceInventory(initial, retried).getOrThrow()
             }
         }
     }
@@ -1385,24 +1425,27 @@ class EmbyClient(
             path.endsWith(".strm", ignoreCase = true)
     }
 
-    private fun trackIntentFor(itemId: String, source: MediaSource, explicitAudio: Int? = null): PlaybackTrackIntent {
+    private fun trackIntentFor(itemId: String, source: MediaSource, explicitAudio: Int? = null, explicitSubtitle: Int? = null): PlaybackTrackIntent {
         val prefs = com.lumina.tv.AppRuntime.prefs
         return resolvePlaybackTrackIntent(source, prefs?.audioTrackFor(itemId, source),
             prefs?.subtitlePreferenceFor(itemId, source), prefs?.preferredAudioLanguage,
-            prefs?.preferredSubtitleLanguage, explicitAudio)
+            prefs?.preferredSubtitleLanguage, explicitAudio, explicitSubtitle)
     }
 
     suspend fun preparePlaybackTracks(itemId: String, sourceId: String?, audioIndex: Int?,
-        strategy: SourceStrategy = SourceStrategy(), audioIdentity: String? = null): PreparedPlaybackTracks {
+        strategy: SourceStrategy = SourceStrategy(), manualAudio: com.lumina.tv.player.ManualTrackSelection? = null,
+        manualSubtitle: com.lumina.tv.player.ManualTrackSelection? = null): PreparedPlaybackTracks {
         val sources = getMediaSourcesResult(itemId).getOrThrow()
         if (sources.isEmpty()) throw EmbyException("没有可用片源")
         val preferredSourceId = sourceId ?: com.lumina.tv.AppRuntime.prefs?.lastSourceFor(itemId)
         val selected = sources.firstOrNull { it.id == preferredSourceId }
             ?: if (sourceId != null) throw EmbyException("所选版本已不可用，请重新选择")
             else sources[chooseSource(sources.mapIndexed { index, source -> source.toSourceOption(index) }, strategy).index]
-        return PreparedPlaybackTracks(selected, trackIntentFor(itemId, selected,
-            audioIndex.takeIf { sourceId == selected.id && audioIdentity ==
-                com.lumina.tv.player.trackMemoryIdentity(selected, "Audio") }), sources)
+        val explicitAudio = manualAudio?.indexForProbe(itemId, selected, com.lumina.tv.player.TrackMemoryType.Audio,
+            com.lumina.tv.player.trackMemoryIdentity(selected, "Audio"))?.takeIf { it == audioIndex && sourceId == selected.id }
+        val explicitSubtitle = manualSubtitle?.indexForProbe(itemId, selected, com.lumina.tv.player.TrackMemoryType.Subtitle,
+            com.lumina.tv.player.trackMemoryIdentity(selected, "Subtitle"))?.takeIf { sourceId == selected.id }
+        return PreparedPlaybackTracks(selected, trackIntentFor(itemId, selected, explicitAudio, explicitSubtitle), sources)
     }
 
     suspend fun resolvePlayback(
@@ -1419,12 +1462,13 @@ class EmbyClient(
         cacheResult: Boolean = false,
         strategy: SourceStrategy = SourceStrategy(),
         preparedTracks: PreparedPlaybackTracks? = null,
-        audioIdentity: String? = null,
+        manualAudio: com.lumina.tv.player.ManualTrackSelection? = null,
+        manualSubtitle: com.lumina.tv.player.ManualTrackSelection? = null,
         playbackInfoCapture: PlaybackInfoCapture? = null,
     ): PlaybackTarget =
         withMetadataContext {
             val startPositionMs = startIntent.positionMs(item.positionTicks / 10_000L)
-            val prepared = preparedTracks ?: preparePlaybackTracks(item.id, mediaSourceId, audioStreamIndex, strategy, audioIdentity)
+            val prepared = preparedTracks ?: preparePlaybackTracks(item.id, mediaSourceId, audioStreamIndex, strategy, manualAudio, manualSubtitle)
             var negotiationSource = prepared.source
             var trackIntent = prepared.intent
             val infoBody = JSONObject()
@@ -1484,9 +1528,7 @@ class EmbyClient(
                 ?: throw EmbyException("PlaybackInfo source is missing its identity")
             val responseSource = parseMediaSource(requireNotNull(first))
             // Keep original source identities even if the output inventory has been reduced.
-            val source = responseSource.copy(streams = negotiationSource.streams,
-                defaultAudioStreamIndex = negotiationSource.defaultAudioStreamIndex,
-                defaultSubtitleStreamIndex = negotiationSource.defaultSubtitleStreamIndex)
+            val source = trackSourceAfterPlaybackInfo(negotiationSource, responseSource)
             val selectedAudioIndex = trackIntent.audioIndex
             val playSessionId = info.optString("PlaySessionId").takeIf { it.isNotBlank() }
             val directUrl = url("/Videos/${item.id}/stream", mapOf(
@@ -1620,19 +1662,8 @@ class EmbyClient(
         uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
     } }.getOrNull()
 
-    private fun negotiatedUrl(target: String, contentStartMs: Long, audioIndex: Int?, sessionId: String?, removeSubtitles: Boolean): String {
-        val uri = Uri.parse(target)
-        val builder = uri.buildUpon().clearQuery()
-        val replaced = setOf("starttimeticks", "audiostreamindex", "playsessionid") +
-            if (removeSubtitles) setOf("subtitlestreamindex", "subtitlemethod") else emptySet()
-        uri.queryParameterNames.filterNot { it.lowercase() in replaced }.forEach { key ->
-            uri.getQueryParameters(key).forEach { builder.appendQueryParameter(key, it) }
-        }
-        builder.appendQueryParameter("StartTimeTicks", (contentStartMs * 10_000L).toString())
-        audioIndex?.let { builder.appendQueryParameter("AudioStreamIndex", it.toString()) }
-        sessionId?.let { builder.appendQueryParameter("PlaySessionId", it) }
-        return builder.build().toString()
-    }
+    private fun negotiatedUrl(target: String, contentStartMs: Long, audioIndex: Int?, sessionId: String?, removeSubtitles: Boolean): String =
+        negotiatedPlaybackUrl(baseUrl, target, contentStartMs, audioIndex, sessionId, removeSubtitles)
 
     fun subtitleUrl(itemId: String, mediaSourceId: String, index: Int, format: String = "srt"): String =
         url("/Videos/$itemId/$mediaSourceId/Subtitles/$index/Stream.$format")
@@ -1765,32 +1796,111 @@ class EmbyClient(
         progressScope.cancel()
     }
 
-    suspend fun clearWatchHistory(): Int = withMetadataContext {
+    suspend fun clearWatchHistory(): Int {
+        val result = clearWatchHistoryResult()
+        if (result.status != WatchHistoryClearStatus.SUCCESS) throw WatchHistoryClearException(result)
+        return result.cleared
+    }
+
+    suspend fun clearWatchHistoryResult(
+        maxPages: Int = 1_001,
+        maxDeletes: Int = 100_000,
+    ): WatchHistoryClearResult {
+        require(maxPages in 1..1_001 && maxDeletes in 1..100_000)
         var cleared = 0
-        while (cleared < 100_000) {
-            val page = getItems(
-                types = "Movie,Series,Episode",
-                sortBy = "DateCreated",
-                sortOrder = "Descending",
-                limit = 100,
-                startIndex = 0,
-                filters = "IsPlayed",
-            )
-            if (page.isEmpty()) break
-            page.forEach { item ->
-                val request = Request.Builder()
-                    .url(url("/Users/$userId/PlayedItems/${item.id}"))
-                    .header("X-Emby-Authorization", authHeader())
-                    .delete()
-                    .build()
-                if (http.readCancellable(request) { it.isSuccessful }) {
-                    cleared++
-                    DetailRecommendationCache.watchStateChanged(baseUrl, userId)
+        var pages = 0
+        val attempted = HashSet<String>()
+        val seenPages = HashSet<Set<String>>()
+        val pending = LinkedHashSet<String>()
+        val failures = ArrayList<WatchHistoryClearFailure>()
+        fun result(stop: WatchHistoryClearStop) = WatchHistoryClearResult(
+            cleared, attempted.size, stop, failures.toList(), pending.toSet())
+        try {
+            return withMetadataContext {
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    if (pages >= maxPages) return@withMetadataContext result(WatchHistoryClearStop.BUDGET_EXHAUSTED)
+                    pages++
+                    // Deletion shifts rows towards the front. Never mechanically advance StartIndex.
+                    val response = getJson(url("/Users/$userId/Items", mapOf(
+                        "Recursive" to "true", "IncludeItemTypes" to "Movie,Series,Episode",
+                        "SortBy" to "DateCreated", "SortOrder" to "Descending",
+                        "Limit" to "100", "StartIndex" to "0", "Filters" to "IsPlayed",
+                        "Fields" to "UserData", "EnableTotalRecordCount" to "true",
+                    )))
+                    val rows = response.optJSONArray("Items")
+                        ?: throw EmbyException("清历史响应缺少 Items")
+                    val ids = (0 until rows.length()).mapTo(LinkedHashSet()) { index ->
+                        (rows.getJSONObject(index).opt("Id") as? String)?.takeIf { it.isNotBlank() }
+                            ?: throw EmbyException("清历史响应缺少有效 Id")
+                    }
+                    if (ids.isEmpty() && response.optInt("TotalRecordCount", 0) > 0)
+                        throw EmbyException("清历史响应为空但总数非零")
+                    currentCoroutineContext().ensureActive()
+                    val confirmed = pending.count { it !in ids }
+                    cleared += confirmed
+                    if (confirmed > 0) DetailRecommendationCache.watchStateChanged(baseUrl, userId)
+                    pending.forEach { id ->
+                        if (id in ids) failures += WatchHistoryClearFailure(id,
+                            EmbyException("删除返回 2xx，但首批页面仍包含该 Id"))
+                    }
+                    pending.clear()
+                    if (ids.isEmpty()) return@withMetadataContext result(WatchHistoryClearStop.COMPLETE)
+                    val fresh = ids.filterNot { it in attempted }
+                    if (!seenPages.add(ids) || fresh.isEmpty())
+                        return@withMetadataContext result(WatchHistoryClearStop.NO_PROGRESS)
+                    if (attempted.size >= maxDeletes)
+                        return@withMetadataContext result(WatchHistoryClearStop.BUDGET_EXHAUSTED)
+                    for (id in fresh) {
+                        if (attempted.size >= maxDeletes) break
+                        currentCoroutineContext().ensureActive()
+                        attempted += id
+                        try {
+                            val request = Request.Builder()
+                                .url(url("/Users/" + userId + "/PlayedItems/" + enc(id)))
+                                .header("X-Emby-Authorization", authHeader()).delete().build()
+                            http.readCancellable(request) { reply ->
+                                if (!reply.isSuccessful) throw EmbyException("HTTP " + reply.code, reply.code)
+                                validateHistoryDeleteResponse(reply.body?.string().orEmpty())
+                            }
+                            currentCoroutineContext().ensureActive()
+                            pending += id
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            currentCoroutineContext().ensureActive()
+                            failures += WatchHistoryClearFailure(id, failure)
+                        }
+                    }
                 }
+                @Suppress("UNREACHABLE_CODE")
+                result(WatchHistoryClearStop.COMPLETE)
             }
-            if (page.size < 100) break
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            failures += WatchHistoryClearFailure(null, failure)
+            return result(WatchHistoryClearStop.REQUEST_FAILED)
         }
-        cleared
+    }
+
+    /** Empty, UserData and Int acknowledgements still need first-page membership confirmation. */
+    private fun validateHistoryDeleteResponse(body: String) {
+        if (body.isBlank()) return
+        val tokener = JSONTokener(body)
+        val value = tokener.nextValue()
+        if (tokener.nextClean() != '\u0000') throw EmbyException("清历史删除响应尾部无效")
+        val valid = when (value) {
+            is Int -> true
+            is JSONObject -> when {
+                value.has("Value") -> value.opt("Value") is Int
+                value.has("UserData") || value.has("Played") -> userDataFlag(value, "Played") == false
+                else -> value.length() == 0
+            }
+            else -> false
+        }
+        if (!valid) throw EmbyException("清历史删除响应无效，无法确认状态")
     }
 
     suspend fun testConnection(server: String, timeoutMs: Long = 20_000L): String = withMetadataContext(timeoutMs) {
@@ -1801,14 +1911,115 @@ class EmbyClient(
 
     companion object {
         private const val SEARCH_REQUEST_ATTEMPTS = 2
-        private val BIF_MAGIC = byteArrayOf(0x89.toByte(), 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A)
         private const val MAX_TRICKPLAY_FILE_BYTES = 16L * 1024 * 1024
         private const val MAX_TRICKPLAY_BYTES = 64L * 1024 * 1024
-        private const val MAX_TRICKPLAY_FRAMES = 1_000_000
 
         fun normalize(raw: String): String {
             if (raw.isBlank()) return ""
             return requireNotNull(parseServerAddress(raw)) { "Invalid server address" }.baseUrl
+        }
+    }
+}
+
+/** Rewrite only explicit Emby playback endpoints; every other URL is an opaque signed value. */
+internal fun negotiatedPlaybackUrl(
+    baseUrl: String,
+    target: String,
+    contentStartMs: Long,
+    audioIndex: Int?,
+    sessionId: String?,
+    removeSubtitles: Boolean,
+): String {
+    if (!isSameOrigin(baseUrl, target)) return target
+    val path = runCatching { java.net.URI(target).rawPath }.getOrNull() ?: return target
+    val basePath = runCatching { java.net.URI(baseUrl).rawPath.orEmpty().trimEnd('/') }.getOrNull() ?: return target
+    if (!path.startsWith("$basePath/")) return target
+    val relativePath = path.removePrefix(basePath)
+    if (!Regex("(?i)/(?:emby/)?videos/[a-z0-9_-]+/(?:master\\.m3u8|main\\.m3u8|stream(?:\\.[a-z0-9]+)?)")
+            .matches(relativePath)) return target
+
+    val replaced = setOf("starttimeticks", "audiostreamindex", "playsessionid") +
+        if (removeSubtitles) setOf("subtitlestreamindex", "subtitlemethod") else emptySet()
+    val fragment = target.indexOf('#').let { if (it < 0) target.length else it }
+    val query = target.indexOf('?').takeIf { it in 0 until fragment }
+    val prefix = target.substring(0, query ?: fragment)
+    // Decode only names to identify our parameters. Keep every retained component byte-for-byte,
+    // including interleaved duplicates, empty values, escape case and '+' versus '%20'.
+    val parameters = if (query == null) mutableListOf() else
+        target.substring(query + 1, fragment).split('&').filterNot { component ->
+            val name = runCatching { java.net.URLDecoder.decode(component.substringBefore('='), "UTF-8") }.getOrNull()
+            name?.lowercase(java.util.Locale.ROOT) in replaced
+        }.toMutableList()
+    parameters += "StartTimeTicks=" + Math.multiplyExact(contentStartMs.coerceAtLeast(0L), 10_000L)
+    audioIndex?.let { parameters += "AudioStreamIndex=$it" }
+    sessionId?.let { parameters += "PlaySessionId=" + URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+    return prefix + "?" + parameters.joinToString("&") + target.substring(fragment)
+}
+
+/** Validated BIF v0 index. Keep the file only; index arrays would escape the byte-cache bound. */
+internal class BifIndex private constructor(
+    private val bytes: ByteArray,
+    private val count: Int,
+    private val multiplier: Long,
+) {
+    val size: Int get() = bytes.size
+
+    fun frameIndex(positionMs: Long): Int {
+        var low = 0
+        var high = count
+        while (low < high) {
+            val middle = low + (high - low) / 2
+            if (uint(bytes, 64 + middle * 8) * multiplier <= positionMs) low = middle + 1 else high = middle
+        }
+        return (low - 1).coerceAtLeast(0)
+    }
+
+    fun frame(index: Int): ByteArray? {
+        if (index !in 0 until count) return null
+        val start = uint(bytes, 68 + index * 8).toInt()
+        // Even the final JPEG ends at the mandatory sentinel offset, not at arbitrary file EOF.
+        val end = uint(bytes, 76 + index * 8).toInt()
+        if (end - start < 4 || bytes[start] != 0xFF.toByte() || bytes[start + 1] != 0xD8.toByte()) return null
+        return bytes.copyOfRange(start, end)
+    }
+
+    companion object {
+        private val MAGIC = byteArrayOf(0x89.toByte(), 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A)
+        private const val UINT_MAX = 0xFFFFFFFFL
+
+        private fun uint(bytes: ByteArray, offset: Int): Long {
+            if (offset < 0 || offset > bytes.size - 4) throw IOException("Truncated BIF integer")
+            return (bytes[offset].toLong() and 0xFF) or
+                ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
+                ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
+                ((bytes[offset + 3].toLong() and 0xFF) shl 24)
+        }
+
+        fun parse(bytes: ByteArray): BifIndex {
+            if (bytes.size < 64 || !MAGIC.indices.all { bytes[it] == MAGIC[it] } || uint(bytes, 8) != 0L)
+                throw IOException("Invalid BIF header or version")
+            val count = uint(bytes, 12)
+            val multiplier = uint(bytes, 16).let { if (it == 0L) 1_000L else it }
+            val indexEnd = 64L + (count + 1L) * 8L
+            if (count !in 1L..1_000_000L || indexEnd > bytes.size)
+                throw IOException("Invalid or truncated BIF index")
+            var previousTimestamp = -1L
+            var previousOffset = indexEnd - 1L
+            for (i in 0..count.toInt()) {
+                val timestamp = uint(bytes, 64 + i * 8)
+                val offset = uint(bytes, 68 + i * 8)
+                if (offset < indexEnd || offset <= previousOffset || offset > bytes.size)
+                    throw IOException("Invalid BIF unsigned offset")
+                if (i == count.toInt()) {
+                    if (timestamp != UINT_MAX) throw IOException("Missing BIF sentinel")
+                } else {
+                    if (timestamp == UINT_MAX || timestamp < previousTimestamp || timestamp > Long.MAX_VALUE / multiplier)
+                        throw IOException("Invalid or overflowing BIF timestamp")
+                    previousTimestamp = timestamp
+                }
+                previousOffset = offset
+            }
+            return BifIndex(bytes, count.toInt(), multiplier)
         }
     }
 }

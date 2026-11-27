@@ -47,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
@@ -73,6 +74,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.google.zxing.BarcodeFormat
@@ -98,6 +100,7 @@ import dev.chrisbanes.haze.hazeEffect
 import androidx.compose.animation.core.EaseOutCubic
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.coroutineScope
@@ -304,6 +307,32 @@ internal fun Modifier.posterFocusGlow(strength: () -> Float, corner: Dp, accent:
     }
 }
 
+internal fun activateFocusSurface(enabled: Boolean = true, onClick: () -> Unit) {
+    if (enabled) onClick()
+}
+
+internal suspend fun requestSurfaceInitialFocus(
+    requested: Boolean,
+    enabled: () -> Boolean,
+    request: () -> Unit,
+) {
+    if (!requested || !enabled()) return
+    delay(100)
+    if (enabled()) request()
+}
+
+internal fun relocateDisabledSurfaceFocus(
+    enabled: Boolean,
+    wasFocused: Boolean,
+    next: () -> Boolean,
+    previous: () -> Boolean,
+    clear: () -> Unit,
+): Boolean {
+    if (enabled || !wasFocused) return false
+    if (!next() && !previous()) clear()
+    return true
+}
+
 /** 可聚焦容器：缩放 + 高光描边的统一交互语言。 */
 @Composable
 fun FocusSurface(
@@ -315,27 +344,40 @@ fun FocusSurface(
     focusRequester: FocusRequester? = null,
     onFocused: (() -> Unit)? = null,
     onFocusChanged: ((Boolean) -> Unit)? = null,
+    enabled: Boolean = true,
     onClick: () -> Unit,
     content: @Composable (focused: Boolean) -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val focused by interaction.collectIsFocusedAsState()
+    val interactionFocused by interaction.collectIsFocusedAsState()
+    val focused = enabled && interactionFocused
+    var wasFocused by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val currentEnabled by rememberUpdatedState(enabled)
     val focusSpec = focusFamily.spec()
     val scale by animateFloatAsState(if (focused) (scaleTo ?: focusSpec.scale) else 1f, tween(focusSpec.duration), label = "scale")
     val requestFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(requestFocus) {
-        if (requestFocus) {
-            kotlinx.coroutines.delay(100)
+    LaunchedEffect(requestFocus, enabled) {
+        requestSurfaceInitialFocus(requestFocus, { currentEnabled }) {
             runCatching { requestFocusRequester.requestFocus() }
         }
+    }
+    LaunchedEffect(enabled) {
+        if (relocateDisabledSurfaceFocus(enabled, wasFocused,
+                next = { focusManager.moveFocus(FocusDirection.Next) },
+                previous = { focusManager.moveFocus(FocusDirection.Previous) },
+                clear = { focusManager.clearFocus(force = true) })) wasFocused = false
     }
     Box(
         modifier
             .then(if (requestFocus) Modifier.focusRequester(requestFocusRequester) else Modifier)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .focusProperties { canFocus = enabled }
             .onFocusChanged {
-                onFocusChanged?.invoke(it.isFocused)
-                if (it.isFocused) onFocused?.invoke()
+                // Keep ownership until the disable effect can choose a legal successor.
+                if (enabled || it.isFocused) wasFocused = it.isFocused
+                onFocusChanged?.invoke(enabled && it.isFocused)
+                if (enabled && it.isFocused) onFocused?.invoke()
             }
             .graphicsLayer {
                 scaleX = scale
@@ -351,7 +393,8 @@ fun FocusSurface(
                 if (focused) Color.White.copy(alpha = 0.28f) else Color(0x24FFFFFF),
                 RoundedCornerShape(corner),
             )
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .clickable(enabled = enabled, interactionSource = interaction, indication = null,
+                onClick = { activateFocusSurface(enabled, onClick) })
     ) { content(focused) }
 }
 

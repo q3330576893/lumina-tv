@@ -3,6 +3,7 @@ package com.lumina.tv.ui.screens
 import com.lumina.tv.data.catchingRequest
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CancellationException
 
 data class SeasonEpisodeLoadState<T>(
     val episodes: List<T> = emptyList(),
@@ -96,6 +97,49 @@ fun shouldAutoLoadEmptySearchPage(
 ): Boolean = visibleCount == 0 && hasMore && !loading && !loadingMore &&
     automaticallyLoadedPages < SEARCH_EMPTY_AUTO_PAGE_LIMIT
 
+internal fun incompleteEmptySearch(
+    visibleCount: Int,
+    hasMore: Boolean,
+    loading: Boolean,
+    automaticallyLoadedPages: Int,
+): Boolean = visibleCount == 0 && hasMore && !loading &&
+    automaticallyLoadedPages >= SEARCH_EMPTY_AUTO_PAGE_LIMIT
+
+/** A query change invalidates callbacks immediately, before its effects are restarted. */
+internal class SearchRequestGeneration {
+    private var key: List<Any?>? = null
+    private var generation = 0L
+
+    fun update(key: List<Any?>): Long {
+        if (this.key != key) {
+            this.key = key
+            generation++
+        }
+        return generation
+    }
+
+    fun invalidate() { key = null; generation++ }
+    fun accepts(ticket: Long): Boolean = generation == ticket
+    fun accept(ticket: Long, action: () -> Unit) { if (accepts(ticket)) action() }
+    fun ensureCurrent(ticket: Long) {
+        if (!accepts(ticket)) throw CancellationException("Superseded search")
+    }
+}
+
+internal fun searchHistoryItemKey(entry: String): String = "history:$entry"
+
+/** Prefer the next surviving item, then the previous one; never reuse a removed index. */
+internal fun <T> focusNeighborAfterRemoval(previous: List<T>, removed: T, remaining: List<T>): T? {
+    val index = previous.indexOf(removed)
+    return previous.drop(index + 1).firstOrNull { it in remaining }
+        ?: previous.take(index.coerceAtLeast(0)).lastOrNull { it in remaining }
+        ?: remaining.firstOrNull()
+}
+
+internal fun accountFocusAfterRemoval(previous: List<String>, removed: String, remaining: List<String>): String =
+    focusNeighborAfterRemoval(previous, removed, remaining)?.let { "account:switch:$it" }
+        ?: "account:save-current"
+
 fun shouldAppendSearchPage(
     reachedVisibleEnd: Boolean,
     loadedItemCount: Int,
@@ -120,14 +164,14 @@ fun accountRequesterKeys(savedServerUrls: List<String>): List<String> = buildLis
 }
 
 fun accountFocusTargets(savedServerUrls: List<String>): Map<String, AccountFocusTargets> = buildMap {
-    put("account:current-edit", AccountFocusTargets())
+    put("account:current-edit", AccountFocusTargets(down = savedServerUrls.firstOrNull()?.let { "account:switch:$it" } ?: "account:save-current"))
     savedServerUrls.forEachIndexed { index, url ->
         val switch = "account:switch:$url"
         val edit = "account:edit:$url"
         val delete = "account:delete:$url"
         put(switch, AccountFocusTargets(up = savedServerUrls.getOrNull(index - 1)?.let { "account:delete:$it" }, down = edit))
         put(edit, AccountFocusTargets(up = switch, down = delete))
-        put(delete, AccountFocusTargets(up = edit, down = "account:save-current"))
+        put(delete, AccountFocusTargets(up = edit, down = savedServerUrls.getOrNull(index + 1)?.let { "account:switch:$it" } ?: "account:save-current"))
     }
     put("account:save-current", AccountFocusTargets(
         up = savedServerUrls.lastOrNull()?.let { "account:delete:$it" } ?: "account:current-edit",

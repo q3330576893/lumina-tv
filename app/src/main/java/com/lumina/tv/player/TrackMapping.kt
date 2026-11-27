@@ -137,10 +137,138 @@ fun <K> buildTrackMapping(streams: List<MediaStream>, tracks: List<PlayerTrack<K
     return TrackMapping(result)
 }
 
-/** Bind an Index to one version AND its inventory. Legacy unbound indices are not trusted. */
-fun trackMemoryIdentity(source: MediaSource, type: String): String {
-    val inventory = source.streams.filter { it.type.equals(type, true) }.sortedBy { it.index }
-        .map { listOf(it.index, it.codec, it.profile, it.language, it.channels, it.title, it.isExternal).toString() }
-    return MessageDigest.getInstance("SHA-256").digest((source.id + inventory).toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
+enum class TrackMemoryType { Audio, Subtitle }
+
+enum class TrackInvalidReason {
+    NO_CONTEXT, SOURCE_CHANGED, TYPE_CHANGED, VERSION_CHANGED, UNATTESTED_VERSION,
+    INVENTORY_CHANGED, INDEX_CHANGED, EXTERNAL_UNATTESTED, SCHEMA_LEGACY,
+    LEGACY_UNVERIFIABLE, MALFORMED_RECORD, UNKNOWN_SCHEMA,
+}
+
+/** Constructed only after a producer's provenance and byte coverage have been reviewed.
+ * The current MediaSource opaque hashes do not provide that attestation. */
+data class TrackVersionEvidence internal constructor(val kind: String, val value: String,
+    val coverage: String = "SOURCE_BYTES") {
+    internal fun isValid() = kind in setOf("ETag", "DateModified", "DateLastSaved") &&
+        value.isNotBlank() && coverage == "SOURCE_BYTES"
+}
+
+data class TrackIdentityV2 internal constructor(
+    val schemaVersion: Int = 2,
+    val type: TrackMemoryType,
+    val sourceId: String,
+    val validator: TrackVersionEvidence,
+    val sourceVersion: String,
+    val inventoryDigest: String,
+)
+
+sealed interface TrackMemoryIdentity {
+    data class Available internal constructor(val identity: TrackIdentityV2) : TrackMemoryIdentity
+    data class Unavailable(val reason: TrackInvalidReason) : TrackMemoryIdentity
+}
+
+/** Fail closed: neither contentVersion nor an opaque contentValidator attests its provenance.
+ * A future positive producer requires a separate review; there is no hash-shaped escape hatch. */
+fun trackMemoryIdentity(source: MediaSource?, type: String): TrackMemoryIdentity {
+    val typed = TrackMemoryType.entries.singleOrNull { it.name == type }
+        ?: return TrackMemoryIdentity.Unavailable(TrackInvalidReason.TYPE_CHANGED)
+    return attestedTrackMemoryIdentity(source, typed, evidence = null)
+}
+
+/** Internal seam for an attested producer and behavioral fixtures, never inferred from metadata. */
+internal fun attestedTrackMemoryIdentity(source: MediaSource?, type: TrackMemoryType,
+    evidence: TrackVersionEvidence?): TrackMemoryIdentity {
+    fun unavailable(reason: TrackInvalidReason) = TrackMemoryIdentity.Unavailable(reason)
+    if (source == null) return unavailable(TrackInvalidReason.NO_CONTEXT)
+    if (source.id.isBlank()) return unavailable(TrackInvalidReason.SOURCE_CHANGED)
+    if (evidence?.isValid() != true) return unavailable(TrackInvalidReason.UNATTESTED_VERSION)
+    val inventory = source.streams.filter { it.type == type.name }.sortedBy { it.index }
+    if (inventory.isEmpty() || inventory.any { it.index < 0 } || inventory.distinctBy { it.index }.size != inventory.size)
+        return unavailable(TrackInvalidReason.INVENTORY_CHANGED)
+    return TrackMemoryIdentity.Available(TrackIdentityV2(type = type, sourceId = source.id,
+        validator = evidence, sourceVersion = source.contentVersion,
+        inventoryDigest = trackInventoryDigest(type, inventory)))
+}
+
+/** Every scalar has a type tag; strings have UTF-8 byte lengths and null has its own tag.
+ * Include only real MediaStream fields. Titles never imply SDH, role or forced flags. */
+internal fun trackInventoryDigest(type: TrackMemoryType, inventory: List<MediaStream>): String {
+    val bytes = java.io.ByteArrayOutputStream()
+    val out = java.io.DataOutputStream(bytes)
+    fun field(value: Any?) {
+        when (value) {
+            null -> out.writeByte(0)
+            is String -> { out.writeByte(1); val utf8 = value.toByteArray(Charsets.UTF_8); out.writeInt(utf8.size); out.write(utf8) }
+            is Int -> { out.writeByte(2); out.writeInt(value) }
+            is Long -> { out.writeByte(3); out.writeLong(value) }
+            is Boolean -> { out.writeByte(4); out.writeBoolean(value) }
+            is Double -> { out.writeByte(5); out.writeLong(java.lang.Double.doubleToLongBits(value)) }
+            else -> error("Unsupported track identity scalar")
+        }
+    }
+    field("lumina.track-memory"); field(2); field(type.name)
+    out.writeByte(6); out.writeInt(inventory.size)
+    inventory.sortedBy { it.index }.forEach { s ->
+        field(s.index); field(s.type); field(s.codec); field(s.language); field(s.title)
+        field(s.isDefault); field(s.isExternal); field(s.displayTitle); field(s.profile)
+        field(s.level); field(s.width); field(s.height); field(s.bitRate); field(s.channels)
+        field(s.sampleRate); field(s.videoRangeType); field(s.dvProfile); field(s.bitDepth)
+        field(s.colorSpace); field(s.colorTransfer); field(s.colorPrimaries); field(s.frameRate)
+    }
+    out.flush()
+    return MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()).joinToString("") { "%02x".format(it) }
+}
+
+/** Unavailable is never equal evidence, even when the two reasons happen to be the same. */
+fun sameTrackMemoryIdentity(a: TrackMemoryIdentity?, b: TrackMemoryIdentity?): Boolean =
+    a is TrackMemoryIdentity.Available && b is TrackMemoryIdentity.Available && a.identity == b.identity
+
+internal fun trackIdentityMismatch(saved: TrackIdentityV2, current: TrackMemoryIdentity): TrackInvalidReason? {
+    if (current is TrackMemoryIdentity.Unavailable) return current.reason
+    val now = (current as TrackMemoryIdentity.Available).identity
+    return when {
+        saved.schemaVersion != 2 || now.schemaVersion != 2 -> TrackInvalidReason.SCHEMA_LEGACY
+        saved.type != now.type -> TrackInvalidReason.TYPE_CHANGED
+        saved.sourceId != now.sourceId -> TrackInvalidReason.SOURCE_CHANGED
+        saved.validator != now.validator || saved.sourceVersion != now.sourceVersion -> TrackInvalidReason.VERSION_CHANGED
+        saved.inventoryDigest != now.inventoryDigest -> TrackInvalidReason.INVENTORY_CHANGED
+        else -> null
+    }
+}
+
+/** A user gesture belongs to one player instance and one load. With no attestation it can
+ * affect only the actual mapping of this exact source object in this load. */
+data class ManualTrackSelection(
+    val itemId: String,
+    val sourceId: String,
+    val type: TrackMemoryType,
+    val index: Int,
+    val playerInstance: String,
+    val loadGeneration: Int,
+    val identity: TrackMemoryIdentity,
+    private val sourceSnapshot: MediaSource,
+) {
+    fun matchesCurrent(item: String, source: MediaSource?, trackType: TrackMemoryType,
+        instance: String, load: Int, currentIdentity: TrackMemoryIdentity): Boolean =
+        itemId == item && source != null && sourceId == source.id && type == trackType &&
+            playerInstance == instance && loadGeneration == load && validIndex(source) &&
+            (sameTrackMemoryIdentity(identity, currentIdentity) ||
+                identity is TrackMemoryIdentity.Unavailable && currentIdentity is TrackMemoryIdentity.Unavailable &&
+                sourceSnapshot === source)
+
+    fun indexForProbe(item: String, source: MediaSource, trackType: TrackMemoryType,
+        currentIdentity: TrackMemoryIdentity): Int? = index.takeIf {
+        itemId == item && sourceId == source.id && type == trackType && validIndex(source) &&
+            source.streams.single { it.type == type.name && it.index == index }.isExternal.not() &&
+            sameTrackMemoryIdentity(identity, currentIdentity)
+    }
+
+    fun forLoad(item: String, source: MediaSource, instance: String, previousLoad: Int,
+        nextLoad: Int, currentIdentity: TrackMemoryIdentity): ManualTrackSelection? =
+        takeIf { playerInstance == instance && loadGeneration == previousLoad &&
+            indexForProbe(item, source, type, currentIdentity) != null }
+            ?.copy(loadGeneration = nextLoad, sourceSnapshot = source, identity = currentIdentity)
+
+    private fun validIndex(source: MediaSource) = index >= 0 && sourceId.isNotBlank() &&
+        source.streams.count { it.type == type.name && it.index == index } == 1
 }

@@ -58,6 +58,7 @@ internal object B2PlaybackChecks {
         inputs: List<Boolean>, waitForSurface: Boolean) = coroutineScope {
         val coordinator = PlaybackLoadCoordinator()
         val load = coordinator.beginLoad("A")
+        val permit = checkNotNull(coordinator.grantPermit(load, LoadRetirementFence().awaitPermit()))
         val negotiation = CompletableDeferred<Unit>()
         val waitingSurface = CompletableDeferred<Unit>()
         val surface = CompletableDeferred<Unit>()
@@ -66,7 +67,7 @@ internal object B2PlaybackChecks {
         val commit = async {
             negotiation.await()
             if (engine == "mpv") { waitingSurface.complete(Unit); surface.await() }
-            if (engine == "media3") coordinator.commit(load) { playing ->
+            if (engine == "media3") coordinator.commit(permit) { playing ->
                 playWhenReady = playing
                 client.reportStart("b2", 600_000, "A", "DirectPlay", "emby", paused = !playing)
             } else {
@@ -95,10 +96,11 @@ internal object B2PlaybackChecks {
     private suspend fun staleLoad(client: EmbyClient, starts: Channel<JSONObject>) = coroutineScope {
         val coordinator = PlaybackLoadCoordinator()
         val old = coordinator.beginLoad("A")
+        val oldPermit = checkNotNull(coordinator.grantPermit(old, LoadRetirementFence().awaitPermit()))
         val negotiation = CompletableDeferred<Unit>()
         val waiting = async {
             negotiation.await()
-            coordinator.commit(old) { client.reportStart("b2", 0, "A", "DirectPlay", null, paused = !it) }
+            coordinator.commit(oldPermit) { client.reportStart("b2", 0, "A", "DirectPlay", null, paused = !it) }
         }
         val current = coordinator.beginLoad("B")
         negotiation.complete(Unit)

@@ -1,4 +1,4 @@
-name: Build and publish Lumina TV
+name: Verify Release and publish signed tags
 
 on:
   pull_request:
@@ -10,51 +10,151 @@ on:
 permissions:
   contents: read
 
+env:
+  EXPECTED_VERSION_NAME: "1.24.19"
+  EXPECTED_VERSION_CODE: "163"
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
   verify:
-    name: Offline logic checks (samples + A1)
+    name: Unsigned Release and offline checks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
+      # Action SHAs were resolved from their owners' GitHub tag refs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v4
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
       - name: Install Android SDK
         run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
-      - name: Install Gradle 8.11.1
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
+        with:
+          gradle-version: "8.11.1"
+          cache-read-only: true
+      - name: Assert workflow permissions and signing boundaries
         run: |
-          curl -fsSL https://services.gradle.org/distributions/gradle-8.11.1-bin.zip -o "$RUNNER_TEMP/gradle.zip"
-          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/gradle-8.11.1/bin" >> "$GITHUB_PATH"
-      - name: Compile and run all assertions (no artifacts)
-        run: gradle --no-daemon --stacktrace :app:compileDebugKotlin :app:compileDebugUnitTestKotlin :app:verifyOffline
-  build:
+          python3 -m pip install --disable-pip-version-check PyYAML==6.0.3
+          python3 scripts/check_release_ci.py workflow
+      - name: Build unsigned Release (never fall back to Debug)
+        run: gradle --no-daemon --console=plain -PreleaseSigning=false :app:verifyOffline :app:assembleRelease
+      - name: Verify unsigned Release structure
+        run: |
+          python3 scripts/check_release_artifact.py \
+            --mode unsigned \
+            --apk app/build/outputs/apk/release/app-release-unsigned.apk \
+            --expected-version-name "$EXPECTED_VERSION_NAME" \
+            --expected-version-code "$EXPECTED_VERSION_CODE" \
+            --report app/build/reports/release/unsigned-check.json
+      - name: Upload unsigned Release and R8 evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: lumina-tv-${{ github.sha }}-unsigned-release
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            app/build/outputs/apk/release/app-release-unsigned.apk
+            app/build/outputs/apk/release/app-release-unsigned.apk.sha256
+            app/build/outputs/mapping/release/
+            app/build/reports/release/unsigned-check.json
+
+  release:
+    name: Sign and publish controlled version tag
     needs: verify
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Require all signing secrets and matching tag before any build
+        env:
+          LUMINA_KEYSTORE_BASE64: ${{ secrets.LUMINA_KEYSTORE_BASE64 }}
+          LUMINA_STORE_PASSWORD: ${{ secrets.LUMINA_STORE_PASSWORD }}
+          LUMINA_KEY_ALIAS: ${{ secrets.LUMINA_KEY_ALIAS }}
+          LUMINA_KEY_PASSWORD: ${{ secrets.LUMINA_KEY_PASSWORD }}
+          LUMINA_CERT_SHA256: ${{ secrets.LUMINA_CERT_SHA256 }}
+        run: python3 scripts/check_release_ci.py preflight
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v4
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
       - name: Install Android SDK
         run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
-      - name: Install Gradle 8.11.1
-        run: |
-          curl -fsSL https://services.gradle.org/distributions/gradle-8.11.1-bin.zip -o "$RUNNER_TEMP/gradle.zip"
-          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/gradle-8.11.1/bin" >> "$GITHUB_PATH"
-      - name: Build TV APK
-        run: gradle --no-daemon --stacktrace assembleDebug
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v7
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
         with:
-          name: lumina-tv-${{ github.ref_name }}-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          gradle-version: "8.11.1"
+          cache-read-only: true
+      - name: Build signed Release (missing credentials are fatal)
+        env:
+          LUMINA_KEYSTORE_PATH: ${{ runner.temp }}/lumina-release.jks
+          LUMINA_STORE_PASSWORD: ${{ secrets.LUMINA_STORE_PASSWORD }}
+          LUMINA_KEY_ALIAS: ${{ secrets.LUMINA_KEY_ALIAS }}
+          LUMINA_KEY_PASSWORD: ${{ secrets.LUMINA_KEY_PASSWORD }}
+        run: gradle --no-daemon --console=plain -PreleaseSigning=true :app:assembleRelease
+      - name: Verify signed Release, certificate pin and SHA-256
+        env:
+          LUMINA_CERT_SHA256: ${{ secrets.LUMINA_CERT_SHA256 }}
+        run: |
+          python3 scripts/check_release_artifact.py \
+            --mode signed \
+            --apk app/build/outputs/apk/release/app-release.apk \
+            --expected-version-name "$EXPECTED_VERSION_NAME" \
+            --expected-version-code "$EXPECTED_VERSION_CODE" \
+            --report app/build/reports/release/signed-check.json
+      - name: Upload signed Release and R8 evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: lumina-tv-${{ github.ref_name }}-signed-release
           if-no-files-found: error
+          retention-days: 30
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/release/app-release.apk.sha256
+            app/build/outputs/mapping/release/
+            app/build/reports/release/signed-check.json
+      - name: Publish verified APK with the official GitHub action
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const fs = require('fs');
+            const tag = context.ref.slice('refs/tags/'.length);
+            if (context.eventName !== 'push' ||
+                context.ref !== `refs/tags/v${process.env.EXPECTED_VERSION_NAME}`) {
+              throw new Error('Publishing is restricted to the verified version tag');
+            }
+            const files = [
+              ['app/build/outputs/apk/release/app-release.apk', 'application/vnd.android.package-archive'],
+              ['app/build/outputs/apk/release/app-release.apk.sha256', 'text/plain'],
+              ['app/build/reports/release/signed-check.json', 'application/json']
+            ].map(([path, type]) => ({path, type, data: fs.readFileSync(path)}));
+            const {data: release} = await github.rest.repos.createRelease({
+              ...context.repo, tag_name: tag, name: `Lumina TV ${tag}`,
+              draft: true, prerelease: false,
+              body: 'Verified signed Release. SHA-256, certificate fingerprint and structural checks are attached.'
+            });
+            for (const file of files) {
+              await github.rest.repos.uploadReleaseAsset({
+                ...context.repo, release_id: release.id,
+                name: require('path').basename(file.path), data: file.data,
+                headers: {'content-type': file.type, 'content-length': file.data.length}
+              });
+            }
+            await github.rest.repos.updateRelease({
+              ...context.repo, release_id: release.id, draft: false
+            });
+      - name: Remove temporary keystore
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/lumina-release.jks"

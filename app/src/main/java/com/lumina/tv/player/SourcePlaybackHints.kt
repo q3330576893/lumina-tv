@@ -5,7 +5,21 @@ import com.lumina.tv.data.MediaSource
 
 data class SourceHint(val priority: Int, val label: String?)
 
-fun sourceHint(source: MediaSource, engine: String, caps: AudioCaps): SourceHint {
+/** With no selectedMode this describes available delivery capabilities, not a negotiated route. */
+internal fun sourceDeliveryHint(source: MediaSource, selectedMode: com.lumina.tv.data.PlaybackMode? = null): String? =
+    when (selectedMode) {
+        com.lumina.tv.data.PlaybackMode.DirectPlay -> "已选直放"
+        com.lumina.tv.data.PlaybackMode.DirectStream -> "已选 DirectStream"
+        com.lumina.tv.data.PlaybackMode.Transcode -> "已选转码"
+        null -> when {
+            source.supportsDirectPlay -> null
+            source.supportsDirectStream -> "可 DirectStream"
+            else -> "无直放/DirectStream 能力"
+        }
+    }
+
+fun sourceHint(source: MediaSource, engine: String, caps: AudioCaps,
+    selectedMode: com.lumina.tv.data.PlaybackMode? = null): SourceHint {
     val video = source.streams.firstOrNull { it.type == "Video" }
     val range = video?.videoRangeType.orEmpty()
     val isDv = video?.dvProfile != null || range.contains("DOVI", true) ||
@@ -29,8 +43,8 @@ fun sourceHint(source: MediaSource, engine: String, caps: AudioCaps): SourceHint
         }
         else -> SourceHint(0, null)
     }
-    if (!source.supportsDirectPlay) {
-        hint = hint.copy(label = listOfNotNull(hint.label, "需转码").joinToString(" · ").ifBlank { null })
+    sourceDeliveryHint(source, selectedMode)?.let { delivery ->
+        hint = hint.copy(label = listOfNotNull(hint.label, delivery).joinToString(" · "))
     }
     return hint
 }

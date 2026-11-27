@@ -135,7 +135,7 @@ object UChecks {
         check(selectPlaybackEngine("auto", "mpv", path, failures, mpvAvailable = true) == "mpv")
         val mpv = source("player/MpvPlayerController.kt")
         check("postForLoad(load, 100L)" in mpv)
-        check("sessionFiles.execute {" in mpv.substringAfter("private fun appendMpvLog").substringBefore("private fun recordPreviousAbnormalSession"))
+        check("diagnosticLogBuffer.add(line)" in mpv.substringAfter("private fun appendMpvLog").substringBefore("private fun recordPreviousAbnormalSession"))
         val player = source("ui/screens/PlayerScreen.kt")
         check("remember(menuMpv, mpvMenuTrackRevision, subtitlePreference)" in player)
         check("preferMpvForUnsupportedHdr" !in player && "\"soft\" -> enginePinned" !in player)

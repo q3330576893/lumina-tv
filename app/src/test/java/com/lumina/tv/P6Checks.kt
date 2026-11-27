@@ -1,6 +1,7 @@
 package com.lumina.tv
 
 import com.lumina.tv.data.*
+import fi.iki.elonen.NanoHTTPD
 import com.lumina.tv.player.MpvPlayerController.LoadIdentity
 import com.lumina.tv.player.PlaybackDiagnostics
 import com.lumina.tv.ui.screens.DetailHlsFailureCache
@@ -24,10 +25,13 @@ object P6Checks {
     @JvmStatic fun main(args: Array<String>) = runBlocking {
         httpPages()
         pagingOwnership()
+        favoritesHttpProgressChecks()
+        favoritesProgressChecks()
+        WatchHistoryClearChecks.run()
         diagnosticOwnership()
         detailPageRecords()
         sharedHeroArtwork()
-        println("P6 PASS: 137 favorites, response-local totals/offsets, mutation rebuild, retained failures, stale loads, focus anchors, actual readback and session-bound metrics")
+        println("P6 PASS: V6-T05 A/B progress guards plus 137 favorites, response-local totals/offsets, mutation rebuild, retained failures, stale loads, focus anchors, actual readback and session-bound metrics")
     }
 
     private fun items(count: Int) = (0 until count).map { MediaItem("id$it", "Item $it", "Movie", isFavorite = true) }
@@ -213,6 +217,264 @@ object P6Checks {
         pending.join()
         check(disposed.state.identity == null && disposed.state.items.size == 24)
         println("D02 STATE PASS: retained append/refresh failures, late append after delete, rebuilt offsets, removed focus neighbour, return and dispose")
+    }
+
+    private suspend fun favoritesHttpProgressChecks() {
+        FavoritesCache.clear()
+        val data = items(101)
+        val phase = AtomicReference("known")
+        val offsets = CopyOnWriteArrayList<Int>()
+        val server = object : NanoHTTPD("127.0.0.1", 0) {
+            override fun serve(session: IHTTPSession): Response {
+                check(session.uri == "/emby/Users/fixture/Items")
+                val offset = session.parameters.getValue("StartIndex").single().toInt()
+                offsets += offset
+                val mode = phase.get()
+                if (mode == "failure" || (mode == "fail-second" && offset > 0))
+                    return newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, MIME_PLAINTEXT, "fixture failure")
+                val rows = data.drop(if (mode == "same") 0 else offset).take(50)
+                val body = JSONObject().put("Items", JSONArray(rows.map {
+                    JSONObject().put("Id", it.id).put("Name", it.name).put("Type", it.type)
+                }))
+                if (mode != "unknown") body.put("TotalRecordCount", 101)
+                return newFixedLengthResponse(Response.Status.OK, "application/json", body.toString())
+            }
+        }
+        server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true)
+        val client = EmbyClient("http://127.0.0.1:" + server.listeningPort + "/emby", userId = "fixture")
+        try {
+            withTimeout(15_000L) {
+                for (mode in listOf("known", "unknown")) {
+                    phase.set(mode)
+                    offsets.clear()
+                    val pager = FavoritesPager("t05-http-" + mode, { 0L }) { limit, start -> client.getFavorites(limit, start) }
+                    pager.refresh(emptyList())
+                    while (pager.state.canAutoAppend) {
+                        check(offsets.size <= 4)
+                        pager.append(automatic = true)
+                    }
+                    check(pager.state.items.map { it.id } == data.map { it.id } && pager.state.error == null)
+                    check(pager.state.nextOffset == null && pager.state.total == if (mode == "known") 101 else null)
+                    check(offsets.toList() == if (mode == "known") listOf(0, 50, 100) else listOf(0, 50, 100, 101))
+                }
+                phase.set("known")
+                val pager = FavoritesPager("t05-http-unchanged", { 0L }) { limit, start -> client.getFavorites(limit, start) }
+                pager.refresh(emptyList())
+                val anchor = FavoritesAnchor("id21", 21, 19, "id23", 23, 50)
+                pager.saveAnchor(anchor)
+                val before = pager.state.items
+                phase.set("same")
+                pager.append(automatic = true)
+                check(pager.state.items == before && pager.anchor == anchor && pager.state.nextOffset == 50)
+                check(pager.state.error != null && !pager.state.canAutoAppend && !pager.state.appending)
+                val stoppedAt = offsets.size
+                repeat(5) { pager.append(automatic = true) }
+                check(offsets.size == stoppedAt)
+                phase.set("known")
+                pager.append() // The existing retry button can resume the rejected offset.
+                pager.append()
+                check(pager.state.items.size == 101 && pager.state.error == null && pager.anchor == anchor)
+                val all = pager.state.items
+                for (mode in listOf("same", "failure", "fail-second")) {
+                    phase.set(mode)
+                    val start = offsets.size
+                    pager.refresh(emptyList())
+                    check(pager.state.items == all && pager.anchor == anchor && pager.state.refreshRequired)
+                    check(pager.state.error != null && !pager.state.refreshing && !pager.state.canAutoAppend)
+                    check(offsets.size - start == if (mode == "failure") 1 else 2)
+                    repeat(3) { pager.append(automatic = true) }
+                    check(offsets.size - start == if (mode == "failure") 1 else 2)
+                }
+                phase.set("known")
+                pager.refresh(emptyList())
+                check(pager.state.items == all && pager.state.error == null && pager.anchor == anchor)
+                phase.set("failure")
+                val failed = FavoritesPager("t05-http-all-failed", { 0L }) { limit, start -> client.getFavorites(limit, start) }
+                failed.refresh(data.take(24))
+                check(failed.state.items == data.take(24) && failed.state.error != null && failed.state.refreshRequired)
+            }
+        } finally { client.close(); server.stop() }
+        println("V6-T05-B HTTP PASS: 101 known/unknown total, terminal empty probe, actual 2xx repeated append/refresh, full/partial HTTP failures, retained anchors and explicit retry")
+    }
+
+    private suspend fun favoritesProgressChecks() = coroutineScope {
+        FavoritesCache.clear()
+        val data = items(101)
+        val anchor = FavoritesAnchor("id21", 21, 17, "id23", 23, 50)
+        val invalid = listOf(
+            FavoritesPage(data.take(50).reversed(), 101, 100), // Same IDs in a different order.
+            FavoritesPage(data.take(25), 101, 75), // Not a repeated page, but no new IDs.
+            FavoritesPage(data.drop(50).take(50), 101, 50),
+            FavoritesPage(data.drop(50).take(50), 101, 0),
+            FavoritesPage(emptyList(), 101, null),
+            FavoritesPage(emptyList(), null, 51),
+            FavoritesPage(data.drop(50).take(50), 101, null),
+            FavoritesPage(listOf(MediaItem("", "Invalid", "Movie")), null, 51),
+        )
+        for ((index, bad) in invalid.withIndex()) {
+            var calls = 0
+            var answer: FavoritesPage? = null
+            val pager = FavoritesPager("t05-append-" + index, { 0L }) { limit, offset ->
+                calls++
+                answer ?: data.drop(offset).take(limit).let { FavoritesPage(it, 101, favoritesNextOffset(offset, it.size, 101)) }
+            }
+            pager.refresh(emptyList())
+            pager.saveAnchor(anchor)
+            val before = pager.state.items
+            answer = bad
+            pager.append(automatic = true)
+            check(calls == 2 && pager.state.items == before && pager.state.nextOffset == 50 && pager.anchor == anchor)
+            check(pager.state.error != null && !pager.state.canAutoAppend && !pager.state.appending)
+            repeat(3) { pager.append(automatic = true) }
+            check(calls == 2)
+            answer = null
+            pager.append()
+            check(calls == 3 && pager.state.items.size == 100 && pager.state.error == null && pager.anchor == anchor)
+        }
+        val badRefreshes = listOf(
+            FavoritesPage(data.take(3), null, 0),
+            FavoritesPage(data.take(3), null, -1),
+            FavoritesPage(emptyList(), 101, null),
+            FavoritesPage(emptyList(), null, 1),
+            FavoritesPage(data.take(3), 101, null),
+            FavoritesPage(listOf(MediaItem("", "Invalid", "Movie")), null, 1),
+        )
+        for ((index, bad) in badRefreshes.withIndex()) {
+            var calls = 0
+            val pager = FavoritesPager("t05-refresh-" + index, { 0L }) { _, _ -> calls++; bad }
+            pager.saveAnchor(anchor)
+            pager.refresh(data.take(24))
+            check(calls == 1 && pager.state.items == data.take(24) && pager.anchor == anchor)
+            check(pager.state.error != null && pager.state.refreshRequired && !pager.state.refreshing)
+            repeat(3) { pager.append(automatic = true) }
+            check(calls == 1)
+        }
+        var calls = 0
+        val bounded = FavoritesPager("t05-append-budget", { 0L }, maxPages = 2) { limit, offset ->
+            calls++
+            val rows = data.drop(offset).take(limit)
+            FavoritesPage(rows, 101, favoritesNextOffset(offset, rows.size, 101))
+        }
+        bounded.refresh(emptyList())
+        bounded.saveAnchor(anchor)
+        bounded.append(automatic = true)
+        check(calls == 2 && bounded.state.items.size == 100 && bounded.state.nextOffset == 100)
+        check(bounded.state.error != null && !bounded.state.canAutoAppend && bounded.anchor == anchor)
+        repeat(5) { bounded.append(automatic = true) }
+        check(calls == 2)
+        bounded.append()
+        check(calls == 3 && bounded.state.items.size == 101 && bounded.state.error == null)
+
+        val key = "t05-refresh-budget"
+        val fullAnchor = anchor.copy(loaded = 101)
+        FavoritesCache.put(key, FavoritesPagingState(FavoritesQueryIdentity(key, 0, 0), data), fullAnchor)
+        var tiny = true
+        var refreshCalls = 0
+        val rebuild = FavoritesPager(key, { 0L }, maxPages = 2) { limit, offset ->
+            refreshCalls++
+            val rows = data.take(75).drop(offset).take(if (tiny) 1 else limit)
+            FavoritesPage(rows, if (tiny) null else 75, favoritesNextOffset(offset, rows.size, if (tiny) null else 75))
+        }
+        rebuild.refresh(emptyList())
+        check(refreshCalls == 2 && rebuild.state.items == data && rebuild.anchor == fullAnchor)
+        check(rebuild.state.error != null && rebuild.state.refreshRequired && !rebuild.state.refreshing)
+        repeat(3) { rebuild.append(automatic = true) }
+        check(refreshCalls == 2)
+        tiny = false
+        rebuild.refresh(emptyList())
+        check(refreshCalls == 4 && rebuild.state.items == data.take(75) && rebuild.state.error == null)
+
+        // The production cap applies across successful automatic append calls, not only inside refresh.
+        var defaultCalls = 0
+        val capped = FavoritesPager("t05-default-budget", { 0L }) { _, offset ->
+            defaultCalls++
+            FavoritesPage(listOf(MediaItem("cap" + offset, "Item", "Movie")), null, offset + 1)
+        }
+        capped.refresh(emptyList())
+        while (capped.state.canAutoAppend) { check(defaultCalls <= FAVORITES_MAX_PAGES); capped.append(automatic = true) }
+        check(defaultCalls == FAVORITES_MAX_PAGES && capped.state.items.size == FAVORITES_MAX_PAGES && capped.state.total == null)
+        repeat(3) { capped.append(automatic = true) }
+        check(defaultCalls == FAVORITES_MAX_PAGES)
+        capped.append()
+        check(defaultCalls == FAVORITES_MAX_PAGES + 1 && capped.state.error == null)
+
+        var changed = false
+        var totalCalls = 0
+        val totals = FavoritesPager("t05-changing-total", { 0L }) { limit, offset ->
+            totalCalls++
+            val rows = data.drop(offset).take(limit)
+            FavoritesPage(rows, if (changed) 102 else 101, favoritesNextOffset(offset, rows.size, if (changed) 102 else 101))
+        }
+        totals.refresh(emptyList())
+        totals.saveAnchor(anchor)
+        changed = true
+        totals.append(automatic = true)
+        check(totalCalls == 2 && totals.state.items == data.take(50) && totals.anchor == anchor)
+        check(totals.state.refreshRequired && totals.state.error != null)
+        repeat(3) { totals.append(automatic = true) }
+        check(totalCalls == 2)
+        changed = false
+        totals.refresh(emptyList())
+        check(totalCalls == 3 && totals.state.error == null)
+        check(runCatching { favoritesNextOffset(Int.MAX_VALUE, 1, null) }.isFailure)
+        favoritesCancellationChecks()
+        val screen = java.io.File("src/main/java/com/lumina/tv/ui/screens/FavoritesScreen.kt").readText()
+        check("s.canAutoAppend" in screen && "pager.append(automatic = true)" in screen)
+        check("scope.launch { pager.append() }" in screen && "!pager.state.refreshRequired" in screen)
+        check("state.total?.toString() ?: \"未知\"" in screen)
+        println("V6-T05-B STATE PASS: new IDs, forward offsets/overflow, page fingerprints, zero progress, refresh/append budgets, automatic suppression, explicit retry, cancellation and screen retry/anchor wiring")
+    }
+
+    private suspend fun favoritesCancellationChecks() = coroutineScope {
+        val data = items(101)
+        val anchor = FavoritesAnchor("id21", 21, 17, "id23", 23, 50)
+        var cancelled: CancellationException? = CancellationException("internal transport cancellation")
+        var calls = 0
+        val pager = FavoritesPager("t05-internal-cancel", { 0L }) { limit, offset ->
+            calls++
+            cancelled?.let { throw it }
+            val rows = data.drop(offset).take(limit)
+            FavoritesPage(rows, 101, favoritesNextOffset(offset, rows.size, 101))
+        }
+        pager.saveAnchor(anchor)
+        try { pager.refresh(data.take(24)); error("Refresh cancellation swallowed") }
+        catch (failure: CancellationException) { check(failure === cancelled) }
+        check(pager.state.items == data.take(24) && pager.anchor == anchor && !pager.state.refreshing && pager.state.error != null)
+        cancelled = null
+        pager.refresh(emptyList())
+        cancelled = CancellationException("internal append cancellation")
+        try { pager.append(); error("Append cancellation swallowed") }
+        catch (failure: CancellationException) { check(failure === cancelled) }
+        check(pager.state.items.size == 50 && pager.anchor == anchor && !pager.state.appending && !pager.state.canAutoAppend)
+        val count = calls
+        repeat(3) { pager.append(automatic = true) }
+        check(calls == count)
+        cancelled = null
+        pager.append()
+        check(pager.state.items.size == 100 && pager.state.error == null)
+
+        // A transport may finish after caller cancellation. ensureActive must still reject its page.
+        for (append in listOf(false, true)) {
+            var block = false
+            val started = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val late = FavoritesPager("t05-user-cancel-" + append, { 0L }) { limit, offset ->
+                if (block) withContext(NonCancellable) { started.complete(Unit); release.await() }
+                val rows = data.drop(offset).take(limit)
+                FavoritesPage(rows, 101, favoritesNextOffset(offset, rows.size, 101))
+            }
+            late.refresh(emptyList())
+            late.saveAnchor(anchor)
+            val before = late.state.items
+            block = true
+            val pending = launch { if (append) late.append() else late.refresh(emptyList()) }
+            started.await()
+            pending.cancel()
+            release.complete(Unit)
+            pending.join()
+            check(pending.isCancelled && late.state.items == before && late.anchor == anchor)
+            check(!late.state.refreshing && !late.state.appending && !late.state.canAutoAppend && late.state.error != null)
+        }
     }
 
     private fun diagnosticOwnership() {

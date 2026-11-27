@@ -28,6 +28,7 @@ object B11Checks {
         responseLocalTotals()
         retryableCaches()
         lifecycleAndPlaybackWiring()
+        com.lumina.tv.data.T09Checks.run()
         println("B11 PASS: Q-050 full category totals; Q-051 request-local page totals; Q-052 foreground Hero; Q-053 paused Aurora; Q-054 retryable chapters/BIF; Q-055 expiring TMDB cache; Q-056 API 30 frame rate overload; Q-057 event-bound mpv track sync; Q-058 FLAC/Vorbis MIME")
     }
 

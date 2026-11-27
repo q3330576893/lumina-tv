@@ -21,6 +21,7 @@ android {
         applicationId = "com.lumina.tv"
         minSdk = 26
         targetSdk = 35
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = 163
         versionName = "1.24.19"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
@@ -29,13 +30,20 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            val ks = rootProject.file("lumina.jks")
-            if (ks.exists()) {
-                storeFile = ks
-                storePassword = localProps.getProperty("LUMINA_STORE_PASSWORD", "")
-                keyAlias = localProps.getProperty("LUMINA_KEY_ALIAS", "lumina")
-                keyPassword = localProps.getProperty("LUMINA_KEY_PASSWORD", "")
+        // Signing is opt-in; local keystores must never sign a PR/unsigned build.
+        if (providers.gradleProperty("releaseSigning").orNull == "true") {
+            create("release") {
+                fun requiredEnvironment(name: String): String =
+                    providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() }
+                        ?: throw GradleException("Missing $name; refusing unsigned or Debug fallback for signed Release.")
+
+                storeFile = rootProject.file(requiredEnvironment("LUMINA_KEYSTORE_PATH"))
+                if (storeFile?.isFile != true) {
+                    throw GradleException("Release keystore is unavailable; refusing unsigned or Debug fallback.")
+                }
+                storePassword = requiredEnvironment("LUMINA_STORE_PASSWORD")
+                keyAlias = requiredEnvironment("LUMINA_KEY_ALIAS")
+                keyPassword = requiredEnvironment("LUMINA_KEY_PASSWORD")
             }
         }
     }
@@ -44,9 +52,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            if (rootProject.file("lumina.jks").exists()) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

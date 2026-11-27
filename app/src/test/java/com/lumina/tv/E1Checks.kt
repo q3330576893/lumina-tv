@@ -34,6 +34,7 @@ object E1Checks {
         pairingChecks()
         loginBoundaryChecks()
         latestChecks()
+        com.lumina.tv.data.T07ProtocolChecks.main(args)
         chapterChecks()
         identityChecks()
         prefsMigrationChecks()
@@ -219,7 +220,7 @@ object E1Checks {
                 try {
                     check(client.getLatest("library", 7).single().id == "latest")
                     check(client.lastApiFailure == null)
-                    check(requests.toList() == listOf("/Users/user/Items/Latest" to mapOf("Limit" to "7")))
+                    check(requests.toList() == listOf("/Users/user/Items/Latest" to mapOf("Limit" to "7", "ParentId" to "library")))
                 } finally { client.close() }
             }
             requests.clear()
@@ -230,7 +231,7 @@ object E1Checks {
                 check(client.lastApiFailure?.contains("top-level array parse failed") == true)
                 val fields = "Overview,PrimaryImageAspectRatio,UserData,ProductionYear,ProductionLocations,OriginalLanguage"
                 check(requests.toList() == listOf(
-                    "/Users/user/Items/Latest" to mapOf("Limit" to "7"),
+                    "/Users/user/Items/Latest" to mapOf("Limit" to "7", "ParentId" to "library"),
                     "/Users/user/Items/Latest" to mapOf("Limit" to "7", "Fields" to fields, "ParentId" to "library"),
                     "/Items" to mapOf("Recursive" to "true", "SortBy" to "DateCreated", "SortOrder" to "Descending",
                         "IncludeItemTypes" to "Movie,Series", "Limit" to "7", "Fields" to fields, "ParentId" to "library"),

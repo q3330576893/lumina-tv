@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -40,7 +41,8 @@ import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
-import kotlin.math.roundToInt
+internal fun splashShimmerOffsetPx(offsetDp: Float, density: Density): Int =
+    with(density) { offsetDp.dp.roundToPx() }
 
 @Composable
 fun SplashScreen(serverName: String, modifier: Modifier = Modifier) {
@@ -105,7 +107,7 @@ fun SplashScreen(serverName: String, modifier: Modifier = Modifier) {
             ) {
                 Box(
                     modifier = Modifier
-                        .offset { IntOffset(shimmerX.roundToInt(), 0) }
+                        .offset { IntOffset(splashShimmerOffsetPx(shimmerX, this), 0) }
                         .width(60.dp)
                         .height(2.dp)
                         .background(

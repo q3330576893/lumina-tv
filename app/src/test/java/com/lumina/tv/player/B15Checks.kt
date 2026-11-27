@@ -60,11 +60,35 @@ object B15Checks {
         check(throwing.mode == "string-failed" && throwing.accepted == 0 && !throwing.complete)
         val empty = applyMpvHttpHeaders(emptyMap(), { _, _ -> error("must not probe empty headers") })
         check(empty.mode == "none" && empty.complete)
+        val headerCall = "applyMpvHttpHeaders("
+        val loadCall = "load.engine.command("
+        val wiringFixture = "$headerCall)\n$loadCall)"
+        assertMpvHeadersBeforeLoad(wiringFixture)
+        val invalidWiring = listOf(
+            "missing headers" to wiringFixture.replace(headerCall, ""),
+            "missing load" to wiringFixture.replace(loadCall, ""),
+            "reversed order" to "$loadCall)\n$headerCall)",
+        )
+        for ((label, fixture) in invalidWiring) {
+            val failure = runCatching { assertMpvHeadersBeforeLoad(fixture) }.exceptionOrNull()
+            check(failure is IllegalStateException) {
+                "$label must reject invalid header/load wiring; failure=$failure"
+            }
+        }
+        // Source wiring only; the binding assertions above do not prove native/device behavior.
         val source = File("src/main/java/com/lumina/tv/player/MpvPlayerController.kt").readText()
-        check(source.indexOf("applyMpvHttpHeaders(requestHeaders") < source.indexOf("load.engine.command(loadCommand"))
+        assertMpvHeadersBeforeLoad(source)
         check("state.httpHeadersNotice?.let { playbackStatusNotice = it }" in
             File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText())
         println("B15 PASS V2: base http-header-fields set, escape-aware list, no -append suffix, visible failure notice")
+    }
+
+    private fun assertMpvHeadersBeforeLoad(source: String) {
+        val headerIndex = source.indexOf("applyMpvHttpHeaders(")
+        val loadIndex = source.indexOf("load.engine.command(")
+        check(headerIndex >= 0) { "Missing mpv HTTP header application call" }
+        check(loadIndex >= 0) { "Missing mpv load command" }
+        check(headerIndex < loadIndex) { "mpv HTTP headers must be applied before the load command" }
     }
 
     private fun v3EngineCircuitBreaker() {
@@ -119,7 +143,7 @@ object B15Checks {
             tinyStore.recordExit("NATIVE", "large-evidence-".repeat(80), 456L)
             val truncated = JSONObject(file.readText())
             check(truncated.getBoolean("truncated") && truncated.getInt("maxBytes") == 256)
-            check(truncated.getString("preview").contains("large-evidence"))
+            check(file.length() <= 256 && truncated.has("preview"))
             store.recordExit("ANR", "fresh evidence", 789L)
             val recovered = JSONObject(file.readText())
             check(!recovered.optBoolean("truncated") && recovered.getJSONObject("lastCrash").getLong("at") == 789L)
@@ -145,10 +169,10 @@ object B15Checks {
         check("trailing-field: intact" in safeJson.getString("evidence"))
         val truncated = JSONObject(boundedDiagnosticJson(
             JSONObject().put("evidence", "x".repeat(200)).toString(), 32))
-        check(truncated.getBoolean("truncated") && truncated.getInt("maxBytes") == 32 && truncated.has("preview"))
+        check(truncated.getBoolean("truncated") && truncated.toString().toByteArray(Charsets.UTF_8).size <= 32)
         val malformed = JSONObject(boundedDiagnosticJson("{broken", 32))
-        check(malformed.getBoolean("invalidJson") && malformed.getString("reason") == "parse_failed" &&
-            malformed.getString("preview").contains("broken") && !malformed.has("truncated"))
+        check(malformed.getBoolean("invalidJson") && !malformed.has("truncated"))
+        check(malformed.toString().toByteArray(Charsets.UTF_8).size <= 32)
         println("B15 PASS V4: atomic/concurrent write round-trip, valid overflow JSON and structure-safe redaction")
     }
 

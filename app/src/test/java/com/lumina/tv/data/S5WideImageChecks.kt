@@ -54,14 +54,14 @@ object S5WideImageChecks {
 
             val tmdb = "https://images.example.invalid/backdrop.jpg"
             val candidates = client.wideImageCandidates(restored, 1280, tmdbUrl = tmdb)
-            check(candidates.map { it.source } == listOf("emby", "emby", "emby", "parent", "parent", "tmdb", "poster"))
+            check(candidates.map { it.source } == listOf("emby", "emby", "emby", "parent", "parent", "parent", "tmdb", "poster"))
             check(candidates.map { URI(it.url).path } == listOf(
                 "/Items/episode/Images/Backdrop/0", "/Items/episode/Images/Backdrop/2",
                 "/Items/episode/Images/Backdrop/0", "/Items/series/Images/Backdrop/0",
-                "/Items/series/Images/Backdrop/0", "/backdrop.jpg", "/Items/episode/Images/Primary"))
+                "/Items/series/Images/Backdrop/2", "/Items/series/Images/Backdrop/0", "/backdrop.jpg", "/Items/episode/Images/Primary"))
             check(query(candidates[0].url)["tag"] == "own-0" && query(candidates[2].url)["tag"] == null)
-            check(query(candidates[3].url)["tag"] == "parent-0" && query(candidates[4].url)["tag"] == null)
-            check(candidates.take(5).all { query(it.url)["maxWidth"] == "1280" && query(it.url)["quality"] == "80" })
+            check(query(candidates[3].url)["tag"] == "parent-0" && query(candidates[4].url)["tag"] == "parent-2" && query(candidates[5].url)["tag"] == null)
+            check(candidates.take(6).all { query(it.url)["maxWidth"] == "1280" && query(it.url)["quality"] == "80" })
             check(client.wideImageCandidates(restored, 480, quality = 67).dropLast(1)
                 .all { query(it.url)["maxWidth"] == "480" && query(it.url)["quality"] == "67" })
 
@@ -73,7 +73,7 @@ object S5WideImageChecks {
             check(query(client.wideImageCandidates(old, 1280).first().url)["tag"] == "legacy-0")
             val parentOnly = restored.copy(backdropTags = emptyMap(), backdropTag = null)
             check(client.wideImageCandidates(parentOnly, 1280, tmdbUrl = tmdb).map { it.source } ==
-                listOf("emby", "parent", "parent", "tmdb", "poster"))
+                listOf("emby", "parent", "parent", "parent", "tmdb", "poster"))
             val duplicated = restored.copy(parentBackdropItemId = restored.id, parentBackdropTags = mapOf(0 to "own-0"))
             check(client.wideImageCandidates(duplicated, 1280, tmdbUrl = candidates[2].url).map { it.source } ==
                 listOf("emby", "emby", "emby", "poster"))

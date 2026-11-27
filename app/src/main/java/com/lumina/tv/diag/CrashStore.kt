@@ -3,6 +3,8 @@ package com.lumina.tv.diag
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
@@ -10,7 +12,25 @@ import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 
 /** File persistence shared by exit-reason collection and the Java crash handler. */
 internal class CrashStore(private val directory: File, private val maxStatsBytes: Int = 120 * 1024) {
-    companion object { private val lock = Any() }
+    companion object {
+        private val lock = Any()
+        private val javaEpochs = ConcurrentHashMap<String, AtomicLong>()
+        private val latestJavaTimes = ConcurrentHashMap<String, AtomicLong>()
+    }
+    private val key = directory.absoluteFile.normalize().path
+    private val javaEpoch get() = javaEpochs.getOrPut(key) { AtomicLong() }
+    private val latestJavaAt get() = latestJavaTimes.getOrPut(key) { AtomicLong(Long.MIN_VALUE) }
+
+    fun previousExitToken(): Long = javaEpoch.get()
+    fun noteJavaCrash(): Long = javaEpoch.incrementAndGet()
+
+    /** The epoch is reserved before report construction; slow historical readers cannot commit over it. */
+    fun commitPreviousExit(token: Long, at: Long, commit: () -> Unit): Boolean = synchronized(lock) {
+        if (token != javaEpoch.get() || at < latestJavaAt.get()) return@synchronized false
+        directory.mkdirs()
+        commit()
+        true
+    }
     private val statsFile get() = File(directory, "crash-stats.json")
 
     fun readStats(): JSONObject = runCatching {
@@ -19,34 +39,41 @@ internal class CrashStore(private val directory: File, private val maxStatsBytes
 
     fun recordExit(type: String, evidence: String, at: Long) = synchronized(lock) {
         val stats = writableStats()
+        val previousExitAt = stats.optJSONObject("lastCrash")?.optLong("at", Long.MIN_VALUE) ?: Long.MIN_VALUE
+        if (at < maxOf(latestJavaAt.get(), stats.optLong("latestJavaAt", Long.MIN_VALUE), previousExitAt)) return@synchronized
         stats.put("lastCrash", JSONObject().put("type", type).put("at", at)
             .put("evidence", LogRedactor.redact(evidence)))
         writeStats(stats)
     }
 
-    fun recordJava(fingerprint: String, report: String, at: Long, details: (() -> String)? = null) = synchronized(lock) {
-        // A duplicate fingerprint suppresses history only; the current scene is always refreshed.
-        val latest = File(directory, "crash-latest.txt")
-        latest.writeText(LogRedactor.redact(report), Charsets.UTF_8)
-        if (details != null) {
-            runCatching { latest.appendText(LogRedactor.redact(details()), Charsets.UTF_8) }
-        }
-        val stats = writableStats()
-        val entry = stats.optJSONObject(fingerprint) ?: JSONObject()
-        val count = entry.optInt("count", 0) + 1
-        entry.put("type", "JAVA").put("count", count).put("lastAt", at)
-        stats.put(fingerprint, entry)
-
-        if (count == 1) {
-            for (n in 5 downTo 2) {
-                runCatching {
-                    File(directory, "crash-${n - 1}.txt").takeIf(File::exists)
-                        ?.copyTo(File(directory, "crash-$n.txt"), overwrite = true)
-                }
+    fun recordJava(fingerprint: String, report: String, at: Long, details: (() -> String)? = null) {
+        noteJavaCrash()
+        synchronized(lock) {
+            directory.mkdirs()
+            val stats = writableStats()
+            val previousAt = maxOf(latestJavaAt.get(), stats.optLong("latestJavaAt", Long.MIN_VALUE))
+            val safe = LogRedactor.redact(report) + (details?.let { runCatching { LogRedactor.redact(it()) }.getOrDefault("") } ?: "")
+            if (at >= previousAt) {
+                File(directory, "crash-latest.txt").writeText(safe, Charsets.UTF_8)
+                latestJavaAt.set(at)
+                stats.put("latestJavaAt", at)
             }
-            runCatching { latest.copyTo(File(directory, "crash-1.txt"), overwrite = true) }
+            // Older submissions still count and archive, but never replace the newest scene.
+            val entry = stats.optJSONObject(fingerprint) ?: JSONObject()
+            val count = entry.optInt("count", 0) + 1
+            entry.put("type", "JAVA").put("count", count).put("lastAt", maxOf(at, entry.optLong("lastAt", Long.MIN_VALUE)))
+            stats.put(fingerprint, entry)
+            if (count == 1) {
+                for (n in 5 downTo 2) {
+                    runCatching {
+                        File(directory, "crash-${n - 1}.txt").takeIf(File::exists)
+                            ?.copyTo(File(directory, "crash-$n.txt"), overwrite = true)
+                    }
+                }
+                runCatching { File(directory, "crash-1.txt").writeText(safe, Charsets.UTF_8) }
+            }
+            writeStats(stats)
         }
-        writeStats(stats)
     }
 
     private fun writableStats(): JSONObject = readStats().also { stats ->

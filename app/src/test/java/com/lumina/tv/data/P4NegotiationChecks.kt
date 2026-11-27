@@ -35,7 +35,7 @@ object P4NegotiationChecks {
             SourceStrategy(), PlaybackStartIntent.Resume, 0, false, false, false)
         check(TrackAwarePlaybackKey(requestKey, off) != TrackAwarePlaybackKey(requestKey, auto))
         check(TrackAwarePlaybackKey(requestKey, off) != TrackAwarePlaybackKey(requestKey, off.copy(sourceId = "v2")))
-        check(TrackAwarePlaybackKey(requestKey, off) != TrackAwarePlaybackKey(requestKey, off.copy(audioIdentity = "changed")))
+        check(TrackAwarePlaybackKey(requestKey, off) != TrackAwarePlaybackKey(requestKey, off.copy(audioIdentity = com.lumina.tv.player.TrackMemoryIdentity.Unavailable(com.lumina.tv.player.TrackInvalidReason.VERSION_CHANGED))))
         println("P4 C03 PASS: language negotiation, manual priority, OFF/AUTO, request indices and cache identity")
     }
 }

@@ -4,6 +4,13 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.lumina.tv.diag.PageLog
 import java.util.UUID
+import com.lumina.tv.player.TrackMemoryType
+import com.lumina.tv.player.TrackMemoryIdentity
+import com.lumina.tv.player.TrackIdentityV2
+import com.lumina.tv.player.TrackVersionEvidence
+import com.lumina.tv.player.TrackInvalidReason
+import com.lumina.tv.player.trackIdentityMismatch
+import com.lumina.tv.player.trackMemoryIdentity
 
 data class SavedServer(
     val name: String,
@@ -14,11 +21,21 @@ data class SavedServer(
     val lastUsed: Long,
 )
 
+internal enum class TrackMemoryMode { INHERIT, TRACK, OFF, AUTO }
+internal data class TrackMemoryRecord(val type: TrackMemoryType, val mode: TrackMemoryMode,
+    val index: Int? = null, val identity: TrackIdentityV2? = null, val invalidReason: TrackInvalidReason? = null,
+    val legacyReason: TrackInvalidReason? = null)
+internal data class TrackMemoryRead(val record: TrackMemoryRecord, val persisted: Boolean)
+
 /** 极轻量的本地配置存储：服务器、凭证、播放内核偏好。 */
 class Prefs internal constructor(
     private val sp: SharedPreferences,
     private val encrypt: (String) -> String? = SecureStore::encrypt,
     private val decrypt: (String) -> String? = SecureStore::decrypt,
+    // Production deliberately admits no opaque MediaSource validator; tests supply attested evidence.
+    private val trackIdentity: (MediaSource?, TrackMemoryType) -> TrackMemoryIdentity = { source, type ->
+        trackMemoryIdentity(source, type.name)
+    },
 ) {
     constructor(context: Context) : this(context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE))
     private val sessionStore = SessionStore(sp, encrypt, decrypt, legacy = { key ->
@@ -238,7 +255,13 @@ class Prefs internal constructor(
         }.toString())
     }
 
-    fun renameSavedServer(url: String, name: String): Boolean {
+    fun renameSavedServer(
+        url: String,
+        name: String,
+        expectedSession: Session? = sessionStore.read(migrate = false),
+    ): Boolean = synchronized(sessionStore) {
+        // The same monitor is used by SessionStore.save/clear, including callers outside AppRuntime.
+        if (sessionStore.read(migrate = false) != expectedSession) return false
         val key = canonicalServerKey(url) ?: return false
         if (!putSecret("saved_servers", org.json.JSONArray().apply {
             savedServerList().forEach { server ->
@@ -248,10 +271,11 @@ class Prefs internal constructor(
         if (canonicalServerKey(baseUrl) == key) {
             val renamed = name.trim().ifBlank { "Emby" }
             val session = sessionStore.read(migrate = false)
+            if (session != expectedSession) return false
             if (session != null) return saveSession(session.copy(serverName = renamed))
             return sp.edit().putString(SessionStore.DRAFT_NAME, renamed).commit()
         }
-        return true
+        true
     }
 
     private fun sameServer(left: String, right: String): Boolean =
@@ -305,69 +329,216 @@ class Prefs internal constructor(
         return key
     }
 
-    private fun normalizeSubtitlePreference(stored: String): String = when {
-        stored == "off" || stored == "auto" || stored.startsWith("track:") -> stored
-        stored == "-1" -> "off"
-        else -> "track:$stored"
+    private data class TrackKeys(val payload: String, val seen: String, val suffix: String, val legacySuffix: String)
+    private data class LegacyTrackValue(val value: Any?, val prefix: String, val copyTo: String?, val marker: String?)
+
+    // All Prefs instances serialize read/migrate/invalidate/write through this lock. Account scope
+    // is frozen before any editor is created. Failed writes remain fail-closed in this process.
+    companion object {
+        private val trackMemoryLock = Any()
+        private val failedTrackWrites = java.util.IdentityHashMap<SharedPreferences, MutableMap<String, TrackMemoryRecord>>()
     }
 
-    fun subtitleModeFor(itemId: String, source: MediaSource? = null): SubtitleMode = when {
-        subtitlePreferenceFor(itemId, source) == "off" -> SubtitleMode.OFF
-        subtitlePreferenceFor(itemId, source)?.startsWith("track:") == true -> SubtitleMode.TRACK
-        else -> SubtitleMode.AUTO
+    var trackMemoryStorageError: String? = null
+        private set
+
+    private fun trackKeys(itemId: String, type: TrackMemoryType): TrackKeys {
+        val suffix = "${ns()}_$itemId"
+        return TrackKeys("track_memory_v2_${suffix}_${type.name.lowercase(java.util.Locale.ROOT)}",
+            "track_memory_v2_seen_${suffix}_${type.name.lowercase(java.util.Locale.ROOT)}", suffix, "${legacyNs()}_$itemId")
+    }
+
+    private fun legacyTrackValue(keys: TrackKeys, type: TrackMemoryType): LegacyTrackValue {
+        val prefix = if (type == TrackMemoryType.Audio) "audio_track" else "subtitle_track"
+        val key = "${prefix}_${keys.suffix}"
+        val old = "${prefix}_${keys.legacySuffix}"
+        val marker = "item_ns_migrated_v2_$key"
+        val migrate = key != old && runCatching { sp.getBoolean(marker, false) }.getOrDefault(false).not()
+        val selected = if (!sp.contains(key) && migrate && sp.contains(old)) old else key
+        val raw = runCatching {
+            if (!sp.contains(selected)) null
+            else if (type == TrackMemoryType.Audio) sp.getInt(selected, -1)
+            else sp.getString(selected, null)
+        }.getOrElse { InvalidLegacyTrackValue }
+        return LegacyTrackValue(raw, prefix, key.takeIf { migrate && selected == old && raw !== InvalidLegacyTrackValue },
+            marker.takeIf { migrate })
+    }
+
+    private object InvalidLegacyTrackValue
+
+    private fun migratedTrackRecord(type: TrackMemoryType, value: Any?): TrackMemoryRecord = when {
+        type == TrackMemoryType.Subtitle && (value == "off" || value == "-1") -> TrackMemoryRecord(type, TrackMemoryMode.OFF)
+        type == TrackMemoryType.Subtitle && value == "auto" -> TrackMemoryRecord(type, TrackMemoryMode.AUTO)
+        value == null -> TrackMemoryRecord(type, TrackMemoryMode.INHERIT)
+        type == TrackMemoryType.Audio && value is Int || type == TrackMemoryType.Subtitle && value is String &&
+            value.isNotBlank() && (value.startsWith("track:") || value.toIntOrNull() != null || Regex(".+:[0-9]+").matches(value)) ->
+            TrackMemoryRecord(type, TrackMemoryMode.INHERIT, invalidReason = TrackInvalidReason.SCHEMA_LEGACY,
+                legacyReason = TrackInvalidReason.LEGACY_UNVERIFIABLE)
+        else -> TrackMemoryRecord(type, TrackMemoryMode.INHERIT, invalidReason = TrackInvalidReason.MALFORMED_RECORD)
+    }
+
+    private fun encodeTrackRecord(record: TrackMemoryRecord): String {
+        val identity = record.identity?.let { id -> org.json.JSONObject()
+            .put("schemaVersion", id.schemaVersion).put("type", id.type.name).put("sourceId", id.sourceId)
+            .put("sourceVersion", id.sourceVersion).put("inventoryDigest", id.inventoryDigest)
+            .put("validator", org.json.JSONObject().put("kind", id.validator.kind).put("value", id.validator.value)
+                .put("coverage", id.validator.coverage)) }
+        return org.json.JSONObject().put("schemaVersion", 2).put("type", record.type.name).put("mode", record.mode.name)
+            .put("index", record.index ?: org.json.JSONObject.NULL).put("identity", identity ?: org.json.JSONObject.NULL)
+            .put("invalidReason", record.invalidReason?.name ?: org.json.JSONObject.NULL)
+            .put("legacyReason", record.legacyReason?.name ?: org.json.JSONObject.NULL).toString()
+    }
+
+    private fun decodeTrackRecord(json: org.json.JSONObject, type: TrackMemoryType): TrackMemoryRecord {
+        require(listOf("schemaVersion", "type", "mode", "index", "identity", "invalidReason").all(json::has))
+        fun text(o: org.json.JSONObject, key: String) = o.opt(key) as? String ?: error("Invalid track string")
+        fun int(o: org.json.JSONObject, key: String) = o.opt(key) as? Int ?: error("Invalid track integer")
+        require(int(json, "schemaVersion") == 2)
+        require(text(json, "type") == type.name)
+        val mode = TrackMemoryMode.valueOf(text(json, "mode"))
+        require(type == TrackMemoryType.Subtitle || mode in setOf(TrackMemoryMode.TRACK, TrackMemoryMode.INHERIT))
+        val index = if (json.isNull("index")) null else int(json, "index")
+        val identity = if (json.isNull("identity")) null else {
+            val id = json.getJSONObject("identity")
+            val validator = id.getJSONObject("validator")
+            TrackIdentityV2(int(id, "schemaVersion"), TrackMemoryType.valueOf(text(id, "type")), text(id, "sourceId"),
+                TrackVersionEvidence(text(validator, "kind"), text(validator, "value"), text(validator, "coverage")),
+                text(id, "sourceVersion"), text(id, "inventoryDigest")).also {
+                require(it.schemaVersion == 2 && it.type == type && it.sourceId.isNotBlank() && it.validator.isValid())
+                require(Regex("[0-9a-f]{64}").matches(it.inventoryDigest))
+            }
+        }
+        val reason = if (json.isNull("invalidReason")) null else TrackInvalidReason.valueOf(text(json, "invalidReason"))
+        val legacy = if (json.isNull("legacyReason")) null else TrackInvalidReason.valueOf(text(json, "legacyReason"))
+        if (mode == TrackMemoryMode.TRACK) require(index != null && index >= 0 && identity != null && reason == null && legacy == null)
+        else require(index == null && identity == null)
+        return TrackMemoryRecord(type, mode, index, identity, reason, legacy)
+    }
+
+    private fun persistTrackRecord(keys: TrackKeys, record: TrackMemoryRecord, legacy: LegacyTrackValue? = null): TrackMemoryRead {
+        val success = runCatching {
+            val edit = sp.edit().putString(keys.payload, encodeTrackRecord(record)).putBoolean(keys.seen, true)
+            legacy?.copyTo?.let { key ->
+                when (val value = legacy.value) {
+                    is Int -> edit.putInt(key, value)
+                    is String -> edit.putString(key, value)
+                    else -> Unit
+                }
+            }
+            legacy?.marker?.let { edit.putBoolean(it, true) }
+            edit.commit()
+        }.getOrDefault(false)
+        if (success) {
+            failedTrackWrites[sp]?.remove(keys.payload)
+            trackMemoryStorageError = null
+        } else {
+            failedTrackWrites.getOrPut(sp) { mutableMapOf() }[keys.payload] = record.copy(
+                mode = if (record.mode == TrackMemoryMode.TRACK) TrackMemoryMode.INHERIT else record.mode,
+                index = null, identity = null)
+            trackMemoryStorageError = "Track memory commit failed"
+        }
+        return TrackMemoryRead(record, success)
+    }
+
+    internal fun trackMemoryFor(itemId: String, type: TrackMemoryType, source: MediaSource? = null): TrackMemoryRead =
+        synchronized(trackMemoryLock) {
+            val keys = trackKeys(itemId, type)
+            failedTrackWrites[sp]?.get(keys.payload)?.let { return@synchronized persistTrackRecord(keys, it) }
+            if (!sp.contains(keys.payload) && !sp.contains(keys.seen)) {
+                val legacy = legacyTrackValue(keys, type)
+                return@synchronized persistTrackRecord(keys, migratedTrackRecord(type, legacy.value), legacy)
+            }
+            // Presence, not the value of seen, establishes v2 authority. Never call itemKey here.
+            val json = runCatching { sp.getString(keys.payload, null)?.let(::orgJsonObject) }.getOrNull()
+            val schema = json?.opt("schemaVersion") as? Int
+            if (schema != null && schema > 2) return@synchronized TrackMemoryRead(
+                TrackMemoryRecord(type, TrackMemoryMode.INHERIT, invalidReason = TrackInvalidReason.UNKNOWN_SCHEMA), true)
+            val failure = when {
+                schema != null && schema < 2 -> TrackInvalidReason.SCHEMA_LEGACY
+                json != null && (json.opt("type") is String && json.opt("type") != type.name ||
+                    json.optJSONObject("identity")?.opt("type")?.let { it != type.name } == true) -> TrackInvalidReason.TYPE_CHANGED
+                else -> TrackInvalidReason.MALFORMED_RECORD
+            }
+            val record = json?.let { runCatching { decodeTrackRecord(it, type) }.getOrNull() }
+                ?: return@synchronized persistTrackRecord(keys, TrackMemoryRecord(type, TrackMemoryMode.INHERIT,
+                    invalidReason = failure, legacyReason = TrackInvalidReason.LEGACY_UNVERIFIABLE.takeIf { failure == TrackInvalidReason.SCHEMA_LEGACY }))
+            if (record.mode != TrackMemoryMode.TRACK) return@synchronized TrackMemoryRead(record, true)
+            // No context is not an observation of a different version; do not retire the stored record.
+            if (source == null) return@synchronized TrackMemoryRead(TrackMemoryRecord(type, TrackMemoryMode.INHERIT,
+                invalidReason = TrackInvalidReason.NO_CONTEXT), true)
+            val current = trackIdentity(source, type)
+            val saved = requireNotNull(record.identity)
+            val reason = when {
+                saved.sourceId != source.id -> TrackInvalidReason.SOURCE_CHANGED
+                current is TrackMemoryIdentity.Unavailable -> current.reason
+                source.streams.count { it.type == type.name && it.index == record.index } != 1 -> TrackInvalidReason.INDEX_CHANGED
+                source.streams.single { it.type == type.name && it.index == record.index }.isExternal -> TrackInvalidReason.EXTERNAL_UNATTESTED
+                else -> trackIdentityMismatch(saved, current)
+            }
+            if (reason == null) TrackMemoryRead(record, true)
+            else persistTrackRecord(keys, TrackMemoryRecord(type, TrackMemoryMode.INHERIT, invalidReason = reason))
+        }
+
+    private fun orgJsonObject(value: String) = org.json.JSONObject(value)
+
+    private fun rememberTrack(itemId: String, type: TrackMemoryType, mode: TrackMemoryMode, index: Int?, source: MediaSource?): Boolean =
+        synchronized(trackMemoryLock) {
+            val keys = trackKeys(itemId, type)
+            var identity: TrackIdentityV2? = null
+            var reason: TrackInvalidReason? = null
+            if (mode == TrackMemoryMode.TRACK) {
+                val current = trackIdentity(source, type)
+                reason = when {
+                    current is TrackMemoryIdentity.Unavailable -> current.reason
+                    index == null || index < 0 || source?.streams?.count { it.type == type.name && it.index == index } != 1 -> TrackInvalidReason.INDEX_CHANGED
+                    source.streams.single { it.type == type.name && it.index == index }.isExternal -> TrackInvalidReason.EXTERNAL_UNATTESTED
+                    else -> null
+                }
+                if (reason == null) identity = (current as TrackMemoryIdentity.Available).identity
+            }
+            persistTrackRecord(keys, TrackMemoryRecord(type, if (mode == TrackMemoryMode.TRACK && identity == null) TrackMemoryMode.INHERIT else mode,
+                index.takeIf { identity != null }, identity, reason)).persisted
+        }
+
+    fun subtitleModeFor(itemId: String, source: MediaSource? = null): SubtitleMode = when (subtitlePreferenceFor(itemId, source)) {
+        "off" -> SubtitleMode.OFF
+        null, "auto" -> SubtitleMode.AUTO
+        else -> SubtitleMode.TRACK
     }
 
     fun subtitlePreferenceFor(itemId: String, source: MediaSource? = null): String? {
-        val key = itemKey("subtitle_track", itemId)
-        // 只读该片的手动记忆；旧的跨片字幕轨/关闭状态不能遮住全局语言偏好。
-        val stored = sp.getString(key, null)
-            ?: return null
-        val value = normalizeSubtitlePreference(stored)
-        if (value != stored) sp.edit().putString(key, value).apply()
-        if (value.startsWith("track:")) {
-            if (source == null || sp.getString(itemKey("subtitle_identity", itemId), null) !=
-                com.lumina.tv.player.trackMemoryIdentity(source, "Subtitle")) return null
-            val index = value.removePrefix("track:emby:").toIntOrNull() ?: return null
-            if (source.subtitleStreams.count { it.index == index } != 1) return null
+        val read = trackMemoryFor(itemId, TrackMemoryType.Subtitle, source)
+        if (!read.persisted) return null
+        return when (read.record.mode) {
+            TrackMemoryMode.OFF -> "off"
+            TrackMemoryMode.AUTO -> "auto"
+            TrackMemoryMode.TRACK -> "track:emby:${read.record.index}"
+            TrackMemoryMode.INHERIT -> null
         }
-        return value
     }
 
     fun subtitleTrackFor(itemId: String, source: MediaSource? = null): String? = subtitlePreferenceFor(itemId, source)
-        ?.takeIf { it.startsWith("track:") }
-        ?.removePrefix("track:")
+        ?.takeIf { it.startsWith("track:") }?.removePrefix("track:")
 
-    fun rememberSubtitleTrack(itemId: String, trackKey: String?, source: MediaSource? = null) {
-        val value = when {
-            trackKey == null || trackKey == "off" -> "off"
-            trackKey == "auto" -> "auto"
-            trackKey == "-1" -> "off"
-            trackKey.startsWith("track:") -> trackKey
-            else -> "track:$trackKey"
+    fun rememberSubtitleTrack(itemId: String, trackKey: String?, source: MediaSource? = null): Boolean {
+        val mode = when (trackKey) {
+            "off", "-1" -> TrackMemoryMode.OFF
+            "auto" -> TrackMemoryMode.AUTO
+            null, "" -> TrackMemoryMode.INHERIT
+            else -> TrackMemoryMode.TRACK
         }
-        val key = itemKey("subtitle_track", itemId)
-        if (value.startsWith("track:")) {
-            val index = value.removePrefix("track:emby:").toIntOrNull() ?: return
-            if (source == null || source.subtitleStreams.count { it.index == index } != 1) return
-        }
-        sp.edit()
-            .putString(key, value)
-            .putString(itemKey("subtitle_identity", itemId), source?.let { com.lumina.tv.player.trackMemoryIdentity(it, "Subtitle") })
-            .apply()
+        val index = trackKey?.removePrefix("track:")?.takeIf { it.startsWith("emby:") }?.removePrefix("emby:")?.toIntOrNull()
+        return rememberTrack(itemId, TrackMemoryType.Subtitle, mode, index, source)
     }
 
     fun audioTrackFor(itemId: String, source: MediaSource? = null): Int? {
-        if (source == null || sp.getString(itemKey("audio_identity", itemId), null) !=
-            com.lumina.tv.player.trackMemoryIdentity(source, "Audio")) return null
-        val key = itemKey("audio_track", itemId)
-        return sp.getInt(key, -1).takeIf { index -> source.audioStreams.count { it.index == index } == 1 }
+        val read = trackMemoryFor(itemId, TrackMemoryType.Audio, source)
+        return read.record.index.takeIf { read.persisted && read.record.mode == TrackMemoryMode.TRACK }
     }
 
-    fun rememberAudioTrack(itemId: String, streamIndex: Int, source: MediaSource? = null) {
-        if (source == null || source.audioStreams.count { it.index == streamIndex } != 1) return
-        sp.edit().putInt(itemKey("audio_track", itemId), streamIndex)
-            .putString(itemKey("audio_identity", itemId), com.lumina.tv.player.trackMemoryIdentity(source, "Audio")).apply()
-    }
+    fun rememberAudioTrack(itemId: String, streamIndex: Int, source: MediaSource? = null): Boolean =
+        rememberTrack(itemId, TrackMemoryType.Audio, TrackMemoryMode.TRACK, streamIndex, source)
+
 
     fun lastSourceFor(itemId: String): String? = sp.getString(itemKey("last_source", itemId), null)
 
