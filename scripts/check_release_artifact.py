@@ -14,7 +14,7 @@ import zipfile
 
 
 ABIS = {"arm64-v8a": (2, 183), "armeabi-v7a": (1, 40)}
-# Inventory from libmpv 1.0.4, FFmpeg decoder 1.6.1+2 and Compose graphics-path.
+# Inventory from dev.jdtech.mpv libmpv 1.0.0, FFmpeg decoder 1.6.1+2 and Compose graphics-path.
 NATIVE_LIBRARIES = {
     "libandroidx.graphics.path.so", "libavcodec.so", "libavdevice.so",
     "libavfilter.so", "libavformat.so", "libavutil.so", "libc++_shared.so",
@@ -22,20 +22,20 @@ NATIVE_LIBRARIES = {
     "libswscale.so",
 }
 KEPT_CLASSES = (
-    "org.jellycine.mpv.MPVLib",
+    "dev.jdtech.mpv.MPVLib",
     "androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer",
     "androidx.media3.decoder.ffmpeg.FfmpegAudioDecoder",
     "androidx.media3.decoder.ffmpeg.FfmpegLibrary",
     "fi.iki.elonen.NanoHTTPD",
 )
 NATIVE_METHODS = {
-    "org.jellycine.mpv.MPVLib": {
+    # dev.jdtech 1.0.0 omits nativeSetSurfaceDataSpace (unused here); restore for org.jellycine 1.0.4.
+    "dev.jdtech.mpv.MPVLib": {
         "nativeCreate", "nativeInit", "nativeDestroy", "nativeCommand",
         "nativeAttachSurface", "nativeDetachSurface", "nativeObserveProperty",
         "nativeGetPropertyBoolean", "nativeGetPropertyDouble", "nativeGetPropertyInt",
         "nativeGetPropertyString", "nativeSetOptionString", "nativeSetPropertyBoolean",
         "nativeSetPropertyDouble", "nativeSetPropertyInt", "nativeSetPropertyString",
-        "nativeSetSurfaceDataSpace",
     },
     "androidx.media3.decoder.ffmpeg.FfmpegAudioDecoder": {
         "ffmpegInitialize", "ffmpegDecode", "ffmpegRelease", "ffmpegReset",
@@ -152,7 +152,7 @@ def check_r8(mapping_dir, definitions):
     config = files["configuration"].read_text(encoding="utf-8")
     require(not re.search(r"(?m)^\s*-(dontshrink|dontobfuscate)\s*$", config),
             "Release R8 shrinking/obfuscation is disabled")
-    for rule in (r"-keep\s+class\s+org\.jellycine\.mpv\.MPVLib\s*\{\s*\*;\s*\}",
+    for rule in (r"-keep\s+class\s+dev\.jdtech\.mpv\.MPVLib\s*\{\s*\*;\s*\}",
                  r"-keep\s+class\s+androidx\.media3\.decoder\.ffmpeg\.\*\*\s*\{\s*\*;\s*\}"):
         require(re.search(rule, config), "Required JNI/reflection keep rule is missing")
     seeds = set(files["seeds"].read_text(encoding="utf-8").splitlines())
@@ -162,9 +162,10 @@ def check_r8(mapping_dir, definitions):
         require(name in definitions, f"Required class not DEFINED in APK DEX: {name}")
     for name, expected in NATIVE_METHODS.items():
         actual = {method for method, flags, _ in definitions[name] if flags & 0x100}
-        require(expected <= actual, f"Missing JNI methods in {name}: {sorted(expected - actual)}")
+        require(expected == actual, f"JNI method inventory mismatch for {name}: "
+                f"missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}")
     for name, expected in {
-        "org.jellycine.mpv.MPVLib": {"event", "eventProperty", "logMessage"},
+        "dev.jdtech.mpv.MPVLib": {"event", "eventProperty", "logMessage"},
         "androidx.media3.decoder.ffmpeg.FfmpegAudioDecoder": {"growOutputBuffer"},
     }.items():
         actual = {method for method, _, _ in definitions[name]}
