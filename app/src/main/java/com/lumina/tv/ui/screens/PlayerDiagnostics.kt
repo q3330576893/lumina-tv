@@ -31,6 +31,7 @@ import com.lumina.tv.player.AudioSupport
 import com.lumina.tv.player.AudioOutputSnapshot
 import com.lumina.tv.player.MpvAvailabilitySnapshot
 import com.lumina.tv.player.MpvPlayerController
+import com.lumina.tv.player.nativeVersionDiagnosticProperties
 import com.lumina.tv.player.PlaybackDiagnostics
 import com.lumina.tv.player.PlaybackLoadDetailSnapshot
 import com.lumina.tv.player.PlayerLifecycle
@@ -116,6 +117,7 @@ internal fun buildPlayerDiagPayload(
         .put("engine", mpvAvailability.addTo(JSONObject()
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
             .put("active", activeEngine)
+            .put("native", JSONObject(mpvBackend?.diagnosticNativeVersions() ?: nativeVersionDiagnosticProperties()))
             .put("anime4k", JSONObject()
                 .put("mode", AppRuntime.prefs?.anime4kMode ?: "off")
                 .put("shaders", if (activeEngine == "mpv") mpvBackend?.anime4kShaderCount() ?: 0 else 0)

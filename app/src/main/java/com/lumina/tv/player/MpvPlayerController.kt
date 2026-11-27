@@ -10,7 +10,7 @@ import android.view.Surface
 import com.lumina.tv.data.MediaStream
 import com.lumina.tv.data.nativePlaybackHeaders
 import com.lumina.tv.diag.PageLog
-import org.jellycine.mpv.MPVLib
+import dev.jdtech.mpv.MPVLib
 import java.io.File
 import com.lumina.tv.diag.DiagnosticLogBuffer
 import com.lumina.tv.diag.LatestDiagnosticWrite
@@ -21,6 +21,13 @@ import java.util.concurrent.Executors
 import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.json.JSONArray
+
+/** Diagnostic-only readback; never substitute the build-time version for a missing native value. */
+internal fun nativeVersionDiagnosticProperties(readProperty: (String) -> String? = { null }): Map<String, String> =
+    listOf("mpv-version", "ffmpeg-version").associateWith { key ->
+        runCatching { readProperty(key) }.getOrNull()?.trim()
+            ?.takeIf { it.isNotEmpty() && it.length <= 80 && it.all { c -> c in ' '..'~' } } ?: "UNKNOWN"
+    } + ("coordinate" to "dev.jdtech.mpv:libmpv:1.0.0")
 
 internal fun mpvLoadAcceptsSeek(terminal: Boolean, ended: Boolean, endKind: MpvEndKind?): Boolean =
     !terminal && !ended && endKind == null
@@ -800,6 +807,12 @@ class MpvPlayerController(
     fun anime4kShaderCount(): Int = anime4k.shaderPaths.size
     fun softwareRetryCount(): Int = softwareRetryCount
     fun diagnosticLoadIdentity(): LoadIdentity? = activeLoad?.takeIf(::isActive)?.identity
+
+    fun diagnosticNativeVersions(): Map<String, String> {
+        checkMainThread()
+        val engine = activeLoad?.takeIf(::isActive)?.engine
+        return nativeVersionDiagnosticProperties { key -> engine?.getPropertyString(key) }
+    }
 
     /** Fresh readback only: never expose cached properties from a retired physical load as actual output. */
     fun diagnosticReadback(identity: LoadIdentity?): Map<String, String> {

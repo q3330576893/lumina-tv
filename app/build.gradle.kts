@@ -94,7 +94,7 @@ dependencies {
     implementation("androidx.media3:media3-datasource-okhttp:1.7.1")
     // FFmpeg audio extension (GPL-3.0). 1.6.1+2 is built against media3 1.7.1.
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.6.1+2")
-    implementation("org.jellycine.mpv:libmpv:1.0.4")
+    implementation("dev.jdtech.mpv:libmpv:1.0.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
 

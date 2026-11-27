@@ -1,3 +1,84 @@
+# Native 来源、许可与能力矩阵 / V6-T20
+
+核对日期：2026-11-27。应用仍为 **1.24.19 / 163**，compileSdk 36，依赖固定 **`dev.jdtech.mpv:libmpv:1.0.0`**。当前事实见本节与 JSON 的 `current_native`；后面的 T15 / T15B 为原样保留的旧 JellyCine 历史快照，不能用旧哈希或 n9.0.1 描述新 Debug APK。
+
+## 当前来源与许可
+
+旧 `org.jellycine.mpv:libmpv:1.0.4` 的「来源不可得」问题**已通过更换依赖解决**：新供应方公开了可取得的 wrapper、JNI、构建脚本与依赖下载路径。它不等于全部静态依赖、二进制源码绑定及完整对应源码交付已核实；这些待核实项及其他 native 组件仍使**整体来源发布门禁保留 BLOCKED**。
+
+| 项目 | 当前记录 |
+| --- | --- |
+| Maven 坐标 | `dev.jdtech.mpv:libmpv:1.0.0` |
+| AAR SHA-256 | `df146592480fc8418415a06b1f1a1d6318b0088e21f52254b0e9a82b61ca8fa2`（本机重新计算） |
+| 上游仓库 / tag | [jarnedemeulemeester/libmpv-android](https://github.com/jarnedemeulemeester/libmpv-android/tree/v1.0.0) / `v1.0.0` |
+| 源归档 | [v1.0.0 ZIP](https://codeload.github.com/jarnedemeulemeester/libmpv-android/zip/refs/tags/v1.0.0)，SHA-256 `c6cd247b55653dabaecfb3e383e4bb8f77eb6e4a02e1a642405a6a46d94a48b9` |
+| wrapper 代码 | **MIT 已核实**：v1.0.0 LICENSE 与 POM；Copyright (c) 2016 Ilya Zhuravlev、sfan5；MIT 不覆盖整个 native bundle |
+| mpv / FFmpeg native 声明 | **GPL-3.0-or-later**；FFmpeg 的 14 个动态库均自报 GPL version 3 or later，含 `--enable-gpl --enable-version3`；mpv features 含 `gpl`。mpv 上游默认 GPL-2.0-or-later，随附 FFmpeg 的 GPLv3+ 要求纳入组合声明 |
+| 尚待核实 | 完整静态依赖许可/版权/NOTICE、完整对应源码交付、实际产物与全部源码/patch/工具链的可复现绑定；NDK libc++、AndroidX path、独立 Jellyfin Media3 FFmpeg JNI 的原缺证项继续保留 |
+
+T18B 已下载的 `.temp/T18B-evidence/1.0.0/source-tag-v1.0.0.zip`、AAR、sources JAR 及检查结果是**一次性本机证据，不进仓库**。新克隆可从上表公开 URL 重新取得 ZIP 并核验 SHA-256；解压后检查 `buildscripts/include/depinfo.sh` 与 `download-deps.sh`，据其固定 tag 获取 mpv `v0.41.0`、FFmpeg `n8.1` 和其他依赖（包含脚本要求的递归子模块），再收集工具链、patch 与许可。该归档含 wrapper/JNI 和配方，**未归档全部依赖源码**；Maven `sources.jar` 仍为空（`SourcesJar.Empty()`），不能替代完整对应源码包。
+
+## 从实际 APK 提取的静态编译能力
+
+核对对象是 `app/build/outputs/apk/debug/app-debug.apk` 中两个 ABI 的 24 个 `.so`；其中 20 个逐字节匹配上述 AAR，另 4 个为原有 AndroidX path / Jellyfin FFmpeg JNI。使用 Python 标准库 ZIP、SHA-256、可打印 ASCII 字符串提取，未执行 native。逐文件哈希、完整 configure 字符串和 JNI 导出见 JSON `current_native.native_sources`；T20 一次性结果在 `.temp/T20-evidence/apk-static.json`。静态配置不等于设备上的解码、直通或 HDR/DV 成功验证。
+
+| APK ABI | mpv 二进制字符串 | FFmpeg 二进制字符串 | 提取位置 |
+| --- | --- | --- | --- |
+| arm64-v8a | `mpv v0.41.0` | `FFmpeg version n8.1` | `libmpv.so`；`libavcodec/avdevice/avfilter/avformat/avutil.so` |
+| armeabi-v7a | `mpv v0.41.0` | `FFmpeg version n8.1` | `libmpv.so`；`libavcodec/avdevice/avfilter/avformat.so`，`libavutil.so` 另含 `n8.1` |
+
+无法提取的版本必须记 `UNKNOWN`；本次两个 ABI 均已从实际字节取到。这里的 FFmpeg n8.1 指 libmpv bundle，不代指 Media3 的 `libffmpegJNI.so` 内另一套 FFmpeg。
+
+以下关键项在两个 ABI 共 14 个 FFmpeg 动态库的 configure 串中均存在：
+
+| configure 项 | 静态能力/限制 |
+| --- | --- |
+| `--enable-mediacodec` | 编入 Android MediaCodec 集成；实际是否采用硬解需运行时诊断 |
+| `--enable-libdav1d` | 编入 dav1d AV1 解码支持；不保证任意码流/设备性能 |
+| `--enable-mbedtls` | 编入 mbedTLS 集成；不等于已验证所有 HTTPS/TLS 端点 |
+| `--disable-filters` | 禁用 FFmpeg libavfilter 的滤镜，包括 vf/lavfi 视频路径及音频滤镜；不等于移除 `libavfilter.so` 或禁用所有 mpv 内建 vf |
+| `--disable-v4l2-m2m` | 不编入 V4L2 M2M codec 支持；与 MediaCodec 是不同路径 |
+| `--enable-gpl --enable-version3` | 启用 GPL / version3 许可配置；不能按 LGPL-only 声明 |
+
+**已核实能力影响：`--disable-filters` 不关闭 mpv 的 `glsl-shaders`（VO 渲染特性）。** v0.41.0 的 [手册 options.rst:6337](https://github.com/mpv-player/mpv/blob/v0.41.0/DOCS/man/options.rst#L6337) 将其定义为渲染管线的 custom GLSL hooks；[video/out/gpu/video.c:546](https://github.com/mpv-player/mpv/blob/v0.41.0/video/out/gpu/video.c#L546) 将 `glsl-shaders` 注册为 `user_shaders` 并由 GPU hook 路径处理；[filters/f_lavfi.c](https://github.com/mpv-player/mpv/blob/v0.41.0/filters/f_lavfi.c) 是独立的 FFmpeg avfilter graph 路径。本次复核 T15B 已保存的同一 v0.41.0 源码（文件 SHA-256 与行号写入 JSON），并确认新 APK 两个 `libmpv.so` 均含 `glsl-shaders`，features 仍有 `gl egl-android libplacebo`。这是开关边界核实，**不是 Anime4K 效果或任意 GPU/驱动的设备验收**。本次在线补取部分文件失败（连接重置/一个旧路径 404），保留失败记录，未当作成功来源证据。
+
+## 相对旧 JellyCine 的差异
+
+旧项来自下方 T15 实际 APK 快照，新项来自本次 Debug APK；比较 FFmpeg 能力开关时剔除了编译工作目录变化，两个 ABI 结果相同。
+
+| 项目 | 旧 `org.jellycine.mpv:libmpv:1.0.4` | 新 `dev.jdtech.mpv:libmpv:1.0.0` | 影响/核验 |
+| --- | --- | --- | --- |
+| mpv / FFmpeg 自报版本 | v0.41.0 / n9.0.1 | v0.41.0 / n8.1 | 供应方版本与内含 FFmpeg 版本分别记录；不伪装为升级到 FFmpeg 9 |
+| FFmpeg 新增开关 | 无 `--disable-vulkan` | 新增 `--disable-vulkan` | 关闭 FFmpeg Vulkan 支持；不关闭 MediaCodec 或 OpenGL shader |
+| FFmpeg 删除开关 | 上述共同关键项 | **无删除的 `--enable-*` / `--disable-*` 项** | 共同关键项全部保留；构建目录从 `/home/suresh/...` 改为 `/home/runner/work/...` |
+| mpv enabled features | 含 `vulkan` | **删除 `vulkan`**，无新增 feature | 仍含 `gl egl-android libplacebo gpl`；不能声称新包支持 Vulkan VO |
+| JNI `nativeSetSurfaceDataSpace` | 17 个 `native*` 导出，含该入口 | 16 个，不含该入口 | 本项目**未调用**；本次 `rg` / grep 核验应用 Kotlin/Java/C/C++/构建脚本，零命中；不调整 Surface/HDR 逻辑 |
+| wrapper / JNI package | `org.jellycine.mpv` | `dev.jdtech.mpv` | T18C 已完成 import 与依赖迁移；本单不再修改坐标 |
+| mpv 配方 | 显式 `-Degl-android=enabled`、两个候选 HDR patch | v1.0.0 `mpv.sh` 未显式加该参数，未含旧两份 patch | 新产物仍自报 `egl-android`；不据此承诺 HDR patch 等价或设备 HDR/DV 行为 |
+
+复核命令：`rg -n -i --glob '*.kt' --glob '*.java' --glob '*.cpp' --glob '*.c' --glob '*.h' --glob '*.kts' 'nativeSetSurfaceDataSpace|setSurfaceDataSpace' app/src app/build.gradle.kts`（退出 1、输出为空）。同时检查两个 APK `libplayer.so` 的 JNI 名称集合，不以 grep 未命中代替产物核验。
+
+## 诊断版本可见性与 T11 预算
+
+`meta.json` 的既有 `engine` 对象新增 `native`，含 `mpv-version`、`ffmpeg-version`、`coordinate`。版本仅在导出诊断时从当前 active native 实例的只读 `getPropertyString` 取得；无 backend / 无有效 active load、空值、读取异常、非可打印 ASCII 或长度超过 80 字符均显示 **`UNKNOWN`**，不使用上面静态表补造运行时值。`coordinate` 是构建中固定的 `dev.jdtech.mpv:libmpv:1.0.0`，明确不是 native API 自报。没有新增属性订阅、定时采样、播放器状态或播放命令。
+
+两个版本值各最多 80 个可打印 ASCII 字符，新增对象有界；仍经原 T11 脱敏和 UTF-8 实编码字节预算处理。`meta.json` / session JSON / archive 的 **120 × 1024 字节**上限和 `boundedDiagnosticJson` 的既有超限 envelope/preview 策略均不改；不增加顶层字段、日志容量或预算。取舍：诊断本身超限时仍会截断/省略明细，native 信息放在靠前的 `engine.native`，不保证任意超限包保留所有字段。
+
+## 未来升级路径（仅记录）
+
+- `1.0.0` AAR 的 `minCompileSdk=36` 与本项目 compileSdk 36 匹配。T18 已提取的 `1.1.0` AAR metadata 要求 **`minCompileSdk=37`**（`.temp/T18-evidence/blocking-aar-metadata.properties`）；1.1.0 起的升级路径需连带评估 **AGP / SDK 升级**，属于独立决策，本单不实施，也不改变 app minSdk。
+- 无 `eventEndFile` 不影响本项目：[`MpvEndFilePolicy.kt:3`](../app/src/main/java/com/lumina/tv/player/MpvEndFilePolicy.kt#L3) 明确 pinned AAR 仅提供 event_id；当前 endKind 已由属性 + 日志证据推导，`UNKNOWN` 特意不当作错误。T18B 早期因缺完整 reason 回调而写的候选排除结论仅是历史，不覆盖 T18C 已验证的现有策略；本单不改 T01–T18 语义。
+
+## 验证范围
+
+修改仅涉及许可文案、来源/能力记录及诊断只读版本上报；不改播放逻辑、依赖坐标、版本、compileSdk 或 AGP，不 commit/push/发布。T20 的 `--offline --dependency-verification=strict :app:verifyOffline :app:assembleDebug` **BUILD SUCCESSFUL**（退出 0，1153.389 秒），原有 T11 全套通过；直接调用实际编译出的生产函数检查版本/UNKNOWN/异常与 54 个 JSON 预算用例均通过，native 对象本体最坏转义样本 **401 字节**，上限仍为 122880 字节。构建后重新核对 24 个 `.so`，其中 20 个与 AAR 逐字节一致；最终 Debug APK SHA-256 `f55435fc099339a2581f59c43b0223f5add8ad0a3ad9696bd38165247c49513d`，aapt2 确认 1.24.19 / 163。详情写入 JSON `current_native.verification`；日志、APK 复核与范围检查保存在忽略目录 `.temp/T20-evidence/`。`rollback/pre-mpv-swap` tag 和 `backup/pre-mpv-swap` 分支保持原对象。
+
+---
+
+# 历史快照：V6-T15 / T15B（旧 JellyCine，已替换）
+
+以下原始结论、APK 哈希、配置、来源不可得与 BLOCKED 记录只描述替换前产物。**旧来源不可得问题已通过更换依赖解决；当前记录以上方 V6-T20 及 JSON `current_native` 为准**，历史缺证不改写成已核实。
+
 # Native 来源核对 / V6-T15
 
 核对日期：2026-11-27（Asia/Shanghai）。应用版本固定为 **163 / 1.24.19**；本次只读核对 `app/build.gradle.kts`，没有修改版本号。**来源发布门禁：BLOCKED**。这是技术记录，不是法律合规或发布批准。
