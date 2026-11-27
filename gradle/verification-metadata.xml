@@ -2988,5 +2988,15 @@
       <sha256 value="1239e9dbe1397cd5971342956b2511bc3ace7b641842e4372a088dcfa8b9ad55" origin="official Maven Central" reason="CI Linux resolution coverage"/>
     </artifact>
   </component>
+  <component group="com.google.guava" name="guava-parent" version="33.3.1-android">
+    <artifact name="guava-parent-33.3.1-android.pom" ext="pom">
+      <sha256 value="6e11986ea7250b51f847157e2dc937f32a306804dfce0007a5e81ddb9b95c579" origin="official Maven Central" reason="CI Linux resolution coverage"/>
+    </artifact>
+  </component>
+  <component group="org.jetbrains.kotlinx" name="kotlinx-coroutines-bom" version="1.7.3">
+    <artifact name="kotlinx-coroutines-bom-1.7.3.pom" ext="pom">
+      <sha256 value="4e5d1900e6379ef3f5970d04a8f30529adc82f859e8cc107c21ce8149ef666c4" origin="official Maven Central" reason="CI Linux resolution coverage"/>
+    </artifact>
+  </component>
 </components>
 </verification-metadata>
