@@ -226,7 +226,12 @@ object T11Checks {
     private fun processDeadline() {
         val child = AtomicReference<Process>()
         val result = DiagnosticCapture.read(64 * 1024, 1200L) { resources ->
-            val process = ProcessBuilder(File(System.getProperty("java.home"), "bin/java.exe").path,
+            val javaExecutable = if (System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) {
+                "java.exe"
+            } else {
+                "java"
+            }
+            val process = ProcessBuilder(File(System.getProperty("java.home"), "bin/$javaExecutable").path,
                 "-cp", System.getProperty("java.class.path"), T11Checks::class.java.name, "capture-child")
                 .redirectErrorStream(true).start()
             child.set(process)
