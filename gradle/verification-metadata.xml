@@ -2998,5 +2998,10 @@
       <sha256 value="4e5d1900e6379ef3f5970d04a8f30529adc82f859e8cc107c21ce8149ef666c4" origin="official Maven Central" reason="CI Linux resolution coverage"/>
     </artifact>
   </component>
+  <component group="com.android.tools.build" name="aapt2" version="8.10.1-12782657">
+    <artifact name="aapt2-8.10.1-12782657-linux.jar" ext="jar">
+      <sha256 value="52f864b7fd20a9ff09fc3db96162537a63c5b38ecc1c2549db4b491c6a517ff0" origin="official Google Maven (dl.google.com)" reason="CI Linux aapt2 coverage; T14 known gap now closed"/>
+    </artifact>
+  </component>
 </components>
 </verification-metadata>
