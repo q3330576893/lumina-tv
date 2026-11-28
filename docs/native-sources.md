@@ -1,8 +1,14 @@
-# Native 来源、许可与能力矩阵 / V6-T20
+# Native 来源、许可与能力矩阵
 
-核对日期：2026-11-27。应用仍为 **1.24.19 / 163**，compileSdk 36，依赖固定 **`dev.jdtech.mpv:libmpv:1.0.0`**。当前事实见本节与 JSON 的 `current_native`；后面的 T15 / T15B 为原样保留的旧 JellyCine 历史快照，不能用旧哈希或 n9.0.1 描述新 Debug APK。
+当前源码版本为 **1.24.21 / 165**（M10A，未发布），compileSdk 36，依赖固定 **`dev.jdtech.mpv:libmpv:1.0.0`**。本次仅同步版本号与文档；下列 native 来源、哈希和静态能力沿用 2026-11-27 的 V6-T20 取证，不代表已构建或验收 1.24.21 APK。
 
-## 当前来源与许可
+## `current_native` 与历史快照的范围
+
+- [native-sources.json](native-sources.json) 的 `current_native` 记录当前仍使用的 dev.jdtech.mpv 供应方及其 **T20 取证快照**；其中 `version`、`artifact`、`diagnostics`、`verification` 仍描述当时的 1.24.19 / 163 产物与实现，不随本次源码版本号改写，也不能视为 1.24.21 的构建或设备证据。
+- JSON 的旧顶层 `version` / `artifacts` / `native_sources` 等字段及下方 T15 / T15B 章节属于旧 JellyCine 快照；旧哈希与 FFmpeg n9.0.1 不适用于当前供应方。旧来源不可得与各项 `BLOCKED` 记录继续保留。
+- 当前诊断的三态版本读回见下文 M00 章节；JSON 中 T20 的 `UNKNOWN` 说明与 401 字节样本保留为历史证据，不描述 M00 后的字段结构。当前整体来源发布门禁仍为 **BLOCKED**。
+
+## 当前来源与许可（沿用 V6-T20 证据）
 
 旧 `org.jellycine.mpv:libmpv:1.0.4` 的「来源不可得」问题**已通过更换依赖解决**：新供应方公开了可取得的 wrapper、JNI、构建脚本与依赖下载路径。它不等于全部静态依赖、二进制源码绑定及完整对应源码交付已核实；这些待核实项及其他 native 组件仍使**整体来源发布门禁保留 BLOCKED**。
 
@@ -20,7 +26,7 @@ T18B 已下载的 `.temp/T18B-evidence/1.0.0/source-tag-v1.0.0.zip`、AAR、sour
 
 ## 从实际 APK 提取的静态编译能力
 
-核对对象是 `app/build/outputs/apk/debug/app-debug.apk` 中两个 ABI 的 24 个 `.so`；其中 20 个逐字节匹配上述 AAR，另 4 个为原有 AndroidX path / Jellyfin FFmpeg JNI。使用 Python 标准库 ZIP、SHA-256、可打印 ASCII 字符串提取，未执行 native。逐文件哈希、完整 configure 字符串和 JNI 导出见 JSON `current_native.native_sources`；T20 一次性结果在 `.temp/T20-evidence/apk-static.json`。静态配置不等于设备上的解码、直通或 HDR/DV 成功验证。
+T20 核对对象是当时 `app/build/outputs/apk/debug/app-debug.apk` 中两个 ABI 的 24 个 `.so`；其中 20 个逐字节匹配上述 AAR，另 4 个为原有 AndroidX path / Jellyfin FFmpeg JNI。该路径可能被后续构建覆盖，产物身份以 T20 记录的 SHA-256 为准。使用 Python 标准库 ZIP、SHA-256、可打印 ASCII 字符串提取，未执行 native。逐文件哈希、完整 configure 字符串和 JNI 导出见 JSON `current_native.native_sources`；T20 一次性结果在 `.temp/T20-evidence/apk-static.json`。静态配置不等于设备上的解码、直通或 HDR/DV 成功验证。
 
 | APK ABI | mpv 二进制字符串 | FFmpeg 二进制字符串 | 提取位置 |
 | --- | --- | --- | --- |
@@ -44,7 +50,7 @@ T18B 已下载的 `.temp/T18B-evidence/1.0.0/source-tag-v1.0.0.zip`、AAR、sour
 
 ## 相对旧 JellyCine 的差异
 
-旧项来自下方 T15 实际 APK 快照，新项来自本次 Debug APK；比较 FFmpeg 能力开关时剔除了编译工作目录变化，两个 ABI 结果相同。
+旧项来自下方 T15 实际 APK 快照，新项来自 T20 Debug APK 快照；比较 FFmpeg 能力开关时剔除了编译工作目录变化，两个 ABI 结果相同。
 
 | 项目 | 旧 `org.jellycine.mpv:libmpv:1.0.4` | 新 `dev.jdtech.mpv:libmpv:1.0.0` | 影响/核验 |
 | --- | --- | --- | --- |
@@ -58,26 +64,26 @@ T18B 已下载的 `.temp/T18B-evidence/1.0.0/source-tag-v1.0.0.zip`、AAR、sour
 
 复核命令：`rg -n -i --glob '*.kt' --glob '*.java' --glob '*.cpp' --glob '*.c' --glob '*.h' --glob '*.kts' 'nativeSetSurfaceDataSpace|setSurfaceDataSpace' app/src app/build.gradle.kts`（退出 1、输出为空）。同时检查两个 APK `libplayer.so` 的 JNI 名称集合，不以 grep 未命中代替产物核验。
 
-## 诊断版本可见性与 T11 预算
+## 当前诊断版本可见性与 T11 预算（M00）
 
-`meta.json` 的既有 `engine` 对象新增 `native`，含 `mpv-version`、`ffmpeg-version`、`coordinate`。版本仅在导出诊断时从当前 active native 实例的只读 `getPropertyString` 取得；无 backend / 无有效 active load、空值、读取异常、非可打印 ASCII 或长度超过 80 字符均显示 **`UNKNOWN`**，不使用上面静态表补造运行时值。`coordinate` 是构建中固定的 `dev.jdtech.mpv:libmpv:1.0.0`，明确不是 native API 自报。没有新增属性订阅、定时采样、播放器状态或播放命令。
+`meta.json` 的 `engine.native` 含 `mpv-version`、`ffmpeg-version`、`coordinate`；版本读回也进入 `playback-failure.json`。M00 后，两个版本字段均为包含 `state`、`value` 与 `readPath` 的对象：无当前有效 active engine 时为 `not_initialized`；属性读取异常、空值或非法值时为 `read_failed`，附 `failureClass` 或 `reason`；成功取得有效版本时为 `available`。前两态的 `value` 为 JSON null，不再统一写成 `UNKNOWN`。
 
-两个版本值各最多 80 个可打印 ASCII 字符，新增对象有界；仍经原 T11 脱敏和 UTF-8 实编码字节预算处理。`meta.json` / session JSON / archive 的 **120 × 1024 字节**上限和 `boundedDiagnosticJson` 的既有超限 envelope/preview 策略均不改；不增加顶层字段、日志容量或预算。取舍：诊断本身超限时仍会截断/省略明细，native 信息放在靠前的 `engine.native`，不保证任意超限包保留所有字段。
+版本只从当前 active native 实例的只读 `getPropertyString` 取得，有效值限 80 个可打印 ASCII 字符；不使用上面静态表补造运行时值。`coordinate` 固定为 `dev.jdtech.mpv:libmpv:1.0.0`，不是 native API 自报。诊断仍经 T11 脱敏和 UTF-8 实编码字节预算处理，**120 × 1024 字节**上限及 `boundedDiagnosticJson` 的超限 envelope/preview 策略继续适用；超限时可能截断或省略明细。T20 的 401 字节测量只对应当时的字段结构，不作为当前三态对象的测量结果。
 
 ## 未来升级路径（仅记录）
 
 - `1.0.0` AAR 的 `minCompileSdk=36` 与本项目 compileSdk 36 匹配。T18 已提取的 `1.1.0` AAR metadata 要求 **`minCompileSdk=37`**（`.temp/T18-evidence/blocking-aar-metadata.properties`）；1.1.0 起的升级路径需连带评估 **AGP / SDK 升级**，属于独立决策，本单不实施，也不改变 app minSdk。
 - 无 `eventEndFile` 不影响本项目：[`MpvEndFilePolicy.kt:3`](../app/src/main/java/com/lumina/tv/player/MpvEndFilePolicy.kt#L3) 明确 pinned AAR 仅提供 event_id；当前 endKind 已由属性 + 日志证据推导，`UNKNOWN` 特意不当作错误。T18B 早期因缺完整 reason 回调而写的候选排除结论仅是历史，不覆盖 T18C 已验证的现有策略；本单不改 T01–T18 语义。
 
-## 验证范围
+## 历史验证范围（V6-T20，1.24.19 / 163）
 
-修改仅涉及许可文案、来源/能力记录及诊断只读版本上报；不改播放逻辑、依赖坐标、版本、compileSdk 或 AGP，不 commit/push/发布。T20 的 `--offline --dependency-verification=strict :app:verifyOffline :app:assembleDebug` **BUILD SUCCESSFUL**（退出 0，1153.389 秒），原有 T11 全套通过；直接调用实际编译出的生产函数检查版本/UNKNOWN/异常与 54 个 JSON 预算用例均通过，native 对象本体最坏转义样本 **401 字节**，上限仍为 122880 字节。构建后重新核对 24 个 `.so`，其中 20 个与 AAR 逐字节一致；最终 Debug APK SHA-256 `f55435fc099339a2581f59c43b0223f5add8ad0a3ad9696bd38165247c49513d`，aapt2 确认 1.24.19 / 163。详情写入 JSON `current_native.verification`；日志、APK 复核与范围检查保存在忽略目录 `.temp/T20-evidence/`。`rollback/pre-mpv-swap` tag 和 `backup/pre-mpv-swap` 分支保持原对象。
+以下为 T20 当时的记录，不是 M10A 的验证结果：修改仅涉及许可文案、来源/能力记录及诊断只读版本上报；不改播放逻辑、依赖坐标、版本、compileSdk 或 AGP，不 commit/push/发布。T20 的 `--offline --dependency-verification=strict :app:verifyOffline :app:assembleDebug` **BUILD SUCCESSFUL**（退出 0，1153.389 秒），原有 T11 全套通过；直接调用实际编译出的生产函数检查版本/UNKNOWN/异常与 54 个 JSON 预算用例均通过，native 对象本体最坏转义样本 **401 字节**，上限仍为 122880 字节。构建后重新核对 24 个 `.so`，其中 20 个与 AAR 逐字节一致；最终 Debug APK SHA-256 `f55435fc099339a2581f59c43b0223f5add8ad0a3ad9696bd38165247c49513d`，aapt2 确认 1.24.19 / 163。详情写入 JSON `current_native.verification`；日志、APK 复核与范围检查保存在忽略目录 `.temp/T20-evidence/`。`rollback/pre-mpv-swap` tag 和 `backup/pre-mpv-swap` 分支保持原对象。
 
 ---
 
 # 历史快照：V6-T15 / T15B（旧 JellyCine，已替换）
 
-以下原始结论、APK 哈希、配置、来源不可得与 BLOCKED 记录只描述替换前产物。**旧来源不可得问题已通过更换依赖解决；当前记录以上方 V6-T20 及 JSON `current_native` 为准**，历史缺证不改写成已核实。
+以下原始结论、APK 哈希、配置、来源不可得与 BLOCKED 记录只描述替换前产物。**旧来源不可得问题已通过更换依赖解决；当前供应方的来源证据见上方 V6-T20 及 JSON `current_native` 快照**，历史缺证不改写成已核实，也不将历史产物改标为 1.24.21。
 
 # Native 来源核对 / V6-T15
 

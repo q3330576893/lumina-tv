@@ -3,10 +3,10 @@
 面向客厅大屏的 Emby 客户端。基于 Kotlin 与 Jetpack Compose 构建，遥控器优先操作，
 以播放可靠性与界面一致性为核心设计目标。
 
-**当前版本源** v1.24.20（versionCode 164，`app/build.gradle.kts`）· Android 8.0+（minSdk 26）
+**当前版本源** v1.24.21（versionCode 165，`app/build.gradle.kts`，未发布）· Android 8.0+（minSdk 26）
 
-2026-11-27 核对：关于页使用 `BuildConfig.VERSION_NAME`；v1.24.20（164）为 native 播放内核更换版本
-（`dev.jdtech.mpv:libmpv:1.0.0`，二进制实测 mpv v0.41.0 / FFmpeg n8.1）。
+关于页使用 `BuildConfig.VERSION_NAME`；1.24.21 的诊断、登录、界面、设置与播放恢复改动见 [CHANGELOG.md](CHANGELOG.md)。
+native 依赖沿用 v1.24.20 的 `dev.jdtech.mpv:libmpv:1.0.0`，既有二进制静态实测为 mpv v0.41.0 / FFmpeg n8.1；本次未构建 Release，设备行为待确认。
 
 native 来源门禁现状：**部分闭环**——新上游 tag、构建脚本与源码归档均可追溯，旧上游"对应源码不可得"问题已通过更换依赖解决；
 但完整对应源码交付（含静态依赖 revision/patch 清单与 NOTICE）尚未完成，因此不宣称完全合规。
@@ -108,7 +108,7 @@ Lumina TV 是原生 Android TV 应用，通过 Emby Server 访问个人媒体库
 | --- | --- |
 | 语言与运行时 | Kotlin、Coroutines |
 | 界面 | Jetpack Compose |
-| 播放 | Media3 ExoPlayer 1.7.1、Jellyfin FFmpeg decoder 1.6.1+2、JellyCine libmpv 1.0.4（Maven 包版本，非 mpv upstream 版本） |
+| 播放 | Media3 ExoPlayer 1.7.1、Jellyfin FFmpeg decoder 1.6.1+2、dev.jdtech.mpv libmpv 1.0.0（Maven 包版本，非 mpv upstream 版本） |
 | 网络 | OkHttp |
 | 图像 | Coil |
 | 元数据 | Emby Server API、TMDB API |

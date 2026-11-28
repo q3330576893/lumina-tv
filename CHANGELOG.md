@@ -5,6 +5,48 @@
 
 ---
 
+## 1.24.21
+
+versionCode 165，未发布。汇总 M00 / M01 / M03 / M04 / M05 / M06 / M07 / M09 的代码改动；本次仅更新版本号与文档，不构建 Release。下列界面、焦点、登录与播放行为仍待设备确认；既有静态核对及 JVM 检查不代表本版本的设备验收。
+
+**诊断**
+
+- 诊断包写完后将权限从 `0600` 设为 `0660`，供 adb 取出。
+- 新增 `playback-failure.json`，记录异常链与栈帧、Media3 errorCode、HTTP URL / status / 重定向 / 耗时、请求头指纹、解码器 fallback、音频原始探测、时间线，以及 `current` / `historical` / `lastSession` 来源标记。
+- 新增 `diagnostics-gap.json` 自检，如实列出缺失字段。
+- 增加 R8 例外，保留诊断相关异常类名，避免 `EmbyException` 混淆为 `A0`；将 mapping 摘要与 APK 绑定。
+- native 版本读回区分 `not_initialized` / `read_failed` / `available` 三态；既有 APK 静态实测记录为 mpv v0.41.0 / FFmpeg n8.1，详见 [native 来源清单](docs/native-sources.md)。
+- logcat 采集采用端到端 deadline，超时关闭流并销毁子进程。
+
+**登录与提示**
+
+- 支持空密码服务器登录，仅地址和用户名必填；二维码配对允许缺少密码。
+- 音轨「对应关系不确定」提示改为 4 秒后自动消失，选定音轨立即清除。
+
+**界面**
+
+- 海报片名区移除整块主题色，标题遮罩改用渐变。
+- 父级不再广播焦点方向，卡片各自维护单一 scale 动画，针对邻卡抖动与整屏卡顿调整焦点渲染。
+- 搜索结果片名常显，片名区域随字号自适应，调整布局以避免裁切。
+- 搜索页 chips 与最近搜索的底色、描边各保留一层，移除重复绘制。
+- 详情页「选择版本」补充 200ms 右滑动画，列表改用 `LazyColumn`。
+- 统一四层材质、`EffectTier`（`FULL` / `REDUCED` / `OFF`，`OFF` 为实体不透明）、TV token 与 reduced motion；浏览页取消玻璃效果。
+- 首页改为全幅剧照、左侧渐变压暗、标题 Logo（clearlogo，缺失时降级为文字），下方使用 16:9 缩略图行，包含进度条与继续播放标签。
+- 媒体库采用大分区标题、BoxSet 拼贴卡与竖版海报行。
+
+**登录/设置**
+
+- 登录字段提供持久 label、原位错误、IME Next / Done 与 TalkBack 语义。
+- 连接流程统一为 7 个具名状态，配对 pending 阶段不提前显示「已登录」。
+- 设置开关整行 `toggleable`，使用单一焦点节点；focus key 采用五元组，删除后焦点落到邻项，并隔离迟到回调抢焦点（既有 JVM 检查覆盖 20 次快切）；补齐 29 项作用域声明，按七分类重排。
+
+**播放内核**
+
+- `STARTUP-P0` 将失败观察与路径排除分离，首次同路执行真实重试，不同 delivery 的失败记录分开处理。
+- 视频/音频错误按 renderer / MIME / sink 分流，`audioSupport=UNSUPPORTED` 不再覆盖视频故障。
+- mpv 内部软解重试执行完整 permit 事务，destroy 失败时 fail-closed；新增 `autoSoftwareRetry` 开关。
+- 首帧恢复采用五态与有限预算，每 item 一次重建、一次换源，预算耗尽后终止；预热采用可复位的类型化状态，buffer 与 source factory 接线对齐。
+
 ## v1.24.20（versionCode 164）
 
 2026-11-27 发布。**native 播放内核更换**：`org.jellycine.mpv:libmpv:1.0.4` → `dev.jdtech.mpv:libmpv:1.0.0`。
