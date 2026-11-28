@@ -772,7 +772,7 @@ class EmbyClient(
     }
 
     suspend fun prewarmPlayback(item: MediaItem, sourceId: String? = null, audioStreamIndex: Int? = null,
-                                strategy: SourceStrategy = SourceStrategy()) {
+                                strategy: SourceStrategy = SourceStrategy(), isCurrent: () -> Boolean = { true }) {
         val prepared = preparePlaybackTracks(item.id, sourceId, audioStreamIndex, strategy)
         val forceTranscode = com.lumina.tv.AppRuntime.prefs?.forceTranscode ?: false
         val maxBitrate = com.lumina.tv.AppRuntime.prefs?.maxStreamingBitrate ?: 120_000_000L
@@ -781,11 +781,20 @@ class EmbyClient(
                 PlaybackStartIntent.Resume, item.positionTicks / 10_000L, trackIntent = prepared.intent))
         lastPrewarmAttempt = attempt
         try {
-            resolvePlayback(item, forceTranscode = forceTranscode, maxStreamingBitrate = maxBitrate,
+            val target = resolvePlayback(item, forceTranscode = forceTranscode, maxStreamingBitrate = maxBitrate,
                 mediaSourceId = sourceId, startIntent = PlaybackStartIntent.Resume,
-                audioStreamIndex = audioStreamIndex, cacheResult = true, strategy = strategy,
+                audioStreamIndex = audioStreamIndex, cacheResult = false, strategy = strategy,
                 preparedTracks = prepared)
-            attempt.state = "done"
+            // Return to the owner's context before publishing; retired permits cannot populate cache.
+            com.lumina.tv.player.commitPrewarmResult(isCurrent) {
+                if (target.url.isNotBlank()) {
+                    playbackTargetCache.keys.removeAll { it.request.itemId == item.id }
+                    playbackTargetCache[playbackTargetKey(item.id, forceTranscode, sourceId, audioStreamIndex,
+                        false, maxBitrate, strategy, PlaybackStartIntent.Resume, item.positionTicks / 10_000L,
+                        trackIntent = target.trackIntent ?: prepared.intent)] = System.currentTimeMillis() to target
+                }
+                attempt.state = "done"
+            }
         } catch (cancelled: CancellationException) {
             attempt.state = "cancelled"
             throw cancelled

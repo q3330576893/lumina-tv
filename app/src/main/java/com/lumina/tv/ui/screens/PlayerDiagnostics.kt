@@ -59,7 +59,7 @@ internal fun buildPlayerDiagPayload(
     audioCaps: AudioCapabilities,
     degraded: Boolean,
     engineSwitchTrace: List<String>,
-    exo: ExoPlayer,
+    exo: ExoPlayer?,
     failurePhase: String,
     mpvState: MpvPlayerController.State,
     showControls: Boolean,
@@ -81,7 +81,7 @@ internal fun buildPlayerDiagPayload(
     audioOutputSnapshot: AudioOutputSnapshot?,
 ): DiagPayload {
     check(Looper.myLooper() == Looper.getMainLooper()) { "Player diagnostics require main" }
-    check(exo.applicationLooper == Looper.getMainLooper()) { "Player applicationLooper must be main" }
+    if (exo != null) check(exo.applicationLooper == Looper.getMainLooper()) { "Player applicationLooper must be main" }
     val videoStream = playbackSource?.streams?.firstOrNull { it.type == "Video" }
     val isDolbyVision = videoStream?.let {
         val range = it.videoRangeType.orEmpty().uppercase().filter(Char::isLetterOrDigit)
@@ -200,7 +200,7 @@ internal fun buildPlayerDiagPayload(
         }
     }
     val tracks = JSONArray().apply {
-        if (load.current) exo.currentTracks.groups.forEach { group ->
+        if (load.current) exo?.currentTracks?.groups.orEmpty().forEach { group ->
             val formats = JSONArray()
             for (i in 0 until group.length) {
                 val f = group.getTrackFormat(i)
@@ -255,7 +255,7 @@ internal fun buildPlayerDiagPayload(
         .put("firstFailureTrace", metrics.optJSONArray("firstFailureTrace") ?: JSONArray())
         .put("pathExclusions", phases.optJSONArray("pathExclusions") ?: JSONArray())
         .put("mediaPeriodId", load.mediaPeriodId ?: JSONObject.NULL)
-    val decoderMime = load.media3Failure?.let(::media3RendererMime) ?: exo.videoFormat?.sampleMimeType
+    val decoderMime = load.media3Failure?.let(::media3RendererMime) ?: exo?.videoFormat?.sampleMimeType
     val decoderFallbacks = decoderFallbackHistory(load.media3Failure)
     val decoderHardwareAccelerated = activeVideoDecoder?.let(::decoderHardwareAcceleration)
     val playbackFailure = playbackFailureJson(PlaybackFailureInput(

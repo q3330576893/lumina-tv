@@ -162,7 +162,6 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.lumina.tv.AppRuntime
@@ -226,6 +225,13 @@ import com.lumina.tv.player.PlaybackFailureReason
 import com.lumina.tv.player.mpvWasExplicitlyRequested
 import com.lumina.tv.player.selectPlaybackEngine
 import com.lumina.tv.player.shouldAutomaticallyTryMpvAudioFallback
+import com.lumina.tv.player.FirstFrameRecovery
+import com.lumina.tv.player.FirstFrameStage
+import com.lumina.tv.player.FirstFrameAction
+import com.lumina.tv.player.NextEpisodePrewarm
+import com.lumina.tv.player.runPrewarmLookup
+import com.lumina.tv.player.Media3ResourcePlan
+import com.lumina.tv.player.Media3SourceWiring
 import com.lumina.tv.player.PlaybackRecoveryBudget
 import com.lumina.tv.player.PlayerLifecycle
 import com.lumina.tv.player.PlayerHostLifecycleEvent
@@ -513,7 +519,8 @@ fun PlayerScreen(
     }
     var softDecodeNoticeShown by remember(item.id) { mutableStateOf(false) }
     var rebuildRetry by remember(item.id) { mutableStateOf(false) }
-    var firstFrameRecoveryTried by remember(item.id) { mutableStateOf(false) }
+    var firstFrameRecovery by remember(item.id) { mutableStateOf(FirstFrameRecovery()) }
+    var frameObservation by remember(item.id) { mutableStateOf(firstFrameRecovery.observation) }
     // 保留用户本次播放明确选择的内核，后续重载不覆盖该选择。
     var enginePinned by remember(item.id) { mutableStateOf<String?>(null) }
     val mpvInstalled = remember(context) { mpvLibrariesInstalled(context) }
@@ -600,16 +607,12 @@ fun PlayerScreen(
     var initialLoadPending by remember(item.id) { mutableStateOf(false) }
     var tunnelingEnabled by remember(item.id) { mutableStateOf(false) }
     var tunnelingFallbackTried by remember(item.id) { mutableStateOf(false) }
-    var tunnelingGeneration by remember(item.id) { mutableIntStateOf(-1) }
-    var tunnelingEnabledAt by remember(item.id) { mutableLongStateOf(0L) }
-    var tunnelingFallbackJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var resumedByBackground by remember(item.id) { mutableStateOf(false) }
-    var readyWithoutFrameSince by remember(item.id) { mutableLongStateOf(0L) }
     var playbackStatusNotice by remember(item.id) { mutableStateOf<String?>(null) }
     var failurePhase by remember(item.id) { mutableStateOf("未知") }
     var currentSourceId by remember(item.id) { mutableStateOf(initialSourceId) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
-    var prewarmedEpisodeId by remember(item.id) { mutableStateOf<String?>(null) }
+    val prewarm = remember(item.id) { NextEpisodePrewarm() }
     var prewarmJob by remember(item.id) { mutableStateOf<Job?>(null) }
     var seekHint by remember { mutableStateOf<String?>(null) }
     var currentResolution by remember { mutableStateOf<String?>(null) }
@@ -683,28 +686,6 @@ fun PlayerScreen(
     val creditsStartMs = playbackMarkers?.creditsStartMs
     val currentCreditsStartMs by rememberUpdatedState(creditsStartMs)
 
-    fun prewarmNext(next: MediaItem) {
-        prewarmJob?.cancel()
-        prewarmJob = scope.launch {
-            val startedAt = android.os.SystemClock.elapsedRealtime()
-            var ok = false
-            PageLog.add("prewarm start nextId=${next.id} engine=$activeEngine")
-            try {
-                client?.prewarmPlayback(
-                    next,
-                    strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy(),
-                )
-                ok = client != null
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                // The completion log records failure without exception text, URLs or credentials.
-            } finally {
-                PageLog.add("prewarm done nextId=${next.id} ok=$ok ms=${android.os.SystemClock.elapsedRealtime() - startedAt}")
-            }
-        }
-    }
-
     fun matchDisplayFrameRate(surface: Surface?, fps: Float?) {
         if (AppRuntime.prefs?.matchDisplayFrameRate != true || Build.VERSION.SDK_INT < 30 || surface == null || fps == null || fps <= 0f) return
         runCatching {
@@ -756,36 +737,19 @@ fun PlayerScreen(
     var titleLogoFailed by remember(item.id) { mutableStateOf(false) }
 
 
-    val httpFactory = remember(client, playbackHttpTrace) {
-        val baseClient = client?.playbackHttpClient ?: okhttp3.OkHttpClient()
-        val observedClient = baseClient.newBuilder().eventListenerFactory(playbackHttpTrace).build()
-        OkHttpDataSource.Factory(observedClient)
-            .setUserAgent("LuminaTV/1.5 (Android)")
-    }
-
     val audioOutputLedger = remember(item.id) { AudioOutputSnapshotLedger() }
     val currentAudioDecodeMode by rememberUpdatedState(audioDecodeMode)
     val subtitleRenderersFactory = remember(item.id) {
         AudioOutputRenderersFactory(context) { currentAudioDecodeMode }
     }
     val fastStart = AppRuntime.prefs?.fastStart != false
-    val trackSelector = remember(item.id, rebuildRetry, fastStart) {
-        androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context).apply {
-            setParameters(
-                buildUponParameters()
-                    .setAllowInvalidateSelectionsOnRendererCapabilitiesChange(true)
-                    .setTunnelingEnabled(false)
-                    .build(),
-            )
-        }
+    var activeTrackSelector by remember(item.id) {
+        mutableStateOf<androidx.media3.exoplayer.trackselection.DefaultTrackSelector?>(null)
     }
-
     fun setTunnelingEnabled(enabled: Boolean): Boolean = runCatching {
-        trackSelector.setParameters(
-            trackSelector.buildUponParameters()
-                .setTunnelingEnabled(enabled)
-                .build(),
-        )
+        activeTrackSelector?.let { selector ->
+            selector.setParameters(selector.buildUponParameters().setTunnelingEnabled(enabled).build())
+        }
         tunnelingEnabled = enabled
         true
     }.getOrElse { failure ->
@@ -794,7 +758,12 @@ fun PlayerScreen(
         false
     }
 
-    val exo = remember(item.id, rebuildRetry, fastStart) {
+    var media3Player by remember(item.id) { mutableStateOf<ExoPlayer?>(null) }
+    val media3Owner = remember(item.id) { java.util.concurrent.atomic.AtomicReference<ExoPlayer?>(null) }
+    val exo = media3Player
+    var media3ListenersReady by remember(item.id) { mutableStateOf(kotlinx.coroutines.CompletableDeferred<Unit>()) }
+
+    fun createMedia3Player(resourcePlan: Media3ResourcePlan, sourceWiring: Media3SourceWiring): ExoPlayer {
         val preference = AppRuntime.prefs?.decoderPreference ?: "auto"
         val codecSelector = MediaCodecSelector { mimeType, secure, tunneling ->
             val dvMime = mimeType.equals("video/dolby-vision", ignoreCase = true)
@@ -819,27 +788,20 @@ fun PlayerScreen(
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setMediaCodecSelector(codecSelector)
             .setEnableDecoderFallback(true)
-        val extractors = androidx.media3.extractor.DefaultExtractorsFactory()
-            .setConstantBitrateSeekingEnabled(true)
-            .setConstantBitrateSeekingAlwaysEnabled(true)
-        val videoBitrateBps = playbackSource?.streams
-            ?.firstOrNull { it.type.equals("Video", true) }?.bitRate?.takeIf { it > 0 }
-            ?: playbackSource?.bitrate?.takeIf { it > 0 }
-            ?: 0L
-        val totalMemMb = runCatching {
-            val am = context.getSystemService(android.app.ActivityManager::class.java)
-            val info = android.app.ActivityManager.MemoryInfo()
-            am?.getMemoryInfo(info)
-            (info.totalMem / (1024L * 1024L)).toInt()
-        }.getOrDefault(0)
-        val bufferPlan = m3oBufferPlan(totalMemMb, videoBitrateBps > 25_000_000L, fastStart)
+        val bufferPlan = resourcePlan.buffer
+        val videoBitrateBps = resourcePlan.videoBitrateBps
         PageLog.add(
-            "m3o buffer tier=${bufferPlan.tier} memMb=$totalMemMb bitrateMbps=${videoBitrateBps / 1_000_000} " +
+            "m3o buffer tier=${bufferPlan.tier} memMb=${resourcePlan.totalMemMb} source=${resourcePlan.sourceId} bitrateMbps=${videoBitrateBps / 1_000_000} " +
                 "min=${bufferPlan.minMs} max=${bufferPlan.maxMs} bytes=${bufferPlan.targetBytes} backSec=${bufferPlan.backSec}",
         )
+        val trackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context).apply {
+            setParameters(buildUponParameters().setAllowInvalidateSelectionsOnRendererCapabilitiesChange(true)
+                .setTunnelingEnabled(tunnelingEnabled).build())
+        }
+        activeTrackSelector = trackSelector
         val playerBuilder = ExoPlayer.Builder(context, renderers)
             .setTrackSelector(trackSelector)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory, extractors))
+            .setMediaSourceFactory(sourceWiring.factory)
             .setHandleAudioBecomingNoisy(true)
             .setSeekBackIncrementMs(10_000L)
             .setSeekForwardIncrementMs(30_000L)
@@ -857,14 +819,14 @@ fun PlayerScreen(
                     .setPrioritizeTimeOverSizeThresholds(false)
                     .build(),
             )
-        playerBuilder
+        return playerBuilder
             .build()
             .apply {
                 PlayerLifecycle.registry.created(this, "media3", "playback:${item.id}")
                 volume = playerVolumePercent / 100f
                 setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
                     activeEngine != "mpv")
-                playWhenReady = true
+                playWhenReady = false
                 val selectionParams = trackSelectionParameters.buildUpon()
                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, resolveSubtitlePreference(
                         AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource),
@@ -877,6 +839,7 @@ fun PlayerScreen(
     }
 
     DisposableEffect(exo, activeEngine) {
+        if (exo == null) return@DisposableEffect onDispose { }
         exo.setAudioAttributes(
             AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
             activeEngine != "mpv",
@@ -884,8 +847,9 @@ fun PlayerScreen(
         onDispose { }
     }
 
-    // The same ExoPlayer survives an audio-mode reload; explicitly clear offload on leaving passthrough.
+    // Apply immediate audio-mode changes as well as the settings used by a newly created player.
     LaunchedEffect(exo, audioDecodeMode) {
+        if (exo == null) return@LaunchedEffect
         exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
             .setAudioOffloadPreferences(media3AudioOffloadPreferences(audioDecodeMode)).build()
     }
@@ -903,23 +867,27 @@ fun PlayerScreen(
         }
     }
     DisposableEffect(exo, playbackStatsListener) {
+        if (exo == null) return@DisposableEffect onDispose { }
         exo.addAnalyticsListener(playbackStatsListener)
         onDispose { exo.removeAnalyticsListener(playbackStatsListener) }
     }
 
-    // Work that touches a player belongs to that exact instance, even across suspension.
+    // Session authority outlives construction; child work is cancelled at every generation boundary.
     val currentExo by rememberUpdatedState(exo)
-    val attachedPlayerView = remember(exo) { java.util.concurrent.atomic.AtomicReference<PlayerView?>(null) }
-    val instanceJob = remember(exo, item.id) { SupervisorJob(scope.coroutineContext[Job]) }
+    val attachedPlayerView = remember(item.id) { java.util.concurrent.atomic.AtomicReference<PlayerView?>(null) }
+    val instanceJob = remember(item.id) { SupervisorJob(scope.coroutineContext[Job]) }
     val instanceScope = remember(instanceJob) { CoroutineScope(scope.coroutineContext + instanceJob) }
-    val creditsCountdown = remember(exo, item.id) { CreditsCountdown<MediaItem>(instanceScope, { PageLog.add(it) }) }
+    var loadWorkJob by remember(item.id) { mutableStateOf<Job>(SupervisorJob(instanceJob)) }
+    fun launchLoadWork(block: suspend CoroutineScope.() -> Unit): Job =
+        CoroutineScope(scope.coroutineContext + loadWorkJob).launch(block = block)
+    val creditsCountdown = remember(item.id) { CreditsCountdown<MediaItem>(instanceScope, { PageLog.add(it) }) }
     val inputLifecycleOwner = LocalLifecycleOwner.current
     var autoNextForeground by remember(inputLifecycleOwner) {
         mutableStateOf(inputLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
-    val manualTrackInstance = remember(exo, item.id) { java.util.UUID.randomUUID().toString() }
-    var pendingManualAudio by remember(exo, item.id) { mutableStateOf<ManualTrackSelection?>(null) }
-    var pendingManualSubtitle by remember(exo, item.id) { mutableStateOf<ManualTrackSelection?>(null) }
+    val manualTrackInstance = remember(item.id) { java.util.UUID.randomUUID().toString() }
+    var pendingManualAudio by remember(item.id) { mutableStateOf<ManualTrackSelection?>(null) }
+    var pendingManualSubtitle by remember(item.id) { mutableStateOf<ManualTrackSelection?>(null) }
     fun manualSelection(source: MediaSource, type: TrackMemoryType, index: Int) = ManualTrackSelection(
         item.id, source.id, type, index, manualTrackInstance, sessionGeneration,
         trackMemoryIdentity(source, type.name), source)
@@ -941,11 +909,11 @@ fun PlayerScreen(
             pendingManualSubtitle = null
         }
     }
-    var playbackLoadPermit by remember(exo, item.id) { mutableStateOf<PlaybackLoadPermit?>(null) }
-    var media3LoadGeneration by remember(exo, item.id) { mutableIntStateOf(-1) }
+    var playbackLoadPermit by remember(item.id) { mutableStateOf<PlaybackLoadPermit?>(null) }
+    var media3LoadGeneration by remember(item.id) { mutableIntStateOf(-1) }
     fun isCurrentLoad(generation: Int): Boolean =
-        instanceJob.isActive && currentExo === exo && loadCoordinator.accepts(generation)
-    fun isCurrentMedia3(): Boolean = !reloadPending && activeEngine == "media3" &&
+        instanceJob.isActive && loadCoordinator.accepts(generation)
+    fun isCurrentMedia3(): Boolean = exo != null && currentExo === exo && !reloadPending && activeEngine == "media3" &&
         isCurrentLoad(media3LoadGeneration) && exo.currentMediaItem?.mediaId == "${item.id}:$media3LoadGeneration"
     fun isCurrentMedia3Event(eventTime: AnalyticsListener.EventTime): Boolean {
         if (!isCurrentMedia3() || eventTime.timeline.isEmpty) return false
@@ -979,7 +947,7 @@ fun PlayerScreen(
     fun observedPlayerPositionMs(): Long? = runCatching { when (activeEngine) {
         "mpv" -> mpvBackend?.observedPositionMs()
         // Media3 masks its position with the requested seek until a frame is rendered.
-        else -> if (media3PositionAvailable && !reloadPending && exo.playbackState != Player.STATE_IDLE &&
+        else -> if (media3PositionAvailable && !reloadPending && exo != null && exo.playbackState != Player.STATE_IDLE &&
             exo.currentMediaItem?.mediaId == "${item.id}:$media3LoadGeneration") {
             exo.currentPosition.takeIf { it >= 0L }
         } else null
@@ -1021,8 +989,8 @@ fun PlayerScreen(
     fun confirmSeek(playerMs: Long?, now: Long, commandFailed: Boolean = false) {
         val pending = seekConfirmation ?: return
         val result = if (commandFailed) SeekConfirmation.ROLLED_BACK else pending.evaluate(playerMs, now,
-            playbackSpeed = if (activeEngine == "mpv") speedState.effectiveSpeed else exo.playbackParameters.speed,
-            paused = if (activeEngine == "mpv") !mpvState.playing || mpvState.buffering else !exo.isPlaying)
+            playbackSpeed = if (activeEngine == "mpv") speedState.effectiveSpeed else exo?.playbackParameters?.speed ?: 1f,
+            paused = if (activeEngine == "mpv") !mpvState.playing || mpvState.buffering else exo?.isPlaying != true)
         if (result == SeekConfirmation.PENDING) return
         seekConfirmation = null
         seekConfirmationJob?.cancel()
@@ -1062,12 +1030,16 @@ fun PlayerScreen(
         if (error != null) reportStopInAppScope()
     }
 
-    DisposableEffect(exo, item.id, media3LoadGeneration) {
+    DisposableEffect(exo, item.id, media3LoadGeneration, frameObservation) {
+        if (exo == null) return@DisposableEffect onDispose { }
         val frameGeneration = media3LoadGeneration
+        val frameToken = frameObservation
         // Also reopen the observation gate if a seek is ignored and ordinary frames keep arriving.
         // We use the callback as frame evidence, not its container-dependent presentation timestamp.
         val listener = androidx.media3.exoplayer.video.VideoFrameMetadataListener { _, _, _, _ ->
-            if (!media3PositionAvailable) instanceScope.launch {
+            val frameAt = android.os.SystemClock.elapsedRealtime()
+            if (!media3PositionAvailable) launchLoadWork launch@ {
+                if (currentExo !== exo || frameToken != firstFrameRecovery.observation || frameAt < frameToken.sinceMs) return@launch
                 if (isCurrentLoad(frameGeneration) && media3LoadGeneration == frameGeneration &&
                     isCurrentMedia3() && exo.playbackState == Player.STATE_READY && !media3PositionAvailable) {
                     media3PositionAvailable = true
@@ -1082,30 +1054,38 @@ fun PlayerScreen(
         onDispose { exo.clearVideoFrameMetadataListener(listener) }
     }
 
-    DisposableEffect(exo, item.id) {
+    fun retireMedia3Player(player: ExoPlayer?, reason: String) {
+        val exo = player ?: return
+        if (!media3Owner.compareAndSet(exo, null)) return
+        val retirement = Media3DecoderRetirements.begin(exo)
+        MpvRetirementFence.track(retirement)
+        var cleanupFailure: Throwable? = null
+        runCatching {
+            attachedPlayerView.get()?.takeIf { it.player === exo }?.player = null
+            exo.clearVideoSurface()
+        }.onFailure { cleanupFailure = it }
+        val released = runCatching { exo.release() }.fold(
+            onSuccess = { true },
+            onFailure = {
+                if (cleanupFailure == null) cleanupFailure = it else cleanupFailure?.addSuppressed(it)
+                false
+            },
+        )
+        if (cleanupFailure == null) {
+            Media3DecoderRetirements.released(exo)
+            PlayerLifecycle.registry.released(exo, reason)
+        } else {
+            Media3DecoderRetirements.fail(exo, retirement, cleanupFailure!!)
+            PageLog.add("media3 retirement failed gen=$sessionGeneration cause=${cleanupFailure!!::class.java.simpleName}")
+            if (released) PlayerLifecycle.registry.released(exo, "playback-disposed-after-cleanup-error")
+        }
+    }
+    val disposeMedia3 = ::retireMedia3Player
+    DisposableEffect(item.id) {
         onDispose {
             reportStopInAppScope()
             instanceJob.cancel()
-            attachedPlayerView.getAndSet(null)?.player = null
-            val retirement = Media3DecoderRetirements.begin(exo)
-            MpvRetirementFence.track(retirement)
-            var cleanupFailure: Throwable? = null
-            runCatching { exo.clearVideoSurface() }.onFailure { cleanupFailure = it }
-            val released = runCatching { exo.release() }.fold(
-                onSuccess = { true },
-                onFailure = {
-                    if (cleanupFailure == null) cleanupFailure = it else cleanupFailure?.addSuppressed(it)
-                    false
-                },
-            )
-            if (cleanupFailure == null) {
-                Media3DecoderRetirements.released(exo)
-                PlayerLifecycle.registry.released(exo, "playback-disposed")
-            } else {
-                Media3DecoderRetirements.fail(exo, retirement, cleanupFailure!!)
-                PageLog.add("media3 retirement failed gen=$sessionGeneration cause=${cleanupFailure!!::class.java.simpleName}")
-                if (released) PlayerLifecycle.registry.released(exo, "playback-disposed-after-cleanup-error")
-            }
+            disposeMedia3(media3Owner.get(), "playback-disposed")
         }
     }
 
@@ -1151,8 +1131,8 @@ fun PlayerScreen(
 
     fun playbackPaused(): Boolean = playbackContinuationPaused(
         desiredPlaying,
-        if (activeEngine == "mpv") mpvState.playing else exo.playWhenReady,
-        if (activeEngine == "mpv") mpvState.ended else exo.playbackState == Player.STATE_ENDED,
+        if (activeEngine == "mpv") mpvState.playing else exo?.playWhenReady == true,
+        if (activeEngine == "mpv") mpvState.ended else exo?.playbackState == Player.STATE_ENDED,
     )
 
     fun switchEpisode(next: MediaItem, reportStop: Boolean = true) {
@@ -1262,7 +1242,7 @@ fun PlayerScreen(
         if (target !== currentTarget || reloadPending || !target.timeline.firstFrame(now)) return
         val generation = sessionGeneration
         val window = target.timeline
-        instanceScope.launch {
+        launchLoadWork launch@ {
             delay(8_000L)
             if (!isCurrentLoad(generation) || currentTarget !== target || target.timeline !== window || reloadPending) return@launch
             observeTimelinePosition(target, observedPlayerPositionMs(), null, android.os.SystemClock.elapsedRealtime())
@@ -1271,14 +1251,14 @@ fun PlayerScreen(
     }
 
     fun completeMedia3AudioReady() {
-        if (!isCurrentMedia3() || exo.playbackState != Player.STATE_READY) return
-        val groups = exo.currentTracks.groups
+        if (exo == null || !isCurrentMedia3() || exo.playbackState != Player.STATE_READY) return
+        val groups = exo?.currentTracks?.groups.orEmpty()
         if (!media3AudioOnlyReady(groups.any { it.type == C.TRACK_TYPE_VIDEO },
                 groups.any { it.type == C.TRACK_TYPE_AUDIO && it.isSelected })) return
         val target = currentTarget ?: return
         val now = android.os.SystemClock.elapsedRealtime()
+        firstFrameRecovery.audioOnlyReady(sessionGeneration)
         media3PositionAvailable = true
-        readyWithoutFrameSince = 0L
         if (!firstFrameRendered) {
             // Common output-ready gate: audio-only playback has no video frame to await.
             firstFrameRendered = true
@@ -1288,8 +1268,6 @@ fun PlayerScreen(
             playbackDiagnostics.identity?.takeIf { it.generation == sessionGeneration }?.let {
                 playbackDiagnostics.firstFrame(it, now, "Media3.audio-only READY")
             }
-            tunnelingFallbackJob?.cancel()
-            tunnelingFallbackJob = null
         }
         onTimelineFirstFrame(target, now)
         observeTimelinePosition(target, exo.currentPosition.takeIf { it >= 0L }, exo.duration, now)
@@ -1335,6 +1313,8 @@ fun PlayerScreen(
         audioRecoveryJob?.cancel()
         audioRecoveryJob = null
         recoveryBudget = PlaybackRecoveryBudget()
+        firstFrameRecovery = FirstFrameRecovery().also { it.beginLoad(sessionGeneration, android.os.SystemClock.elapsedRealtime()) }
+        frameObservation = firstFrameRecovery.observation
         pathFailures.clearForManualRetry()
         audioMpvAttempts.clear()
         audioMpvFailures.clear()
@@ -1349,8 +1329,25 @@ fun PlayerScreen(
         error = msg
     }
 
+    fun finishFirstFrameRecovery(reason: String) {
+        firstFrameRecovery.terminate()
+        recordPathFailure(PlaybackFailureReason.FIRST_FRAME_TIMEOUT, reason)
+        audioRecoveryJob?.cancel()
+        audioRecoveryJob = null
+        loadJob?.cancel()
+        media3Player?.pause()
+        mpvBackend?.release("first-frame-terminal")
+        mpvBackend = null
+        updateStalled(false)
+        playbackStatusNotice = null
+        failurePhase = "首帧"
+        PageLog.add("firstFrameGuard action=terminal reason=$reason attempts=${recoveryBudget.attempts}")
+        reportError("视频未能输出画面，请重试、更换片源或退出播放")
+    }
+
     fun canStartAutomaticRecovery(generation: Int, reason: String): Boolean {
         val cause = when {
+            firstFrameRecovery.stage == FirstFrameStage.Terminal -> "first-frame-terminal"
             !isCurrentLoad(generation) -> "stale"
             reloadPending -> "reloading"
             audioRecoveryJob?.isActive == true -> "audio-job"
@@ -1374,13 +1371,13 @@ fun PlayerScreen(
             mpvBackend?.release("recovery-budget-exhausted")
             mpvBackend = null
             media3LoadGeneration = -1
-            exo.pause()
+            exo?.pause()
             updateStalled(false)
             playbackStatusNotice = null
             reportError("自动恢复次数已用完，请重试或更换片源、音轨")
             return
         }
-        audioRecoveryJob = instanceScope.launch {
+        audioRecoveryJob = launchLoadWork launch@ {
             val waitMs = if (bypassRecoveryBudget) minimumDelayMs
             else maxOf(minimumDelayMs, recoveryBudget.cooldownRemainingMs(android.os.SystemClock.elapsedRealtime()))
             if (waitMs > 0L) {
@@ -1448,7 +1445,7 @@ fun PlayerScreen(
         updateStalled(false)
         playbackStatusNotice = null
         failurePhase = "证书验证"
-        exo.pause()
+        exo?.pause()
         reportError(CERTIFICATE_ERROR_MESSAGE)
     }
 
@@ -1592,7 +1589,7 @@ fun PlayerScreen(
             // Exclude the track that actually failed. A manual unsupported choice must
             // still be able to return to the previously playing, supported track.
             media3AudioCandidates.filter { candidate ->
-                exo.currentTracks.groups.any { group ->
+                exo?.currentTracks?.groups.orEmpty().any { group ->
                     group.mediaTrackGroup == candidate.group && group.isTrackSelected(candidate.index)
                 }
             }.forEach { audioAlternativeAttempts += "$sourceKey:${it.group.id}:${it.index}" }
@@ -1600,7 +1597,7 @@ fun PlayerScreen(
         val alternative = media3AudioCandidates.takeIf { media3AudioSourceId == sourceKey }
             ?.firstOrNull { candidate ->
                 candidate.supported && "$sourceKey:${candidate.group.id}:${candidate.index}" !in audioAlternativeAttempts &&
-                    exo.currentTracks.groups.any { group ->
+                    exo?.currentTracks?.groups.orEmpty().any { group ->
                         group.mediaTrackGroup == candidate.group && group.isTrackSupported(candidate.index)
                     }
             }
@@ -1679,6 +1676,10 @@ fun PlayerScreen(
             MpvPlayerController.FailureKind.CERT_INVALID -> error("Certificate errors are terminal")
         }
         recordPathFailure(reason, detail)
+        if (firstFrameRecovery.stage == FirstFrameStage.AlternatePath && !firstFrameRendered) {
+            finishFirstFrameRecovery("alternate-mpv:$reason")
+            return
+        }
         if (recordAudioMpvFailure()) return
         enginePinned = "media3"
         updateStalled(false)
@@ -1757,6 +1758,94 @@ fun PlayerScreen(
         onDispose { monitor.unregister() }
     }
 
+    fun tickFirstFrameRecovery(now: Long) {
+        if (error != null || reloadPending || !autoNextForeground) return
+        val player = media3Player
+        val video = player?.currentTracks?.groups.orEmpty().firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.isSelected }
+        val surface = (attachedPlayerView.get()?.videoSurfaceView as? SurfaceView)?.holder?.surface
+        val action = firstFrameRecovery.tick(now, sessionGeneration,
+            ready = activeEngine == "media3" && player?.playbackState == Player.STATE_READY,
+            selectedVideo = video != null || firstFrameRecovery.ownsRecovery && !firstFrameRendered &&
+                playbackSource?.streams.orEmpty().any { it.type == "Video" },
+            surfaceValid = if (activeEngine == "media3") surface?.isValid == true else currentSurface?.isValid == true,
+            playing = desiredPlaying, budget = recoveryBudget)
+        if (action == null && !firstFrameRecovery.ownsRecovery) return
+        val counters = player?.videoDecoderCounters
+        counters?.ensureUpdated()
+        val format = player?.videoFormat
+        val evidence = JSONObject().put("stage", firstFrameRecovery.stage.name)
+            .put("generation", sessionGeneration).put("observationEpoch", frameObservation.epoch)
+            .put("surfaceValid", surface?.isValid == true)
+            .put("selectedVideoTrack", video?.let { group ->
+                (0 until group.length).firstOrNull(group::isTrackSelected)?.let { index ->
+                    JSONObject().put("group", group.mediaTrackGroup.id).put("index", index)
+                        .put("id", group.getTrackFormat(index).id ?: JSONObject.NULL)
+                        .put("mime", group.getTrackFormat(index).sampleMimeType ?: JSONObject.NULL)
+                }
+            } ?: JSONObject.NULL)
+            .put("decoder", activeVideoDecoder ?: JSONObject.NULL)
+            .put("decoderInitCount", counters?.decoderInitCount ?: 0)
+            .put("renderedOutputBufferCount", counters?.renderedOutputBufferCount ?: 0)
+            .put("output", JSONObject().put("width", format?.width ?: JSONObject.NULL)
+                .put("height", format?.height ?: JSONObject.NULL).put("mime", format?.sampleMimeType ?: JSONObject.NULL)
+                .put("surfaceWidth", attachedPlayerView.get()?.videoSurfaceView?.width ?: JSONObject.NULL)
+                .put("surfaceHeight", attachedPlayerView.get()?.videoSurfaceView?.height ?: JSONObject.NULL))
+        val previous = phaseTimes.optJSONObject("firstFrameRecovery")
+        phaseTimes.put("firstFrameRecovery", evidence)
+        if (action == null) {
+            if (previous?.optString("stage") != firstFrameRecovery.stage.name ||
+                previous.optBoolean("surfaceValid") != (surface?.isValid == true)) {
+                PageLog.add("firstFrameGuard action=observe evidence=$evidence")
+            }
+            return
+        }
+        playbackDiagnostics.identity?.let { playbackDiagnostics.recovery(it, now, "first-frame:$action") }
+        PageLog.add("firstFrameGuard action=$action evidence=$evidence attempts=${recoveryBudget.attempts}")
+        when (action) {
+            FirstFrameAction.REBIND -> runCatching {
+                player?.clearVideoSurface()
+                if (surface?.isValid == true) player?.setVideoSurface(surface)
+            }.onFailure { PageLog.add("firstFrameGuard rebind failed=${it.javaClass.simpleName}") }
+            FirstFrameAction.RECREATE, FirstFrameAction.ALTERNATE -> {
+                if (action == FirstFrameAction.ALTERNATE) {
+                    val next = mediaSources.firstOrNull { it.id != currentSourceId && it.id !in triedSources }
+                    when {
+                        tunnelingEnabled && !tunnelingFallbackTried -> {
+                            tunnelingFallbackTried = true
+                            setTunnelingEnabled(false)
+                        }
+                        canTryMpvPath() -> {
+                            recordPathFailure(PlaybackFailureReason.FIRST_FRAME_TIMEOUT, "ready-no-frame")
+                            enginePinned = "mpv"
+                        }
+                        next != null -> {
+                            recordPathFailure(PlaybackFailureReason.FIRST_FRAME_TIMEOUT, "ready-no-frame")
+                            triedSources = triedSources + listOfNotNull(currentSourceId)
+                            currentSourceId = next.id
+                            enginePinned = null
+                            reloadForceTranscode = false
+                        }
+                        serverTranscodingAvailable(currentPlaybackSourceJson()) && !transcodeFallbackTried -> {
+                            recordPathFailure(PlaybackFailureReason.FIRST_FRAME_TIMEOUT, "ready-no-frame")
+                            transcodeFallbackTried = true
+                            reloadForceTranscode = true
+                        }
+                        else -> { finishFirstFrameRecovery("no-alternate-path"); return }
+                    }
+                }
+                if (action == FirstFrameAction.RECREATE) {
+                    recordPathFailure(PlaybackFailureReason.FIRST_FRAME_TIMEOUT, "ready-no-frame")
+                    enginePinned = currentPath?.engine
+                    reloadForceTranscode = currentPath?.delivery == PlaybackDelivery.TRANSCODE
+                }
+                // tick acquired exactly one shared-budget permit; reload must not charge again.
+                recovering = true
+                try { requestPlaybackReload(sessionGeneration) } finally { recovering = false }
+            }
+            FirstFrameAction.TERMINAL -> finishFirstFrameRecovery("deadline-or-budget")
+        }
+    }
+
     fun loadSource(
         forceTranscode: Boolean,
         sourceId: String? = currentSourceId,
@@ -1766,7 +1855,7 @@ fun PlayerScreen(
                 ?: AppRuntime.prefs?.audioTrackFor(item.id, source)
         },
     ) {
-        if (!instanceJob.isActive || currentExo !== exo) return
+        if (!instanceJob.isActive) return
         val c = client ?: return
         val previousGeneration = sessionGeneration
         val previousSource = playbackSource
@@ -1791,12 +1880,6 @@ fun PlayerScreen(
         readyAt = 0L
         firstFrameAt = 0L
         firstFrameRendered = false
-        firstFrameRecoveryTried = false
-        readyWithoutFrameSince = 0L
-        tunnelingFallbackJob?.cancel()
-        tunnelingFallbackJob = null
-        tunnelingEnabledAt = 0L
-        tunnelingGeneration = -1
         setTunnelingEnabled(false)
         watchdog.reset()
         // Snapshot before releasing either engine. Zero is a valid restoration point.
@@ -1809,7 +1892,14 @@ fun PlayerScreen(
         speedState = speedState.forNewLoad()
         loadJob?.cancel()
         rangeProbeJob?.cancel()
+        loadWorkJob.cancel()
+        loadWorkJob = SupervisorJob(instanceJob)
         val generation = loadCoordinator.beginLoad(sourceId)
+        firstFrameRecovery.beginLoad(generation, android.os.SystemClock.elapsedRealtime())
+        frameObservation = firstFrameRecovery.observation
+        prewarm.invalidate()
+        prewarmJob?.cancel()
+        prewarmJob = null
         playbackLoadPermit = null
         seekConfirmationJob?.cancel()
         seekConfirmation = null
@@ -1833,24 +1923,19 @@ fun PlayerScreen(
         mpvBackend?.release("external-load-replaced")
         mpvBackend = null
         mpvState = MpvPlayerController.State()
-        val exoRetirement = Media3DecoderRetirements.begin(exo)
-        MpvRetirementFence.track(exoRetirement)
-        var exoCleanupFailure: Throwable? = null
-        fun retireExoStep(action: () -> Unit) {
-            runCatching(action).onFailure { failure ->
-                if (exoCleanupFailure == null) exoCleanupFailure = failure
-                else exoCleanupFailure?.addSuppressed(failure)
-            }
-        }
-        retireExoStep { exo.pause() }
-        // pause() retains MediaCodec and its buffers. Retire the old media before negotiating
-        // another load/engine, so mpv cannot start alongside a suspended Media3 decoder.
-        retireExoStep { exo.stop() }
-        retireExoStep { exo.clearMediaItems() }
-        if (exoCleanupFailure == null) {
-            Media3DecoderRetirements.finish(exo, exoRetirement)
-        } else {
-            Media3DecoderRetirements.fail(exo, exoRetirement, exoCleanupFailure!!)
+        // Keep decoder callbacks attached until stop/clear has drained the old physical load.
+        val retiringPlayer = media3Player
+        retiringPlayer?.let { exo ->
+            val exoRetirement = Media3DecoderRetirements.begin(exo)
+            MpvRetirementFence.track(exoRetirement)
+            runCatching {
+                exo.pause()
+                exo.stop()
+                exo.clearMediaItems()
+            }.fold(
+                onSuccess = { Media3DecoderRetirements.finish(exo, exoRetirement) },
+                onFailure = { Media3DecoderRetirements.fail(exo, exoRetirement, it) },
+            )
         }
         PageLog.add("playback reload session=${playbackDiagnostics.sessionId} load=${playbackDiagnostics.identity} gen=$generation fromGen=${generation - 1} positionMs=$resumePosition engine=$activeEngine")
         playStartAt = android.os.SystemClock.elapsedRealtime()
@@ -1865,9 +1950,14 @@ fun PlayerScreen(
             firstFrameRendered = false
             updateLoading(false)
             updateStalled(true)
-            readyWithoutFrameSince = 0L
             bufferingTimedOut = false
             try {
+                MpvRetirementFence.awaitPermit()
+                if (!isCurrentLoad(generation) || reloadPending) return@launch
+                retireMedia3Player(retiringPlayer, "load-replaced")
+                media3Player = null
+                activeTrackSelector = null
+                // release is also fenced; never reuse the authority from before that retirement.
                 val retirementPermit = MpvRetirementFence.awaitPermit()
                 val loadPermit = loadCoordinator.grantPermit(generation, retirementPermit) ?: return@launch
                 if (!isCurrentLoad(generation) || reloadPending) return@launch
@@ -1901,7 +1991,6 @@ fun PlayerScreen(
                 val target = resolvedTarget.copy(negotiationDiagnostics = JSONObject(resolvedTarget.negotiationDiagnostics.toString()))
                 if (!isCurrentLoad(generation)) { PageLog.add("stale callback dropped gen=$generation/cur=$sessionGeneration"); return@launch }
                 if (reloadPending || !loadCoordinator.resolveSource(generation, target.source.id)) return@launch
-                httpFactory.setDefaultRequestProperties(target.headers)
                 phaseTimes.put("compatMappingMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
                 details.acceptTarget(target)
                 currentTarget = target
@@ -1933,7 +2022,7 @@ fun PlayerScreen(
                 val hlsRemuxTried = targetIsHls && target.mode != com.lumina.tv.data.PlaybackMode.Transcode
                 phaseTimes.put("hlsRemuxTried", hlsRemuxTried)
                 if (target.mode == com.lumina.tv.data.PlaybackMode.Transcode) transcodeFallbackTried = true
-                rangeProbeJob = instanceScope.launch {
+                rangeProbeJob = launchLoadWork launch@ {
                     val probeResult = runCatching { PlaybackRangeProbe.probe(target.url, target.headers, c.playbackHttpClient) }
                         .getOrElse { JSONObject().put("error", it.javaClass.simpleName) }
                     if (isCurrentLoad(generation) && currentTarget === target) {
@@ -1981,10 +2070,6 @@ fun PlayerScreen(
                 val tunnelingEligible = if (isDolbyVision) dvCapability else isHdr && hdrCapability
                 val enableTunnelingForLoad = selectedEngine == "media3" && tunnelingEligible && !tunnelingFallbackTried
                 val tunnelingActuallyEnabled = enableTunnelingForLoad && setTunnelingEnabled(true)
-                if (tunnelingActuallyEnabled) {
-                    tunnelingGeneration = generation
-                    tunnelingEnabledAt = android.os.SystemClock.elapsedRealtime()
-                }
                 PageLog.add(
                     "media3Tunneling decision gen=$generation range=$rangeType dv=$isDolbyVision " +
                         "dvCap=$dvCapability hdrCap=$hdrCapability engine=$selectedEngine " +
@@ -2020,15 +2105,12 @@ fun PlayerScreen(
                 }
                 activeEngine = selectedEngine
                 bindAudioOutput(target.source?.id ?: sourceId, null, selectedEngine, generation)
-                exo.setAudioAttributes(
-                    AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
-                    selectedEngine != "mpv",
-                )
                 currentResolution = target.source?.resolution
                     ?: if (target.direct) null else "转码"
                 val cacheLimit = AppRuntime.prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L
                 PlaybackCache.setLimit(cacheLimit)
-                val upstreamFactory = OkHttpDataSource.Factory(c.playbackHttpClient)
+                val observedClient = c.playbackHttpClient.newBuilder().eventListenerFactory(playbackHttpTrace).build()
+                val upstreamFactory = OkHttpDataSource.Factory(observedClient)
                     .setUserAgent("LuminaTV/1.5 (Android)")
                     .setDefaultRequestProperties(target.headers)
                 val cacheFactory = if (cacheLimit > 0L) PlaybackCache.dataSourceFactory(context, upstreamFactory) else null
@@ -2228,6 +2310,7 @@ fun PlayerScreen(
                             playbackDiagnostics.firstFrame(load, android.os.SystemClock.elapsedRealtime(), "mpv.ready (no rendered-frame callback)")
                         }
                         if (state.ready && !state.buffering && !firstFrameRendered) {
+                            firstFrameRecovery.frame(firstFrameRecovery.observation, android.os.SystemClock.elapsedRealtime())
                             firstFrameRendered = true
                             matchDisplayFrameRate(currentSurface, mpvBackend?.containerFps())
                             firstFrameAt = android.os.SystemClock.elapsedRealtime()
@@ -2301,11 +2384,10 @@ fun PlayerScreen(
                         else -> backend.enableSubtitleAuto()
                     }
                     pendingStartIntent = null
-                    var waitedMs = 0
-                    while (currentSurface?.isValid != true && waitedMs < 1_500) {
+                    val surfaceDeadline = android.os.SystemClock.elapsedRealtime() + 1_500L
+                    while (currentSurface?.isValid != true && android.os.SystemClock.elapsedRealtime() < surfaceDeadline) {
                         delay(50)
                         if (!isCurrentLoad(generation)) return@launch
-                        waitedMs += 50
                     }
                     val surface = currentSurface?.takeIf { it.isValid }
                     if (surface == null) {
@@ -2345,7 +2427,7 @@ fun PlayerScreen(
                         subtitleHttpFactory,
                         configs.associate { it.uri to it.id.orEmpty() },
                     ) { id, reason ->
-                        instanceScope.launch {
+                        launchLoadWork launch@ {
                             if (isCurrentLoad(generation) && activeEngine == "media3") {
                                 phaseTimes.put("rendererFailure", JSONObject().put("route", "TEXT")
                                     .put("rendererType", "external-subtitle").put("sampleMime", "text/vtt")
@@ -2362,7 +2444,25 @@ fun PlayerScreen(
                         .apply { if (customKey != null) setCustomCacheKey(customKey) }
                         .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(item.name).build())
                         .build()
-                    val videoSource = DefaultMediaSourceFactory(optionalFactory).createMediaSource(videoItem)
+                    // Metadata is final and no old decoder exists before choosing resources or building.
+                    val totalMemMb = runCatching {
+                        val info = android.app.ActivityManager.MemoryInfo()
+                        context.getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(info)
+                        (info.totalMem / (1024L * 1024L)).toInt()
+                    }.getOrDefault(0)
+                    if (!isCurrentLoad(generation) || !loadCoordinator.accepts(loadPermit)) return@launch
+                    val resourcePlan = Media3ResourcePlan.resolve(target.source, totalMemMb, fastStart, retirementPermit)
+                    val sourceWiring = Media3SourceWiring(optionalFactory)
+                    val exo = createMedia3Player(resourcePlan, sourceWiring)
+                    val listenersReady = kotlinx.coroutines.CompletableDeferred<Unit>()
+                    media3ListenersReady = listenersReady
+                    media3Owner.set(exo)
+                    media3Player = exo
+                    media3LoadGeneration = generation
+                    // Listener effects must be installed before prepare can emit decoder/frame events.
+                    listenersReady.await()
+                    if (!isCurrentLoad(generation) || media3Player !== exo || !loadCoordinator.accepts(loadPermit)) return@launch
+                    val videoSource = sourceWiring.factory.createMediaSource(videoItem)
                     subtitleSelectionApplied = false
                     audioSelectionApplied = false
                     selectedAudioStreamIndex = target.audioStreamIndex
@@ -2381,25 +2481,6 @@ fun PlayerScreen(
                     exo.setMediaSource(videoSource)
                     if (!isCurrentLoad(generation) || !loadCoordinator.accepts(loadPermit)) return@launch
                     exo.prepare()
-                    if (tunnelingActuallyEnabled && tunnelingGeneration == generation) {
-                        tunnelingFallbackJob?.cancel()
-                        val enabledAt = tunnelingEnabledAt
-                        val remainingMs = (enabledAt + 3_000L - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1L)
-                        tunnelingFallbackJob = instanceScope.launch {
-                            delay(remainingMs)
-                            if (isCurrentLoad(generation) && !reloadPending && activeEngine == "media3" &&
-                                tunnelingEnabled && tunnelingGeneration == generation && !firstFrameRendered
-                            ) {
-                                tunnelingFallbackTried = true
-                                tunnelingEnabledAt = 0L
-                                tunnelingGeneration = -1
-                                PageLog.add("media3Tunneling fallback gen=$generation reason=no-first-frame elapsedMs=${android.os.SystemClock.elapsedRealtime() - enabledAt}")
-                                setTunnelingEnabled(false)
-                                requestPlaybackReload(generation)
-                            }
-                            tunnelingFallbackJob = null
-                        }
-                    }
                     pendingStartIntent = null
                     target.playerStartPositionMs?.let(exo::seekTo)
                     exo.setPlaybackSpeed(speedState.effectiveSpeed)
@@ -2428,8 +2509,8 @@ fun PlayerScreen(
     val diagnosticSessionId = remember(item.id) { ExitSessionDiagnostics.newSession() }
 
     fun buildDiagPayload(outcome: String): DiagPayload {
-        check(android.os.Looper.myLooper() == exo.applicationLooper)
-        check(exo.applicationLooper == android.os.Looper.getMainLooper())
+        check(android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+        if (exo != null) check(exo.applicationLooper == android.os.Looper.getMainLooper())
         phaseTimes.put("failedPaths", failureDiagnostics()).put("recoveryAttempts", recoveryBudget.attempts)
             .put("pathExclusions", JSONArray(pathFailures.exclusionHistory().map { exclusion ->
                 JSONObject().put("path", playbackPathJson(exclusion.observation.path))
@@ -2491,7 +2572,7 @@ fun PlayerScreen(
     }
 
     // One entry point for initial load, rebuild, engine switch and explicit reload.
-    LaunchedEffect(exo, item.id, reloadKey) {
+    LaunchedEffect(item.id, reloadKey) {
         com.lumina.tv.ui.components.DetailPreviewPlayer.awaitRelease()
         loadSource(forceTranscode = reloadForceTranscode)
     }
@@ -2524,10 +2605,12 @@ fun PlayerScreen(
         val now = android.os.SystemClock.elapsedRealtime()
         val beforeSeek = observedPlayerPositionMs() ?: lastPlayerPositionMs
         target.timeline.beforeSeek()
+        firstFrameRecovery.beforeSeek(now)
+        frameObservation = firstFrameRecovery.observation
         seekConfirmationJob?.cancel()
         seekConfirmation = PendingSeekConfirmation(displayTarget, playerPosition, beforeSeek, now,
-            playbackSpeed = if (activeEngine == "mpv") speedState.effectiveSpeed else exo.playbackParameters.speed,
-            paused = if (activeEngine == "mpv") !mpvState.playing || mpvState.buffering else !exo.isPlaying)
+            playbackSpeed = if (activeEngine == "mpv") speedState.effectiveSpeed else exo?.playbackParameters?.speed ?: 1f,
+            paused = if (activeEngine == "mpv") !mpvState.playing || mpvState.buffering else exo?.isPlaying != true)
         phaseTimes.put("seekConfirmation", JSONObject().put("state", SeekConfirmation.PENDING.name)
             .put("targetMs", displayTarget).put("playerTargetMs", playerPosition)
             .put("timelineUnverified", target?.timeline?.calibration?.offsetMs == null))
@@ -2536,7 +2619,7 @@ fun PlayerScreen(
                 "mpv" -> checkNotNull(mpvBackend).seekTo(playerPosition)
                 else -> {
                     media3PositionAvailable = false
-                    exo.seekTo(playerPosition)
+                    exo?.seekTo(playerPosition)
                 }
             }
         }
@@ -2544,7 +2627,7 @@ fun PlayerScreen(
             confirmSeek(null, now, commandFailed = true)
         } else {
             val generation = sessionGeneration
-            seekConfirmationJob = instanceScope.launch {
+            seekConfirmationJob = launchLoadWork launch@ {
                 delay(PendingSeekConfirmation.TIMEOUT_MS)
                 if (isCurrentLoad(generation)) {
                     val observed = observedPlayerPositionMs()
@@ -2565,7 +2648,7 @@ fun PlayerScreen(
         if (!desiredPlaying) cancelCreditsCountdown("pause")
         when (activeEngine) {
             "mpv" -> if (desiredPlaying) mpvBackend?.play() else mpvBackend?.pause()
-            else -> if (desiredPlaying) exo.play() else exo.pause()
+            else -> if (desiredPlaying) exo?.play() else exo?.pause()
         }
         pauseIndicatorUntil = android.os.SystemClock.elapsedRealtime() + 1200L
         PageLog.add("togglePlay src=$src state=${if (desiredPlaying) "playing" else "paused"}")
@@ -2576,7 +2659,7 @@ fun PlayerScreen(
         playerVolumePercent = value
         if (value > 0) lastAudibleVolumePercent = value
         AppRuntime.prefs?.playerVolume = value
-        if (activeEngine == "mpv") mpvBackend?.setVolumePercent(value) else exo.volume = value / 100f
+        if (activeEngine == "mpv") mpvBackend?.setVolumePercent(value) else exo?.volume = value / 100f
         volumeOsdUntil = android.os.SystemClock.elapsedRealtime() + 1_500L
         volumeOsdVisible = true
         if (activeAudioPassthrough) {
@@ -2605,13 +2688,13 @@ fun PlayerScreen(
     fun currentVolumePercent(): Int = if (activeEngine == "mpv") {
         mpvBackend?.volumePercent() ?: playerVolumePercent
     } else {
-        (exo.volume * 100f + 0.5f).toInt().coerceIn(0, 100)
+        ((exo?.volume ?: playerVolumePercent / 100f) * 100f + 0.5f).toInt().coerceIn(0, 100)
     }
 
     fun setPlaybackSpeed(value: Float) {
         when (activeEngine) {
             "mpv" -> mpvBackend?.setSpeed(value)
-            else -> exo.setPlaybackSpeed(value)
+            else -> exo?.setPlaybackSpeed(value)
         }
     }
 
@@ -2627,9 +2710,10 @@ fun PlayerScreen(
     }
 
     DisposableEffect(exo, item.id) {
+        if (exo == null) return@DisposableEffect onDispose { }
         val listener = object : Player.Listener {
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
-                if (!isCurrentMedia3()) return
+                if (currentExo !== exo || !isCurrentMedia3()) return
                 val errorClass = classifyPlaybackError(err, client?.baseUrl.orEmpty())
                 val rendererFailure = classifyRendererFailure(err, source = currentSourceId,
                     audioSupportUnsupported = audioSupport == AudioSupport.UNSUPPORTED)
@@ -2640,23 +2724,6 @@ fun PlayerScreen(
                     if (rendererFailure.route in setOf(RendererFailureRoute.AUDIO, RendererFailureRoute.VIDEO) &&
                         rendererFailure.evidence.decoderName == null) put("decoderName", decoderReadback ?: JSONObject.NULL)
                 })
-                if (tunnelingEnabled && tunnelingGeneration == sessionGeneration && !firstFrameRendered &&
-                    rendererFailure.route == RendererFailureRoute.VIDEO &&
-                    errorClass.category == PlaybackErrorCategory.DECODING && !tunnelingFallbackTried
-                ) {
-                    val generation = sessionGeneration
-                    tunnelingFallbackTried = true
-                    tunnelingFallbackJob?.cancel()
-                    tunnelingFallbackJob = null
-                    tunnelingEnabledAt = 0L
-                    tunnelingGeneration = -1
-                    PageLog.add("media3Tunneling fallback gen=$generation reason=decoder-error")
-                    setTunnelingEnabled(false)
-                    error = null
-                    updateStalled(true)
-                    requestPlaybackReload(generation)
-                    return
-                }
                 android.util.Log.e("LuminaTV", "Media3 playback failed code=${err.errorCode}", err)
                 PageLog.add("playbackError category=${errorClass.category.name} code=${err.errorCode} action=${errorClass.action}")
                 failurePhase = when {
@@ -2700,7 +2767,7 @@ fun PlayerScreen(
                     failurePhase = "认证"
                     updateStalled(false)
                     reportError("登录已失效，请重新登录")
-                    exo.pause()
+                    exo?.pause()
                     PageLog.add("playbackRecovery route=authentication action=terminal no-transcode")
                     return
                 }
@@ -2711,6 +2778,11 @@ fun PlayerScreen(
                         return
                     }
                     RendererFailureRoute.VIDEO -> {
+                        if (!firstFrameRendered) {
+                            firstFrameRecovery.videoFailure(sessionGeneration)
+                            tickFirstFrameRecovery(android.os.SystemClock.elapsedRealtime())
+                            return
+                        }
                         recordPathFailure(PlaybackFailureReason.DECODING, err.errorCodeName)
                         if (canTryMpvPath()) {
                             enginePinned = "mpv"
@@ -2773,7 +2845,7 @@ fun PlayerScreen(
                     val generation = sessionGeneration
                     updateStalled(true)
                     error = null
-                    instanceScope.launch {
+                    launchLoadWork launch@ {
                         rangeProbeJob?.join()
                         if (!isCurrentLoad(generation) || activeEngine != "media3") return@launch
                         val rangeProbeDiagnostics = loadDetails.rangeProbeDiagnostics
@@ -2945,7 +3017,7 @@ fun PlayerScreen(
             }
 
             override fun onPlaybackStateChanged(state: Int) {
-                if (!isCurrentMedia3()) return
+                if (currentExo !== exo || !isCurrentMedia3()) return
                 playbackDiagnostics.identity?.let { playbackDiagnostics.buffering(it, state == Player.STATE_BUFFERING,
                     android.os.SystemClock.elapsedRealtime(), "Media3.onPlaybackStateChanged:$state") }
                 updateStalled(state == Player.STATE_BUFFERING && exo.playWhenReady)
@@ -2962,7 +3034,6 @@ fun PlayerScreen(
                     if (readyAt == 0L) readyAt = android.os.SystemClock.elapsedRealtime()
                     val loadToReadyMs = (readyAt - loadStartedAt).coerceAtLeast(0L)
                     phaseTimes.put("loadToReadyMs", loadToReadyMs)
-                    if (!firstFrameRendered) readyWithoutFrameSince = System.currentTimeMillis()
                     if (degraded) error = null
                 } else if (state == Player.STATE_BUFFERING) {
                     playbackStatusNotice = null
@@ -2974,7 +3045,7 @@ fun PlayerScreen(
             }
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
-                if (!isCurrentMedia3()) return
+                if (currentExo !== exo || !isCurrentMedia3()) return
                 completeMedia3AudioReady()
                 val embyAudio = playbackSource?.audioStreams.orEmpty()
                 val embySubs = playbackSource?.subtitleStreams.orEmpty()
@@ -3045,9 +3116,9 @@ fun PlayerScreen(
                 if (shouldRecoverAudioWithoutSelection(sourceHasAudio, selectedMediaAudio, noAudioRetryTried)) {
                     val generation = sessionGeneration
                     PageLog.add("audioCapability action=deferred-selection-check candidates=${audioCandidates.size}")
-                    instanceScope.launch {
+                    launchLoadWork launch@ {
                         delay(3_000)
-                        val selectedAudioAfterWait = exo.currentTracks.groups
+                        val selectedAudioAfterWait = exo?.currentTracks?.groups.orEmpty()
                             .filter { it.type == C.TRACK_TYPE_AUDIO }
                             .any { group -> (0 until group.length).any(group::isTrackSelected) }
                         if (isCurrentLoad(generation) && activeEngine == "media3" &&
@@ -3059,7 +3130,7 @@ fun PlayerScreen(
                             )
                         ) {
                             noAudioRetryTried = true
-                            val audioGroupsExist = exo.currentTracks.groups
+                            val audioGroupsExist = exo?.currentTracks?.groups.orEmpty()
                                 .any { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
                             val reason = if (audioGroupsExist) "audio-track-not-selected" else "missing-audio-track"
                             PageLog.add("audioCapability action=recover-after-selection-wait reason=$reason")
@@ -3109,13 +3180,13 @@ fun PlayerScreen(
             }
 
             override fun onIsPlayingChanged(p: Boolean) {
-                if (!isCurrentMedia3()) return
+                if (currentExo !== exo || !isCurrentMedia3()) return
                 isPlaying = p
                 if (p) updateStalled(false)
                 if (p) AudioFocusGuard.record("playback-resumed")
             }
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                if (!isCurrentMedia3()) return
+                if (currentExo !== exo || !isCurrentMedia3()) return
                 desiredPlaying = media3DesiredPlayingAfterChange(desiredPlaying, playWhenReady, reason)
                 if (!desiredPlaying) cancelCreditsCountdown("media3-pause:$reason")
                 updateStalled(playWhenReady && exo.playbackState == Player.STATE_BUFFERING)
@@ -3124,7 +3195,7 @@ fun PlayerScreen(
                 }
             }
             override fun onIsLoadingChanged(loading: Boolean) {
-                if (!isCurrentMedia3()) return
+                if (currentExo !== exo || !isCurrentMedia3()) return
                 updateLoading(loading)
             }
 
@@ -3133,10 +3204,32 @@ fun PlayerScreen(
         onDispose { exo.removeListener(listener) }
     }
 
+    // Decoder lifetime observation must survive seek/load observation epoch changes.
     DisposableEffect(exo) {
+        if (exo == null) return@DisposableEffect onDispose { }
+        val lifetime = object : AnalyticsListener {
+            override fun onVideoDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String,
+                initializedTimestampMs: Long, initializationDurationMs: Long) {
+                if (media3Owner.get() !== exo) return
+                PlayerLifecycle.registry.decoderInitialized(exo, decoderName)
+                Media3DecoderRetirements.decoderInitialized(exo, decoderName)
+            }
+            override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
+                if (media3Owner.get() !== exo) return
+                PlayerLifecycle.registry.decoderReleased(exo, decoderName)
+                Media3DecoderRetirements.decoderReleased(exo, decoderName)
+            }
+        }
+        exo.addAnalyticsListener(lifetime)
+        onDispose { exo.removeAnalyticsListener(lifetime) }
+    }
+
+    DisposableEffect(exo, frameObservation) {
+        if (exo == null) return@DisposableEffect onDispose { }
+        val analyticsFrame = frameObservation
         val analytics = object : AnalyticsListener {
             override fun onPlayerError(eventTime: AnalyticsListener.EventTime, error: androidx.media3.common.PlaybackException) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 loadDetails.recordMedia3Failure(error, eventTime.mediaPeriodId?.toString())
             }
 
@@ -3144,26 +3237,24 @@ fun PlayerScreen(
                 eventTime: AnalyticsListener.EventTime, decoderName: String,
                 initializedTimestampMs: Long, initializationDurationMs: Long,
             ) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 playbackDiagnostics.identity?.let { playbackDiagnostics.decoder(it, true, decoderName) }
             }
 
             override fun onAudioDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 playbackDiagnostics.identity?.let { playbackDiagnostics.decoder(it, true, null) }
             }
 
             override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
-                PlayerLifecycle.registry.decoderReleased(exo, decoderName)
-                Media3DecoderRetirements.decoderReleased(exo, decoderName)
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 playbackDiagnostics.identity?.let { playbackDiagnostics.decoder(it, false, null) }
             }
 
             override fun onAudioTrackInitialized(
                 eventTime: AnalyticsListener.EventTime, audioTrackConfig: androidx.media3.exoplayer.audio.AudioSink.AudioTrackConfig,
             ) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 val encoding = audioTrackConfig.encoding
                 val offload = audioTrackConfig.offload
                 val outputPath = media3AudioPath(encoding)
@@ -3196,7 +3287,7 @@ fun PlayerScreen(
             override fun onAudioTrackReleased(
                 eventTime: AnalyticsListener.EventTime, audioTrackConfig: androidx.media3.exoplayer.audio.AudioSink.AudioTrackConfig,
             ) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 activeAudioPassthrough = false
                 passthroughVolumeAdjustments = 0
                 audioOutputLedger.invalidateSample()
@@ -3209,9 +3300,7 @@ fun PlayerScreen(
                 initializedTimestampMs: Long,
                 initializationDurationMs: Long,
             ) {
-                PlayerLifecycle.registry.decoderInitialized(exo, decoderName)
-                Media3DecoderRetirements.decoderInitialized(exo, decoderName)
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 activeVideoDecoder = decoderName
                 playbackDiagnostics.identity?.let { playbackDiagnostics.decoder(it, false, decoderName) }
                 phaseTimes.put("decoderInitMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
@@ -3222,7 +3311,8 @@ fun PlayerScreen(
                 output: Any,
                 renderTimeMs: Long,
             ) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
+                if (eventTime.realtimeMs < analyticsFrame.sinceMs || !firstFrameRecovery.frame(analyticsFrame, renderTimeMs)) return
                 media3PositionAvailable = true
                 val now = android.os.SystemClock.elapsedRealtime()
                 currentTarget?.let { target ->
@@ -3230,10 +3320,6 @@ fun PlayerScreen(
                     observeTimelinePosition(target, exo.currentPosition.takeIf { it >= 0L }, exo.duration, now)
                 }
                 firstFrameRendered = true
-                if (tunnelingGeneration == sessionGeneration) {
-                    tunnelingFallbackJob?.cancel()
-                    tunnelingFallbackJob = null
-                }
                 updateStalled(exo.playbackState == Player.STATE_BUFFERING && exo.playWhenReady)
                 phaseTimes.put("firstFramePositionMs", exo.currentPosition)
                 if (firstFrameAt == 0L) firstFrameAt = now
@@ -3247,7 +3333,6 @@ fun PlayerScreen(
                     .put("readyToFirstFrameMs", readyToFirstFrameMs)
                     .put("firstFrameMs", loadToFirstFrameMs)
                 playbackDiagnostics.identity?.let { playbackDiagnostics.firstFrame(it, firstFrameAt, "Media3.onRenderedFirstFrame") }
-                readyWithoutFrameSince = 0L
                 if (strmRestartNoticePending) {
                     strmRestartNoticePending = false
                     strmRestartNoticeShown = true
@@ -3257,7 +3342,7 @@ fun PlayerScreen(
                 }
                 matchDisplayFrameRate(output as? Surface, exo.videoFormat?.frameRate)
                 val generation = sessionGeneration
-                instanceScope.launch {
+                launchLoadWork launch@ {
                     delay(2_000)
                     if (isCurrentLoad(generation) && firstFrameRendered) {
                         phaseTimes.put("stableOutputMs", android.os.SystemClock.elapsedRealtime() - playStartAt)
@@ -3266,12 +3351,12 @@ fun PlayerScreen(
             }
 
             override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFramesCount: Int, elapsedMs: Long) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 droppedFrames += droppedFramesCount
             }
 
             override fun onVideoFrameProcessingOffset(eventTime: AnalyticsListener.EventTime, totalProcessingOffsetUs: Long, frameCount: Int) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 renderedFrames += frameCount
             }
 
@@ -3281,12 +3366,13 @@ fun PlayerScreen(
                 totalBytesLoaded: Long,
                 bitrateEstimate: Long,
             ) {
-                if (!isCurrentMedia3Event(eventTime)) return
+                if (currentExo !== exo || !isCurrentMedia3Event(eventTime)) return
                 estimatedBitrate = bitrateEstimate.coerceAtLeast(0L)
                 bytesLoaded = totalBytesLoaded.toLong()
             }
         }
         exo.addAnalyticsListener(analytics)
+        media3ListenersReady.complete(Unit)
         onDispose { exo.removeAnalyticsListener(analytics) }
     }
 
@@ -3294,6 +3380,7 @@ fun PlayerScreen(
         onDispose {
             cancelSeekPreview("page-exit")
             reportStopInAppScope()
+            prewarm.invalidate()
             prewarmJob?.cancel()
             cancelCreditsCountdown("player-disposed")
             watchdog.reset()
@@ -3374,7 +3461,7 @@ fun PlayerScreen(
         seekPlayerTo(to)
         seekTimeoutJob?.cancel()
         val generation = sessionGeneration
-        seekTimeoutJob = instanceScope.launch {
+        seekTimeoutJob = launchLoadWork launch@ {
             delay(400)
             if (!isCurrentLoad(generation)) return@launch
             seekInFlight = false
@@ -3416,7 +3503,7 @@ fun PlayerScreen(
         seekPreviewJob?.cancel()
         val generation = sessionGeneration
         val startedAt = android.os.SystemClock.elapsedRealtime()
-        seekPreviewJob = instanceScope.launch {
+        seekPreviewJob = launchLoadWork launch@ {
             delay(500L)
             while (isCurrentLoad(generation)) {
                 val active = seekPreviewTargetMs
@@ -3527,11 +3614,17 @@ fun PlayerScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
                 autoNextForeground = false
+                prewarm.invalidate()
+                prewarmJob?.cancel()
+                prewarmJob = null
                 if (creditsCountdown.active) cancelCreditsCountdown("host-${event.name}")
                 cancelSeekPreview("host-${event.name}")
                 dispatchHiddenInput(HiddenPlaybackEvent.Cancel)
             }
-            if (event == Lifecycle.Event.ON_RESUME) autoNextForeground = true
+            if (event == Lifecycle.Event.ON_RESUME) {
+                prewarm.resume()
+                autoNextForeground = true
+            }
             if (event == Lifecycle.Event.ON_STOP) {
                 // Intent also covers negotiation, Surface waits and temporary audio-focus holds.
                 val playbackRequested = loadCoordinator.desiredPlaying
@@ -3544,7 +3637,7 @@ fun PlayerScreen(
                 if (transition.pausePlayback) {
                     desiredPlaying = false
                     cancelCreditsCountdown("host-stop")
-                    if (hostActiveEngine == "mpv") hostMpvBackend?.pause() else exo.pause()
+                    if (hostActiveEngine == "mpv") hostMpvBackend?.pause() else exo?.pause()
                     isPlaying = false
                     PageLog.add("playbackLifecycle event=ON_STOP action=pause engine=$hostActiveEngine generation=$hostSessionGeneration")
                 }
@@ -3572,8 +3665,15 @@ fun PlayerScreen(
         }
     }
 
+    LaunchedEffect(autoNextForeground, desiredPlaying, sessionGeneration, playbackLoadPermit) {
+        prewarm.invalidate()
+        prewarmJob?.cancel()
+        prewarmJob = null
+        if (autoNextForeground && desiredPlaying) prewarm.resume()
+    }
+
     fun requestWatchdogRecovery(reason: WatchdogReason) {
-        if (recovering || audioRecoveryJob?.isActive == true || optionMenu || error != null || reloadPending) return
+        if (firstFrameRecovery.ownsRecovery || recovering || audioRecoveryJob?.isActive == true || optionMenu || error != null || reloadPending) return
         val generation = sessionGeneration
         val recoveryPosition = position
         val mpvLoad = mpvBackend?.diagnosticLoadIdentity().takeIf { activeEngine == "mpv" }
@@ -3620,9 +3720,10 @@ fun PlayerScreen(
         var bufferingSince = 0L
         while (true) {
             delay(500)
-            if (!instanceJob.isActive || currentExo !== exo) return@LaunchedEffect
+            if (!instanceJob.isActive) return@LaunchedEffect
             val target = currentTarget
             val now = android.os.SystemClock.elapsedRealtime()
+            tickFirstFrameRecovery(now)
             val watchdogEngine = activeEngine
             val watchdogBackend = mpvBackend
             val watchdogMpvLoad = if (watchdogEngine == "mpv") watchdogBackend?.diagnosticLoadIdentity() else null
@@ -3637,7 +3738,7 @@ fun PlayerScreen(
                     } else null
                 },
                 position = { observedPlayerPositionMs() },
-                duration = { if (watchdogEngine == "mpv") watchdogBackend?.durationMs() else exo.duration },
+                duration = { if (watchdogEngine == "mpv") watchdogBackend?.durationMs() else exo?.duration },
             )
             val playerPosition = nativeTimeline?.positionMs
             val playerDuration = nativeTimeline?.durationMs
@@ -3679,9 +3780,9 @@ fun PlayerScreen(
             val reason = if (ownsEngine) watchdog.onTick(
                 timeline = nativeTimeline,
                 expectedLoad = WatchdogLoadIdentity(sessionGeneration, watchdogMpvLoad?.physicalId),
-                bufferedMs = if (activeEngine == "media3") exo.bufferedPosition.takeIf { it >= 0L } else mpvState.bufferedPositionMs,
-                state = if (activeEngine == "media3") exo.playbackState else if (isActuallyStalled) Player.STATE_BUFFERING else if (mpvState.ready) Player.STATE_READY else Player.STATE_IDLE,
-                playWhenReady = if (activeEngine == "media3") exo.playWhenReady else mpvState.playing,
+                bufferedMs = if (activeEngine == "media3") exo?.bufferedPosition?.takeIf { it >= 0L } else mpvState.bufferedPositionMs,
+                state = if (activeEngine == "media3") exo?.playbackState ?: Player.STATE_IDLE else if (isActuallyStalled) Player.STATE_BUFFERING else if (mpvState.ready) Player.STATE_READY else Player.STATE_IDLE,
+                playWhenReady = if (activeEngine == "media3") exo?.playWhenReady == true else mpvState.playing,
                 isSeeking = seekConfirmation != null || seekInFlight || seekHint != null || seekHoldActive || previewActive,
                 bytesLoaded = bytesLoaded,
                 isLoading = isLoading,
@@ -3705,40 +3806,51 @@ fun PlayerScreen(
             ) {
                 startAutoNext(reportStop = false)
             }
-            if (contentTimelineKnown && autoNextForeground && !playbackPaused() && duration > 0 && item.seriesId != null && prewarmedEpisodeId == null &&
-                position >= duration - 30_000L
-            ) {
-                prewarmedEpisodeId = "pending"
-                val prewarmGeneration = sessionGeneration
-                val prewarmPermit = playbackLoadPermit
-                instanceScope.launch {
-                    val c = client ?: return@launch
-                    val result = c.getNextEpisode(item)
-                    if (!isCurrentLoad(prewarmGeneration) || !loadCoordinator.accepts(prewarmPermit) ||
-                        reloadPending || !autoNextForeground || playbackPaused()) return@launch
-                    if (result is NextEpisodeResult.Found) {
-                        val next = result.item
-                        prewarmedEpisodeId = next.id
-                        val skipReason = try {
-                            prewarmNextSkipReason(context, next)
-                        } catch (_: Exception) {
-                            PageLog.add("prewarm gate failed")
-                            return@launch
-                        }
-                        if (skipReason != null) {
-                            PageLog.add("prewarm skipped reason=$skipReason")
-                            return@launch
-                        }
-                        prewarmNext(next)
-                    } else prewarmedEpisodeId = when (result) {
-                        NextEpisodeResult.NoNext -> "none"
-                        is NextEpisodeResult.RetryableFailure -> "retryable-failure"
-                        else -> "non-retryable-failure"
-                    }
-                }
+            val prewarmEligible = contentTimelineKnown && autoNextForeground && !playbackPaused() &&
+                duration > 0 && item.seriesId != null && position >= duration - 30_000L &&
+                loadCoordinator.accepts(playbackLoadPermit)
+            if (!prewarmEligible) {
+                prewarm.invalidate()
+                prewarmJob?.cancel()
+                prewarmJob = null
             }
-            if (activeEngine == "media3" && exo.playbackState == Player.STATE_BUFFERING) {
-                val now = System.currentTimeMillis()
+            if (prewarmEligible && prewarmJob?.isActive != true) {
+                val token = prewarm.begin(now, sessionGeneration, playbackLoadPermit, loadCoordinator::accepts)
+                if (token != null) prewarmJob = launchLoadWork launch@ {
+                    val prewarmGeneration = token.generation
+                    val prewarmPermit = token.permit
+                    runPrewarmLookup(prewarm, token, android.os.SystemClock::elapsedRealtime,
+                        valid = { isCurrentLoad(prewarmGeneration) && loadCoordinator.accepts(prewarmPermit) &&
+                            !reloadPending && autoNextForeground && !playbackPaused() },
+                        lookup = { client?.getNextEpisode(item) ?: NextEpisodeResult.NonRetryableFailure(IllegalStateException("No client")) },
+                        id = { it.id },
+                        warm = { next ->
+                            val skipReason = prewarmNextSkipReason(context, next)
+                            if (skipReason != null) {
+                                PageLog.add("prewarm skipped reason=$skipReason")
+                                false
+                            } else {
+                                val startedAt = android.os.SystemClock.elapsedRealtime()
+                                var ok = false
+                                PageLog.add("prewarm start nextId=${next.id} engine=$activeEngine")
+                                try {
+                                    val c = client
+                                    if (c != null) c.prewarmPlayback(next,
+                                        strategy = AppRuntime.prefs?.sourceStrategy ?: com.lumina.tv.data.SourceStrategy(),
+                                        isCurrent = { prewarm.owns(token) && isCurrentLoad(prewarmGeneration) &&
+                                            loadCoordinator.accepts(prewarmPermit) && !reloadPending &&
+                                            autoNextForeground && !playbackPaused() })
+                                    ok = c != null
+                                    ok
+                                } finally {
+                                    PageLog.add("prewarm done nextId=${next.id} ok=$ok ms=${android.os.SystemClock.elapsedRealtime() - startedAt}")
+                                }
+                            }
+                        })
+                }.also { job -> prewarm.bind(token, job) }
+            }
+            if (activeEngine == "media3" && exo?.playbackState == Player.STATE_BUFFERING) {
+                val now = android.os.SystemClock.elapsedRealtime()
                 if (bufferingSince == 0L) {
                     bufferingSince = now
                 } else if (!bufferingTimedOut && !firstFrameRendered && now - bufferingSince >= 15_000L) {
@@ -3749,34 +3861,12 @@ fun PlayerScreen(
             } else {
                 bufferingSince = 0L
             }
-            if (isCurrentMedia3() && exo.playbackState == Player.STATE_READY &&
-                exo.currentTracks.groups.any { it.type == C.TRACK_TYPE_VIDEO && it.isSelected } &&
-                !firstFrameRendered && readyWithoutFrameSince > 0L &&
-                System.currentTimeMillis() - readyWithoutFrameSince >= 8_000L
-            ) {
-                if (!firstFrameRecoveryTried) {
-                    firstFrameRecoveryTried = true
-                    val surfaceRebound = runCatching {
-                        val surface = (attachedPlayerView.get()?.videoSurfaceView as? SurfaceView)?.holder?.surface
-                        if (surface != null && surface.isValid) {
-                            exo.setVideoSurface(surface)
-                            true
-                        } else {
-                            false
-                        }
-                    }.getOrDefault(false)
-                    rebuildRetry = true
-                    PageLog.add("firstFrameGuard action=surface-rebind-or-rebuild frames=${exo.videoDecoderCounters?.renderedOutputBufferCount ?: 0} surfaceRebound=$surfaceRebound rebuildRetry=$rebuildRetry")
-                }
-                playbackStatusNotice = "已就绪但未出画面，可能是解码器或显示层问题"
-                failurePhase = "首帧"
-            }
             sinceReport++
             val reportSession = progressSession
             if (error == null && !reloadPending && reportSession != null && !reportSession.isClosed &&
                 sinceReport >= 10 && lastPlayerPositionMs != null) {
                 sinceReport = 0
-                val paused = if (activeEngine == "mpv") !mpvState.playing else !exo.isPlaying
+                val paused = if (activeEngine == "mpv") !mpvState.playing else exo?.isPlaying != true
                 val sample = timelinePosition(lastPlayerPositionMs)
                 client?.reportProgress(reportSession, sample.reportPositionMs, paused,
                     timelineUnverified = sample.timelineUnverified, playerPositionMs = sample.playerPositionMs)
@@ -3918,7 +4008,7 @@ fun PlayerScreen(
         showExitPrompt = false
         exitPromptAt = 0L
         reportStopInAppScope()
-        if (activeEngine == "mpv") mpvBackend?.pause() else exo.stop()
+        if (activeEngine == "mpv") mpvBackend?.pause() else exo?.stop()
         scope.launch {
             // Graceful exit gives the Stop disk barrier at most 2s without blocking the UI.
             client?.awaitProgressPersistence()
@@ -4549,7 +4639,7 @@ fun PlayerScreen(
                         )
                     }
                     val bufferedPlayerMsForBar = if (activeEngine == "media3") {
-                        exo.bufferedPosition.takeIf { it >= 0L } ?: -1L
+                        exo?.bufferedPosition?.takeIf { it >= 0L } ?: -1L
                     } else {
                         mpvState.bufferedPositionMs?.takeIf { it > 0L } ?: -1L
                     }
@@ -4946,8 +5036,8 @@ fun PlayerScreen(
                         mpvBackend?.selectPlayerAudioTrack(mpvId)
                         mpvMenuTrackRevision++
                     }
-                    if (activeEngine == "media3" && key != null) {
-                        val supported = exo.currentTracks.groups.any { it.mediaTrackGroup == key.group &&
+                    if (activeEngine == "media3" && key != null && exo != null) {
+                        val supported = exo?.currentTracks?.groups.orEmpty().any { it.mediaTrackGroup == key.group &&
                             key.index in 0 until it.length && it.isTrackSupported(key.index) }
                         if (supported) exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                             .clearOverridesOfType(C.TRACK_TYPE_AUDIO).addOverride(TrackSelectionOverride(key.group, key.index)).build()
@@ -4986,7 +5076,7 @@ fun PlayerScreen(
                             audioDecodeNotice = "本机不支持所选音轨，正在尝试兼容播放路径"
                             PageLog.add("audioCapability action=manual-unsupported index=$streamIndex")
                             requestAudioRecovery("manual-unsupported")
-                        } else if (override != null && exo.currentTracks.groups.any { group ->
+                        } else if (exo != null && override != null && exo?.currentTracks?.groups.orEmpty().any { group ->
                                 group.mediaTrackGroup == override.mediaTrackGroup && override.trackIndices.all { group.isTrackSupported(it) }
                             }) {
                             exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
@@ -5008,7 +5098,7 @@ fun PlayerScreen(
                         } else if (activeEngine == "mpv") {
                             mpvBackend?.setSubtitleTrack(index)
                             rememberConfirmedSubtitle(mpvBackend?.currentSubtitleEmbyIndex())
-                        } else if (mapped != null && exo.currentTracks.groups.any {
+                        } else if (exo != null && mapped != null && exo?.currentTracks?.groups.orEmpty().any {
                                 it.mediaTrackGroup == mapped.group && it.isTrackSupported(mapped.index)
                             }) {
                             exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
@@ -5029,7 +5119,7 @@ fun PlayerScreen(
                     val localKey = key?.takeUnless { it == "auto" }?.let {
                         val groupId = it.substringBeforeLast(':', "")
                         val trackIndex = it.substringAfterLast(':').toIntOrNull()
-                        exo.currentTracks.groups.firstOrNull { group -> group.type == C.TRACK_TYPE_TEXT && group.mediaTrackGroup.id == groupId }
+                        exo?.currentTracks?.groups.orEmpty().firstOrNull { group -> group.type == C.TRACK_TYPE_TEXT && group.mediaTrackGroup.id == groupId }
                             ?.let { group -> trackIndex?.let { index -> subtitleMapping.embyFor(Media3TrackKey(group.mediaTrackGroup, index)) } }
                     }
                     val serverPreference = when {
@@ -5060,7 +5150,7 @@ fun PlayerScreen(
                         else if (key == "auto") mpvBackend?.enableSubtitleAuto()
                         else key.removePrefix("emby:").toIntOrNull()?.let { mpvBackend?.setSubtitleTrack(it) }
                         rememberConfirmedSubtitle(mpvBackend?.currentSubtitleEmbyIndex())
-                    } else {
+                    } else if (exo != null) {
                         when {
                             key == null -> exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).clearOverridesOfType(C.TRACK_TYPE_TEXT).build()
@@ -5069,7 +5159,7 @@ fun PlayerScreen(
                             else -> {
                                 val id = key.substringBeforeLast(':', "")
                                 val index = key.substringAfterLast(':').toIntOrNull()
-                                val group = exo.currentTracks.groups.firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.mediaTrackGroup.id == id }
+                                val group = exo?.currentTracks?.groups.orEmpty().firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.mediaTrackGroup.id == id }
                                 if (group != null && index != null && index in 0 until group.length) {
                                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).clearOverridesOfType(C.TRACK_TYPE_TEXT)

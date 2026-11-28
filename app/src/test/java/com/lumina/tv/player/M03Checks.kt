@@ -80,7 +80,8 @@ object M03Checks {
             check("retryAvailablePath(retryPath, pathFailures)" in watchdog && "requestPlaybackReload(generation)" in watchdog)
             val reloadBody = screen.substringAfter("fun requestPlaybackReload(").substringBefore("fun checkStrmResume")
             check("reloadKey++" in reloadBody)
-            check("LaunchedEffect(exo, item.id, reloadKey)" in screen && "loadCoordinator.commit(loadPermit)" in screen)
+            check("LaunchedEffect(item.id, reloadKey)" in screen && "loadCoordinator.commit(loadPermit)" in screen)
+            check("listenersReady.await()" in screen) // Metadata creates the player; its appearance cannot recursively reload.
             check(screen.indexOf("exo.setMediaSource(videoSource)") < screen.indexOf("exo.prepare()", screen.indexOf("exo.setMediaSource(videoSource)")))
         }
         verify("S3 renderer routing wiring") {

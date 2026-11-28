@@ -292,8 +292,10 @@ internal object T06NextEpisodeChecks {
         check("loadCoordinator = loadCoordinator, generation = generation, permit = permit" in start)
         check("isCurrentLoad(generation) && !reloadPending && error == null && autoNextForeground && !playbackPaused()" in start)
         check("playbackLoadPermit = loadPermit" in source && "playbackLoadPermit = null" in source)
-        check("autoNextForeground = false" in source && "Lifecycle.Event.ON_RESUME) autoNextForeground = true" in source)
+        check("autoNextForeground = false" in source && "Lifecycle.Event.ON_RESUME) {" in source && "prewarm.resume()" in source)
         check("cancelCreditsCountdown(\"pause\")" in source && "allowRestart = false" in source)
-        check("!loadCoordinator.accepts(prewarmPermit)" in source && "result is NextEpisodeResult.Found" in source)
+        check("loadCoordinator.accepts(prewarmPermit)" in source && "runPrewarmLookup(prewarm, token" in source)
+        val prewarm = File("src/main/java/com/lumina/tv/player/NextEpisodePrewarm.kt").readText()
+        check("is NextEpisodeResult.Found" in prewarm && "state.finish(token)" in prewarm)
     }
 }

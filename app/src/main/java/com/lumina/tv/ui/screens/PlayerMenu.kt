@@ -71,7 +71,7 @@ internal val SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f)
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 internal fun OptionMenu(
-    exo: ExoPlayer,
+    exo: ExoPlayer?,
     item: MediaItem,
     resizeMode: Int,
     currentSourceId: String?,
@@ -116,11 +116,12 @@ internal fun OptionMenu(
     }
 
     // 轨道状态化：切换后 UI 立刻刷新
-    var tracks by remember { mutableStateOf(exo.currentTracks) }
-    var textDisabled by remember(activeEngine) {
-        mutableStateOf(exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT))
+    var tracks by remember(exo) { mutableStateOf(exo?.currentTracks ?: Tracks.EMPTY) }
+    var textDisabled by remember(exo, activeEngine) {
+        mutableStateOf(exo?.trackSelectionParameters?.disabledTrackTypes?.contains(C.TRACK_TYPE_TEXT) == true)
     }
     DisposableEffect(exo) {
+        if (exo == null) return@DisposableEffect onDispose { }
         val l = object : Player.Listener {
             override fun onTracksChanged(t: Tracks) {
                 tracks = t

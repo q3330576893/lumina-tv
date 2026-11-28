@@ -16,6 +16,9 @@ object SamplesMain {
     @JvmStatic
     fun main(args: Array<String>) {
         val suites = listOf<Pair<String, () -> Unit>>(
+            "M07 P1 first frame" to { com.lumina.tv.player.P1FirstFrameChecks.run() },
+            "M07 P1 prewarm" to { com.lumina.tv.player.P1PrewarmChecks.run() },
+            "M07 P1 buffer factory" to { com.lumina.tv.player.P1BufferFactoryChecks.run() },
             "V6 M03 startup" to { com.lumina.tv.player.M03Checks.main(emptyArray()) },
             "DV profile parsing" to { runDvProfileParsingAssertions() },
             "Playback error classification" to { playbackErrorSamples() },
@@ -32,7 +35,7 @@ object SamplesMain {
             "V6 M05 visual foundation" to { M05Checks.main(emptyArray()) },
             "A1 reliability" to { A1ReliabilityChecks.main(emptyArray()) },
         )
-        check(suites.size == 15) { "Expected all sample suites plus A1, M00, M01, M03, M04B, and M05; refusing an incomplete gate." }
+        check(suites.size == 18) { "Expected all existing suites plus the three M07 P1 suites; refusing an incomplete gate." }
         suites.forEachIndexed { index, (name, run) ->
             println("[${index + 1}/${suites.size}] START $name")
             run()

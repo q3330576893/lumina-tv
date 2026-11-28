@@ -168,7 +168,8 @@ internal object T06WatchdogChecks {
         val loop = source.substringAfter("val watchdogEngine = activeEngine").substringBefore("val creditsSkipSeconds =")
         check("val nativeTimeline = sampleWatchdogTimeline(" in loop)
         check("position = { observedPlayerPositionMs() }" in loop)
-        check("duration = { if (watchdogEngine == \"mpv\") watchdogBackend?.durationMs() else exo.duration }" in loop) {
+        // Metadata/retirement may intentionally leave no Media3 instance; preserve unknown duration.
+        check("duration = { if (watchdogEngine == \"mpv\") watchdogBackend?.durationMs() else exo?.duration }" in loop) {
             "Watchdog duration is disconnected from current native sampling"
         }
         check("timeline = nativeTimeline" in loop && "expectedLoad = WatchdogLoadIdentity(sessionGeneration, watchdogMpvLoad?.physicalId)" in loop)

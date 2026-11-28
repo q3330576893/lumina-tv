@@ -99,7 +99,12 @@ object B1Checks {
             check(nativePlaybackHeaders(mapOf("x-emby-authorization" to "secret", "Referer" to "business")) == mapOf("Referer" to "business"))
             val player = File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText()
             check(!player.contains("DefaultHttpDataSource.Factory"))
-            check(player.contains("OkHttpDataSource.Factory(c.playbackHttpClient)"))
+            // The actual source transport derives from the authenticated playback client,
+            // adding diagnostics without replacing its interceptors/account policy.
+            check(player.contains("val observedClient = c.playbackHttpClient.newBuilder().eventListenerFactory(playbackHttpTrace).build()"))
+            check(player.contains("val upstreamFactory = OkHttpDataSource.Factory(observedClient)"))
+            check(player.contains("targetCacheFactory ?: upstreamFactory"))
+            check(player.contains("val sourceWiring = Media3SourceWiring(optionalFactory)"))
             println("B1 Q-001 PASS: real metadata/playback/probe redirects, HLS child policy, host/port/scheme, business headers and account snapshots")
         } finally {
             account.close(); otherAccount.close(); a.stop(); b.stop()
