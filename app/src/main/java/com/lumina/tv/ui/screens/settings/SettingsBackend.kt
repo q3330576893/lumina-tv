@@ -29,6 +29,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,6 +50,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lumina.tv.ui.rememberPreferenceState
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.BootReceiver
 import com.lumina.tv.data.DynamicRangePref
@@ -67,14 +72,14 @@ fun SettingsBackend(
     val prefs = AppRuntime.prefs
     val context = LocalContext.current
     val bootCapability = remember(context) { BootReceiver.capability(context) }
-    var playerEngine by remember { mutableStateOf(prefs?.playerEngine ?: "auto") }
-    var decoderPreference by remember { mutableStateOf(prefs?.decoderPreference ?: "auto") }
-    var matchDisplayFrameRate by remember { mutableStateOf(prefs?.matchDisplayFrameRate ?: false) }
-    var declareDtsDirectPlay by remember { mutableStateOf(prefs?.declareDtsDirectPlay ?: false) }
-    var bootLaunch by remember { mutableStateOf(prefs?.bootLaunch ?: false) }
-    var sourceDynamicRange by remember { mutableStateOf(prefs?.sourceDynamicRange ?: DynamicRangePref.UNSET) }
-    var sourceBitrate by remember { mutableStateOf(prefs?.sourceBitratePreference ?: NumericPref.UNSET) }
-    var sourceReleaseGroups by remember { mutableStateOf(prefs?.sourceReleaseGroups.orEmpty()) }
+    var playerEngine by rememberPreferenceState(prefs, "engine", { prefs?.playerEngine ?: "auto" }, { prefs?.playerEngine = it })
+    var decoderPreference by rememberPreferenceState(prefs, "decoder_preference", { prefs?.decoderPreference ?: "auto" }, { prefs?.decoderPreference = it })
+    var matchDisplayFrameRate by rememberPreferenceState(prefs, "match_display_frame_rate", { prefs?.matchDisplayFrameRate ?: false }, { prefs?.matchDisplayFrameRate = it })
+    var declareDtsDirectPlay by rememberPreferenceState(prefs, "declare_dts_direct_play", { prefs?.declareDtsDirectPlay ?: false }, { prefs?.declareDtsDirectPlay = it })
+    var bootLaunch by rememberPreferenceState(prefs, "boot_launch", { prefs?.bootLaunch ?: false }, { prefs?.bootLaunch = it })
+    var sourceDynamicRange by rememberPreferenceState(prefs, "source_dynamic_range", { prefs?.sourceDynamicRange ?: DynamicRangePref.UNSET }, { prefs?.sourceDynamicRange = it })
+    var sourceBitrate by rememberPreferenceState(prefs, "source_bitrate", { prefs?.sourceBitratePreference ?: NumericPref.UNSET }, { prefs?.sourceBitratePreference = it })
+    var sourceReleaseGroups by rememberPreferenceState(prefs, "source_release_groups", { prefs?.sourceReleaseGroups.orEmpty() }, { prefs?.sourceReleaseGroups = it })
     var sourcePreferencesExpanded by rememberSaveable { mutableStateOf(false) }
     var releaseGroupsDialog by remember { mutableStateOf(false) }
 
@@ -85,9 +90,18 @@ fun SettingsBackend(
         add("compat:declareDtsDirectPlay")
         add("compat:bootLaunch")
         add("compat:sourcePreferences")
+        add("compat:sourceDynamicRange")
+        add("compat:sourceBitrate")
+        add("compat:sourceReleaseGroups")
     }
     val requesters = remember(firstFocusRequester) {
         rowKeys.mapIndexed { index, key -> key to if (index == 0) firstFocusRequester else FocusRequester() }.toMap()
+    }
+    val focusContext = LocalSettingsFocusContext.current
+    val expandedContext = focusContext.copy(expansionState = if (sourcePreferencesExpanded) "expanded" else "collapsed")
+    BackHandler(enabled = sourcePreferencesExpanded && !releaseGroupsDialog) {
+        sourcePreferencesExpanded = false
+        focusContext.restore(focusContext.key("compat:sourcePreferences"))
     }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
 
@@ -104,125 +118,70 @@ fun SettingsBackend(
                 )
                 ChoiceRow("compat:playerEngine", "播放内核", "自动优先 Media3", engineOptions, playerEngine, { key ->
                     playerEngine = key
-                    prefs?.playerEngine = key
                 }, requesters.getValue("compat:playerEngine"), railRequester, onFocused,
                     downRequester = requesters.getValue("compat:decoderPreference"))
                 ChoiceRow("compat:decoderPreference", "解码器优先级", "选择硬件或软件解码优先级", listOf(
                     SettingChoiceOption("auto", "自动"), SettingChoiceOption("hardware", "硬解优先"), SettingChoiceOption("software", "软解优先"),
-                ), decoderPreference, { key -> decoderPreference = key; prefs?.decoderPreference = key }, requesters.getValue("compat:decoderPreference"), railRequester, onFocused,
+                ), decoderPreference, { key -> decoderPreference = key }, requesters.getValue("compat:decoderPreference"), railRequester, onFocused,
                     upRequester = requesters.getValue("compat:playerEngine"), downRequester = requesters.getValue("compat:matchDisplayFrameRate"))
                 ToggleRow("compat:matchDisplayFrameRate", "匹配显示帧率", "默认关闭；仅在 API 30 及以上尝试无缝切换", matchDisplayFrameRate, {
-                    matchDisplayFrameRate = it; prefs?.matchDisplayFrameRate = it
+                    matchDisplayFrameRate = it
                 }, requesters.getValue("compat:matchDisplayFrameRate"), railRequester, onFocused,
-                    upRequester = requesters.getValue("compat:decoderPreference"), downRequester = requesters.getValue("compat:declareDtsDirectPlay"))
+                    upRequester = requesters.getValue("compat:decoderPreference"), downRequester = requesters.getValue("compat:declareDtsDirectPlay"),
+                    enabled = android.os.Build.VERSION.SDK_INT >= 30,
+                    disabledReason = "系统版本不支持无缝帧率切换", nextCondition = "需要 Android 11 / API 30 及以上")
                 ToggleRow("compat:declareDtsDirectPlay", "声明 DTS/TrueHD 直放（实验）", "开启后服务器可能直接给原轨；若本机解不了会退回 mpv，可能出现黑画面/无声，建议先导出诊断对比", declareDtsDirectPlay, {
-                    declareDtsDirectPlay = it; prefs?.declareDtsDirectPlay = it
+                    declareDtsDirectPlay = it
                 }, requesters.getValue("compat:declareDtsDirectPlay"), railRequester, onFocused,
                     upRequester = requesters.getValue("compat:matchDisplayFrameRate"), downRequester = requesters.getValue("compat:bootLaunch"))
                 ToggleRow("compat:bootLaunch", "开机自启", bootCapability.description, bootLaunch, {
-                    bootLaunch = it; prefs?.bootLaunch = it
+                    bootLaunch = it
                 }, requesters.getValue("compat:bootLaunch"), railRequester, onFocused,
                     upRequester = requesters.getValue("compat:declareDtsDirectPlay"), downRequester = requesters.getValue("compat:sourcePreferences"))
 
-                var disclosureFocused by remember { mutableStateOf(false) }
-                val disclosureRequester = requesters.getValue("compat:sourcePreferences")
-                val disclosureShape = RoundedCornerShape(12.dp)
-                Box(
-                    Modifier.fillMaxWidth().heightIn(min = 44.dp)
-                        .focusRequester(disclosureRequester)
-                        .focusProperties {
-                            left = railRequester
-                            up = requesters.getValue("compat:bootLaunch")
-                        }
-                        .onFocusChanged { disclosureFocused = it.isFocused; if (it.isFocused) onFocused("compat:sourcePreferences") }
-                        .luminaSurface(SurfaceLevel.Content, disclosureShape, focused = disclosureFocused)
-                        .clickable {
-                            if (sourcePreferencesExpanded) disclosureRequester.requestFocus()
-                            sourcePreferencesExpanded = !sourcePreferencesExpanded
-                        },
-                ) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("高级选项", color = TextMain, fontSize = TypeScale.sp14, fontWeight = FontWeight.Medium)
-                        Spacer(Modifier.width(12.dp))
-                        val summary = buildList {
-                            if (sourceReleaseGroups.isBlank()) add("未设置（不按发布组排序）")
-                            if (sourceDynamicRange != DynamicRangePref.UNSET) add(when (sourceDynamicRange) {
-                                DynamicRangePref.DOLBY_VISION -> "DV优先"
-                                DynamicRangePref.HDR -> "HDR优先"
-                                DynamicRangePref.SDR -> "SDR优先"
-                                else -> ""
-                            })
-                            if (sourceBitrate != NumericPref.UNSET) add(if (sourceBitrate == NumericPref.HIGH) "码率高优先" else "码率低优先")
-                        }.joinToString(" · ").ifBlank { "片源偏好：默认（取第一个源）" }
-                        Text(summary, Modifier.weight(1f), color = TextSub, fontSize = TypeScale.sp10, maxLines = 1)
-                        androidx.compose.material3.Icon(if (sourcePreferencesExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = if (disclosureFocused) Accent else TextSub)
-                    }
+                CompositionLocalProvider(LocalSettingsFocusContext provides expandedContext) {
+                NavigationRow("compat:sourcePreferences", "高级选项", "片源动态范围、码率与发布组偏好",
+                    if (sourcePreferencesExpanded) "已展开 ▾" else "已收起 ▸", {
+                        sourcePreferencesExpanded = !sourcePreferencesExpanded
+                        val next = focusContext.copy(expansionState = if (sourcePreferencesExpanded) "expanded" else "collapsed")
+                        focusContext.record(next.key("compat:sourcePreferences"))
+                        focusContext.restore(next.key("compat:sourcePreferences"))
+                    }, requesters.getValue("compat:sourcePreferences"), railRequester, onFocused,
+                    upRequester = requesters.getValue("compat:bootLaunch"))
                 }
-                AnimatedVisibility(
-                    visible = sourcePreferencesExpanded,
-                    modifier = Modifier.focusProperties { canFocus = sourcePreferencesExpanded },
-                    enter = expandVertically(androidx.compose.animation.core.tween(TvMotion.CATEGORY)),
-                    exit = shrinkVertically(androidx.compose.animation.core.tween(TvMotion.CATEGORY)),
-                ) {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp)) {
-                        Text("动态范围", color = TextSub, fontSize = TypeScale.sp10)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf(
-                                DynamicRangePref.UNSET to "不设置", DynamicRangePref.DOLBY_VISION to "DV优先",
-                                DynamicRangePref.HDR to "HDR优先", DynamicRangePref.SDR to "SDR优先",
-                            ).forEach { (value, label) ->
-                                val active = sourceDynamicRange == value
-                                FocusSurface(Modifier.height(32.dp).widthIn(min = 72.dp), corner = 16.dp, onClick = {
-                                    sourceDynamicRange = value; prefs?.sourceDynamicRange = value
-                                }) { focused ->
-                                    Box(Modifier.fillMaxWidth().height(32.dp).luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(16.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral, selected = active), contentAlignment = Alignment.Center) {
-                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp10, modifier = Modifier.padding(horizontal = 10.dp))
-                                    }
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(6.dp))
-                        Text("码率", color = TextSub, fontSize = TypeScale.sp10)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf(NumericPref.UNSET to "不设置", NumericPref.HIGH to "高优先", NumericPref.LOW to "低优先").forEach { (value, label) ->
-                                val active = sourceBitrate == value
-                                FocusSurface(Modifier.height(32.dp).widthIn(min = 72.dp), corner = 16.dp, onClick = {
-                                    sourceBitrate = value; prefs?.sourceBitratePreference = value
-                                }) { focused ->
-                                    Box(Modifier.fillMaxWidth().height(32.dp).luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(16.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral, selected = active), contentAlignment = Alignment.Center) {
-                                        Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp10, modifier = Modifier.padding(horizontal = 10.dp))
-                                    }
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        FocusSurface(Modifier.fillMaxWidth().height(40.dp), corner = 10.dp, onClick = { releaseGroupsDialog = true }) { focused ->
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("发布组关键词", color = TextMain, modifier = Modifier.weight(1f), fontSize = TypeScale.sp12)
-                                Text(sourceReleaseGroups.ifBlank { "SPARKS,FGT" }, color = if (focused) TextMain else TextSub, fontSize = TypeScale.sp11, maxLines = 1)
-                            }
-                        }
+                if (sourcePreferencesExpanded) CompositionLocalProvider(LocalSettingsFocusContext provides expandedContext) {
+                    Column {
+                        ChoiceRow("compat:sourceDynamicRange", "动态范围", "仅影响新媒体的片源排序", listOf(
+                            SettingChoiceOption("UNSET", "不设置"), SettingChoiceOption("DOLBY_VISION", "DV 优先"),
+                            SettingChoiceOption("HDR", "HDR 优先"), SettingChoiceOption("SDR", "SDR 优先")),
+                            sourceDynamicRange.name, { sourceDynamicRange = DynamicRangePref.valueOf(it) },
+                            requesters.getValue("compat:sourceDynamicRange"), railRequester, onFocused,
+                            upRequester = requesters.getValue("compat:sourcePreferences"))
+                        ChoiceRow("compat:sourceBitrate", "码率偏好", "按码率排列片源，不改变流媒体码率上限", listOf(
+                            SettingChoiceOption("UNSET", "不设置"), SettingChoiceOption("HIGH", "高优先"), SettingChoiceOption("LOW", "低优先")),
+                            sourceBitrate.name, { sourceBitrate = NumericPref.valueOf(it) },
+                            requesters.getValue("compat:sourceBitrate"), railRequester, onFocused)
+                        NavigationRow("compat:sourceReleaseGroups", "发布组关键词", "打开弹层查看和编辑完整列表；逗号分隔",
+                            if (sourceReleaseGroups.isBlank()) "未设置" else "已设置 ${sourceReleaseGroups.split(',').count { it.isNotBlank() }} 项", { releaseGroupsDialog = true },
+                            requesters.getValue("compat:sourceReleaseGroups"), railRequester, onFocused)
                     }
                 }
             }
         }
     }
 
-    if (releaseGroupsDialog) {
-        AlertDialog(
-            onDismissRequest = { releaseGroupsDialog = false },
-            title = { Text("发布组关键词") },
-            text = {
-                OutlinedTextField(
-                    value = sourceReleaseGroups,
-                    onValueChange = { sourceReleaseGroups = it; prefs?.sourceReleaseGroups = it },
-                    label = { Text("发布组关键词") },
-                    placeholder = { Text("示例：SPARKS,FGT（留空则不按发布组排序）") },
-                    singleLine = true,
-                )
-            },
-            confirmButton = { TextButton(onClick = { releaseGroupsDialog = false }) { Text("完成") } },
-            dismissButton = { TextButton(onClick = { releaseGroupsDialog = false }) { Text("关闭") } },
-        )
+    if (releaseGroupsDialog) CompositionLocalProvider(LocalSettingsFocusContext provides expandedContext) {
+        var draft by remember { mutableStateOf(sourceReleaseGroups) }
+        SettingsDialog("compat:sourceReleaseGroups", "发布组关键词", { releaseGroupsDialog = false }) { close ->
+            Text(SettingDeclarations.forRow("compat:sourceReleaseGroups")!!.summary, color = TextSub)
+            val field = remember { FocusRequester() }
+            LaunchedEffect(Unit) { withFrameNanos { }; field.requestFocus() }
+            OutlinedTextField(value = draft, onValueChange = { draft = it }, label = { Text("发布组关键词（逗号分隔）") },
+                modifier = Modifier.fillMaxWidth().settingsEditorFocus("compat:releaseGroups:editor", field))
+            SettingsDialogButton("compat:releaseGroups:save", "保存") {
+                sourceReleaseGroups = draft; close()
+            }
+            SettingsDialogButton("compat:releaseGroups:cancel", "取消", onClick = close)
+        }
     }
 }

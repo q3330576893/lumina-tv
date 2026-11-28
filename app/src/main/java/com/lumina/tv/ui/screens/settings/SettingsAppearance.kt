@@ -108,7 +108,7 @@ fun SettingsAppearance(
                             "appearance:themeColor" -> ChoiceRow(
                                 focusKey = spec.key,
                                 title = "主题色",
-                                description = "应用到强调色与背景光晕",
+                                description = "应用到强调色与选中标记",
                                 options = THEME_PRESETS.map {
                                     SettingChoiceOption(it.key, it.label, it.accent)
                                 },

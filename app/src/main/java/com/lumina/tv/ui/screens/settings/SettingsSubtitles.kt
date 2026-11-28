@@ -17,6 +17,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Text
+import com.lumina.tv.ui.rememberPreferenceState
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
@@ -29,14 +30,14 @@ fun SettingsSubtitles(
     modifier: Modifier = Modifier,
 ) {
     val prefs = AppRuntime.prefs
-    var subtitleScale by remember { mutableStateOf(prefs?.subtitleScale ?: 1.0f) }
-    var subtitleColor by remember { mutableStateOf(prefs?.subtitleColor ?: android.graphics.Color.WHITE) }
-    var subtitleOutline by remember { mutableStateOf(prefs?.subtitleOutline ?: true) }
-    var subtitlePosition by remember { mutableStateOf(prefs?.subtitlePosition ?: 0.08f) }
-    var subtitleBg by remember { mutableStateOf(prefs?.subtitleBg ?: false) }
-    var preferredSubtitleLanguage by remember { mutableStateOf(prefs?.preferredSubtitleLanguage.orEmpty()) }
+    var subtitleScale by rememberPreferenceState(prefs, "subtitle_scale", { prefs?.subtitleScale ?: 1.0f }, { prefs?.subtitleScale = it })
+    var subtitleColor by rememberPreferenceState(prefs, "subtitle_color", { prefs?.subtitleColor ?: android.graphics.Color.WHITE }, { prefs?.subtitleColor = it })
+    var subtitleOutline by rememberPreferenceState(prefs, "subtitle_outline", { prefs?.subtitleOutline ?: true }, { prefs?.subtitleOutline = it })
+    var subtitlePosition by rememberPreferenceState(prefs, "subtitle_position", { prefs?.subtitlePosition ?: 0.08f }, { prefs?.subtitlePosition = it })
+    var subtitleBg by rememberPreferenceState(prefs, "subtitle_bg", { prefs?.subtitleBg ?: false }, { prefs?.subtitleBg = it })
+    var preferredSubtitleLanguage by rememberPreferenceState(prefs, "preferred_subtitle_language", { prefs?.preferredSubtitleLanguage.orEmpty() }, { prefs?.preferredSubtitleLanguage = it })
 
-    val rowKeys = remember { listOf("subtitles:subtitleScale", "subtitles:subtitleColor", "subtitles:subtitleOutline", "subtitles:subtitlePosition", "subtitles:subtitleBg", "subtitles:preferredSubtitleLanguage") }
+    val rowKeys = remember { listOf("subtitles:subtitleScale", "subtitles:subtitleColor", "subtitles:subtitleOutline", "subtitles:subtitlePosition", "subtitles:subtitleBg", "subtitles:preferredSubtitleLanguage", "subtitles:preferredAudioLanguage") }
     val requesters = remember {
         rowKeys.mapIndexed { index, key -> key to if (index == 0) firstFocusRequester else FocusRequester() }.toMap()
     }
@@ -62,7 +63,7 @@ fun SettingsSubtitles(
 
     LazyColumn(state = settingsListState(SettingsCategory.Subtitles), modifier = modifier, verticalArrangement = Arrangement.spacedBy(SettingsTokens.GroupGap)) {
         item(key = "subtitles:preview-label") {
-            Text("字幕", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
+            Text("字幕与音轨", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }
         item(key = "subtitles:preview") {
             SubtitlePreviewCard(subtitleScale, Color(subtitleColor), subtitleOutline, subtitlePosition, subtitleBg)
@@ -70,23 +71,25 @@ fun SettingsSubtitles(
         item(key = "subtitles:group") {
             Column(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).glassBorder(groupShape)) {
                 ChoiceRow("subtitles:subtitleScale", "字号", "调整字幕显示大小", scaleOptions, subtitleScale.toString(), { key ->
-                    subtitleScale = key.toFloat(); prefs?.subtitleScale = subtitleScale
+                    subtitleScale = key.toFloat()
                 }, requesters.getValue(rowKeys[0]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[1]))
                 ChoiceRow("subtitles:subtitleColor", "文字颜色", "选择字幕文字颜色", colorOptions, subtitleColor.toString(), { key ->
-                    subtitleColor = key.toInt(); prefs?.subtitleColor = subtitleColor
+                    subtitleColor = key.toInt()
                 }, requesters.getValue(rowKeys[1]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[2]))
                 ToggleRow("subtitles:subtitleOutline", "字幕描边", "高对比背景下保持文字清晰", subtitleOutline, {
-                    subtitleOutline = it; prefs?.subtitleOutline = it
+                    subtitleOutline = it
                 }, requesters.getValue(rowKeys[2]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[1]), downRequester = requesters.getValue(rowKeys[3]))
                 ChoiceRow("subtitles:subtitlePosition", "垂直位置", "调整字幕在画面中的高度", positionOptions, subtitlePosition.toString(), { key ->
-                    subtitlePosition = key.toFloat(); prefs?.subtitlePosition = subtitlePosition
+                    subtitlePosition = key.toFloat()
                 }, requesters.getValue(rowKeys[3]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[2]), downRequester = requesters.getValue(rowKeys[4]))
                 ToggleRow("subtitles:subtitleBg", "字幕背景底色", "亮背景下更易读，默认关闭", subtitleBg, {
-                    subtitleBg = it; prefs?.subtitleBg = it
+                    subtitleBg = it
                 }, requesters.getValue(rowKeys[4]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[5]))
                 ChoiceRow("subtitles:preferredSubtitleLanguage", "首选字幕语言", "新影片默认语言；按片手动选择优先", languageOptions, preferredSubtitleLanguage, { key ->
-                    preferredSubtitleLanguage = key; prefs?.preferredSubtitleLanguage = key
-                }, requesters.getValue(rowKeys[5]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[4]), downRequester = requesters.getValue(rowKeys[5]), showDivider = false)
+                    preferredSubtitleLanguage = key
+                }, requesters.getValue(rowKeys[5]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[4]), downRequester = requesters.getValue(rowKeys[6]))
+                AudioLanguagePreferenceRow(requesters.getValue(rowKeys[6]), railRequester, onFocused,
+                    requesters.getValue(rowKeys[5]))
             }
         }
     }

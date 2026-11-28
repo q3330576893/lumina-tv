@@ -76,6 +76,7 @@ fun SettingsAbout(
     onFocused: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val focusContext = LocalSettingsFocusContext.current
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
@@ -141,7 +142,8 @@ fun SettingsAbout(
                         checkingUpdate = false
                     }
                 }, requesters.getValue(rowKeys[0]), railRequester, onFocused,
-                    downRequester = requesters.getValue(rowKeys[1]))
+                    downRequester = requesters.getValue(rowKeys[1]),
+                    enabled = !checkingUpdate, disabledReason = "正在检查更新", nextCondition = "检查完成后重试")
                 Text(
                     updateResult,
                     color = when {
@@ -162,7 +164,8 @@ fun SettingsAbout(
                             .onFailure { Toast.makeText(context, "打开失败：${it.message}", Toast.LENGTH_LONG).show() }
                     }
                 }, requesters.getValue(rowKeys[1]), railRequester, onFocused,
-                    upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[2]))
+                    upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[2]),
+                    enabled = releaseUrl != null, disabledReason = "尚未取得发布地址", nextCondition = "先成功检查更新")
                 ActionRow("about:exportDiagnostics", "导出诊断包", "选择现象并保存或分享", if (showDiagExport) "进行中" else "导出", {
                     showDiagExport = true
                 }, requesters.getValue(rowKeys[2]), railRequester, onFocused,
@@ -190,10 +193,7 @@ fun SettingsAbout(
         }
     }
 
-    if (licensesOpen) AlertDialog(
-        onDismissRequest = { licensesOpen = false },
-        title = { Text("开源许可") },
-        text = {
+    if (licensesOpen) SettingsDialog("about:licenses", "开源许可", { licensesOpen = false }) { close ->
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -206,17 +206,16 @@ fun SettingsAbout(
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(notice.library)
                         Text(notice.license, fontSize = TypeScale.sp11)
-                        TextButton(onClick = {
+                        SettingsDialogButton("about:license:${notice.library}", "来源与许可（浏览器）") {
                             runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(notice.source))) }
                                 .onFailure { Toast.makeText(context, "无法打开来源链接", Toast.LENGTH_SHORT).show() }
-                        }) { Text("来源与许可（浏览器）") }
+                        }
                     }
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = { licensesOpen = false }) { Text("关闭") } },
-    )
-    DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false }) { outcome ->
+        SettingsDialogButton("about:licenses:close", "关闭", initialFocus = true, onClick = close)
+    }
+    DiagExportDialog(visible = showDiagExport, onDismiss = { showDiagExport = false; focusContext.restore(focusContext.key("about:exportDiagnostics")) }) { outcome ->
         withContext(Dispatchers.IO) {
             exportDiagnosticBundle(context, environmentDiagnosticPayload(context, outcome), "environment")
         }

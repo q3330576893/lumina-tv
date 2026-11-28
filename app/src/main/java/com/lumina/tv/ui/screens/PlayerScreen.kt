@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.ui.rememberPreferenceState
+
 import com.lumina.tv.ui.theme.*
 
 import com.lumina.tv.data.catchingRequest
@@ -607,13 +609,13 @@ fun PlayerScreen(
     var seekHint by remember { mutableStateOf<String?>(null) }
     var currentResolution by remember { mutableStateOf<String?>(null) }
     val seekStepMs = seekStepSeconds * 1000L
-    var subScale by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitleScale ?: 1.0f) }
-    var subtitleColor by remember { mutableIntStateOf(AppRuntime.prefs?.subtitleColor ?: android.graphics.Color.WHITE) }
-    var subtitleOutline by remember { mutableStateOf(AppRuntime.prefs?.subtitleOutline ?: true) }
-    var subtitlePosition by remember { mutableFloatStateOf(AppRuntime.prefs?.subtitlePosition ?: 0.08f) }
-    var subtitleBg by remember { mutableStateOf(AppRuntime.prefs?.subtitleBg ?: false) }
+    var subScale by rememberPreferenceState(AppRuntime.prefs, "subtitle_scale", { AppRuntime.prefs?.subtitleScale ?: 1.0f }, { AppRuntime.prefs?.subtitleScale = it })
+    var subtitleColor by rememberPreferenceState(AppRuntime.prefs, "subtitle_color", { AppRuntime.prefs?.subtitleColor ?: android.graphics.Color.WHITE }, { AppRuntime.prefs?.subtitleColor = it })
+    var subtitleOutline by rememberPreferenceState(AppRuntime.prefs, "subtitle_outline", { AppRuntime.prefs?.subtitleOutline ?: true }, { AppRuntime.prefs?.subtitleOutline = it })
+    var subtitlePosition by rememberPreferenceState(AppRuntime.prefs, "subtitle_position", { AppRuntime.prefs?.subtitlePosition ?: 0.08f }, { AppRuntime.prefs?.subtitlePosition = it })
+    var subtitleBg by rememberPreferenceState(AppRuntime.prefs, "subtitle_bg", { AppRuntime.prefs?.subtitleBg ?: false }, { AppRuntime.prefs?.subtitleBg = it })
     var subtitlePreference by remember(item.id) { mutableStateOf(AppRuntime.prefs?.subtitlePreferenceFor(item.id, playbackSource)) }
-    var subtitleOffsetMs by remember { mutableLongStateOf(AppRuntime.prefs?.subtitleOffsetMs ?: 0L) }
+    var subtitleOffsetMs by rememberPreferenceState(AppRuntime.prefs, "subtitle_offset_ms", { AppRuntime.prefs?.subtitleOffsetMs ?: 0L }, { AppRuntime.prefs?.subtitleOffsetMs = it })
     var seekHoldActive by remember { mutableStateOf(false) }
     var hiddenInputState by remember(item.id) { mutableStateOf(HiddenPlaybackInputState()) }
     var seekInFlight by remember { mutableStateOf(false) }
@@ -2412,10 +2414,15 @@ fun PlayerScreen(
         }
     }
 
+    LaunchedEffect(mpvBackend, subScale, subtitleColor, subtitleOutline, subtitlePosition, subtitleBg) {
+        val subtitleSp = when { subScale >= 2.3f -> 38.4f; subScale >= 1.9f -> 32f; subScale >= 1.5f -> 25.6f; subScale >= 1.2f -> 20.8f; else -> 16f }
+        mpvBackend?.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
+        mpvBackend?.setSubtitleStyle(subtitleColor, subtitleOutline, subtitlePosition, subtitleBg)
+    }
+
     LaunchedEffect(exo, mpvBackend, subtitleOffsetMs) {
         subtitleRenderersFactory.subtitleOffsetMs = subtitleOffsetMs
         mpvBackend?.setSubtitleOffset(subtitleOffsetMs)
-        AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
     }
 
     LaunchedEffect(activeEngine, mpvBackend, resizeMode) {
@@ -4341,13 +4348,13 @@ fun PlayerScreen(
                                     }
                                     ev.type == KeyEventType.KeyDown && nativeCode == android.view.KeyEvent.KEYCODE_PAGE_UP -> {
                                         subtitleOffsetMs = (subtitleOffsetMs - 250L).coerceIn(-10_000L, 10_000L)
-                                        AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
+
                                         seekHint = "字幕偏移 ${subtitleOffsetMs}ms"
                                         true
                                     }
                                     ev.type == KeyEventType.KeyDown && nativeCode == android.view.KeyEvent.KEYCODE_PAGE_DOWN -> {
                                         subtitleOffsetMs = (subtitleOffsetMs + 250L).coerceIn(-10_000L, 10_000L)
-                                        AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
+
                                         seekHint = "字幕偏移 ${subtitleOffsetMs}ms"
                                         true
                                     }
@@ -4964,11 +4971,11 @@ fun PlayerScreen(
                 onSubtitleOffset = {
                     subtitleOffsetMs = it.coerceIn(-10_000L, 10_000L)
                     mpvBackend?.setSubtitleOffset(subtitleOffsetMs)
-                    AppRuntime.prefs?.subtitleOffsetMs = subtitleOffsetMs
+
                 },
                 onSubScale = {
                     subScale = it
-                    AppRuntime.prefs?.subtitleScale = it
+
                     val subtitleSp = when { it >= 2.3f -> 38.4f; it >= 1.9f -> 32f; it >= 1.5f -> 25.6f; it >= 1.2f -> 20.8f; else -> 16f }
                     mpvBackend?.setSubtitleFontSize((subtitleSp * context.resources.displayMetrics.density).toInt())
                 },

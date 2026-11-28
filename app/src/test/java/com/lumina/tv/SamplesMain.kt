@@ -38,6 +38,7 @@ object SamplesMain {
             println("[${index + 1}/${suites.size}] PASS $name")
         }
         M09Checks.main(emptyArray())
-        println("All sample assertions passed (${suites.size + 1} suites).")
+        M06Checks.main(emptyArray())
+        println("All sample assertions passed (${suites.size + 2} suites).")
     }
 }

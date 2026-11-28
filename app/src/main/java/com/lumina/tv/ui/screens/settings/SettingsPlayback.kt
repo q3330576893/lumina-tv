@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.unit.dp
+import com.lumina.tv.ui.rememberPreferenceState
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.data.PLAYBACK_CACHE_OPTIONS
 import com.lumina.tv.data.PlaybackCache
@@ -46,19 +47,18 @@ fun SettingsPlayback(
     val prefs = AppRuntime.prefs
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var speed by remember { mutableStateOf(prefs?.defaultSpeed ?: 1.0f) }
-    var autoNext by remember { mutableStateOf(prefs?.autoNextEpisode ?: false) }
-    var introSeconds by remember { mutableStateOf(prefs?.globalIntroSeconds ?: 0) }
-    var endCreditsSeconds by remember { mutableStateOf(AppRuntime.prefs?.endCreditsSkipSeconds ?: 30) }
-    var bitrate by remember { mutableStateOf(prefs?.maxStreamingBitrate ?: 120_000_000L) }
-    var cacheBytes by remember { mutableStateOf(prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L) }
+    var speed by rememberPreferenceState(prefs, "default_speed", { prefs?.defaultSpeed ?: 1.0f }, { prefs?.defaultSpeed = it })
+    var autoNext by rememberPreferenceState(prefs, "auto_next", { prefs?.autoNextEpisode ?: false }, { prefs?.autoNextEpisode = it })
+    var introSeconds by rememberPreferenceState(prefs, "global_intro_seconds", { prefs?.globalIntroSeconds ?: 0 }, { prefs?.globalIntroSeconds = it })
+    var endCreditsSeconds by rememberPreferenceState(prefs, "end_credits_skip_seconds", { AppRuntime.prefs?.endCreditsSkipSeconds ?: 30 }, { prefs?.endCreditsSkipSeconds = it })
+    var bitrate by rememberPreferenceState(prefs, "max_streaming_bitrate", { prefs?.maxStreamingBitrate ?: 120_000_000L }, { prefs?.maxStreamingBitrate = it })
+    var cacheBytes by rememberPreferenceState(prefs, "playback_cache_bytes", { prefs?.playbackCacheBytes ?: 512L * 1024L * 1024L }, { prefs?.playbackCacheBytes = it })
     var cacheUsed by remember { mutableStateOf<Long?>(null) }
     var cacheMaintenanceBusy by remember { mutableStateOf(false) }
     var cacheMaintenanceError by remember { mutableStateOf<String?>(null) }
     val cacheMaintenanceMutex = remember { Mutex() }
-    var forceTranscode by remember { mutableStateOf(prefs?.forceTranscode ?: false) }
-    var preferredAudioLanguage by remember { mutableStateOf(prefs?.preferredAudioLanguage.orEmpty()) }
-    var anime4kMode by remember { mutableStateOf(prefs?.anime4kMode ?: "off") }
+    var forceTranscode by rememberPreferenceState(prefs, "force_transcode", { prefs?.forceTranscode ?: false }, { prefs?.forceTranscode = it })
+    var anime4kMode by rememberPreferenceState(prefs, "anime4k_mode", { prefs?.anime4kMode ?: "off" }, { prefs?.anime4kMode = it })
 
     suspend fun maintainCache(operation: suspend () -> Unit) {
         cacheMaintenanceMutex.withLock {
@@ -96,7 +96,7 @@ fun SettingsPlayback(
         listOf(
             "playback:defaultSpeed", "playback:autoNextEpisode", "playback:globalIntroSeconds",
             "playback:endCreditsSkipSeconds", "playback:maxStreamingBitrate", "playback:playbackCacheBytes",
-            "playback:clearCache", "playback:forceTranscode", "playback:preferredAudioLanguage",
+            "playback:clearCache", "playback:forceTranscode",
             "playback:anime4kMode",
         )
     }
@@ -138,23 +138,23 @@ fun SettingsPlayback(
         item(key = "playback:group") {
             Column(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).glassBorder(groupShape)) {
                 ChoiceRow("playback:defaultSpeed", "默认倍速", "选择新视频的默认播放速度", speedOptions, speed.toString(), { key ->
-                    speed = key.toFloat(); prefs?.defaultSpeed = speed
+                    speed = key.toFloat()
                 }, requesters.getValue(rowKeys[0]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[1]))
                 ToggleRow("playback:autoNextEpisode", "自动连播", "剧集播完自动播放下一集", autoNext, {
-                    autoNext = it; prefs?.autoNextEpisode = it
+                    autoNext = it
                 }, requesters.getValue(rowKeys[1]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[2]))
                 ChoiceRow("playback:globalIntroSeconds", "跳过片头", "全局默认；单剧设置优先", introOptions, introSeconds.toString(), { key ->
-                    introSeconds = key.toInt(); prefs?.globalIntroSeconds = introSeconds
+                    introSeconds = key.toInt()
                 }, requesters.getValue(rowKeys[2]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[1]), downRequester = requesters.getValue(rowKeys[3]))
                 ChoiceRow("playback:endCreditsSkipSeconds", "片尾跳过", "自动跳过片尾的时长", endOptions, endCreditsSeconds.toString(), { key ->
-                    endCreditsSeconds = key.toInt(); AppRuntime.prefs?.endCreditsSkipSeconds = endCreditsSeconds
+                    endCreditsSeconds = key.toInt()
                 }, requesters.getValue(rowKeys[3]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[2]), downRequester = requesters.getValue(rowKeys[4]))
                 ChoiceRow("playback:maxStreamingBitrate", "播放码率上限", "限制流媒体最高码率", bitrateOptions, bitrate.toString(), { key ->
-                    bitrate = key.toLong(); prefs?.maxStreamingBitrate = bitrate
+                    bitrate = key.toLong()
                 }, requesters.getValue(rowKeys[4]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[3]), downRequester = requesters.getValue(rowKeys[5]))
                 ChoiceRow("playback:playbackCacheBytes", "缓存上限", "每天自动清理一次，超过上限会提前淘汰", cacheOptions, cacheBytes.toString(), { key ->
                     val selectedBytes = key.toLong()
-                    cacheBytes = selectedBytes; prefs?.playbackCacheBytes = selectedBytes
+                    cacheBytes = selectedBytes
                     scope.launch {
                         maintainCache {
                             PlaybackCache.setLimit(selectedBytes)
@@ -170,18 +170,30 @@ fun SettingsPlayback(
                     if (!cacheMaintenanceBusy) scope.launch {
                         maintainCache { PlaybackCache.clear(context).getOrThrow() }
                     }
-                }, requesters.getValue(rowKeys[6]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[5]), downRequester = requesters.getValue(rowKeys[7]))
+                }, requesters.getValue(rowKeys[6]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[5]), downRequester = requesters.getValue(rowKeys[7]),
+                    enabled = !cacheMaintenanceBusy, disabledReason = "缓存维护进行中", nextCondition = "等待维护完成后重试")
                 ToggleRow("playback:forceTranscode", "强制转码", "电视盒子解码异常或画面卡顿时打开", forceTranscode, {
-                    forceTranscode = it; prefs?.forceTranscode = it
+                    forceTranscode = it
                 }, requesters.getValue(rowKeys[7]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[6]), downRequester = requesters.getValue(rowKeys[8]))
-                ChoiceRow("playback:preferredAudioLanguage", "首选音轨语言", "新影片默认语言；按片手动选择优先", languageOptions, preferredAudioLanguage, { key ->
-                    preferredAudioLanguage = key; prefs?.preferredAudioLanguage = key
-                }, requesters.getValue(rowKeys[8]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[7]), downRequester = requesters.getValue(rowKeys[9]))
                 ChoiceRow("playback:anime4kMode", "Anime4K 超分", "仅 mpv 内核 / SDR / 1080p 及以下生效", anime4kOptions, anime4kMode, { key ->
-                    anime4kMode = key; prefs?.anime4kMode = key
-                }, requesters.getValue(rowKeys[9]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[8]), downRequester = requesters.getValue(rowKeys[9]), showDivider = false)
+                    anime4kMode = key
+                }, requesters.getValue(rowKeys[8]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[7]), downRequester = requesters.getValue(rowKeys[8]), showDivider = false)
             }
         }
         item { Spacer(Modifier.height(1.dp)) }
     }
+}
+
+/** Shared preference row used by the 字幕与音轨 category. */
+@Composable
+internal fun AudioLanguagePreferenceRow(focusRequester: FocusRequester, railRequester: FocusRequester,
+    onFocused: (String) -> Unit, upRequester: FocusRequester) {
+    val prefs = AppRuntime.prefs
+    var preferredAudioLanguage by rememberPreferenceState(prefs, "preferred_audio_language",
+        { prefs?.preferredAudioLanguage.orEmpty() }, { prefs?.preferredAudioLanguage = it })
+    val options = listOf("" to "跟随片源", "zh" to "中文", "en" to "英文", "ja" to "日文", "ko" to "韩文")
+        .map { SettingChoiceOption(it.first, it.second) }
+    ChoiceRow("subtitles:preferredAudioLanguage", "首选音轨语言", "新影片默认语言；按媒体手动选择优先",
+        options, preferredAudioLanguage, { preferredAudioLanguage = it }, focusRequester, railRequester, onFocused,
+        upRequester = upRequester, showDivider = false)
 }

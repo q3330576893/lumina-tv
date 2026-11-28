@@ -112,7 +112,7 @@ fun SettingsHome(
             items(views, key = LibraryView::id) { view ->
                 val requester = requireNotNull(requesters[view.id])
                 ToggleRow(
-                    focusKey = view.id,
+                    focusKey = "home:view:${view.id}",
                     title = view.name,
                     description = libraryItemCountDescription(itemCounts[view.id], countLoadComplete),
                     checked = view.id !in hiddenIds,

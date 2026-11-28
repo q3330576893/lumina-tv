@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.tv.AppRuntime
@@ -50,6 +51,10 @@ fun SettingsAccount(
     var renameServerUrl by remember { mutableStateOf<String?>(null) }
     var renameSession by remember { mutableStateOf<Session?>(null, referentialEqualityPolicy()) }
     var renameServerText by remember { mutableStateOf("") }
+    var savedServersOpen by remember { mutableStateOf(false) }
+    var deleteServerUrl by remember { mutableStateOf<String?>(null) }
+    val serverListRequester = remember { FocusRequester() }
+    val focusContext = LocalSettingsFocusContext.current
     var showLogoutConfirmation by remember { mutableStateOf(false) }
     var accountError by remember { mutableStateOf(prefs?.credentialStorageError) }
     val session = AppRuntime.session
@@ -67,14 +72,16 @@ fun SettingsAccount(
     val accountOnFocused: (String) -> Unit = { focusedAccountKey = it; onFocused(it) }
     val groupShape = RoundedCornerShape(SettingsTokens.GroupCorner)
 
-    LaunchedEffect(pendingFocusKey, savedServerUrls) {
+    LaunchedEffect(pendingFocusKey, savedServerUrls, savedServersOpen, renameServerUrl, deleteServerUrl) {
         val target = pendingFocusKey ?: return@LaunchedEffect
+        if (renameServerUrl != null || deleteServerUrl != null) return@LaunchedEffect
         val serverIndex = savedServerUrls.indexOfFirst { target == "account:switch:$it" }
-        val itemIndex = if (serverIndex >= 0) 3 + serverIndex else 3 + savedServerUrls.size.coerceAtLeast(1)
+        val itemIndex = if (savedServersOpen) 3 else 4
         listState.scrollToItem(itemIndex)
         var restored = false
         for (attempt in 0 until 3) {
             withFrameNanos { }
+            if (!focusContext.isActive()) return@LaunchedEffect
             runCatching { requesters[target]?.requestFocus() }
             withFrameNanos { }
             restored = focusedAccountKey == target
@@ -84,50 +91,56 @@ fun SettingsAccount(
         pendingFocusKey = null
     }
 
-    renameServerUrl?.let { url ->
-        AlertDialog(
-            onDismissRequest = { renameServerUrl = null },
-            title = { Text("编辑服务器名称") },
-            text = {
-                OutlinedTextField(
-                    value = renameServerText,
-                    onValueChange = { renameServerText = it.take(32) },
-                    singleLine = true,
-                    placeholder = { Text("例如：客厅 NAS") },
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val saved = AppRuntime.renameSavedServer(url, renameServerText, renameSession)
-                    savedServers = prefs?.savedServers().orEmpty()
-                    if (saved) renameServerUrl = null
-                    else accountError = prefs?.credentialStorageError ?: "保存服务器名称失败，请重试。"
-                }) { Text("保存") }
-            },
-            dismissButton = { TextButton(onClick = { renameServerUrl = null }) { Text("取消") } },
-        )
+    renameServerUrl?.takeIf { accountError == null }?.let { url ->
+        SettingsDialog(if (savedServersOpen) "account:servers" else "account:current-edit", "编辑服务器名称", {
+            renameServerUrl = null
+            if (savedServersOpen) pendingFocusKey = "account:edit:$url"
+        }, restoreFocusOnClose = !savedServersOpen) { close ->
+            val editor = remember { FocusRequester() }
+            LaunchedEffect(Unit) { withFrameNanos { }; editor.requestFocus() }
+            Text(url, color = TextSub)
+            OutlinedTextField(value = renameServerText, onValueChange = { renameServerText = it.take(32) },
+                label = { Text("服务器名称") }, singleLine = true,
+                modifier = Modifier.fillMaxWidth().settingsEditorFocus("account:rename:editor", editor))
+            SettingsDialogButton("account:rename:save", "保存") {
+                val saved = AppRuntime.renameSavedServer(url, renameServerText, renameSession)
+                savedServers = prefs?.savedServers().orEmpty()
+                if (saved) close() else accountError = prefs?.credentialStorageError ?: "保存服务器名称失败，请重试。"
+            }
+            SettingsDialogButton("account:rename:cancel", "取消", onClick = close)
+        }
     }
-    if (showLogoutConfirmation) {
-        AlertDialog(
-            onDismissRequest = { showLogoutConfirmation = false },
-            title = { Text("退出 / 更换账号") },
-            text = { Text("确定退出当前账号并返回登录页面吗？") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showLogoutConfirmation = false
-                    onLogout()
-                }) { Text("退出") }
-            },
-            dismissButton = { TextButton(onClick = { showLogoutConfirmation = false }) { Text("取消") } },
-        )
+    deleteServerUrl?.takeIf { accountError == null }?.let { url ->
+        SettingsDialog("account:servers", "删除已保存服务器", {
+            deleteServerUrl = null; pendingFocusKey = "account:delete:$url"
+        }, restoreFocusOnClose = false) { close ->
+            Text("只移除这条已保存记录：\n$url", color = TextMain)
+            SettingsDialogButton("account:delete:cancel", "取消", initialFocus = true, onClick = close)
+            SettingsDialogButton("account:delete:confirm", "删除") {
+                if (prefs?.removeSavedServer(url) != true) {
+                    accountError = prefs?.credentialStorageError ?: "删除已保存服务器失败，请重试。"
+                } else {
+                    val updated = prefs.savedServers()
+                    pendingFocusKey = accountFocusAfterRemoval(savedServerUrls, url, updated.map { it.second })
+                    savedServers = updated
+                    deleteServerUrl = null
+                    if (updated.isEmpty()) { savedServersOpen = false; focusContext.restore(focusContext.key("account:save-current")) }
+                }
+            }
+        }
     }
-
-    if (accountError != null) AlertDialog(
-        onDismissRequest = { accountError = null },
-        title = { Text("操作未完成") },
-        text = { Text(accountError.orEmpty()) },
-        confirmButton = { TextButton(onClick = { accountError = null }) { Text("确定") } },
-    )
+    if (showLogoutConfirmation) SettingsDialog("account:logout", "退出 / 更换账号", { showLogoutConfirmation = false }) { close ->
+        Text("确定退出当前账号并返回登录页面吗？", color = TextMain)
+        SettingsDialogButton("account:logout:cancel", "取消", initialFocus = true, onClick = close)
+        SettingsDialogButton("account:logout:confirm", "退出") { showLogoutConfirmation = false; onLogout() }
+    }
+    if (accountError != null) SettingsDialog("account:servers", "操作未完成", {
+        accountError = null
+        if (savedServersOpen && renameServerUrl == null && deleteServerUrl == null) pendingFocusKey = focusedAccountKey
+    }, restoreFocusOnClose = !savedServersOpen && renameServerUrl == null && deleteServerUrl == null) { close ->
+        Text(accountError.orEmpty(), color = TextMain)
+        SettingsDialogButton("account:error:close", "确定", initialFocus = true, onClick = close)
+    }
 
     LazyColumn(state = listState, modifier = modifier) {
         item(key = "account:current-label") {
@@ -137,7 +150,7 @@ fun SettingsAccount(
             Column(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).glassBorder(groupShape).padding(SettingsTokens.RowPaddingH)) {
                 Text(displayServerName ?: "-", color = TextMain, fontSize = TypeScale.sp18)
                 Spacer(Modifier.height(4.dp))
-                Text(session?.baseUrl ?: prefs?.baseUrl ?: "-", color = TextSub, fontSize = TypeScale.sp12)
+                Text("完整服务器地址见编辑弹层", color = TextSub, fontSize = TypeScale.sp12)
                 Spacer(Modifier.height(10.dp))
                 ActionRow(
                     focusKey = "account:current-edit",
@@ -151,7 +164,7 @@ fun SettingsAccount(
                     },
                     focusRequester = requireNotNull(requesters["account:current-edit"]),
                     leftRequester = railRequester,
-                    upRequester = focusTargets.getValue("account:current-edit").up?.let(requesters::getValue),
+                    downRequester = serverListRequester,
                     onFocused = accountOnFocused,
                     showDivider = false,
                 )
@@ -160,12 +173,50 @@ fun SettingsAccount(
         item(key = "account:saved-label") {
             Text("已保存服务器", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, top = SettingsTokens.GroupGap, bottom = 10.dp))
         }
-        if (savedServers.isEmpty()) {
-            item(key = "account:empty") {
-                Text("暂无已保存服务器", color = TextSub, fontSize = TypeScale.sp14, modifier = Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).padding(SettingsTokens.RowPaddingH))
+        item(key = "account:servers") {
+            NavigationRow("account:servers", "已保存服务器", "打开列表查看完整地址、切换、重命名或删除",
+                "${savedServers.size} 个服务器", { savedServersOpen = true }, serverListRequester, railRequester, accountOnFocused)
+        }
+        item(key = "account:save") {
+            Column(Modifier.fillMaxWidth().padding(top = SettingsTokens.GroupGap)) {
+                ActionRow(
+                    focusKey = "account:save-current",
+                    title = "保存当前服务器",
+                    description = "将当前服务器和账号加入已保存列表",
+                    actionLabel = "保存",
+                    onClick = {
+                        if (prefs?.saveCurrentServer() != true) {
+                            accountError = prefs?.credentialStorageError ?: "保存服务器凭据失败，请重试。"
+                        }
+                        savedServers = prefs?.savedServers().orEmpty()
+                    },
+                    focusRequester = requireNotNull(requesters["account:save-current"]),
+                    leftRequester = railRequester,
+                    upRequester = serverListRequester,
+                    downRequester = focusTargets.getValue("account:save-current").down?.let(requesters::getValue),
+                    onFocused = accountOnFocused,
+                )
+                ActionRow(
+                    focusKey = "account:logout",
+                    title = "退出 / 更换账号",
+                    description = "退出当前账号并返回登录页面",
+                    actionLabel = "退出",
+                    onClick = { showLogoutConfirmation = true },
+                    focusRequester = requireNotNull(requesters["account:logout"]),
+                    leftRequester = railRequester,
+                    upRequester = focusTargets.getValue("account:logout").up?.let(requesters::getValue),
+                    onFocused = accountOnFocused,
+                    danger = true,
+                    showDivider = false,
+                )
             }
-        } else {
-            items(savedServers.size, key = { "account:server:${savedServers[it].second}" }) { index ->
+        }
+        item(key = "account:bottom-space") { Spacer(Modifier.height(SettingsTokens.GroupGap)) }
+    }
+    if (savedServersOpen && renameServerUrl == null && deleteServerUrl == null && accountError == null) {
+        SettingsDialog("account:servers", "已保存服务器", { savedServersOpen = false; pendingFocusKey = null }) { close ->
+            if (savedServers.isEmpty()) Text("暂无已保存服务器", color = TextSub)
+            savedServers.forEachIndexed { index, _ ->
                 val (name, url) = savedServers[index]
                 Column(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).padding(horizontal = 10.dp, vertical = 4.dp)) {
                     Text(name, color = TextMain, fontSize = TypeScale.sp14, modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp))
@@ -202,15 +253,7 @@ fun SettingsAccount(
                         title = "删除已保存服务器",
                         description = "$name · $url",
                         actionLabel = "删除",
-                        onClick = {
-                            if (prefs?.removeSavedServer(url) != true) {
-                                accountError = prefs?.credentialStorageError ?: "删除已保存服务器失败，请重试。"
-                            } else {
-                                val updated = prefs.savedServers()
-                                pendingFocusKey = accountFocusAfterRemoval(savedServerUrls, url, updated.map { it.second })
-                                savedServers = updated
-                            }
-                        },
+                        onClick = { deleteServerUrl = url },
                         focusRequester = requireNotNull(requesters["account:delete:$url"]),
                         leftRequester = railRequester,
                         upRequester = focusTargets.getValue("account:delete:$url").up?.let(requesters::getValue),
@@ -220,42 +263,10 @@ fun SettingsAccount(
                         showDivider = false,
                     )
                 }
+
             }
+            SettingsDialogButton("account:servers:close", "关闭", initialFocus = pendingFocusKey == null, onClick = close)
         }
-        item(key = "account:save") {
-            Column(Modifier.fillMaxWidth().padding(top = SettingsTokens.GroupGap)) {
-                ActionRow(
-                    focusKey = "account:save-current",
-                    title = "保存当前服务器",
-                    description = "将当前服务器和账号加入已保存列表",
-                    actionLabel = "保存",
-                    onClick = {
-                        if (prefs?.saveCurrentServer() != true) {
-                            accountError = prefs?.credentialStorageError ?: "保存服务器凭据失败，请重试。"
-                        }
-                        savedServers = prefs?.savedServers().orEmpty()
-                    },
-                    focusRequester = requireNotNull(requesters["account:save-current"]),
-                    leftRequester = railRequester,
-                    upRequester = focusTargets.getValue("account:save-current").up?.let(requesters::getValue),
-                    downRequester = focusTargets.getValue("account:save-current").down?.let(requesters::getValue),
-                    onFocused = accountOnFocused,
-                )
-                ActionRow(
-                    focusKey = "account:logout",
-                    title = "退出 / 更换账号",
-                    description = "退出当前账号并返回登录页面",
-                    actionLabel = "退出",
-                    onClick = { showLogoutConfirmation = true },
-                    focusRequester = requireNotNull(requesters["account:logout"]),
-                    leftRequester = railRequester,
-                    upRequester = focusTargets.getValue("account:logout").up?.let(requesters::getValue),
-                    onFocused = accountOnFocused,
-                    danger = true,
-                    showDivider = false,
-                )
-            }
-        }
-        item(key = "account:bottom-space") { Spacer(Modifier.height(SettingsTokens.GroupGap)) }
     }
+
 }

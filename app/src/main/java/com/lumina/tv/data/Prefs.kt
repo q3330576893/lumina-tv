@@ -38,6 +38,15 @@ class Prefs internal constructor(
     },
 ) {
     constructor(context: Context) : this(context.getSharedPreferences("lumina_prefs", Context.MODE_PRIVATE))
+
+    /** UI subscriptions are limited to a named preference; no credential values are exposed. */
+    internal fun observePreference(key: String, changed: () -> Unit): () -> Unit {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, updated ->
+            if (updated == key) changed()
+        }
+        sp.registerOnSharedPreferenceChangeListener(listener)
+        return { sp.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
     private val sessionStore = SessionStore(sp, encrypt, decrypt, legacy = { key ->
         getSecret(key, if (key == "server_name") "Emby" else "")
     })
