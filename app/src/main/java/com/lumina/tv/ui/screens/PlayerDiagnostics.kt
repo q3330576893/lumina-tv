@@ -252,6 +252,8 @@ internal fun buildPlayerDiagPayload(
         .put("failureElapsedRealtimeMs", failureAt ?: JSONObject.NULL)
         .put("stageDurationsMs", JSONObject(phases.toString()))
         .put("events", metricEvents)
+        .put("firstFailureTrace", metrics.optJSONArray("firstFailureTrace") ?: JSONArray())
+        .put("pathExclusions", phases.optJSONArray("pathExclusions") ?: JSONArray())
         .put("mediaPeriodId", load.mediaPeriodId ?: JSONObject.NULL)
     val decoderMime = load.media3Failure?.let(::media3RendererMime) ?: exo.videoFormat?.sampleMimeType
     val decoderFallbacks = decoderFallbackHistory(load.media3Failure)
@@ -286,6 +288,9 @@ internal fun buildPlayerDiagPayload(
         source = if (load.current) "current" else "lastSession",
     ))
     val diagnosticsGap = diagnosticsGap(playbackFailure)
+    playbackFailure.put("rendererFailure", phases.optJSONObject("rendererFailure") ?: JSONObject()
+        .put("route", "UNKNOWN").put("rendererType", JSONObject.NULL).put("sampleMime", JSONObject.NULL)
+        .put("decoderName", JSONObject.NULL).put("trackIdentity", JSONObject.NULL).put("source", JSONObject.NULL))
     return DiagPayload(
         metaJson = meta.toString(2),
         playbackInfoJson = load.playbackInfoJson,

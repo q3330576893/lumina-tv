@@ -97,7 +97,7 @@ object B15Checks {
             val failures = PlaybackPathFailures()
             failures.recordEngineFailure(PlaybackPathFailure(base.copy(engine = "mpv"), reason, 1, "injected fatal failure"))
             check(selectPlaybackEngine("mpv", "mpv", base, failures, mpvAvailable = true) == "media3")
-            check(selectPlaybackEngine("mpv", "mpv", base.copy(audioMode = "soft", requestVariant = 2), failures, mpvAvailable = true) == "media3")
+            check(selectPlaybackEngine("mpv", "mpv", base.copy(audioMode = "soft", requestVariant = 2), failures, mpvAvailable = true) == "mpv") // M03: preserve a distinct path.
             check(!failures.excludes(base.copy(sourceId = "other", engine = "mpv")))
             failures.clearForManualRetry() // Manual selection starts a fresh attempt and clears the breaker.
             check(selectPlaybackEngine("mpv", "mpv", base, failures, mpvAvailable = true) == "mpv")
@@ -116,7 +116,7 @@ object B15Checks {
         check(!audioFailures.excludes(base.copy(engine = "mpv", audioMode = "soft")))
         val player = File("src/main/java/com/lumina/tv/ui/screens/PlayerScreen.kt").readText()
         check("enginePinned = \"media3\"" in player && "已切回内置内核 Media3" in player)
-        println("B15 PASS V3: source-scoped initialization/decoding breaker; HTTP/load/audio failures stay path-scoped; manual retry clears breaker")
+        println("B15 PASS V3: initialization/decoding/HTTP/load/audio exclusions stay path-scoped; manual retry clears availability, retaining history")
     }
 
     private fun v4CrashStatsJson() {

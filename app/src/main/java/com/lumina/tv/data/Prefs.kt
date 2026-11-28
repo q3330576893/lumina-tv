@@ -135,6 +135,11 @@ class Prefs internal constructor(
         set(v) = sp.edit().putString("server_note", v).apply()
 
     /** 播放内核：exo（硬解直连） / auto */
+    /** Operational rollback flag; no settings UI or audio-track policy change. */
+    var autoSoftwareRetry: Boolean
+        get() = sp.getBoolean("auto_software_retry", true)
+        set(value) { sp.edit().putBoolean("auto_software_retry", value).apply() }
+
     var playerEngine: String
         get() {
             val stored = sp.getString("engine", "auto") ?: "auto"

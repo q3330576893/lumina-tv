@@ -142,12 +142,15 @@ data class Anime4kConfig(val shaderPaths: List<String>) {
     }
 }
 
-class MpvPlayerController(
+class MpvPlayerController internal constructor(
     context: Context,
     private val generation: Int,
     private val tlsCaFile: File,
     subtitleHttpClient: OkHttpClient,
     private val onSoftwareRetry: (MpvPlayerController, LoadIdentity, () -> Boolean, () -> Unit) -> Unit,
+    private val onSoftwareRetryRetired: (MpvPlayerController, LoadIdentity, LoadRetirement, () -> Boolean, (Boolean) -> Unit) -> Unit,
+    private val hasLoadPermit: () -> Boolean,
+    private val autoSoftwareRetry: Boolean = true,
     private val desiredPlaying: (() -> Boolean?)? = null,
     private val onPhysicalLoad: (MpvPlayerController, LoadIdentity, Boolean) -> Unit = { _, _, _ -> },
     private val onState: (MpvPlayerController, LoadIdentity, State) -> Unit,
@@ -336,6 +339,7 @@ class MpvPlayerController(
     private fun createNativeLoad(software: Boolean): InitializationResult {
         checkMainThread()
         val identity = LoadIdentity(generation, physicalIds.incrementAndGet(), software)
+        if (!hasLoadPermit()) return InitializationResult.Failed("播放许可已失效", identity)
         var created: NativeLoad? = null
         return try {
             val engine = MPVLib.create(appContext) ?: error("libmpv 初始化失败或当前设备 ABI 不受支持")
@@ -413,6 +417,7 @@ class MpvPlayerController(
         audioFocusHold = false
         val retirement = load.subtitleIo.retire {
             var failure: Throwable? = null
+            var nativeDestroyed = false
             fun cleanupStep(action: () -> Unit) {
                 runCatching(action).onFailure { error ->
                     if (failure == null) failure = error else failure?.addSuppressed(error)
@@ -422,14 +427,16 @@ class MpvPlayerController(
             cleanupStep { load.engine.removeLogObserver(load.logObserver) }
             cleanupStep { load.engine.detachSurface() }
             // This serial executor owns both subtitle JNI and destruction. Never wait on the UI.
-            cleanupStep { load.engine.destroy() }
-            load.subtitleFiles.forEach { file ->
-                if (file.exists() && !file.delete()) {
-                    val error = IllegalStateException("Unable to delete subtitle file ${file.name}")
-                    if (failure == null) failure = error else failure?.addSuppressed(error)
+            retireNativeResources(destroy = {
+                cleanupStep { load.engine.destroy(); nativeDestroyed = true }
+                failure?.let { throw it }
+            }, cleanupFiles = {
+                load.subtitleFiles.forEach { file ->
+                    check(!file.exists() || file.delete()) { "Unable to delete subtitle file ${file.name}" }
                 }
-            }
-            failure?.let { throw it }
+            }, onFileCleanupFailure = { error ->
+                appendMpvLog("retirement fileCleanup=failed nativeDestroy=${if (nativeDestroyed) "succeeded" else "failed"} cause=${error.javaClass.simpleName}")
+            })
         }
         lastRetirement = retirement
         MpvRetirementFence.track(retirement)
@@ -633,7 +640,7 @@ class MpvPlayerController(
     }
 
     private fun startPhysicalLoad(load: NativeLoad) {
-        if (!isActive(load)) return
+        if (!isActive(load) || !hasLoadPermit()) return
         if (!refreshPauseIntent()) return
         if (pauseIntent) {
             audioFocus.pauseByUser()
@@ -1131,7 +1138,7 @@ class MpvPlayerController(
             return
         }
         if (load.retryPending) return
-        if (!softwareRetryUsed) {
+        if (shouldRetryMpvInSoftware(autoSoftwareRetry, softwareRetryUsed)) {
             load.retryPending = true
             val stillNeeded = { isActive(load) && !ready && !load.terminal && mpvEndAllowsRecovery(load.endKind) }
             onSoftwareRetry(this, load.identity, stillNeeded) {
@@ -1139,7 +1146,8 @@ class MpvPlayerController(
             }
         } else {
             val kind = load.failureKind ?: FailureKind.FIRST_FRAME_TIMEOUT
-            val message = if (kind == FailureKind.DECODING) "mpv 硬解和软解均失败" else "mpv 未能出画（硬解和软解均无首帧）"
+            val message = if (!autoSoftwareRetry) "mpv 未能出画，请手动更换内核或片源"
+                else if (kind == FailureKind.DECODING) "mpv 硬解和软解均失败" else "mpv 未能出画（硬解和软解均无首帧）"
             emit(load, buffering = false, error = message, failureKind = kind)
         }
     }
@@ -1152,39 +1160,29 @@ class MpvPlayerController(
         val retirement = destroyNativeLoad(load)
         fileLoaded = false
         ready = false
-        retirement.invokeOnCompletion { outcome ->
-            handler.post {
-                if (released || activeLoad != null) return@post
-                if (outcome != RetirementOutcome.Succeeded) {
-                    val failure = (outcome as? RetirementOutcome.Failed)?.cause
-                    onState(this, load.identity, State(
-                        error = "mpv native cleanup failed${failure?.message?.let { ": $it" }.orEmpty()}",
-                        failureKind = FailureKind.INITIALIZATION,
-                    ))
-                    return@post
+        val stillCurrent = { !released && activeLoad == null && attachedSurface?.isValid == true &&
+            (desiredPlaying == null || desiredPlaying.invoke() != null) }
+        onSoftwareRetryRetired(this, load.identity, retirement, stillCurrent) resume@{ playing ->
+            checkMainThread()
+            if (!stillCurrent() || !hasLoadPermit()) return@resume
+            pauseIntent = !playing
+            // Capture only after the renewed permit is installed and live intent is committed.
+            val surface = checkNotNull(attachedSurface)
+            val width = lastSurfaceWidth
+            val height = lastSurfaceHeight
+            attachedSurface = null
+            val result = createNativeLoad(software = true)
+            if (result is InitializationResult.Failed) {
+                if (!released && activeLoad == null) {
+                    onState(this, checkNotNull(result.identity), State(error = result.reason, failureKind = FailureKind.INITIALIZATION))
                 }
-                // Surface callbacks can run during retirement. Rebind the latest surface, not a
-                // stale pre-retirement snapshot or a surface cached while activeLoad was null.
-                val surface = attachedSurface
-                val width = lastSurfaceWidth
-                val height = lastSurfaceHeight
-                attachedSurface = null
-                val result = createNativeLoad(software = true)
-                if (result is InitializationResult.Failed) {
-                    if (!released && activeLoad == null) {
-                        onState(this, checkNotNull(result.identity), State(error = result.reason, failureKind = FailureKind.INITIALIZATION))
-                    }
-                    return@post
-                }
-                val retry = checkNotNull(activeLoad)
-                if (surface?.isValid != true) {
-                    emit(retry, buffering = false, error = "播放画面未就绪（Surface 未创建）", failureKind = FailureKind.SURFACE)
-                    return@post
-                }
-                attachSurface(surface, width, height)
-                appendMpvLog("${timestamp()} load=${retry.identity} hwdec fallback -> no")
-                startPhysicalLoad(retry)
+                return@resume
             }
+            val retry = checkNotNull(activeLoad)
+            attachSurface(surface, width, height)
+            if (attachedSurface !== surface) return@resume
+            appendMpvLog("${timestamp()} load=${retry.identity} hwdec fallback -> no")
+            startPhysicalLoad(retry)
         }
     }
 

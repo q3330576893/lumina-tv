@@ -14,11 +14,14 @@ internal class PlaybackDiagnostics(private val log: (String) -> Unit = {}) {
     private var startedAt = 0L
     private var firstFrameMs: Long? = null
     private var stallAt: Long? = null
+    private var bufferingAt: Long? = null
     private var stallCount = 0
     private var stallDurationMs = 0L
     private var retries = 0
     private var watchdogHits = 0
     private val events = ArrayDeque<JSONObject>()
+    private val firstFailureTrace = mutableListOf<JSONObject>()
+    private var failureCount = 0
     private var videoDecoder: String? = null
     private var audioDecoder: String? = null
     private var audioOutput: JSONObject? = null
@@ -44,13 +47,15 @@ internal class PlaybackDiagnostics(private val log: (String) -> Unit = {}) {
         startedAt = now
         firstFrameMs = null
         stallAt = null
+        bufferingAt = null
         stallCount = 0
         stallDurationMs = 0L
         watchdogHits = 0
         videoDecoder = null
         audioDecoder = null
         audioOutput = null
-        event(load, "load_started", now, JSONObject().put("previousLoadIdentity", previous?.json() ?: JSONObject.NULL))
+        event(load, "load_started", now, JSONObject().put("previousLoadIdentity", previous?.json() ?: JSONObject.NULL)
+            .put("reason", if (previous == null) "initial_load" else "replacement_load"))
     }
 
     fun retry(load: LoadIdentity, now: Long) {
@@ -65,8 +70,21 @@ internal class PlaybackDiagnostics(private val log: (String) -> Unit = {}) {
         event(load, "first_frame", now, JSONObject().put("latencyMs", firstFrameMs).put("evidence", evidence))
     }
 
-    fun stalled(load: LoadIdentity, stalled: Boolean, now: Long, countRebuffer: Boolean) {
+    fun buffering(load: LoadIdentity, active: Boolean, now: Long, evidence: String) {
         if (load != identity) return
+        if (active && bufferingAt == null) {
+            bufferingAt = now
+            event(load, "buffering_started", now, JSONObject()
+                .put("reason", if (firstFrameMs == null) "startup" else "rebuffer").put("evidence", evidence))
+        } else if (!active && bufferingAt != null) {
+            event(load, "buffering_ended", now, JSONObject().put("durationMs", now - checkNotNull(bufferingAt)).put("evidence", evidence))
+            bufferingAt = null
+        }
+    }
+
+    fun stalled(load: LoadIdentity, stalled: Boolean, now: Long, countRebuffer: Boolean, bufferingObserved: Boolean = true) {
+        if (load != identity) return
+        if (bufferingObserved) buffering(load, stalled, now, "observed playback state")
         if (stalled && countRebuffer && stallAt == null) {
             stallAt = now
             stallCount++
@@ -79,10 +97,21 @@ internal class PlaybackDiagnostics(private val log: (String) -> Unit = {}) {
         }
     }
 
-    fun watchdog(load: LoadIdentity, now: Long) {
+    fun watchdog(load: LoadIdentity, now: Long, reason: String = "unknown", evidence: JSONObject = JSONObject()) {
         if (load != identity) return
         watchdogHits++
-        event(load, "watchdog", now)
+        event(load, "watchdog", now, JSONObject().put("reason", reason).put("evidence", evidence))
+    }
+
+    fun failure(load: LoadIdentity, now: Long, reason: String, evidence: JSONObject) {
+        if (load != identity) return
+        event(load, "failure_observed", now, JSONObject().put("reason", reason)
+            .put("failureNumber", failureCount + 1).put("evidence", evidence))
+        failureCount++
+    }
+
+    fun recovery(load: LoadIdentity, now: Long, reason: String) {
+        event(load, "recovery_action", now, JSONObject().put("reason", reason))
     }
 
     fun decoder(load: LoadIdentity, audio: Boolean, name: String?) {
@@ -127,6 +156,7 @@ internal class PlaybackDiagnostics(private val log: (String) -> Unit = {}) {
         .put("rebufferDurationMs", stallDurationMs + (stallAt?.let { (now - it).coerceAtLeast(0L) } ?: 0L))
         .put("retryCountInSession", retries).put("watchdogHits", watchdogHits)
         .put("events", JSONArray(events.toList()))
+        .put("firstFailureTrace", JSONArray(firstFailureTrace))
 
     fun identityJson(): JSONObject = JSONObject().put("sessionId", sessionId)
         .put("loadIdentity", identity?.json() ?: JSONObject.NULL)
@@ -135,6 +165,8 @@ internal class PlaybackDiagnostics(private val log: (String) -> Unit = {}) {
         if (load != identity) return
         fields.put("event", name).put("elapsedRealtimeMs", now).put("sessionId", sessionId).put("loadIdentity", load.json())
         events.addLast(fields)
+        // Preserve the original failure chain across subsequent loads and manual retries.
+        if (failureCount < 2 && firstFailureTrace.size < 64) firstFailureTrace += JSONObject(fields.toString())
         if (events.size > 160) events.removeFirst()
         log("playbackMetric event=$name session=$sessionId generation=${load.generation} load=${load.physicalId} software=${load.software} atMs=$now")
     }

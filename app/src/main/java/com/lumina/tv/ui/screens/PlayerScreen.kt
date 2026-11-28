@@ -213,6 +213,11 @@ import com.lumina.tv.player.OptionalVttDataSourceFactory
 import com.lumina.tv.player.PlaybackPath
 import com.lumina.tv.player.PlaybackPathFailure
 import com.lumina.tv.player.PlaybackPathFailures
+import com.lumina.tv.player.classifyRendererFailure
+import com.lumina.tv.player.RendererFailureRoute
+import com.lumina.tv.player.renewSoftwareRetryPermit
+import com.lumina.tv.player.playbackPathJson
+import com.lumina.tv.player.retryAvailablePath
 import com.lumina.tv.player.readDisplayHdrTypes
 import com.lumina.tv.player.supportsContentHdr
 import com.lumina.tv.player.displayHdrDiagnostic
@@ -1180,7 +1185,8 @@ fun PlayerScreen(
         val now = android.os.SystemClock.elapsedRealtime()
         playbackDiagnostics.identity?.takeIf { it.generation == sessionGeneration }?.let { load ->
             playbackDiagnostics.stalled(load, stalled, now,
-                firstFrameRendered && seekHint == null && !seekHoldActive && !previewActive)
+                firstFrameRendered && seekHint == null && !seekHoldActive && !previewActive,
+                bufferingObserved = false)
         }
         if (isActuallyStalled == stalled) return
         isActuallyStalled = stalled
@@ -1296,12 +1302,22 @@ fun PlayerScreen(
 
     fun recordPathFailure(reason: PlaybackFailureReason, detail: String) {
         val path = currentPath ?: return
-        val failure = PlaybackPathFailure(path, reason, sessionGeneration, detail)
+        val now = android.os.SystemClock.elapsedRealtime()
+        val load = playbackDiagnostics.identity
+        val failure = PlaybackPathFailure(path, reason, sessionGeneration, detail,
+            attemptId = load?.physicalId?.toString() ?: sessionGeneration.toString(), timeMs = now)
+        val prior = pathFailures.snapshot().size
         if (path.engine == "mpv" && reason in setOf(
                 PlaybackFailureReason.INITIALIZATION, PlaybackFailureReason.DECODING)) {
             pathFailures.recordEngineFailure(failure)
         } else {
             pathFailures.record(failure)
+        }
+        if (pathFailures.snapshot().size != prior && load != null) {
+            playbackDiagnostics.failure(load, now, reason.name, JSONObject()
+                .put("path", playbackPathJson(path)).put("detail", detail)
+                .put("rendererFailure", phaseTimes.optJSONObject("rendererFailure") ?: JSONObject.NULL)
+                .put("excluded", pathFailures.excludes(path)))
         }
         PageLog.add("pathFailed source=${path.sourceId} engine=${path.engine} path=${path.delivery} audio=${path.audioTrack} reason=$reason")
     }
@@ -1311,6 +1327,8 @@ fun PlayerScreen(
                 .put("delivery", failure.path.delivery.name).put("audioTrack", failure.path.audioTrack)
                 .put("audioMode", failure.path.audioMode).put("requestVariant", failure.path.requestVariant)
                 .put("reason", failure.reason.name).put("generation", failure.generation).put("detail", failure.detail)
+                .put("attemptId", failure.attemptId).put("elapsedRealtimeMs", failure.timeMs)
+                .put("evidence", failure.evidence)
         })
 
     fun beginManualAttempt() {
@@ -1398,6 +1416,7 @@ fun PlayerScreen(
             playbackStatusNotice = null
             watchdog.reset()
             PageLog.add("automaticRecovery reason=$reason attempts=${recoveryBudget.attempts} gen=$generation")
+            playbackDiagnostics.identity?.let { playbackDiagnostics.recovery(it, android.os.SystemClock.elapsedRealtime(), reason) }
             try {
                 action()
             } finally {
@@ -2087,9 +2106,11 @@ fun PlayerScreen(
                     if (!isCurrentLoad(generation)) { caBundle.delete(); return@launch }
                     val backend = MpvPlayerController(context, generation, caBundle, c.playbackHttpClient, onSoftwareRetry = { owner, load, needed, retry ->
                         if (mpvBackend === owner && isCurrentLoad(load.generation)) {
+                            recordPathFailure(PlaybackFailureReason.FIRST_FRAME_TIMEOUT, "mpv-native-first-frame-timeout")
                             val retryWithProgressSession = {
                                 if (needed()) {
                                     playbackDiagnostics.retry(load, android.os.SystemClock.elapsedRealtime())
+                                    playbackDiagnostics.recovery(load, android.os.SystemClock.elapsedRealtime(), "mpv-software-retry-retire")
                                     reportStopInAppScope()
                                     speedState = speedState.forNewLoad()
                                     owner.setSpeed(speedState.userSpeed)
@@ -2105,7 +2126,33 @@ fun PlayerScreen(
                                 recoverAutomatically("mpv-software-retry", generation, stillNeeded = needed, action = retryWithProgressSession)
                             }
                         }
-                    }, desiredPlaying = {
+                    }, onSoftwareRetryRetired = { owner, load, retirement, needed, start ->
+                        loadJob = instanceScope.launch {
+                            try {
+                                val resumed = renewSoftwareRetryPermit(retirement, MpvRetirementFence, loadCoordinator, load.generation,
+                                    isCurrent = { mpvBackend === owner && isCurrentLoad(load.generation) &&
+                                        !reloadPending && loadCoordinator.sourceId == srcId && needed() },
+                                    install = { freshPermit -> playbackLoadPermit = freshPermit },
+                                    start = start)
+                                if (!resumed && mpvBackend === owner && isCurrentLoad(load.generation) && !reloadPending) {
+                                    phaseTimes.put("softwareRetry", "cancelled_before_permit")
+                                    updateStalled(false)
+                                    reportError("播放恢复已取消，请重试或更换内核、片源")
+                                }
+                            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                throw cancelled
+                            } catch (failure: com.lumina.tv.player.RetirementBlockedException) {
+                                if (mpvBackend === owner && isCurrentLoad(load.generation) && !reloadPending) {
+                                    details.recordFailure(failure)
+                                    recordPathFailure(PlaybackFailureReason.INITIALIZATION, "native-retirement-failed")
+                                    updateStalled(false)
+                                    reportError("播放资源释放失败，请重启应用后重试")
+                                }
+                            }
+                        }
+                    }, hasLoadPermit = {
+                        isCurrentLoad(generation) && !reloadPending && loadCoordinator.accepts(playbackLoadPermit)
+                    }, autoSoftwareRetry = AppRuntime.prefs?.autoSoftwareRetry ?: true, desiredPlaying = {
                         loadCoordinator.playingFor(generation)?.takeIf { isCurrentLoad(generation) && !reloadPending }
                     }, onPhysicalLoad = { owner, load, paused ->
                         if (mpvBackend === owner && isCurrentLoad(load.generation) && !reloadPending) {
@@ -2128,6 +2175,7 @@ fun PlayerScreen(
                             seekConfirmation = null
                         }
                         playbackDiagnostics.activate(load, android.os.SystemClock.elapsedRealtime())
+                        playbackDiagnostics.buffering(load, state.buffering, android.os.SystemClock.elapsedRealtime(), "mpv.buffering")
                         phaseTimes.put("identity", playbackDiagnostics.identityJson())
                         audioOutputLedger.bindTrack(owner.currentAudioEmbyIndex()?.toString())
                         val outputBinding = audioOutputLedger.current()?.binding
@@ -2299,6 +2347,10 @@ fun PlayerScreen(
                     ) { id, reason ->
                         instanceScope.launch {
                             if (isCurrentLoad(generation) && activeEngine == "media3") {
+                                phaseTimes.put("rendererFailure", JSONObject().put("route", "TEXT")
+                                    .put("rendererType", "external-subtitle").put("sampleMime", "text/vtt")
+                                    .put("decoderName", JSONObject.NULL).put("trackIdentity", id).put("source", srcId)
+                                    .put("evidence", reason))
                                 audioDecodeNotice = "外挂字幕加载失败，视频继续播放；可在字幕菜单换轨或关闭字幕"
                                 PageLog.add("externalSubtitle action=empty-fallback id=$id reason=$reason")
                             }
@@ -2379,6 +2431,15 @@ fun PlayerScreen(
         check(android.os.Looper.myLooper() == exo.applicationLooper)
         check(exo.applicationLooper == android.os.Looper.getMainLooper())
         phaseTimes.put("failedPaths", failureDiagnostics()).put("recoveryAttempts", recoveryBudget.attempts)
+            .put("pathExclusions", JSONArray(pathFailures.exclusionHistory().map { exclusion ->
+                JSONObject().put("path", playbackPathJson(exclusion.observation.path))
+                    .put("reason", exclusion.observation.reason.name)
+                    .put("elapsedRealtimeMs", exclusion.observation.timeMs)
+                    .put("attemptId", exclusion.observation.attemptId)
+                    .put("remainingAvailablePaths", exclusion.remainingAvailablePaths)
+                    .put("candidateScope", "known_negotiated_paths")
+                    .put("manualAttempt", exclusion.manualAttempt)
+            }))
         val load = loadDetails.snapshot(currentLoadKey())
         val source = playbackSource?.takeIf { load.current && load.urlType in setOf("static", "hls") && it.id == load.key.sourceId }
         return buildPlayerDiagPayload(
@@ -2570,7 +2631,17 @@ fun PlayerScreen(
             override fun onPlayerError(err: androidx.media3.common.PlaybackException) {
                 if (!isCurrentMedia3()) return
                 val errorClass = classifyPlaybackError(err, client?.baseUrl.orEmpty())
+                val rendererFailure = classifyRendererFailure(err, source = currentSourceId,
+                    audioSupportUnsupported = audioSupport == AudioSupport.UNSUPPORTED)
+                val decoderReadback = playbackDiagnostics.actualDecoder("media3", emptyMap())
+                    .optJSONObject(if (rendererFailure.route == RendererFailureRoute.AUDIO) "audio" else "video")
+                    ?.optString("value")?.takeUnless { it == "unknown" }
+                phaseTimes.put("rendererFailure", rendererFailure.json().apply {
+                    if (rendererFailure.route in setOf(RendererFailureRoute.AUDIO, RendererFailureRoute.VIDEO) &&
+                        rendererFailure.evidence.decoderName == null) put("decoderName", decoderReadback ?: JSONObject.NULL)
+                })
                 if (tunnelingEnabled && tunnelingGeneration == sessionGeneration && !firstFrameRendered &&
+                    rendererFailure.route == RendererFailureRoute.VIDEO &&
                     errorClass.category == PlaybackErrorCategory.DECODING && !tunnelingFallbackTried
                 ) {
                     val generation = sessionGeneration
@@ -2617,11 +2688,11 @@ fun PlayerScreen(
                 val networkRetryDelay = if (shouldRetryNetworkPlayback(errorClass.category, networkRetryCount))
                     playbackNetworkRetryDelayMs(err, networkRetryCount) else null
                 val errorRoute = playbackErrorRoute(errorClass.category)
-                if (errorRoute == PlaybackErrorRoute.CERTIFICATE) {
+                if (errorRoute == PlaybackErrorRoute.CERTIFICATE && rendererFailure.route == RendererFailureRoute.TLS) {
                     showCertificateError("media3")
                     return
                 }
-                if (errorRoute == PlaybackErrorRoute.AUTHENTICATION) {
+                if (errorRoute == PlaybackErrorRoute.AUTHENTICATION && rendererFailure.route == RendererFailureRoute.AUTH) {
                     audioRecoveryJob?.cancel()
                     audioRecoveryJob = null
                     recovering = false
@@ -2634,11 +2705,47 @@ fun PlayerScreen(
                     return
                 }
                 if (audioRecoveryJob?.isActive == true) return
+                when (rendererFailure.route) {
+                    RendererFailureRoute.AUDIO -> {
+                        requestAudioRecovery("media3-audio:${err.errorCodeName}")
+                        return
+                    }
+                    RendererFailureRoute.VIDEO -> {
+                        recordPathFailure(PlaybackFailureReason.DECODING, err.errorCodeName)
+                        if (canTryMpvPath()) {
+                            enginePinned = "mpv"
+                            reloadForceTranscode = false
+                            requestAutomaticReload(sessionGeneration, "media3-video:${err.errorCodeName}")
+                        } else if (!retryAlternateSource(sessionGeneration, err.errorCodeName, PlaybackFailureReason.DECODING)) {
+                            updateStalled(false)
+                            reportError("视频解码失败，请更换内核或片源")
+                        }
+                        return
+                    }
+                    RendererFailureRoute.TEXT -> {
+                        playbackDiagnostics.identity?.let { playbackDiagnostics.failure(it,
+                            android.os.SystemClock.elapsedRealtime(), "subtitle-renderer", rendererFailure.json()) }
+                        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).clearOverridesOfType(C.TRACK_TYPE_TEXT).build()
+                        recoverAutomatically("subtitle-renderer", sessionGeneration) {
+                            if (isCurrentMedia3()) exo.prepare()
+                        }
+                        return
+                    }
+                    RendererFailureRoute.UNKNOWN -> {
+                        recordPathFailure(PlaybackFailureReason.UNKNOWN, err.errorCodeName)
+                        if (currentPath?.let(pathFailures::excludes) != true) {
+                            requestAutomaticReload(sessionGeneration, "media3-unknown:${err.errorCodeName}")
+                        } else {
+                            updateStalled(false)
+                            reportError("播放失败原因未明，请导出诊断后重试或更换片源")
+                        }
+                        return
+                    }
+                    else -> Unit // The existing origin-aware HTTP/TLS/container policy owns these errors.
+                }
                 val containerUnsupported = errorClass.category == PlaybackErrorCategory.PARSING
                 val decodingUnsupported = errorClass.category == PlaybackErrorCategory.DECODING
-                val audioDecodingUnsupported = decodingUnsupported && (
-                    (err as? androidx.media3.exoplayer.ExoPlaybackException)?.rendererFormat?.sampleMimeType?.startsWith("audio/") == true ||
-                        audioSupport == AudioSupport.UNSUPPORTED)
                 if (decodingUnsupported || containerUnsupported) {
                     recordPathFailure(if (decodingUnsupported) PlaybackFailureReason.DECODING else PlaybackFailureReason.PARSING, err.errorCodeName)
                 }
@@ -2759,16 +2866,6 @@ fun PlayerScreen(
                     audioDecodeNotice = if (badHttpFallbackStage == 1) "HTTP 400，正在尝试移除字幕转码参数" else "字幕参数回退失败，正在尝试服务器直连地址"
                     engineSwitchTrace.add("http-400-fallback:$badHttpFallbackStage")
                     requestAutomaticReload(sessionGeneration, "media3:${err.errorCodeName}")
-                } else if (audioDecodeMode == "passthrough" && decodingUnsupported) {
-                    requestAudioRecovery("passthrough-unsupported")
-                } else if (audioDecodingUnsupported) {
-                    requestAudioRecovery("decoder-unsupported")
-                } else if (audioDecodeMode != "passthrough" && decodingUnsupported && canTryMpvPath()) {
-                    updateStalled(false)
-                    audioDecodeNotice = "本机 Media3 解码器不支持该音轨，已自动切到 mpv 播放路径"
-                    enginePinned = "mpv"
-                    reloadForceTranscode = false
-                    requestAutomaticReload(sessionGeneration, "media3-decoding")
                 } else if (containerUnsupported && currentIsHls && !directFallbackTried) {
                     directFallbackTried = true
                     forceDirectNext = true
@@ -2849,6 +2946,8 @@ fun PlayerScreen(
 
             override fun onPlaybackStateChanged(state: Int) {
                 if (!isCurrentMedia3()) return
+                playbackDiagnostics.identity?.let { playbackDiagnostics.buffering(it, state == Player.STATE_BUFFERING,
+                    android.os.SystemClock.elapsedRealtime(), "Media3.onPlaybackStateChanged:$state") }
                 updateStalled(state == Player.STATE_BUFFERING && exo.playWhenReady)
                 watchdog.onPlaybackStateChanged(state)
                 if (state == Player.STATE_READY) {
@@ -3479,6 +3578,7 @@ fun PlayerScreen(
         val recoveryPosition = position
         val mpvLoad = mpvBackend?.diagnosticLoadIdentity().takeIf { activeEngine == "mpv" }
         val bufferedAtHit = mpvState.bufferedPositionMs
+        recordPathFailure(PlaybackFailureReason.WATCHDOG, reason.name)
         recoverAutomatically("watchdog:${reason.name}", generation, 300L,
             stillNeeded = {
                 val waitingForMpvCache = mpvLoad != null &&
@@ -3490,8 +3590,13 @@ fun PlayerScreen(
                         isActuallyStalled && mpvState.cacheSpeedBytesPerSecond == 0L && mpvState.bufferedPositionMs == bufferedAtHit
                     } else position == recoveryPosition || isActuallyStalled || !firstFrameRendered
             }) {
-            recordPathFailure(PlaybackFailureReason.WATCHDOG, reason.name)
-            if (recoveryBudget.attempts > 1) {
+            val retryPath = currentPath ?: return@recoverAutomatically
+            if (retryAvailablePath(retryPath, pathFailures) {
+                    enginePinned = retryPath.engine
+                    reloadForceTranscode = retryPath.delivery == PlaybackDelivery.TRANSCODE
+                    requestPlaybackReload(generation)
+                }) return@recoverAutomatically
+            if (pathFailures.excludes(retryPath)) {
                 val next = mediaSources.firstOrNull { it.id != currentSourceId && it.id !in triedSources }
                 if (next != null) {
                     triedSources = triedSources + listOfNotNull(currentSourceId)
@@ -3499,6 +3604,10 @@ fun PlayerScreen(
                     enginePinned = null
                     directFallbackTried = false
                     transcodeFallbackTried = false
+                } else {
+                    updateStalled(false)
+                    reportError("当前播放路径恢复失败，请重试或更换内核、片源")
+                    return@recoverAutomatically
                 }
             }
             reloadForceTranscode = currentPath?.delivery == PlaybackDelivery.TRANSCODE
@@ -3581,7 +3690,9 @@ fun PlayerScreen(
             ) else null
             if (reason != null) {
                 playbackDiagnostics.identity?.takeIf { it.generation == sessionGeneration }?.let {
-                    playbackDiagnostics.watchdog(it, android.os.SystemClock.elapsedRealtime())
+                    playbackDiagnostics.watchdog(it, android.os.SystemClock.elapsedRealtime(), reason.name,
+                        JSONObject().put("positionMs", position).put("buffering", isActuallyStalled)
+                            .put("loading", isLoading).put("firstFrameRendered", firstFrameRendered))
                 }
                 requestWatchdogRecovery(reason)
             }

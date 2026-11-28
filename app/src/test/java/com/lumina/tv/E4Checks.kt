@@ -420,7 +420,8 @@ object E4Checks {
         }
         val failures = PlaybackPathFailures()
         failures.recordEngineFailure(PlaybackPathFailure(path, PlaybackFailureReason.INITIALIZATION, 1, "native init failed"))
-        check(failures.excludes(path.copy(delivery = PlaybackDelivery.TRANSCODE)))
+        check(failures.excludes(path))
+        check(!failures.excludes(path.copy(delivery = PlaybackDelivery.TRANSCODE))) // M03: exact-path evidence cannot poison another delivery.
         check(!failures.excludes(path.copy(engine = "media3")))
         failures.clearForManualRetry()
         check(!failures.excludes(path))
