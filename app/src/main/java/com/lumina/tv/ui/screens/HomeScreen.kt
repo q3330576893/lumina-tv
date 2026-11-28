@@ -156,8 +156,6 @@ import com.lumina.tv.ui.components.glassSurface
 import com.lumina.tv.ui.components.focusGutter
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
-import com.lumina.tv.ui.components.PosterFocusDir
-import com.lumina.tv.ui.components.PosterFocusRole
 import com.lumina.tv.ui.components.ResumeRemovalPill
 import com.lumina.tv.ui.components.SectionTitle
 import com.lumina.tv.ui.theme.Accent
@@ -1192,46 +1190,6 @@ fun HomeScreen(
                         }
                         val cardWidth = (maxWidth - 32.dp * 2 - 12.dp * (libraryGridColumns - 1)) / libraryGridColumns
                         val gutter = focusGutter(cardWidth, FocusScale.DENSE_GRID)
-                        var libraryGridHasFocus by remember(gridStateKey) { mutableStateOf(false) }
-                        val libraryFocusColumns = remember(gridState.layoutInfo) {
-                            val visible = gridState.layoutInfo.visibleItemsInfo
-                            visible.firstOrNull()?.let { first ->
-                                visible.count { it.index in first.index until (first.index + 50) && it.offset.y == first.offset.y }
-                                    .coerceAtLeast(1)
-                            } ?: 1
-                        }
-                        val libraryFocusedIndex = if (!libraryGridHasFocus) -1 else focusedMediaId?.let { id -> gridItems.indexOfFirst { it.id == id }.takeIf { it >= 0 } }
-                            ?: when {
-                                restoreTargetId == RESTORE_FIRST -> 0
-                                restoreTargetId != null -> gridItems.indexOfFirst { it.id == restoreTargetId }.takeIf { it >= 0 } ?: -1
-                                else -> -1
-                            }
-                        var previousLibraryFocusIndex by remember(gridItems) { mutableIntStateOf(-1) }
-                        var libraryFocusDir by remember(gridItems) { mutableStateOf(PosterFocusDir.NONE) }
-                        LaunchedEffect(libraryFocusedIndex) {
-                            if (libraryFocusedIndex >= 0) {
-                                if (previousLibraryFocusIndex >= 0) {
-                                    val delta = libraryFocusedIndex - previousLibraryFocusIndex
-                                    libraryFocusDir = when {
-                                        kotlin.math.abs(delta) >= libraryFocusColumns -> if (delta > 0) PosterFocusDir.DOWN else PosterFocusDir.UP
-                                        delta > 0 -> PosterFocusDir.RIGHT
-                                        delta < 0 -> PosterFocusDir.LEFT
-                                        else -> PosterFocusDir.NONE
-                                    }
-                                } else libraryFocusDir = PosterFocusDir.NONE
-                                previousLibraryFocusIndex = libraryFocusedIndex
-                            } else {
-                                previousLibraryFocusIndex = -1
-                                libraryFocusDir = PosterFocusDir.NONE
-                            }
-                        }
-                        fun libraryRoleOf(index: Int) = when {
-                            libraryFocusedIndex < 0 -> PosterFocusRole.REST
-                            index == libraryFocusedIndex -> PosterFocusRole.FOCUSED
-                            kotlin.math.abs(index - libraryFocusedIndex) == 1 ||
-                                kotlin.math.abs(index - libraryFocusedIndex) == libraryFocusColumns -> PosterFocusRole.NEIGHBOR
-                            else -> PosterFocusRole.REST
-                        }
                         LazyVerticalGrid(
                             state = gridState,
                             columns = GridCells.Fixed(libraryGridColumns),
@@ -1240,8 +1198,8 @@ fun HomeScreen(
                                 top = 12.dp + gutter, bottom = 160.dp + gutter,
                             ),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(18.dp),
-                            modifier = Modifier.fillMaxSize().onFocusChanged { libraryGridHasFocus = it.hasFocus },
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.fillMaxSize(),
                         ) {
                             itemsIndexed(
                                 gridItems,
@@ -1256,10 +1214,6 @@ fun HomeScreen(
                                     width = cardWidth,
                                     titleAlwaysVisible = true,
                                     requestInitialFocus = requestFocus,
-                                    focusRole = libraryRoleOf(index),
-                                    focusDir = libraryFocusDir,
-                                    snapAnimation = gridState.isScrollInProgress || requestFocus,
-                                    roleDriven = true,
                                     upFocus = if (index < libraryGridColumns) librarySortFocus else null,
                                     onFocused = {
                                         if (restoreTargetId != null) restoreTargetId = null
@@ -1303,46 +1257,6 @@ fun HomeScreen(
                     }
                     val cardWidth = (maxWidth - 32.dp * 2 - 12.dp * (gridColumns - 1)) / gridColumns
                     val gutter = focusGutter(cardWidth, FocusScale.DENSE_GRID)
-                    var mediaGridHasFocus by remember(gridStateKey) { mutableStateOf(false) }
-                    val gridFocusColumns = remember(gridState.layoutInfo) {
-                        val visible = gridState.layoutInfo.visibleItemsInfo
-                        visible.firstOrNull()?.let { first ->
-                            visible.count { it.index in first.index until (first.index + 50) && it.offset.y == first.offset.y }
-                                .coerceAtLeast(1)
-                        } ?: 1
-                    }
-                    val gridFocusedIndex = if (!mediaGridHasFocus) -1 else focusedMediaId?.let { id -> gridItems.indexOfFirst { it.id == id }.takeIf { it >= 0 } }
-                        ?: when {
-                            restoreTargetId == RESTORE_FIRST -> 0
-                            restoreTargetId != null -> gridItems.indexOfFirst { it.id == restoreTargetId }.takeIf { it >= 0 } ?: -1
-                            else -> -1
-                        }
-                    var previousGridFocusIndex by remember(gridItems) { mutableIntStateOf(-1) }
-                    var gridFocusDir by remember(gridItems) { mutableStateOf(PosterFocusDir.NONE) }
-                    LaunchedEffect(gridFocusedIndex) {
-                        if (gridFocusedIndex >= 0) {
-                            if (previousGridFocusIndex >= 0) {
-                                val delta = gridFocusedIndex - previousGridFocusIndex
-                                gridFocusDir = when {
-                                    kotlin.math.abs(delta) >= gridFocusColumns -> if (delta > 0) PosterFocusDir.DOWN else PosterFocusDir.UP
-                                    delta > 0 -> PosterFocusDir.RIGHT
-                                    delta < 0 -> PosterFocusDir.LEFT
-                                    else -> PosterFocusDir.NONE
-                                }
-                            } else gridFocusDir = PosterFocusDir.NONE
-                            previousGridFocusIndex = gridFocusedIndex
-                        } else {
-                            previousGridFocusIndex = -1
-                            gridFocusDir = PosterFocusDir.NONE
-                        }
-                    }
-                    fun gridRoleOf(index: Int) = when {
-                        gridFocusedIndex < 0 -> PosterFocusRole.REST
-                        index == gridFocusedIndex -> PosterFocusRole.FOCUSED
-                        kotlin.math.abs(index - gridFocusedIndex) == 1 ||
-                            kotlin.math.abs(index - gridFocusedIndex) == gridFocusColumns -> PosterFocusRole.NEIGHBOR
-                        else -> PosterFocusRole.REST
-                    }
                     LazyVerticalGrid(
                         state = gridState,
                         columns = GridCells.Fixed(gridColumns),
@@ -1351,8 +1265,8 @@ fun HomeScreen(
                             top = 76.dp + gutter, bottom = 160.dp + gutter,
                         ),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(18.dp),
-                        modifier = Modifier.fillMaxSize().onFocusChanged { mediaGridHasFocus = it.hasFocus },
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(
                             gridItems,
@@ -1367,10 +1281,6 @@ fun HomeScreen(
                                 width = cardWidth,
                                 titleAlwaysVisible = tab != HomeTab.Favorites,
                                 requestInitialFocus = requestFocus,
-                                focusRole = gridRoleOf(index),
-                                focusDir = gridFocusDir,
-                                snapAnimation = gridState.isScrollInProgress || requestFocus,
-                                roleDriven = true,
                                 focusRequester = if (tab == HomeTab.Favorites && index == 0) favoritesContentFocus else null,
                                 onFocused = {
                                     if (restoreTargetId != null) restoreTargetId = null
@@ -2825,35 +2735,6 @@ private fun RowSection(
 ) {
     val client = AppRuntime.client
     val listState = rememberLazyListState()
-    var rowHasFocus by remember(sectionKey) { mutableStateOf(false) }
-    val focusedIndex = if (focusedSection == sectionKey && rowHasFocus) {
-        val currentId = actualFocusItemId ?: focusItemId
-        when {
-            currentId == RESTORE_FIRST -> 0
-            currentId != null -> items.indexOfFirst { it.id == currentId }
-            else -> -1
-        }
-    } else -1
-    var previousFocusIndex by remember(items) { mutableIntStateOf(-1) }
-    var focusDir by remember(items) { mutableStateOf(PosterFocusDir.NONE) }
-    LaunchedEffect(focusedIndex) {
-        if (focusedIndex >= 0) {
-            if (previousFocusIndex >= 0) {
-                focusDir = if (focusedIndex > previousFocusIndex) PosterFocusDir.RIGHT
-                else if (focusedIndex < previousFocusIndex) PosterFocusDir.LEFT else PosterFocusDir.NONE
-            } else focusDir = PosterFocusDir.NONE
-            previousFocusIndex = focusedIndex
-        } else {
-            previousFocusIndex = -1
-            focusDir = PosterFocusDir.NONE
-        }
-    }
-    fun roleOf(index: Int) = when {
-        focusedIndex < 0 -> PosterFocusRole.REST
-        index == focusedIndex -> PosterFocusRole.FOCUSED
-        kotlin.math.abs(index - focusedIndex) == 1 -> PosterFocusRole.NEIGHBOR
-        else -> PosterFocusRole.REST
-    }
     LaunchedEffect(listState, items, focusItemId, focusedSection, sectionKey) {
         val targetId = focusItemId ?: return@LaunchedEffect
         if (focusedSection != sectionKey) return@LaunchedEffect
@@ -2875,15 +2756,12 @@ private fun RowSection(
             state = listState,
             modifier = Modifier
                 .focusGroup()
-                .onFocusChanged {
-                    rowHasFocus = it.hasFocus
-                    onRowFocusChanged?.invoke(it.hasFocus)
-                },
+                .onFocusChanged { onRowFocusChanged?.invoke(it.hasFocus) },
             contentPadding = PaddingValues(
                 start = 40.dp + focusGutter(width, FocusScale.POSTER_MEDIUM),
                 end = 40.dp + focusGutter(width, FocusScale.POSTER_MEDIUM),
             ),
-            horizontalArrangement = Arrangement.spacedBy(Space.m),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             itemsIndexed(items, key = { _, it -> it.id }) { index, it ->
                 val requestFocus = (focusedSection == sectionKey && it.id == focusItemId) ||
@@ -2895,12 +2773,7 @@ private fun RowSection(
                     aspectRatio = aspectRatio,
                     titleOverlay = titleOverlay,
                     titleAlwaysVisible = true,
-                    focusScale = FocusScale.POSTER_MEDIUM,
                     requestInitialFocus = requestFocus,
-                    focusRole = roleOf(index),
-                    focusDir = focusDir,
-                    snapAnimation = listState.isScrollInProgress || requestFocus,
-                    roleDriven = true,
                     focusRequester = if (it == items.firstOrNull()) firstItemFocus else null,
                     upFocus = upFocus,
                     onFocused = { onItemFocused?.invoke(it.id) },

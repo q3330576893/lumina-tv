@@ -5,11 +5,14 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -63,15 +66,18 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -127,8 +133,6 @@ import com.lumina.tv.ui.components.FocusSurface
 import com.lumina.tv.ui.components.FocusScale
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
-import com.lumina.tv.ui.components.PosterFocusDir
-import com.lumina.tv.ui.components.PosterFocusRole
 import com.lumina.tv.ui.components.DetailHeroParallax
 import com.lumina.tv.ui.components.DetailVideoBackground
 import com.lumina.tv.ui.components.rememberDetailHeroDrift
@@ -152,6 +156,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
 import com.lumina.tv.data.catchingRequest
 import com.lumina.tv.data.withRequestBudget
 import androidx.compose.ui.window.Dialog
@@ -541,28 +546,7 @@ fun DetailScreen(
     var focusedRelatedId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     val castRowState = rememberLazyListState()
     val similarRowState = rememberLazyListState()
-    var similarRowHasFocus by remember(id) { mutableStateOf(false) }
-    val focusedRelatedIndex = if (similarRowHasFocus) similar.indexOfFirst { it.id == focusedRelatedId } else -1
-    var previousRelatedIndex by remember(similar) { mutableIntStateOf(-1) }
-    var relatedFocusDir by remember(similar) { mutableStateOf(PosterFocusDir.NONE) }
-    LaunchedEffect(focusedRelatedIndex) {
-        if (focusedRelatedIndex >= 0) {
-            if (previousRelatedIndex >= 0) {
-                relatedFocusDir = if (focusedRelatedIndex > previousRelatedIndex) PosterFocusDir.RIGHT
-                else if (focusedRelatedIndex < previousRelatedIndex) PosterFocusDir.LEFT else PosterFocusDir.NONE
-            } else relatedFocusDir = PosterFocusDir.NONE
-            previousRelatedIndex = focusedRelatedIndex
-        } else {
-            previousRelatedIndex = -1
-            relatedFocusDir = PosterFocusDir.NONE
-        }
-    }
-    fun relatedRoleOf(index: Int) = when {
-        focusedRelatedIndex < 0 -> PosterFocusRole.REST
-        index == focusedRelatedIndex -> PosterFocusRole.FOCUSED
-        kotlin.math.abs(index - focusedRelatedIndex) == 1 -> PosterFocusRole.NEIGHBOR
-        else -> PosterFocusRole.REST
-    }
+
     val detailScrollState = rememberScrollState()
     val playFocus = remember { FocusRequester() }
     val overviewFocus = remember { FocusRequester() }
@@ -1584,7 +1568,7 @@ fun DetailScreen(
                 Text("相关推荐", color = TextMain, fontSize = TypeScale.sp18, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(12.dp))
                 if (similarLoading) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         repeat(4) {
                             Box(Modifier.width(138.dp).height(190.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x1AFFFFFF)))
                         }
@@ -1598,8 +1582,8 @@ fun DetailScreen(
                 } else {
                     LazyRow(
                         state = similarRowState,
-                        modifier = Modifier.focusGroup().onFocusChanged { similarRowHasFocus = it.hasFocus },
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        modifier = Modifier.focusGroup(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         itemsIndexed(similar, key = { _, it -> it.id }) { index, related ->
                             val requestFocus = related.id == focusedRelatedId
@@ -1607,12 +1591,7 @@ fun DetailScreen(
                                 item = related,
                                 imageUrl = client?.imageUrl(related),
                                 width = 138.dp,
-                                focusScale = FocusScale.DENSE_GRID,
                                 requestInitialFocus = requestFocus,
-                                focusRole = relatedRoleOf(index),
-                                focusDir = relatedFocusDir,
-                                snapAnimation = similarRowState.isScrollInProgress || requestFocus,
-                                roleDriven = true,
                                 onFocused = { focusedRelatedId = related.id },
                                 onClick = { playAction.invalidate(); onOpenDetail(related.id) },
                             )
@@ -1854,6 +1833,21 @@ private fun SourceMenu(
     PickerDialog(title, listOf("" to "自动选择") + options, currentSourceId.orEmpty(), onPick, onClose, loading = sourcesLoading)
 }
 
+private const val PICKER_DIALOG_ANIMATION_MS = 200
+
+/** A lazy entry must be composed and attached before its requester can receive focus. */
+internal suspend fun focusPickerEntry(
+    index: Int,
+    isVisible: Boolean,
+    scrollToItem: suspend (Int) -> Unit,
+    awaitMounted: suspend () -> Unit,
+    requestFocus: () -> Unit,
+) {
+    if (!isVisible) scrollToItem(index)
+    awaitMounted()
+    requestFocus()
+}
+
 @Composable
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 private fun PickerDialog(
@@ -1864,46 +1858,105 @@ private fun PickerDialog(
     onClose: () -> Unit,
     loading: Boolean = false,
 ) {
-    val entries = options.distinctBy { it.first }
+    val entries = remember(options) { options.distinctBy { it.first } }
     val requesters = remember { mutableMapOf<String, FocusRequester>() }
     val entryFocuses = entries.map { (id, _) -> requesters.getOrPut(id) { FocusRequester() } }
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        val initialKey = entries.firstOrNull()?.first
-        LaunchedEffect(initialKey) {
-            withFrameNanos { }
-            initialKey?.let { catchingRequest { requesters.getValue(it).requestFocus() } }
+    val listState = rememberLazyListState()
+    val mountedEntries = remember { mutableStateMapOf<String, FocusRequester>() }
+    val visibility = remember { MutableTransitionState(false).apply { targetState = true } }
+    var pendingClose by remember { mutableStateOf<(() -> Unit)?>(null) }
+    LaunchedEffect(visibility.isIdle, visibility.currentState, pendingClose) {
+        if (visibility.isIdle && !visibility.currentState) pendingClose?.invoke()
+    }
+    fun dismiss(afterExit: () -> Unit = onClose) {
+        if (pendingClose == null) {
+            pendingClose = afterExit
+            visibility.targetState = false
         }
-        Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
-            GlassPanel(Modifier.width(560.dp), corner = 22.dp) {
-                Column(Modifier.padding(22.dp)) {
-                    Text(title, color = TextMain, fontSize = TypeScale.sp16, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(14.dp))
-                    if (loading) Text("正在读取列表…", color = TextSub, fontSize = TypeScale.sp12)
-                    else if (options.isEmpty()) Text("没有可选项", color = TextSub, fontSize = TypeScale.sp12)
-                    Column(
-                        Modifier.heightIn(max = 46.dp * 8 + 40.dp).verticalScroll(rememberScrollState()).focusGroup(),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        entries.forEachIndexed { index, (id, label) ->
-                          key(id) {
-                            FocusSurface(
-                                modifier = Modifier.fillMaxWidth().height(46.dp)
-                                    .focusRequester(entryFocuses[index])
-                                    .focusProperties {
-                                        up = pickerNeighbor(index, -1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel
-                                        down = pickerNeighbor(index, 1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel
-                                        left = FocusRequester.Cancel
-                                        right = FocusRequester.Cancel
-                                    },
-                                corner = 12.dp, scaleTo = 1f, onClick = { onPick(id) },
-                            ) { focused ->
-                                Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(if (id == currentKey) Icons.Rounded.CheckCircle else Icons.Rounded.Layers, null, tint = if (id == currentKey) Accent else TextSub, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(10.dp))
-                                    Text(label, color = TextMain, fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+    Dialog(onDismissRequest = { dismiss() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        AnimatedVisibility(
+            visibleState = visibility,
+            enter = fadeIn(tween(PICKER_DIALOG_ANIMATION_MS)),
+            exit = fadeOut(tween(PICKER_DIALOG_ANIMATION_MS)),
+        ) {
+            var requestedFocusKey by remember { mutableStateOf<String?>(null) }
+            // This effect lives inside the visible content, so initial focus also waits for mounting.
+            LaunchedEffect(requestedFocusKey, entries, pendingClose) {
+                if (pendingClose != null) return@LaunchedEffect
+                val index = entries.indexOfFirst { it.first == requestedFocusKey }.takeIf { it >= 0 }
+                    ?: entries.indices.firstOrNull() ?: return@LaunchedEffect
+                val targetKey = entries[index].first
+                focusPickerEntry(
+                    index = index,
+                    isVisible = listState.layoutInfo.visibleItemsInfo.any { it.key == targetKey },
+                    scrollToItem = { listState.scrollToItem(it) },
+                    awaitMounted = { snapshotFlow { mountedEntries.containsKey(targetKey) }.first { it } },
+                    requestFocus = { requesters.getValue(targetKey).requestFocus() },
+                )
+            }
+            Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
+                GlassPanel(
+                    Modifier.width(560.dp).animateEnterExit(
+                        enter = slideInHorizontally(
+                            animationSpec = tween(PICKER_DIALOG_ANIMATION_MS),
+                            initialOffsetX = { fullWidth -> fullWidth },
+                        ),
+                        exit = slideOutHorizontally(
+                            animationSpec = tween(PICKER_DIALOG_ANIMATION_MS),
+                            targetOffsetX = { fullWidth -> fullWidth },
+                        ),
+                    ),
+                    corner = 22.dp,
+                ) {
+                    Column(Modifier.padding(22.dp)) {
+                        Text(title, color = TextMain, fontSize = TypeScale.sp16, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(14.dp))
+                        if (loading) Text("正在读取列表…", color = TextSub, fontSize = TypeScale.sp12)
+                        else if (options.isEmpty()) Text("没有可选项", color = TextSub, fontSize = TypeScale.sp12)
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.heightIn(max = 46.dp * 8 + 40.dp).focusGroup(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            itemsIndexed(entries, key = { _, entry -> entry.first }) { index, (id, label) ->
+                                DisposableEffect(id) {
+                                    mountedEntries[id] = entryFocuses[index]
+                                    onDispose { mountedEntries.remove(id) }
+                                }
+                                FocusSurface(
+                                    modifier = Modifier.fillMaxWidth().height(46.dp)
+                                        .focusRequester(entryFocuses[index])
+                                        .onPreviewKeyEvent { event ->
+                                            val direction = when (event.key) {
+                                                Key.DirectionUp -> -1
+                                                Key.DirectionDown -> 1
+                                                else -> return@onPreviewKeyEvent false
+                                            }
+                                            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                            if (pendingClose == null) {
+                                                pickerNeighbor(index, direction, entries.size)?.let { target ->
+                                                    requestedFocusKey = entries[target].first
+                                                }
+                                            }
+                                            true
+                                        }
+                                        .focusProperties {
+                                            up = pickerNeighbor(index, -1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel
+                                            down = pickerNeighbor(index, 1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel
+                                            left = FocusRequester.Cancel
+                                            right = FocusRequester.Cancel
+                                        },
+                                    onFocused = { requestedFocusKey = id },
+                                    corner = 12.dp, scaleTo = 1f, onClick = { dismiss { onPick(id) } },
+                                ) { focused ->
+                                    Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(if (id == currentKey) Icons.Rounded.CheckCircle else Icons.Rounded.Layers, null, tint = if (id == currentKey) Accent else TextSub, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(10.dp))
+                                        Text(label, color = TextMain, fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
                                 }
                             }
-                          }
                         }
                     }
                 }

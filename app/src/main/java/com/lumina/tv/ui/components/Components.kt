@@ -1,6 +1,5 @@
 package com.lumina.tv.ui.components
 
-import androidx.compose.animation.core.spring
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -10,7 +9,6 @@ import androidx.compose.ui.zIndex
 import android.graphics.Bitmap
 import android.app.ActivityManager
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -57,10 +55,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -101,11 +96,8 @@ import androidx.compose.animation.core.EaseOutCubic
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.platform.LocalDensity
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /** 极光背景：深空底 + 两团缓慢漂移的光晕，营造 iOS 玻璃质感的空间感。 */
 @Composable
@@ -249,7 +241,9 @@ object FocusScale {
     const val ULTRA_DENSE = 1.05f
 }
 
-private const val FOCUS_ANIMATION_DURATION_MS = 160
+internal fun posterTitleAreaHeight(fontScale: Float): Dp = (20f * fontScale + 16f).dp
+
+private const val FOCUS_ANIMATION_DURATION_MS = 140
 
 /** 放大后需要的额外内边距，避免四角卡被 Lazy 容器裁切。 */
 internal fun focusGutter(cardWidth: Dp, maxScale: Float): Dp =
@@ -264,47 +258,6 @@ private fun FocusFamily.spec(): FocusSpec = when (this) {
     FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, FOCUS_ANIMATION_DURATION_MS)
     FocusFamily.Button -> FocusSpec(1.04f, FOCUS_ANIMATION_DURATION_MS)
     FocusFamily.DetailPanel -> FocusSpec(1.02f, FOCUS_ANIMATION_DURATION_MS)
-}
-
-/**
- * 海报选中态：一小圈向外的光源，替代整屏/整卡白框与灰黑影。
- * 未选中直接返回 this；选中时在内容背后叠 3 层逐渐外扩、逐渐变淡的圆角光晕，
- * 再补一圈 1dp 的半透明白内环（圆角与卡片一致）。
- */
-internal fun Modifier.posterFocusGlow(strength: () -> Float, corner: Dp, accent: Color): Modifier {
-    return this.drawBehind {
-        val s = strength()
-        if (s <= 0.001f) return@drawBehind
-        val cornerPx = corner.toPx()
-        val layers = arrayOf(
-            3.dp.toPx() to 0.10f,
-            6.dp.toPx() to 0.06f,
-            9.dp.toPx() to 0.03f,
-        )
-        layers.forEach { (expand, alpha) ->
-            drawRoundRect(
-                color = accent.copy(alpha = alpha * s),
-                topLeft = Offset(-expand, -expand),
-                size = Size(size.width + expand * 2f, size.height + expand * 2f),
-                cornerRadius = CornerRadius(cornerPx + expand),
-            )
-        }
-        val ringWidth = 1.dp.toPx()
-        val inset = ringWidth / 2f
-        drawRoundRect(
-            brush = Brush.verticalGradient(
-                colors = listOf(
-                    Color.White.copy(alpha = 0.85f * s),
-                    accent.copy(alpha = 0.45f * s),
-                    Color.White.copy(alpha = 0.20f * s),
-                ),
-            ),
-            topLeft = Offset(inset, inset),
-            size = Size(size.width - ringWidth, size.height - ringWidth),
-            cornerRadius = CornerRadius(cornerPx),
-            style = Stroke(width = ringWidth),
-        )
-    }
 }
 
 internal fun activateFocusSurface(enabled: Boolean = true, onClick: () -> Unit) {
@@ -345,6 +298,9 @@ fun FocusSurface(
     onFocused: (() -> Unit)? = null,
     onFocusChanged: ((Boolean) -> Unit)? = null,
     enabled: Boolean = true,
+    surfaceFill: ((focused: Boolean) -> Color)? = null,
+    surfaceBorderColor: ((focused: Boolean) -> Color)? = null,
+    surfaceBorderWidth: ((focused: Boolean) -> Dp)? = null,
     onClick: () -> Unit,
     content: @Composable (focused: Boolean) -> Unit,
 ) {
@@ -355,7 +311,13 @@ fun FocusSurface(
     val focusManager = LocalFocusManager.current
     val currentEnabled by rememberUpdatedState(enabled)
     val focusSpec = focusFamily.spec()
-    val scale by animateFloatAsState(if (focused) (scaleTo ?: focusSpec.scale) else 1f, tween(focusSpec.duration), label = "scale")
+    val scale = remember { Animatable(1f) }
+    LaunchedEffect(focused) {
+        scale.animateTo(
+            if (focused) (scaleTo ?: focusSpec.scale) else 1f,
+            tween(focusSpec.duration, easing = EaseOutCubic),
+        )
+    }
     val requestFocusRequester = remember { FocusRequester() }
     LaunchedEffect(requestFocus, enabled) {
         requestSurfaceInitialFocus(requestFocus, { currentEnabled }) {
@@ -380,17 +342,17 @@ fun FocusSurface(
                 if (enabled && it.isFocused) onFocused?.invoke()
             }
             .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+                scaleX = scale.value
+                scaleY = scale.value
                 shadowElevation = 0f
                 shape = RoundedCornerShape(corner)
                 clip = false
             }
             .clip(RoundedCornerShape(corner))
-            .background(ThemeRuntime.glassFill(focused))
+            .background(surfaceFill?.invoke(focused) ?: ThemeRuntime.glassFill(focused))
             .border(
-                1.dp,
-                if (focused) Color.White.copy(alpha = 0.28f) else Color(0x24FFFFFF),
+                surfaceBorderWidth?.invoke(focused) ?: 1.dp,
+                surfaceBorderColor?.invoke(focused) ?: if (focused) Color.White.copy(alpha = 0.28f) else Color(0x24FFFFFF),
                 RoundedCornerShape(corner),
             )
             .clickable(enabled = enabled, interactionSource = interaction, indication = null,
@@ -422,10 +384,7 @@ internal fun ResumeRemovalPill(focusRequester: FocusRequester, onClick: () -> Un
     }
 }
 
-enum class PosterFocusRole { REST, NEIGHBOR, FOCUSED }
-enum class PosterFocusDir { NONE, LEFT, RIGHT, UP, DOWN }
-
-/** 海报卡片：竖版封面 + 进度条 + 标题。 */
+/** A poster keeps its focus animation local to its own interaction state. */
 @Composable
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun PosterCard(
@@ -435,93 +394,24 @@ fun PosterCard(
     aspectRatio: Float = 1.5f,
     titleOverlay: Boolean = false,
     titleAlwaysVisible: Boolean = false,
-    focusScale: Float = FocusScale.POSTER_LARGE,
     requestInitialFocus: Boolean = false,
     focusRequester: FocusRequester? = null,
     upFocus: FocusRequester? = null,
     onFocused: (() -> Unit)? = null,
-    focusRole: PosterFocusRole = PosterFocusRole.REST,
-    focusDir: PosterFocusDir = PosterFocusDir.NONE,
-    snapAnimation: Boolean = false,
-    roleDriven: Boolean = false,
     onMenuKey: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val initialFocusRequester = remember { FocusRequester() }
     val focused by interaction.collectIsFocusedAsState()
-    val cardShape = if (titleOverlay) RoundedCornerShape(10.dp) else ShapeScale.card
-    // ShapeScale.card 为 RoundedCornerShape(14.dp)，这里用等价 Dp 供光晕圆角使用。
-    val cardCorner = if (titleOverlay) 10.dp else 14.dp
-    val role = if (roleDriven) focusRole else if (focused) PosterFocusRole.FOCUSED else PosterFocusRole.REST
-    val focusedNow = role == PosterFocusRole.FOCUSED
-    val density = LocalDensity.current.density
-    var hasReceivedFocus by remember { mutableStateOf(false) }
-    val initialRequestSnap = requestInitialFocus && !hasReceivedFocus
-    val snapNow = snapAnimation || initialRequestSnap
-    val directionSign = when (focusDir) {
-        PosterFocusDir.RIGHT, PosterFocusDir.UP -> 1f
-        PosterFocusDir.LEFT, PosterFocusDir.DOWN -> -1f
-        PosterFocusDir.NONE -> 0f
-    }
-    val targetScale = when (role) {
-        PosterFocusRole.FOCUSED -> focusScale
-        PosterFocusRole.NEIGHBOR -> 0.97f
-        PosterFocusRole.REST -> 1f
-    }
-    val targetLift = if (focusedNow) -4f else 0f
-    val targetAlpha = when (role) {
-        PosterFocusRole.FOCUSED -> 1f
-        PosterFocusRole.NEIGHBOR -> 0.80f
-        PosterFocusRole.REST -> 0.92f
-    }
-    val scale = remember { Animatable(targetScale) }
-    val lift = remember { Animatable(targetLift) }
-    val alphaCard = remember { Animatable(targetAlpha) }
-    val shadowElevation = remember { Animatable(0f) }
-    val imgScale = remember { Animatable(1f) }
-    val imgShift = remember { Animatable(0f) }
-    val rotY = remember { Animatable(0f) }
-    val glow = remember { Animatable(0f) }
-    LaunchedEffect(role, focusDir, snapNow) {
-        coroutineScope {
-            launch {
-                if (snapNow) scale.snapTo(targetScale)
-                else scale.animateTo(targetScale, if (focusedNow) spring(0.78f, 720f) else tween(140, easing = EaseOutCubic))
-            }
-            launch {
-                if (snapNow) lift.snapTo(targetLift)
-                else lift.animateTo(targetLift, if (focusedNow) spring(0.78f, 720f) else tween(140, easing = EaseOutCubic))
-            }
-            launch {
-                if (snapNow) alphaCard.snapTo(targetAlpha)
-                else alphaCard.animateTo(targetAlpha, if (focusedNow) tween(200, easing = EaseOutCubic) else tween(112, easing = EaseOutCubic))
-            }
-            launch {
-                if (snapNow) shadowElevation.snapTo(if (focusedNow) 18f else 0f)
-                else if (focusedNow) { delay(50); shadowElevation.animateTo(18f, tween(260, easing = EaseOutCubic)) }
-                else shadowElevation.animateTo(0f, tween(182, easing = EaseOutCubic))
-            }
-            launch {
-                if (snapNow) imgScale.snapTo(if (focusedNow) 1.04f else 1f)
-                else if (focusedNow) { delay(30); imgScale.animateTo(1.04f, spring(0.90f, 420f)) }
-                else imgScale.animateTo(1f, tween(196, easing = EaseOutCubic))
-            }
-            launch {
-                if (snapNow) imgShift.snapTo(if (focusedNow) directionSign * 2.5f else 0f)
-                else if (focusedNow) { delay(30); imgShift.animateTo(directionSign * 2.5f, spring(0.90f, 420f)) }
-                else imgShift.animateTo(0f, tween(196, easing = EaseOutCubic))
-            }
-            launch {
-                if (snapNow || !focusedNow || focusDir == PosterFocusDir.NONE) rotY.snapTo(0f)
-                else { rotY.snapTo(directionSign * 3.6f); rotY.animateTo(0f, spring(0.75f, 520f)) }
-            }
-            launch {
-                if (snapNow) glow.snapTo(if (focusedNow) 0.55f else 0f)
-                else if (focusedNow) { delay(80); glow.animateTo(0.55f, tween(120, easing = EaseOutCubic)) }
-                else glow.snapTo(0f)
-            }
-        }
+    val cardShape = RoundedCornerShape(12.dp)
+    val scale = remember { Animatable(1f) }
+
+    LaunchedEffect(focused) {
+        scale.animateTo(
+            targetValue = if (focused) 1.04f else 1f,
+            animationSpec = tween(durationMillis = 140, easing = EaseOutCubic),
+        )
     }
     LaunchedEffect(requestInitialFocus) {
         if (requestInitialFocus) {
@@ -531,28 +421,19 @@ fun PosterCard(
     }
     Column(
         Modifier
-            .zIndex(when (role) { PosterFocusRole.FOCUSED -> 6f; PosterFocusRole.NEIGHBOR -> 1f; PosterFocusRole.REST -> 0f })
+            .zIndex(if (focused) 1f else 0f)
             .then(if (width != null) Modifier.width(width) else Modifier.fillMaxWidth())
             .then(if (titleOverlay) Modifier.aspectRatio(1f / aspectRatio) else Modifier)
             .focusRequester(initialFocusRequester)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusProperties { if (upFocus != null) up = upFocus }
-            .onFocusChanged { if (it.isFocused) { hasReceivedFocus = true; onFocused?.invoke() } }
+            .onFocusChanged { if (it.isFocused) onFocused?.invoke() }
             .graphicsLayer {
                 scaleX = scale.value
                 scaleY = scale.value
-                translationY = lift.value.dp.toPx()
-                rotationY = rotY.value
-                cameraDistance = 15f * density
-                transformOrigin = TransformOrigin.Center
-                alpha = alphaCard.value
                 shape = cardShape
                 clip = false
-                this.shadowElevation = shadowElevation.value.dp.toPx()
-                ambientShadowColor = Accent.copy(alpha = 0.30f)
-                spotShadowColor = Accent.copy(alpha = 0.45f)
             }
-            .posterFocusGlow({ glow.value }, cardCorner, Accent)
             .onPreviewKeyEvent { event ->
                 if (onMenuKey != null && event.type == KeyEventType.KeyDown && event.key == Key.Menu &&
                     event.nativeKeyEvent.repeatCount == 0
@@ -574,11 +455,7 @@ fun PosterCard(
                 model = imageUrl,
                 contentDescription = item.name,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().graphicsLayer {
-                    scaleX = imgScale.value
-                    scaleY = imgScale.value
-                    translationX = imgShift.value.dp.toPx()
-                },
+                modifier = Modifier.fillMaxSize(),
             )
             if (AppRuntime.prefs?.showPosterWatchState ?: true) {
                 if (item.played) {
@@ -616,8 +493,8 @@ fun PosterCard(
             }
             if (titleOverlay) {
                 Box(
-                    Modifier.align(Alignment.BottomStart).fillMaxWidth().height(40.dp)
-                        .background(Color.Black.copy(alpha = 0.55f))
+                    Modifier.align(Alignment.BottomStart).fillMaxWidth().height(44.dp)
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f))))
                 )
                 Text(
                     item.name,
@@ -650,11 +527,11 @@ fun PosterCard(
             }
             Box(
                 Modifier.matchParentSize().drawBehind {
-                    val edgeWidth = 1.dp.toPx()
+                    val edgeWidth = if (focused) 3.dp.toPx() else 1.dp.toPx()
                     inset(edgeWidth / 2f) {
                         drawOutline(
                             cardShape.createOutline(size, layoutDirection, this),
-                            color = if (focused) Color.White.copy(alpha = 0.28f) else GlassLine,
+                            color = if (focused) Color.White else GlassLine,
                             style = Stroke(width = edgeWidth),
                         )
                     }
@@ -662,24 +539,11 @@ fun PosterCard(
             )
         }
         if (!titleOverlay) {
-            val titleAlpha by animateFloatAsState(
-                targetValue = when {
-                    focused -> 1f
-                    titleAlwaysVisible -> 0.72f
-                    else -> 0f
-                },
-                animationSpec = if (titleAlwaysVisible) {
-                    tween(durationMillis = 120)
-                } else {
-                    tween(durationMillis = 160, delayMillis = 40)
-                },
-                label = "posterTitleAlpha",
-            )
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .height(36.dp)
-                    .graphicsLayer { this.alpha = titleAlpha }
+                    .height(posterTitleAreaHeight(LocalDensity.current.fontScale))
+                    .graphicsLayer { alpha = if (titleAlwaysVisible || focused) 1f else 0f }
                     .padding(top = 10.dp)
             ) {
                 Text(

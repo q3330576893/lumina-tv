@@ -17,6 +17,7 @@ import com.lumina.tv.ui.screens.HeroDirectionKey
 import com.lumina.tv.ui.screens.EpisodePickerPages
 import com.lumina.tv.ui.screens.homeNeedsHeroReset
 import com.lumina.tv.ui.screens.pickerNeighbor
+import com.lumina.tv.ui.screens.focusPickerEntry
 import com.lumina.tv.ui.screens.shouldHeroConsumeCarouselDirection
 import kotlinx.coroutines.runBlocking
 import com.lumina.tv.data.PlayableItemRequestGate
@@ -113,9 +114,86 @@ object UChecks {
         check(".clickable {" in seasons && ".focusable()" !in seasons)
         val detail = source("ui/screens/DetailScreen.kt")
         check("item?.id, selectedSeason?.id, episodeReloadTick, episodePages)" in detail)
-        check(".heightIn(max = 46.dp * 8 + 40.dp).verticalScroll(" in detail)
-        check("down = pickerNeighbor(index, 1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel" in detail)
+        pickerSourceContract(detail)
+        // An unrelated list elsewhere in DetailScreen must not satisfy a missing picker guard.
+        for (required in listOf("LazyColumn(", "heightIn(max = 46.dp * 8 + 40.dp)", ".focusGroup()",
+                "down = pickerNeighbor(index, 1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel")) {
+            val start = detail.indexOf("private fun PickerDialog(")
+            val end = detail.indexOf("private fun SettingRow(", start)
+            val mutated = detail.take(start) + detail.substring(start, end).replace(required, "REMOVED") +
+                detail.substring(end) + "\n// Unrelated region: $required"
+            check(runCatching { pickerSourceContract(mutated) }.isFailure) { "Picker guard accepted missing $required" }
+        }
+        lazyPickerFocus()
         println("B14 PASS U7/U8/U9: speed focus exit, loaded and retryable season pages, scrollable bounded version focus")
+    }
+
+    private fun pickerSourceContract(detail: String) {
+        val start = detail.indexOf("private fun PickerDialog(")
+        val end = detail.indexOf("private fun SettingRow(", start.coerceAtLeast(0))
+        check(start >= 0 && end > start) { "Version picker region is missing" }
+        val picker = detail.substring(start, end)
+        check("LazyColumn(" in picker) { "Version picker must stay lazy" }
+        val list = picker.substringAfter("LazyColumn(")
+        val listOptions = list.substringBefore("itemsIndexed(")
+        check("heightIn(max = 46.dp * 8 + 40.dp)" in listOptions) { "Version picker height cap is missing" }
+        check(".focusGroup()" in listOptions) { "Version picker focus group is missing" }
+        check("itemsIndexed(entries, key = { _, entry -> entry.first })" in list)
+        check("up = pickerNeighbor(index, -1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel" in list)
+        check("down = pickerNeighbor(index, 1, entries.size)?.let(entryFocuses::get) ?: FocusRequester.Cancel" in list)
+        check("left = FocusRequester.Cancel" in list && "right = FocusRequester.Cancel" in list)
+        check("pickerNeighbor(index, direction, entries.size)" in list && "requestedFocusKey = entries[target].first" in list)
+        check("Key.DirectionUp -> -1" in list && "Key.DirectionDown -> 1" in list)
+        check("focusPickerEntry(" in picker && "listState.scrollToItem(it)" in picker)
+        check("snapshotFlow { mountedEntries.containsKey(targetKey) }.first { it }" in picker)
+        check("DisposableEffect(id)" in list && "onDispose { mountedEntries.remove(id) }" in list)
+
+        val duration = Regex("PICKER_DIALOG_ANIMATION_MS = (\\d+)").find(detail)?.groupValues?.get(1)?.toInt()
+        check(duration != null && duration in 180..220)
+        check(Regex("AnimatedVisibility\\(").findAll(picker).count() == 1)
+        check("MutableTransitionState(false).apply { targetState = true }" in picker && "visibleState = visibility" in picker)
+        check(".animateEnterExit(" in picker)
+        check("slideInHorizontally(" in picker && "initialOffsetX = { fullWidth -> fullWidth }" in picker)
+        check("slideOutHorizontally(" in picker && "targetOffsetX = { fullWidth -> fullWidth }" in picker)
+        check("if (visibility.isIdle && !visibility.currentState) pendingClose?.invoke()" in picker)
+        check("delay(" !in picker && "visibility.targetState = false" in picker)
+        check("onDismissRequest = { dismiss() }" in picker && "onClick = { dismiss { onPick(id) } }" in picker)
+    }
+
+    private suspend fun lazyPickerFocus() = coroutineScope {
+        var focusedIndex = 7
+        var scrolledTo: Int? = null
+        val mounted = CompletableDeferred<Unit>()
+        val move = async {
+            focusPickerEntry(8, isVisible = false,
+                scrollToItem = { scrolledTo = it },
+                awaitMounted = { mounted.await() },
+                requestFocus = { focusedIndex = 8 })
+        }
+        yield()
+        check(scrolledTo == 8 && focusedIndex == 7 && !move.isCompleted)
+        mounted.complete(Unit)
+        withTimeout(1_000L) { move.await() }
+        check(focusedIndex == 8)
+        focusPickerEntry(7, isVisible = true,
+            scrollToItem = { error("An already visible neighbor must not jump the viewport") },
+            awaitMounted = { mounted.await() },
+            requestFocus = { focusedIndex = 7 })
+        check(focusedIndex == 7)
+
+        val removedEntry = CompletableDeferred<Unit>()
+        val cancelled = async {
+            focusPickerEntry(11, isVisible = false,
+                scrollToItem = { scrolledTo = it },
+                awaitMounted = { removedEntry.await() },
+                requestFocus = { error("Closed or replaced picker must not receive stale focus") })
+        }
+        yield()
+        check(scrolledTo == 11 && !cancelled.isCompleted)
+        cancelled.cancelAndJoin()
+        removedEntry.complete(Unit)
+        check(cancelled.isCancelled && focusedIndex == 7)
+        println("M04C PASS: bounded lazy picker guards reject four missing-contract mutations; offscreen focus waits for mount, visible focus preserves scroll, stale focus cancels; shared 200ms right slide waits for exit completion")
     }
 
     private fun media3Default() {
