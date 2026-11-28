@@ -126,6 +126,9 @@ fun SearchScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val density = LocalDensity.current
     val inputFocus = remember { FocusRequester() }
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    var resultsFocusRequested by remember { mutableStateOf(false) }
+    var budgetTruncated by remember { mutableStateOf(false) }
     var keyword by rememberSaveable { mutableStateOf(initialKeyword) }
     var results by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     val latestLoader = remember(client) { LatestItemsLoader() }
@@ -164,12 +167,20 @@ fun SearchScreen(
         searchGeneration.invalidate()
         focusedItemId = null
         focusedLatestId = null
+        resultsFocusRequested = false
+    }
+
+    fun enterResults() {
+        resultsFocusRequested = true
+        keyboard?.hide()
+        focusManager.clearFocus(force = true)
     }
 
     fun submitSearch(query: String = keyword) {
         invalidateSearchFocus()
         keyword = query
         searchNow++
+        enterResults()
     }
 
     LaunchedEffect(pendingHistoryFocus, history, keyword) {
@@ -213,6 +224,7 @@ fun SearchScreen(
     LaunchedEffect(client, keyword, typeFilter, favoritesOnly, unwatchedOnly, searchNow) {
         if (!searchGeneration.accepts(searchTicket)) return@LaunchedEffect
         val query = keyword.trim()
+        budgetTruncated = false
         if (query.isBlank()) {
             results = emptyList()
             pageStart = 0
@@ -300,16 +312,18 @@ fun SearchScreen(
                 }, onFinished = { loadingMore = false }) {
                     val page = currentClient.getItems(
                         types = types, sortBy = "SortName", sortOrder = "Ascending",
-                        limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
+                        limit = searchPageSize(pageStart), startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
                         fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
                         requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
                     )
                     currentCoroutineContext().ensureActive()
                     searchGeneration.ensureCurrent(searchTicket)
+                    val requestedSize = searchPageSize(pageStart)
                     results = (results + page).distinctBy { it.id }
                     appendError = null
                     pageStart += page.size
-                    hasMore = page.size == 40 && pageStart < 300
+                    budgetTruncated = pageStart >= SEARCH_RESULT_BUDGET && page.size == requestedSize
+                    hasMore = page.size == requestedSize && pageStart < SEARCH_RESULT_BUDGET
                 }
             }
     }
@@ -358,20 +372,23 @@ fun SearchScreen(
         }, onFinished = { loadingMore = false }) {
             val page = currentClient.getItems(
                 types = types, sortBy = "SortName", sortOrder = "Ascending",
-                limit = 40, startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
+                limit = searchPageSize(pageStart), startIndex = pageStart, searchTerm = keyword.trim(), filters = filters,
                 fields = "PrimaryImageAspectRatio,UserData,Genres,ProductionYear",
                 requestTimeoutSeconds = SEARCH_REQUEST_TIMEOUT_SECONDS,
             )
             currentCoroutineContext().ensureActive()
             searchGeneration.ensureCurrent(searchTicket)
+            val requestedSize = searchPageSize(pageStart)
             results = (results + page).distinctBy { it.id }
             appendError = null
             pageStart += page.size
-            hasMore = page.size == 40 && pageStart < 300
+            budgetTruncated = pageStart >= SEARCH_RESULT_BUDGET && page.size == requestedSize
+            hasMore = page.size == requestedSize && pageStart < SEARCH_RESULT_BUDGET
         }
     }
 
     fun retryAppend() {
+        if (pageStart >= SEARCH_RESULT_BUDGET) return
         appendError = null
         autoLoadedEmptyPages = 0
         emptyPageContinuation++
@@ -410,10 +427,13 @@ fun SearchScreen(
                 ),
                 modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(inputFocus)
                     .tvFocusBoundary(RoundedCornerShape(16.dp))
-                    .onFocusChanged { inputHasFocus = it.isFocused; if (it.isFocused) focusedHistoryEntry = null }
+                    .onFocusChanged { inputHasFocus = it.isFocused; if (it.isFocused) { focusedHistoryEntry = null; resultsFocusRequested = false } }
                     .onPreviewKeyEvent { event ->
                         if (keyword.isBlank() && history.isNotEmpty() && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                             pendingHistoryFocus = history.first()
+                            true
+                        } else if (keyword.isNotBlank() && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                            enterResults()
                             true
                         } else false
                     },
@@ -465,6 +485,9 @@ fun SearchScreen(
                     Spacer(Modifier.width(12.dp))
                     Text(filterDescription, color = TextSub, fontSize = 11.sp)
                 }
+                searchBudgetNotice(pageStart, budgetTruncated)?.let { notice ->
+                    Text(notice, color = TextSub, fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp))
+                }
                 if (visibleResults.isEmpty()) {
                     when {
                         loadingMore || hasMore && autoLoadedEmptyPages < SEARCH_EMPTY_AUTO_PAGE_LIMIT -> LoadingView(text = "继续搜索中…")
@@ -480,6 +503,7 @@ fun SearchScreen(
                                     }
                                 }
                             }
+                        budgetTruncated -> EmptyView("当前已加载内容中未找到匹配项")
                         else -> EmptyView("没有找到相关内容")
                     }
                 } else {
@@ -491,8 +515,8 @@ fun SearchScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(visibleResults, key = { _, item -> item.id }) { index, item ->
-                            val requestFocus = item.id == focusedItemId ||
-                                (focusedItemId == null && item == visibleResults.firstOrNull())
+                            val requestFocus = mayFocusSearchResult(resultsFocusRequested, imeVisible, inputHasFocus) &&
+                                (item.id == focusedItemId || (focusedItemId == null && item == visibleResults.firstOrNull()))
                             PosterCard(item = item, imageUrl = client?.imageUrl(item), width = 150.dp,
                                 titleAlwaysVisible = true,
                                 requestInitialFocus = requestFocus,

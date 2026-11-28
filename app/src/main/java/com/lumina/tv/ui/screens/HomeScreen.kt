@@ -27,6 +27,9 @@ import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -242,14 +245,17 @@ fun HomeScreen(
         ) }
     }
     val favoritesGridState = remember(favoritesPager) { LazyGridState() }
-    val mediaLibraryGridState = rememberSaveable(client, saver = LazyGridState.Saver) { LazyGridState() }
+    val mediaLibraryGridState = rememberSaveable(client, saver = LazyListState.Saver) { LazyListState() }
     var views by remember(homeIdentity) { mutableStateOf(LibraryCache.home?.views ?: emptyList()) }
     var libraryCounts by remember(client, homeIdentity, userDataRevision, views) { mutableStateOf<Map<String, Int?>>(emptyMap()) }
     var libraryRecentBackdropUrls by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
 
     var tab by rememberSaveable { mutableStateOf(HomeTab.Recommend) }
     var selectedLibraryId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedCollectionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedCollectionName by rememberSaveable { mutableStateOf("") }
     val selectedLibrary = views.firstOrNull { it.id == selectedLibraryId }
+        ?: selectedCollectionId?.takeIf { it == selectedLibraryId }?.let { LibraryView(it, selectedCollectionName, "collection") }
     var libraryError by remember { mutableStateOf<String?>(null) }
     var librarySort by rememberSaveable { mutableStateOf(AppRuntime.prefs?.librarySort ?: "date") }
     var librarySortOrder by rememberSaveable { mutableStateOf(AppRuntime.prefs?.librarySortOrder ?: "Descending") }
@@ -426,8 +432,7 @@ fun HomeScreen(
     var resumeRowFocused by remember { mutableStateOf(false) }
     var focusedMediaSection by rememberSaveable { mutableStateOf<String?>(null) }
     var focusedLibraryId by rememberSaveable(client) { mutableStateOf<String?>(null) }
-    var heroIndex by rememberSaveable { mutableStateOf(0) }
-    var unavailableHeroIds by remember(homeIdentity) { mutableStateOf<Set<String>>(emptySet()) }
+        var unavailableHeroIds by remember(homeIdentity) { mutableStateOf<Set<String>>(emptySet()) }
     var heroHasFocus by remember { mutableStateOf(false) }
     var restoreHeroFocus by rememberSaveable { mutableStateOf(false) }
     var heroResetPending by remember { mutableStateOf(false) }
@@ -762,8 +767,8 @@ fun HomeScreen(
 
     val heroLifecycle = LocalLifecycleOwner.current.lifecycle
     var heroHour by remember(homeIdentity) { mutableLongStateOf(heroHourContext(System.currentTimeMillis())) }
-    LaunchedEffect(active, heroLifecycle, homeIdentity) {
-        if (!active) return@LaunchedEffect
+    LaunchedEffect(active, heroLifecycle, homeIdentity, ThemeRuntime.motion) {
+        if (!active || !ThemeRuntime.motion.idleAnimations) return@LaunchedEffect
         heroLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 val now = System.currentTimeMillis()
@@ -774,17 +779,15 @@ fun HomeScreen(
     }
     val heroItems = rememberScopedHomeHeroItems(homeIdentity, heroHour,
         latest, movies, series, favorites, unavailableHeroIds, heroExposureHistory)
-    LaunchedEffect(heroItems.size) {
-        if (heroItems.isEmpty()) heroIndex = 0
-        else if (heroIndex > heroItems.lastIndex) heroIndex = heroItems.lastIndex
-    }
+    // Ranking can refresh in the background; an idle homepage never advances its artwork.
+    val fallbackHero = remember(homeIdentity, heroItems.isEmpty()) { heroItems.take(1) }
+
     val hiddenHomeViewIds = AppRuntime.prefs?.hiddenViewIds.orEmpty()
     val homeLibraries = remember(views, hiddenHomeViewIds) {
         views.filterNot { it.id in hiddenHomeViewIds }
     }
     val firstSectionKey: String? = when {
         resume.isEmpty() && favorites.isEmpty() -> "empty"
-        resume.isNotEmpty() -> "resume"
         homeLibraries.isNotEmpty() -> "library-${homeLibraries.first().id}"
         favorites.isNotEmpty() -> "favorites"
         else -> homeLibraries.firstNotNullOfOrNull { view ->
@@ -803,7 +806,6 @@ fun HomeScreen(
         var index = 1 // Hero
         when {
             resume.isEmpty() && favorites.isEmpty() -> index // Empty-state action
-            resume.isNotEmpty() -> index
             homeLibraries.isNotEmpty() -> index
             favorites.isNotEmpty() -> index
             else -> {
@@ -823,7 +825,7 @@ fun HomeScreen(
     val hasContentTarget = when (tab) {
         HomeTab.Recommend -> firstSectionKey != null
         HomeTab.Favorites -> favoritesPager?.state?.items?.isNotEmpty() == true
-        HomeTab.Media -> selectedLibraryId == null && views.any { !(AppRuntime.prefs?.isViewHidden(it.id) ?: false) }
+        HomeTab.Media -> selectedLibraryId == null && client != null
         else -> false
     }
     fun navigateToFirstContent(): Boolean {
@@ -874,7 +876,7 @@ fun HomeScreen(
     val navContentFocus = when (tab) {
         HomeTab.Recommend -> heroArtworkFocus
         HomeTab.Favorites -> if (hasContentTarget) favoritesContentFocus else FocusRequester.Default
-        HomeTab.Media -> if (selectedLibraryId == null && views.any { !(AppRuntime.prefs?.isViewHidden(it.id) ?: false) }) mediaLibraryContentFocus else FocusRequester.Default
+        HomeTab.Media -> if (selectedLibraryId == null) mediaLibraryContentFocus else FocusRequester.Default
         else -> FocusRequester.Default
     }
 
@@ -904,7 +906,7 @@ fun HomeScreen(
             }
         }
         if (event.type == KeyEventType.KeyDown && event.key == Key.Menu) {
-            val inResume = resumeRowFocused || (focusedMediaId != null && resume.any { it.id == focusedMediaId })
+            val inResume = heroHasFocus || resumeRowFocused || (focusedMediaId != null && resume.any { it.id == focusedMediaId })
             if (inResume) false else {
                 runCatching { navFocus.requestFocus() }
                 true
@@ -940,21 +942,13 @@ fun HomeScreen(
                     ) {
                     item(key = "home-hero") {
                         Hero(
-                            items = heroItems,
+                            items = resume.ifEmpty { fallbackHero },
+                            resume = resume,
                             active = active,
                             heroWidth = heroWidth,
                             heroHeight = heroHeight,
-                            currentIndex = heroIndex,
-                            onPrevious = {
-                                if (heroItems.isNotEmpty()) {
-                                    heroIndex = (heroIndex - 1 + heroItems.size) % heroItems.size
-                                }
-                            },
-                            onNext = {
-                                if (heroItems.isNotEmpty()) {
-                                    heroIndex = (heroIndex + 1) % heroItems.size
-                                }
-                            },
+                            viewportHeight = maxHeight,
+                            onRemoveResume = { pendingResumeRemoval = it },
                             onPlay = { restoreHeroFocus = true; onPlay(it) },
                             onOpenDetail = { restoreHeroFocus = true; onOpenDetail(it) },
                             artworkFocus = heroArtworkFocus,
@@ -966,11 +960,9 @@ fun HomeScreen(
                                     scope.launch { ensureHeroAtTop("focus") }
                                 }
                             },
-                            onItemUnavailable = { itemId -> unavailableHeroIds = unavailableHeroIds + itemId },
                             onItemVisible = { account, itemId ->
                                 if (AppRuntime.client === client && account == homeIdentity) heroExposureHistory.record(account, itemId)
                             },
-                            hazeState = hazeState,
                         )
                     }
                     if (!loading && resume.isEmpty() && favorites.isEmpty()) {
@@ -993,7 +985,6 @@ fun HomeScreen(
                             }
                         }
                     }
-                    if (resume.isNotEmpty()) item { RowSection("继续观看", resume, width = 170.dp, topPadding = 12.dp, requestInitialFocus = restoreTargetId == RESTORE_FIRST && firstSectionKey == "resume", focusItemId = restoreTargetId, actualFocusItemId = focusedMediaId, sectionKey = "resume", focusedSection = focusedMediaSection, firstItemFocus = if (firstSectionKey == "resume") firstContentFocus else null, onItemFocused = { restoreTargetId = null; focusedMediaId = it; focusedMediaSection = "resume" }, onRowFocusChanged = { resumeRowFocused = it }, onItemMenu = { pendingResumeRemoval = it }) { restoreTargetId = it.id; onOpenDetail(it.seriesId ?: it.id) } }
                     if (homeLibraries.isNotEmpty()) item(key = "home-libraries") {
                         HomeLibraryRow(
                             views = homeLibraries,
@@ -1031,10 +1022,18 @@ fun HomeScreen(
                     onLibraryFocused = { focusedLibraryId = it },
                     onOpenLibrary = { selectedLibraryId = it.id; focusedLibraryId = it.id; focusedMediaId = null; restoreTargetId = RESTORE_FIRST; LibraryCache.clearGridPosition(libraryBrowseKey(it.id, librarySort, librarySortOrder)) },
                     firstItemFocus = mediaLibraryContentFocus,
+                    onOpenDetail = onOpenDetail,
+                    onOpenCollection = { collection ->
+                        selectedCollectionId = collection.id
+                        selectedCollectionName = readableMediaTitle(collection)
+                        selectedLibraryId = collection.id
+                        focusedMediaId = null
+                        restoreTargetId = RESTORE_FIRST
+                    },
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
-                        Modifier.fillMaxWidth().height(96.dp).tvPagePadding().padding(top = 24.dp),
+                        Modifier.fillMaxWidth().heightIn(min = 96.dp).tvPagePadding().padding(top = 24.dp, bottom = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         FocusSurface(modifier = Modifier.size(40.dp).focusRequester(libraryBackFocus).focusProperties { right = librarySortFocus }, corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
@@ -1046,10 +1045,10 @@ fun HomeScreen(
                             }
                         }
                         Spacer(Modifier.width(16.dp))
-                        Column(Modifier.widthIn(max = 260.dp)) {
+                        Column(Modifier.weight(1f)) {
                             Text(
                                 selectedLibrary?.name.orEmpty(),
-                                color = TextMain, fontSize = TypeScale.sp24, fontWeight = FontWeight.Medium,
+                                color = TextMain, fontSize = 30.sp, fontWeight = FontWeight.Medium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                             Text(if (librarySort == "random") "随机固定样本 · ${gridItems.size}/最多 50 部（非全库）"
@@ -1188,11 +1187,10 @@ fun HomeScreen(
                             ) { index, media ->
                                 val requestFocus = active && restoreTargetId != null &&
                                     (restoreTargetId == media.id || (restoreTargetId == RESTORE_FIRST && index == 0))
-                                PosterCard(
+                                com.lumina.tv.ui.components.LibraryPosterCard(
                                     item = media,
                                     imageUrl = client?.imageUrl(media),
-                                    width = cardWidth,
-                                    titleAlwaysVisible = true,
+                                    modifier = Modifier.width(cardWidth),
                                     requestInitialFocus = requestFocus,
                                     upFocus = if (index < libraryGridColumns) librarySortFocus else null,
                                     onFocused = {
@@ -1290,7 +1288,9 @@ fun HomeScreen(
             )
         }
         if (!(tab == HomeTab.Media && selectedLibraryId != null)) NavBar(
-            modifier = Modifier.fillMaxWidth().wrapContentHeight().zIndex(2f),
+            modifier = Modifier.fillMaxWidth().wrapContentHeight().zIndex(2f)
+                .drawWithContent { drawRect(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent))); drawContent() }
+                .windowInsetsPadding(androidx.compose.foundation.layout.WindowInsets.safeDrawing.only(androidx.compose.foundation.layout.WindowInsetsSides.Top)),
                 tab = tab,
                 onSelect = { t, _ -> tab = t; selectedLibraryId = null; restoreTargetId = null },
                 onSearch = onSearch,
@@ -1384,8 +1384,13 @@ private fun NavBar(
     hazeState: HazeState,
 ) {
     Box(modifier) {
+        androidx.compose.foundation.Image(
+            painter = androidx.compose.ui.res.painterResource(com.lumina.tv.R.drawable.ic_launcher_foreground),
+            contentDescription = "LuminaTV",
+            modifier = Modifier.align(Alignment.TopStart).padding(start = Space.l, top = 16.dp).size(44.dp),
+        )
         ServerCapsule(
-            modifier = Modifier.align(Alignment.TopStart).padding(start = Space.l + Space.xs, top = 16.dp),
+            modifier = Modifier.align(Alignment.TopStart).padding(start = Space.l + 56.dp, top = 24.dp),
             onSwitchServer = onSwitchServer,
             onLogout = onLogout,
             onServerSwitched = onServerSwitched,
@@ -1838,116 +1843,6 @@ private fun HomeLibraryRow(
     }
 }
 
-@Composable
-private fun MediaLibrary(
-    views: List<LibraryView>,
-    contents: Map<String, List<MediaItem>>,
-    counts: Map<String, Int?>,
-    gridState: LazyGridState,
-    active: Boolean,
-    focusedLibraryId: String?,
-    onLibraryFocused: (String) -> Unit,
-    onOpenLibrary: (LibraryView) -> Unit,
-    firstItemFocus: FocusRequester,
-) {
-    if (views.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("服务器暂无媒体库分类", color = TextSub, fontSize = TypeScale.sp13)
-        }
-        return
-    }
-    var pendingRestoreId by remember(gridState) { mutableStateOf(focusedLibraryId) }
-    val restoreIndex = pendingRestoreId?.let { id -> views.indexOfFirst { it.id == id }.coerceAtLeast(0) } ?: -1
-    val restoreId = views.getOrNull(restoreIndex)?.id
-    val restoreFocus = remember { FocusRequester() }
-    LaunchedEffect(gridState, active, restoreIndex, restoreId) {
-        if (!active || restoreId == null) return@LaunchedEffect
-        val isTargetVisible = {
-            gridState.layoutInfo.visibleItemsInfo.any { it.index == restoreIndex && it.key == restoreId }
-        }
-        withFrameNanos { }
-        if (!isTargetVisible()) gridState.scrollToItem(restoreIndex)
-        snapshotFlow(isTargetVisible).first { it }
-        withFrameNanos { }
-        val targetFocus = if (restoreIndex == 0) firstItemFocus else restoreFocus
-        runCatching { targetFocus.requestFocus() }
-        pendingRestoreId = null
-    }
-    Column(Modifier.fillMaxSize()) {
-        Column(Modifier.padding(start = 34.dp, end = 34.dp, top = 76.dp, bottom = 6.dp)) {
-            Text("媒体库", color = TextMain, fontSize = TypeScale.sp22, fontWeight = FontWeight.Bold)
-        }
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(300.dp),
-            state = gridState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 34.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            items(views, key = { it.id }) { v ->
-                val libraryItems = contents[v.id].orEmpty()
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    FocusSurface(
-                        modifier = Modifier.width(300.dp).height(132.dp),
-                        corner = 20.dp,
-                        scaleTo = TvTokenValues.FOCUS_SCALE,
-                        focusRequester = when (v.id) {
-                            views.first().id -> firstItemFocus
-                            restoreId -> restoreFocus
-                            else -> null
-                        },
-                        onFocused = { onLibraryFocused(v.id) },
-                        onClick = { onOpenLibrary(v) },
-                    ) { focused ->
-                        val shape = RoundedCornerShape(20.dp)
-                        Box(
-                            Modifier.fillMaxSize()
-
-                                .luminaSurface(SurfaceLevel.Content, shape = shape)
-
-                                .clip(shape)
-                        ) {
-                            if (libraryItems.isNotEmpty()) {
-                                Row(Modifier.fillMaxSize()) {
-                                    repeat(2) { column ->
-                                        Column(Modifier.weight(1f).fillMaxHeight()) {
-                                            repeat(2) { row ->
-                                                val imageItem = libraryItems.getOrNull(column * 2 + row)
-                                                Box(Modifier.weight(1f).fillMaxWidth().luminaSurface(SurfaceLevel.Content)) {
-                                                    imageItem?.let { media ->
-                                                        AsyncImage(
-                                                            model = AppRuntime.client?.imageUrl(media, 360),
-                                                            contentDescription = null,
-                                                            contentScale = ContentScale.Crop,
-                                                            modifier = Modifier.fillMaxSize(),
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Darken))
-                            }
-                            Box(Modifier.fillMaxWidth().height(1.dp).luminaDivider().align(Alignment.TopCenter))
-                            Column(Modifier.align(Alignment.BottomStart).padding(16.dp)) {
-                                Text(v.name, color = Color.White, fontSize = TypeScale.sp20, fontWeight = FontWeight.Bold)
-                                Text(
-                                    libraryCategoryCountLabel(counts[v.id], libraryItems.size),
-                                    color = Color(0xCCFFFFFF),
-                                    fontSize = TypeScale.sp11,
-                                )
-                            }
-                            Text("›", color = Color(0xCCFFFFFF), fontSize = TypeScale.sp24, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp))
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 internal fun libraryCategoryCountLabel(totalCount: Int?, sampleCount: Int): String =
     totalCount?.let { "共 $it 部" }
         ?: sampleCount.takeIf { it > 0 }?.let { "预览 $it 部" }
@@ -2070,491 +1965,169 @@ internal fun pickHeroItems(pool: List<MediaItem>, recentIds: Set<String>, size: 
 @Composable
 private fun Hero(
     items: List<MediaItem>,
+    resume: List<MediaItem>,
     heroWidth: Dp,
     heroHeight: Dp,
-    currentIndex: Int,
-    onPrevious: () -> Unit,
-    onNext: () -> Unit,
+    viewportHeight: Dp,
     onPlay: (MediaItem) -> Unit,
     onOpenDetail: (String) -> Unit,
+    onRemoveResume: (MediaItem) -> Unit,
     artworkFocus: FocusRequester,
     navFocus: FocusRequester,
     onNavigateDown: () -> Boolean,
     onHeroFocusChanged: (Boolean) -> Unit,
-    onItemUnavailable: (String) -> Unit,
     onItemVisible: (String, String) -> Unit,
-    hazeState: HazeState,
     active: Boolean = true,
 ) {
-    val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
-    if (item == null) {
-        Box(Modifier.fillMaxWidth().height(heroHeight).luminaSurface(SurfaceLevel.Canvas)
-            .focusRequester(artworkFocus)
-            .focusProperties { up = navFocus }
-            .onFocusChanged { onHeroFocusChanged(it.hasFocus) }
-            .onPreviewKeyEvent { it.type == KeyEventType.KeyDown && it.key == Key.DirectionDown && onNavigateDown() }
-            .focusable()) {
-            Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas))
-            Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = TypeScale.sp13)
-        }
-        return
-    }
-    val context = LocalContext.current
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val transitionScope = rememberCoroutineScope()
-    val client = AppRuntime.client
+    // Only HeroPresentation reads this state. Moving along the rail never invalidates HomeScreen.
+    val selectedId = rememberSaveable { mutableStateOf<String?>(null) }
     val playFocus = remember { FocusRequester() }
     val detailFocus = remember { FocusRequester() }
-    val compact = heroWidth < 720.dp
-    val horizontalInset = if (compact) 20.dp else 40.dp
-    val bottomInset = if (compact) 20.dp else 28.dp
-    val titleWidth = if (compact) (heroWidth - horizontalInset * 2).coerceAtLeast(0.dp) else heroWidth * 0.36f
-    val actionWidth = ((titleWidth - 12.dp) / 2).coerceAtLeast(0.dp)
-    val thumbnailWidth = if (compact) minOf(64.dp, heroWidth * 0.21f) else minOf(112.dp, heroWidth * 0.14f)
-    var focusedHeroAction by remember { mutableStateOf(HeroActionFocus.NONE) }
-    var tmdbBackdrops by remember(items, client) { mutableStateOf<Map<String, String>>(emptyMap()) }
-    var tmdbResolvedIds by remember(items, client) { mutableStateOf<Set<String>>(emptySet()) }
-    LaunchedEffect(items, client, active, lifecycle) {
-        if (!active) return@LaunchedEffect
-        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            if (tmdbResolvedIds.isNotEmpty()) return@repeatOnLifecycle
-            val pairs = items.map { media ->
-                async {
-                    media.id to catchingRequest {
-                        TmdbClient.lookupHero(
-                            media.type,
-                            media.seriesName ?: media.name,
-                            media.year,
-                            media.providerIds["OriginalTitle"],
-                        )?.backdropUrl
-                    }.getOrNull()
-                }
-            }.awaitAll()
-            tmdbBackdrops = pairs.mapNotNull { (id, url) ->
-                url?.takeIf(String::isNotBlank)?.let { id to it }
-            }.toMap()
-            tmdbResolvedIds = pairs.mapTo(mutableSetOf()) { it.first }
-            PageLog.add("heroBackdrop have=${tmdbBackdrops.size}/${items.size}")
-        }
-    }
-
-    fun heroImageCandidates(heroItem: MediaItem?): List<WideImageCandidate> = heroItem?.let { media ->
-        client?.wideImageCandidates(media, maxWidth = 1280, quality = 80, tmdbUrl = tmdbBackdrops[media.id]).orEmpty()
-    }.orEmpty()
-    val heroCandidatesById = remember(items, client, tmdbBackdrops) {
-        items.associate { it.id to heroImageCandidates(it) }
-    }
-    val heroItemsById = remember(items) { items.associateBy { it.id } }
-    val accountScope = client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
-    val lifecycleState by lifecycle.currentStateAsState()
-    var viewportVisible by remember(client) { mutableStateOf(false) }
-    val exposureTracker = remember(client) { HeroExposureTracker() }
-    var loadedHeroImages by remember(client) { mutableStateOf<Set<String>>(emptySet()) }
-    var failedHeroImages by remember(client) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
-    var failedThumbImages by remember(client) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
-    val lastHeroImageLogs = remember(client) { mutableMapOf<String, Pair<String, Boolean>>() }
-    fun isRejectedHeroImage(image: String?): Boolean =
-        image != null && failedHeroImages.values.any { image in it }
-    fun resolveHeroCandidate(heroItem: MediaItem?): WideImageCandidate? = heroItem?.let { media ->
-        heroCandidatesById[media.id].orEmpty().firstOrNull { !isRejectedHeroImage(it.url) }
-    }
-    fun resolveHeroImage(heroItem: MediaItem?): String? = resolveHeroCandidate(heroItem)?.url
-    fun logHeroImage(media: MediaItem, image: String, success: Boolean) {
-        // A successful top image becomes the bottom layer; do not log that same load twice.
-        val event = image to success
-        if (lastHeroImageLogs[media.id] == event) return
-        lastHeroImageLogs[media.id] = event
-        val cands = heroCandidatesById[media.id].orEmpty()
-        val k = cands.indexOfFirst { it.url == image }
-        val source = cands.getOrNull(k)?.source ?: "unknown"
-        val maxWidth = 1280
-        PageLog.add("heroImg cands=${cands.size} pick=$k src=$source w=$maxWidth ok=$success")
-    }
-    fun rejectHeroImage(media: MediaItem, image: String) {
-        logHeroImage(media, image, false)
-        failedHeroImages = failedHeroImages + (media.id to (failedHeroImages[media.id].orEmpty() + image))
-    }
-    fun heroImageLoaded(media: MediaItem, image: String, width: Int, height: Int) {
-        val source = heroCandidatesById[media.id].orEmpty().firstOrNull { it.url == image }?.source
-        if (width <= 0 || height <= 0 || (source != "poster" && width <= height)) {
-            rejectHeroImage(media, image)
+    val playAction = rememberPlayableItemAction(items, active = active) { target, _ -> onPlay(target) }
+    val rail = remember(heroWidth) { homeRailGeometry(heroWidth.value) }
+    val fontScale = LocalDensity.current.fontScale
+    val safeTop = with(LocalDensity.current) { androidx.compose.foundation.layout.WindowInsets.safeDrawing.getTop(this).toDp() }
+    // Wrap content vertically for large fonts; the outer LazyColumn can scroll on small displays.
+    val railHeight = if (resume.isEmpty()) 24.dp else rail.height.dp + 32.dp + 20.dp * fontScale
+    val contentHeight = (160.dp + 112.dp * fontScale).coerceAtLeast(heroHeight - 100.dp)
+    val height = maxOf(viewportHeight, safeTop + 86.dp + contentHeight + railHeight)
+    Box(Modifier.fillMaxWidth().height(height).luminaSurface(SurfaceLevel.Canvas)
+        .onFocusChanged { onHeroFocusChanged(it.hasFocus) }.focusGroup()) {
+        HeroPresentation(items, selectedId, heroWidth, height, railHeight, safeTop,
+            playFocus, detailFocus, artworkFocus, navFocus, active, onItemVisible,
+            onPlay = { playAction.play(it) }, onOpenDetail = onOpenDetail)
+        if (resume.isNotEmpty()) {
+            HomeResumeRail(resume, rail, Modifier.align(Alignment.BottomStart), artworkFocus, playFocus,
+                onNavigateDown = onNavigateDown,
+                onItemFocused = { playAction.invalidate(); selectedId.value = it.id },
+                onPlay = { playAction.play(it) }, onOpenDetail = onOpenDetail, onRemoveResume = onRemoveResume)
         } else {
-            loadedHeroImages = loadedHeroImages + image
-            logHeroImage(media, image, true)
-        }
-    }
-    fun layerImageLoaded(layer: HeroImageLayer?, image: String, width: Int, height: Int) {
-        val current = layer?.takeIf { it.imageUrl == image } ?: return
-        heroItemsById[current.itemId]?.let { heroImageLoaded(it, image, width, height) }
-    }
-    fun layerImageFailed(layer: HeroImageLayer?, image: String) {
-        val current = layer?.takeIf { it.imageUrl == image } ?: return
-        heroItemsById[current.itemId]?.let { rejectHeroImage(it, image) }
-    }
-    val wipeProgress = remember(items, client) { Animatable(1f) }
-    var bottomLayer by remember(items, client) {
-        mutableStateOf(resolveHeroImage(item)?.let { HeroImageLayer(item.id, it) })
-    }
-    var topLayer by remember(items, client) { mutableStateOf<HeroImageLayer?>(null) }
-    var topLoaded by remember(items, client) { mutableStateOf(false) }
-    var isForward by remember(items) { mutableStateOf(true) }
-    var lastRequestedIndex by remember(items) { mutableStateOf(currentIndex) }
-    var transitionGeneration by remember(items, client) { mutableStateOf(0) }
-    var transitionJob by remember(items, client) { mutableStateOf<Job?>(null) }
-
-    LaunchedEffect(currentIndex, items, client, tmdbBackdrops, failedHeroImages, tmdbResolvedIds) {
-        val targetItem = items.getOrNull(currentIndex)
-        val targetLayer = targetItem?.let { media -> resolveHeroImage(media)?.let { HeroImageLayer(media.id, it) } }
-        if (isRejectedHeroImage(bottomLayer?.imageUrl)) bottomLayer = null
-        if (targetLayer == null || isRejectedHeroImage(topLayer?.imageUrl)) {
-            // A rejected top candidate must not leave the wipe at zero over an empty layer.
-            transitionJob?.cancel()
-            transitionGeneration += 1
-            topLayer = null
-            topLoaded = false
-            wipeProgress.snapTo(1f)
-        }
-        if (targetLayer == null) {
-            if (targetItem != null && targetItem.id in tmdbResolvedIds) onItemUnavailable(targetItem.id)
-            lastRequestedIndex = currentIndex
-            return@LaunchedEffect
-        }
-        if (targetLayer.imageUrl == topLayer?.imageUrl) {
-            // Shared artwork keeps the bitmap but still changes the owning media.
-            topLayer = targetLayer
-            lastRequestedIndex = currentIndex
-            return@LaunchedEffect
-        }
-        if (topLayer == null && targetLayer.imageUrl == bottomLayer?.imageUrl) {
-            bottomLayer = targetLayer
-            lastRequestedIndex = currentIndex
-            return@LaunchedEffect
-        }
-
-        transitionJob?.cancel()
-        transitionGeneration += 1
-        if (topLoaded && wipeProgress.value > 0f) {
-            topLayer?.let {
-                bottomLayer = it
-            }
-        }
-        val forwardDistance = (currentIndex - lastRequestedIndex + items.size) % items.size
-        val backwardDistance = (lastRequestedIndex - currentIndex + items.size) % items.size
-        isForward = forwardDistance <= backwardDistance
-        lastRequestedIndex = currentIndex
-        topLayer = targetLayer
-        topLoaded = false
-        wipeProgress.snapTo(0f)
-    }
-    LaunchedEffect(topLayer, topLoaded, transitionGeneration, ThemeRuntime.motion) {
-        val layer = topLayer ?: return@LaunchedEffect
-        if (!topLoaded || isRejectedHeroImage(layer.imageUrl)) return@LaunchedEffect
-        val generation = transitionGeneration
-        transitionJob?.cancel()
-        transitionJob = transitionScope.launch {
-            wipeProgress.animateTo(1f, tween(TvMotion.CATEGORY, easing = FastOutSlowInEasing))
-            if (generation == transitionGeneration && layer == topLayer) {
-                bottomLayer = layer
-                topLayer = null
-                topLoaded = false
+            Box(Modifier.align(Alignment.BottomStart).padding(start = rail.inset.dp, bottom = 12.dp)
+                .focusRequester(artworkFocus).focusProperties { up = playFocus }
+                .onPreviewKeyEvent { it.type == KeyEventType.KeyDown && it.key == Key.DirectionDown && onNavigateDown() }
+                .focusable()) {
+                Text("暂无继续观看记录", color = TextSub, fontSize = 13.sp)
             }
         }
     }
-    DisposableEffect(items, client) {
-        onDispose {
-            transitionJob?.cancel()
+}
+
+private data class LoadedHomeArtwork(val layer: HeroImageLayer?, val drawable: android.graphics.drawable.Drawable?)
+
+@Composable
+private fun HeroPresentation(
+    items: List<MediaItem>, selectedId: androidx.compose.runtime.MutableState<String?>,
+    heroWidth: Dp, height: Dp, railHeight: Dp, safeTop: Dp,
+    playFocus: FocusRequester, detailFocus: FocusRequester, artworkFocus: FocusRequester, navFocus: FocusRequester,
+    active: Boolean, onItemVisible: (String, String) -> Unit,
+    onPlay: (MediaItem) -> Unit, onOpenDetail: (String) -> Unit,
+) {
+    val item = items.firstOrNull { it.id == selectedId.value } ?: items.firstOrNull()
+    val client = AppRuntime.client
+    val context = LocalContext.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val lifecycleState by lifecycle.currentStateAsState()
+    val accountScope = client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
+    val exposureTracker = remember(client) { HeroExposureTracker() }
+    var viewportVisible by remember { mutableStateOf(false) }
+    var artwork by remember(client) { mutableStateOf(LoadedHomeArtwork(null, null)) }
+    var loadedHeroImages by remember(client) { mutableStateOf<Set<String>>(emptySet()) }
+    var artworkFailed by remember(item?.id, client) { mutableStateOf(false) }
+    var focusedHeroAction by remember { mutableStateOf(HeroActionFocus.NONE) }
+    val currentIndex = items.indexOf(item).coerceAtLeast(0)
+
+    LaunchedEffect(item, client, active) {
+        if (!active) return@LaunchedEffect
+        if (item == null) {
+            artwork = LoadedHomeArtwork(null, null)
+            return@LaunchedEffect
         }
-    }
-    var lastInteractionAt by remember(items) { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
-    val isPastWipeMidpoint by remember(wipeProgress) {
-        derivedStateOf(structuralEqualityPolicy()) { wipeProgress.value >= 0.5f }
-    }
-    val displayLayer = heroDisplayLayer(bottomLayer, topLayer, topLoaded, isPastWipeMidpoint)
-    val displayItem = displayLayer?.let { heroItemsById[it.itemId] } ?: item
-    val playAction = rememberPlayableItemAction(listOf(item.id, displayItem.id, currentIndex), active = active) { target, _ -> onPlay(target) }
-    val currentPlayAction by rememberUpdatedState(playAction)
-    val advance by rememberUpdatedState(onNext)
-    LaunchedEffect(items, playAction.resolving, active, lifecycle, ThemeRuntime.motion) {
-        if (!active || items.size < 2 || playAction.resolving) return@LaunchedEffect
-        if (!ThemeRuntime.motion.idleAnimations) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            lastInteractionAt = android.os.SystemClock.elapsedRealtime()
-            while (true) {
-                val remainingMs = 10_000L - (android.os.SystemClock.elapsedRealtime() - lastInteractionAt)
-                if (remainingMs > 0L) {
-                    delay(remainingMs)
-                } else {
-                    if (currentPlayAction.resolving) return@repeatOnLifecycle
-                    currentPlayAction.invalidate()
-                    advance()
-                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
+            for (candidate in homeImageCandidates(client, item)) {
+                val image = candidate.url
+                if (image == null) {
+                    artworkFailed = true
+                    artwork = LoadedHomeArtwork(null, null)
+                    break
+                }
+                val result = context.imageLoader.execute(ImageRequest.Builder(context).data(image)
+                    .size(1280, 720).crossfade(false).build())
+                currentCoroutineContext().ensureActive()
+                if (result is coil.request.SuccessResult) {
+                    loadedHeroImages = loadedHeroImages + image
+                    artwork = LoadedHomeArtwork(HeroImageLayer(item.id, image), result.drawable)
+                    break
                 }
             }
         }
     }
-    // 标题优先用透明 Logo：Emby 自带优先，没有再用 TMDB 的
-    val embyLogo = remember(client, displayItem.id, displayItem.logoTag) {
-        client?.logoUrl(displayItem)?.takeIf { it.isNotBlank() }
-    }
-    var tmdbInfo by remember(client, displayItem.id) { mutableStateOf<TmdbClient.TmdbInfo?>(null) }
-    LaunchedEffect(client, displayItem.id, active, lifecycle) {
-        if (!active) return@LaunchedEffect
-        if (embyLogo != null && (displayItem.communityRating ?: displayItem.rating) != null) return@LaunchedEffect
-        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            if (tmdbInfo == null) {
-                tmdbInfo = TmdbClient.lookupHero(displayItem.type, displayItem.seriesName ?: displayItem.name, displayItem.year, displayItem.providerIds["OriginalTitle"])
-            }
-        }
-    }
-    val titleLogo = embyLogo ?: tmdbInfo?.logoUrl
+    // Warm only neighbouring images through Coil; there is no timer or automatic advance.
     LaunchedEffect(currentIndex, items, client, active, lifecycle) {
         if (!active || items.size < 2) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            val next = items[(currentIndex + 1) % items.size]
-            val nextImage = heroCandidatesById[next.id]?.firstOrNull()?.url ?: return@repeatOnLifecycle
-            if (isRejectedHeroImage(nextImage)) return@repeatOnLifecycle
-            val request = ImageRequest.Builder(context).data(nextImage).crossfade(false).build()
-            val prefetch = context.imageLoader.enqueue(request)
-            try {
-                prefetch.job.await()
-            } finally {
-                prefetch.dispose()
+            listOfNotNull(items.getOrNull(currentIndex - 1), items.getOrNull(currentIndex + 1)).map { media ->
+                media.id to catchingRequest {
+                    val image = homeImageCandidates(client, media).first().url
+                    if (image != null) context.imageLoader.execute(ImageRequest.Builder(context).data(image)
+                        .size(1280, 720).crossfade(false).build())
+                }
             }
         }
     }
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .height(heroHeight)
-            .clipToBounds()
-            .onGloballyPositioned { coordinates ->
-                val bounds = coordinates.boundsInWindow()
-                viewportVisible = heroViewportVisible(coordinates.size.width.toFloat(), coordinates.size.height.toFloat(),
-                    bounds.width, bounds.height)
-            }
-            .drawWithContent {
+    val displayLayer = artwork.layer
+    Box(Modifier.fillMaxSize().onGloballyPositioned { coordinates ->
+        val bounds = coordinates.boundsInWindow()
+        viewportVisible = heroViewportVisible(coordinates.size.width.toFloat(), coordinates.size.height.toFloat(), bounds.width, bounds.height)
+    }.drawWithContent {
                 drawContent()
                 exposureTracker.onDraw(accountScope, displayLayer, active, lifecycleState.isAtLeast(Lifecycle.State.STARTED),
-                    viewportVisible, displayLayer?.imageUrl in loadedHeroImages && !isRejectedHeroImage(displayLayer?.imageUrl),
-                    onItemVisible)
-            }
-            .onFocusChanged { onHeroFocusChanged(it.hasFocus) }
-            .onPreviewKeyEvent { event ->
-                if (focusedHeroAction == HeroActionFocus.NONE || event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                if (event.key == Key.DirectionDown && focusedHeroAction != HeroActionFocus.ARTWORK) {
-                    return@onPreviewKeyEvent onNavigateDown()
-                }
-                val direction = when (event.key) {
-                    Key.DirectionLeft -> HeroDirectionKey.LEFT
-                    Key.DirectionRight -> HeroDirectionKey.RIGHT
-                    else -> return@onPreviewKeyEvent false
-                }
-                if (!shouldHeroConsumeCarouselDirection(focusedHeroAction, direction, items.size)) {
-                    lastInteractionAt = android.os.SystemClock.elapsedRealtime()
-                    return@onPreviewKeyEvent false
-                }
-                lastInteractionAt = android.os.SystemClock.elapsedRealtime()
-                playAction.invalidate()
-                if (direction == HeroDirectionKey.LEFT) onPrevious() else onNext()
-                true
-            }
-            .focusGroup()
-    ) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .luminaSurface(SurfaceLevel.Canvas)
-        ) {
-            if (bottomLayer == null && topLayer == null && item.id in tmdbResolvedIds) {
-                Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas))
-                Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = TypeScale.sp13)
-            }
-            bottomLayer?.takeUnless { isRejectedHeroImage(it.imageUrl) }?.let bottom@{ layer ->
-                val imageOwner = heroItemsById[layer.itemId] ?: return@bottom
-                HeroBackdropImage(
-                    imageUrl = layer.imageUrl,
-                    isPoster = heroCandidatesById[imageOwner.id].orEmpty().any {
-                        it.url == layer.imageUrl && it.source == "poster"
-                    },
-                    onSuccess = { width, height ->
-                        layerImageLoaded(bottomLayer, layer.imageUrl, width, height)
-                    },
-                    onError = { layerImageFailed(bottomLayer, layer.imageUrl) },
-                )
-            }
-            topLayer?.takeUnless { isRejectedHeroImage(it.imageUrl) }?.let top@{ layer ->
-                val imageOwner = heroItemsById[layer.itemId] ?: return@top
-                HeroBackdropImage(
-                    imageUrl = layer.imageUrl,
-                    isPoster = heroCandidatesById[imageOwner.id].orEmpty().any {
-                        it.url == layer.imageUrl && it.source == "poster"
-                    },
-                    wipeProgress = wipeProgress.asState(),
-                    isForward = isForward,
-                    onLoaded = {
-                        if (layer.imageUrl == topLayer?.imageUrl && !isRejectedHeroImage(layer.imageUrl)) topLoaded = true
-                    },
-                    onSuccess = { width, height ->
-                        layerImageLoaded(topLayer, layer.imageUrl, width, height)
-                    },
-                    onError = { layerImageFailed(topLayer, layer.imageUrl) },
-                )
-            }
-        Box(
-            Modifier.align(Alignment.TopCenter).fillMaxWidth().fillMaxHeight(0.62f)
-                .focusRequester(artworkFocus)
-                .focusProperties { up = navFocus; down = playFocus }
-                .onFocusChanged {
-                    if (it.isFocused) focusedHeroAction = HeroActionFocus.ARTWORK
-                    else if (focusedHeroAction == HeroActionFocus.ARTWORK) focusedHeroAction = HeroActionFocus.NONE
-                }
-                .onKeyEvent {
-                    if (it.key != Key.DirectionCenter && it.key != Key.Enter && it.key != Key.NumPadEnter) false
-                    else {
-                        if (it.type == KeyEventType.KeyUp) playFocus.requestFocus()
-                        true
-                    }
-                }
-                .focusable()
-        )
-        Box(
-            Modifier.fillMaxSize().luminaScrim(BackdropShade.Hero)
-        )
-        Column(
-            Modifier.align(Alignment.BottomStart).heightIn(max = (heroHeight - 40.dp).coerceAtLeast(0.dp))
-                .padding(start = horizontalInset, bottom = bottomInset)
-                .widthIn(max = titleWidth),
-            verticalArrangement = Arrangement.Bottom,
-        ) {
-            Text("为你推荐", color = TextSub, fontSize = TypeScale.sp14, letterSpacing = 3.sp)
-            Spacer(Modifier.height(8.dp))
-            if (!titleLogo.isNullOrBlank()) {
-                AsyncImage(
-                    model = ImageRequest.Builder(context).data(titleLogo).crossfade(true).build(),
-                    contentDescription = displayItem.seriesName ?: displayItem.name,
-                    contentScale = ContentScale.Fit,
-                    alignment = Alignment.BottomStart,
-                    modifier = Modifier.heightIn(max = 96.dp).widthIn(max = 345.dp),
-                )
+                    viewportVisible, displayLayer?.imageUrl in loadedHeroImages, onItemVisible)
+    }) {
+        // One transition, bounded by the M05 motion policy. The static base exists on every frame.
+        androidx.compose.animation.Crossfade(artwork, animationSpec = tween(ThemeRuntime.motion.duration(200)), label = "homeArtwork") { frame ->
+            HeroBackdropImage(frame.drawable)
+        }
+        Box(Modifier.fillMaxHeight().fillMaxWidth(0.40f).drawWithContent {
+            drawRect(Brush.horizontalGradient(listOf(Color.Black.copy(alpha = 0.92f), Color.Black.copy(alpha = 0.55f), Color.Transparent)))
+        })
+        Column(Modifier.fillMaxWidth(0.40f).padding(start = TvTokens.safeInset(heroWidth), end = 12.dp,
+            top = safeTop + 86.dp, bottom = railHeight + 12.dp).align(Alignment.BottomStart)) {
+            if (item == null) {
+                Text("媒体库", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Medium)
             } else {
-                Text(
-                    displayItem.seriesName ?: displayItem.name,
-                    color = TextMain, style = TextStyle(fontSize = TypeScale.sp40, lineHeight = 48.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.2.sp),
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
-                )
-            }
-            val hasOwnRating = (displayItem.rating ?: displayItem.communityRating) != null
-            val ratingText = if (!hasOwnRating) tmdbInfo?.rating?.let { "TMDB ★ %.1f".format(it) } else null
-            val sub = listOfNotNull(
-                displayItem.subtitle.takeIf { it.isNotBlank() },
-                displayItem.genres.take(2).joinToString(" / ").takeIf { it.isNotBlank() },
-                ratingText,
-            ).joinToString("   ")
-            if (sub.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                Text(sub, color = TextSub, style = TextStyle(fontSize = TypeScale.sp15, lineHeight = 20.sp, fontWeight = FontWeight.Normal), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            displayItem.overview?.let {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    it, color = Color(0xFFC9D5E8), fontSize = TypeScale.sp14, lineHeight = 21.sp,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            Spacer(Modifier.height(14.dp))
-            Row {
-                FocusSurface(
-                    modifier = Modifier.height(52.dp).width(minOf(160.dp, actionWidth)).focusProperties {
-                        right = detailFocus
-                        up = artworkFocus
-                    },
-                    corner = 26.dp,
-                    scaleTo = TvTokenValues.FOCUS_SCALE,
-                    focusRequester = playFocus,
-                    onFocusChanged = {
-                        if (it) {
-                            focusedHeroAction = HeroActionFocus.PLAY
-                        } else if (focusedHeroAction == HeroActionFocus.PLAY) {
-                            focusedHeroAction = HeroActionFocus.NONE
-                        }
-                    },
-                    onClick = {
-                        lastInteractionAt = android.os.SystemClock.elapsedRealtime()
-                        if (displayItem.id == item.id) playAction.play(displayItem)
-                    },
-                ) { focused ->
-                    Row(
-                        Modifier.fillMaxSize().luminaStatus(TextMain),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF0B1018), modifier = Modifier.size(22.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            if (playAction.resolving) "解析单集…" else if (displayItem.id != item.id) "切换中…"
-                            else if (displayItem.positionTicks > 0) "继续播放" else "立即播放",
-                            color = Color(0xFF0B1018), fontSize = TypeScale.sp17, fontWeight = FontWeight.Bold,
-                        )
+                HomeHeroTitle(item, client, artworkFailed)
+                val metadata = homeHeroMetadata(item)
+                if (metadata.isNotEmpty()) Text(metadata, color = Color(0xFFCDD3DD), fontSize = 13.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
+                item.overview?.takeIf(String::isNotBlank)?.let {
+                    Text(it, color = Color(0xFFE1E5EC), fontSize = 14.sp, lineHeight = 20.sp,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp).onPreviewKeyEvent { event ->
+                    if (focusedHeroAction == HeroActionFocus.NONE || event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    val direction = when (event.key) {
+                        Key.DirectionLeft -> HeroDirectionKey.LEFT
+                        Key.DirectionRight -> HeroDirectionKey.RIGHT
+                        else -> return@onPreviewKeyEvent false
                     }
-                }
-                Spacer(Modifier.width(12.dp))
-                FocusSurface(
-                    modifier = Modifier.height(52.dp).width(minOf(136.dp, actionWidth)).focusProperties {
-                        left = playFocus
-                        up = artworkFocus
-                    },
-                    corner = 26.dp,
-                    scaleTo = TvTokenValues.FOCUS_SCALE,
-                    focusRequester = detailFocus,
-                    onFocusChanged = {
-                        if (it) {
-                            focusedHeroAction = HeroActionFocus.DETAIL
-                        } else if (focusedHeroAction == HeroActionFocus.DETAIL) {
-                            focusedHeroAction = HeroActionFocus.NONE
-                        }
-                    },
-                    onClick = { playAction.invalidate(); onOpenDetail(displayItem.seriesId ?: displayItem.id) },
-                ) { focused ->
-                    Box(
-                        Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("查看详情", color = Color(0xFFE8ECF2), fontSize = TypeScale.sp15) }
-                }
-            }
-        }
-            Column(
-                Modifier.align(if (compact) Alignment.TopEnd else Alignment.BottomEnd).padding(
-                    end = horizontalInset,
-                    top = if (compact) 64.dp else 0.dp,
-                    bottom = if (compact) 0.dp else bottomInset,
-                ),
-                horizontalAlignment = Alignment.End,
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items.take(3).forEachIndexed { slot, _ ->
-                        val thumbnailItem = items[(currentIndex + slot) % items.size]
-                        Box(
-                            Modifier.size(width = thumbnailWidth, height = thumbnailWidth * 9 / 16)
-                                .clip(RoundedCornerShape(6.dp))
-                                .luminaSurface(SurfaceLevel.Content)
-                        ) {
-                            HeroThumb(
-                                thumbnailItem, client, tmdbBackdrops[thumbnailItem.id],
-                                failedImages = failedThumbImages[thumbnailItem.id].orEmpty(),
-                                onFailed = { image ->
-                                    failedThumbImages = failedThumbImages +
-                                        (thumbnailItem.id to (failedThumbImages[thumbnailItem.id].orEmpty() + image))
-                                },
-                            )
-                            Box(
-                                Modifier.fillMaxSize().border(
-                                    if (slot == 0) 2.dp else 1.dp,
-                                    if (slot == 0) Accent else Color(0x33FFFFFF),
-                                    RoundedCornerShape(6.dp),
-                                )
-                            )
-                        }
+                    if (!shouldHeroConsumeCarouselDirection(focusedHeroAction, direction, items.size)) return@onPreviewKeyEvent false
+                    selectedId.value = items[Math.floorMod(currentIndex + if (direction == HeroDirectionKey.LEFT) -1 else 1, items.size)].id
+                    true
+                }, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FocusSurface(Modifier.weight(1f).heightIn(min = 40.dp).focusProperties {
+                        right = detailFocus; up = navFocus; down = artworkFocus
+                    }, corner = 12.dp, focusRequester = playFocus,
+                        onFocusChanged = { focusedHeroAction = if (it) HeroActionFocus.PLAY else HeroActionFocus.NONE },
+                        onClick = { onPlay(item) }) { _ ->
+                        Text(if (item.positionTicks > 0) "续播" else "播放", color = Color.White, fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
+                    }
+                    FocusSurface(Modifier.weight(1f).heightIn(min = 40.dp).focusProperties {
+                        left = playFocus; up = navFocus; down = artworkFocus
+                    }, corner = 12.dp, focusRequester = detailFocus,
+                        onFocusChanged = { focusedHeroAction = if (it) HeroActionFocus.DETAIL else HeroActionFocus.NONE },
+                        onClick = { onOpenDetail(item.seriesId ?: item.id) }) { _ ->
+                        Text("详情", color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
                     }
                 }
             }
@@ -2563,105 +2136,85 @@ private fun Hero(
 }
 
 @Composable
-private fun HeroThumb(
-    item: MediaItem,
-    client: EmbyClient?,
-    tmdbBackdrop: String?,
-    failedImages: Set<String>,
-    onFailed: (String) -> Unit,
-) {
-    val candidates = remember(item, tmdbBackdrop, client) {
-        client?.wideImageCandidates(item, maxWidth = 960, quality = 80, tmdbUrl = tmdbBackdrop).orEmpty()
-    }
-    val candidateIndex = candidates.indexOfFirst { it.url !in failedImages }
-    val candidate = candidates.getOrNull(candidateIndex)
-    val candidateFailed = candidate == null
-    LaunchedEffect(item.id, candidate?.url) {
-        PageLog.add("thumbImg id=${item.id} pick=$candidateIndex failed=$candidateFailed")
-    }
-    fun rejectCandidate() {
-        val image = candidate?.url ?: return
-        if (image in failedImages) return
-        PageLog.add("thumbImg id=${item.id} pick=$candidateIndex failed=true")
-        onFailed(image)
-    }
-    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content)) {
-        if (candidates.isEmpty() || candidateFailed) Icon(Icons.Rounded.Movie, null, tint = TextSub, modifier = Modifier.align(Alignment.Center).size(14.dp))
-        candidate?.let { candidate ->
-            AsyncImage(candidate.url, null, contentScale = ContentScale.Crop,
-                onSuccess = {
-                    val height = it.result.drawable.intrinsicHeight
-                    val width = it.result.drawable.intrinsicWidth
-                    if (width <= 0 || height <= 0 || (candidate.source != "poster" && width <= height)) rejectCandidate()
-                },
-                onError = { rejectCandidate() },
-                modifier = Modifier.fillMaxSize())
-        }
-    }
-}
-
-@Composable
-private fun HeroBackdropImage(
-    imageUrl: String,
-    isPoster: Boolean,
-    wipeProgress: State<Float>? = null,
-    isForward: Boolean = true,
-    onLoaded: () -> Unit = {},
-    onSuccess: (Int, Int) -> Unit = { _, _ -> },
-    onError: () -> Unit = {},
-) {
+private fun HomeHeroTitle(item: MediaItem, client: EmbyClient?, artworkFailed: Boolean) {
+    val logo = remember(client, item.id, item.logoTag) { client?.logoUrl(item, maxWidth = 640, maxHeight = 220) }
+    var logoLoaded by remember(logo) { mutableStateOf(false) }
     val context = LocalContext.current
-    val request = remember(imageUrl) {
-        ImageRequest.Builder(context).data(imageUrl).crossfade(false).build()
+    Box(Modifier.fillMaxWidth().heightIn(min = 76.dp)) {
+        if (heroUsesTextTitle(logo, logoLoaded, artworkFailed)) Text(readableMediaTitle(item), color = Color.White,
+            fontSize = 30.sp, lineHeight = 36.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (logo != null && !artworkFailed) AsyncImage(
+            model = remember(logo, context) { ImageRequest.Builder(context).data(logo).size(640, 220).crossfade(false).build() },
+            contentDescription = readableMediaTitle(item), contentScale = ContentScale.Fit, alignment = Alignment.CenterStart,
+            onSuccess = { logoLoaded = true }, onError = { logoLoaded = false },
+            modifier = Modifier.fillMaxWidth().height(76.dp).graphicsLayer { alpha = if (logoLoaded) 1f else 0f })
     }
-    val wipeModifier = if (wipeProgress == null || !ThemeRuntime.motion.carouselDisplacement) Modifier else Modifier
-        .graphicsLayer {
-            val progress = wipeProgress.value
-            translationX = (if (isForward) 1f else -1f) * 18.dp.toPx() * (1f - progress)
-            clip = true
-            compositingStrategy = if (progress > 0f && progress < 1f) {
-                CompositingStrategy.Offscreen
-            } else {
-                CompositingStrategy.Auto
+}
+
+@Composable
+private fun HeroBackdropImage(drawable: android.graphics.drawable.Drawable?) {
+    Box(Modifier.fillMaxSize().drawWithContent {
+        drawRect(Brush.linearGradient(listOf(Color(0xFF101C2E), Color(0xFF060A12))))
+        drawContent()
+    }) {
+        if (drawable != null) AsyncImage(drawable, null, contentScale = ContentScale.Crop,
+            alignment = Alignment.CenterEnd, modifier = Modifier.fillMaxSize())
+    }
+}
+
+@Composable
+private fun HomeResumeRail(
+    items: List<MediaItem>, geometry: HomeRailGeometry, modifier: Modifier,
+    artworkFocus: FocusRequester, playFocus: FocusRequester, onNavigateDown: () -> Boolean,
+    onItemFocused: (MediaItem) -> Unit, onPlay: (MediaItem) -> Unit, onOpenDetail: (String) -> Unit,
+    onRemoveResume: (MediaItem) -> Unit,
+) {
+    Column(modifier.fillMaxWidth()) {
+        LazyRow(Modifier.fillMaxWidth().padding(end = geometry.inset.dp).focusGroup(),
+            contentPadding = PaddingValues(start = geometry.inset.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(geometry.gap.dp)) {
+            items(items, key = { it.id }) { media ->
+                val cardModifier = Modifier.width(geometry.width.dp).aspectRatio(HomeRailTokens.ASPECT)
+                    .then(if (media.id == items.first().id) Modifier.focusRequester(artworkFocus) else Modifier)
+                    .focusProperties { up = playFocus }
+                    .onPreviewKeyEvent { event ->
+                        when {
+                            event.type != KeyEventType.KeyDown -> false
+                            event.key == Key.Menu -> { if (event.nativeKeyEvent.repeatCount == 0) onOpenDetail(media.seriesId ?: media.id); true }
+                            event.key == Key.Delete -> { onRemoveResume(media); true }
+                            event.key == Key.DirectionDown -> onNavigateDown()
+                            else -> false
+                        }
+                    }
+                com.lumina.tv.ui.components.BrowseFocusCard(cardModifier,
+                    onFocused = { onItemFocused(media) }, onClick = { onPlay(media) }) { focused ->
+                    val shape = RoundedCornerShape(HomeRailTokens.CORNER_DP.dp)
+                    Box(Modifier.fillMaxSize().clip(shape).luminaSurface(SurfaceLevel.Content)
+                        .then(if (focused) Modifier.border(TvTokens.FocusBorder, Color.White, shape) else Modifier)) {
+                        val client = AppRuntime.client
+                        val candidates = remember(client, media) { homeImageCandidates(client, media, HomeRailTokens.IMAGE_WIDTH) }
+                        var imageIndex by remember(candidates) { mutableIntStateOf(0) }
+                        candidates.getOrNull(imageIndex)?.url?.let { url ->
+                            AsyncImage(url, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize(),
+                                onError = { imageIndex++ })
+                        }
+                        browseProgress(media)?.let { progress ->
+                            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(HomeRailTokens.PROGRESS_DP.dp)
+                                .drawWithContent {
+                                    drawRect(Color.White.copy(alpha = 0.5f))
+                                    drawRect(Color.White, size = size.copy(width = size.width * progress))
+                                })
+                        }
+                        if (focused) Text("继续播放", color = Color.White, fontSize = 10.sp, maxLines = 1,
+                            modifier = Modifier.align(Alignment.BottomStart).padding(start = 6.dp, bottom = 8.dp)
+                                .clip(RoundedCornerShape(4.dp)).drawWithContent { drawRect(Color.Black.copy(alpha = 0.82f)); drawContent() }
+                                .padding(horizontal = 6.dp, vertical = 3.dp))
+                    }
+                }
             }
         }
-        .drawWithContent {
-            val progress = wipeProgress.value
-            if (progress <= 0f) return@drawWithContent
-            drawContent()
-            if (progress < 1f) {
-                val softEdge = 36.dp.toPx()
-                val edge = if (isForward) size.width * progress else size.width * (1f - progress)
-                val startX = if (isForward) (edge - softEdge).coerceAtLeast(0f) else edge
-                val endX = if (isForward) edge else (edge + softEdge).coerceAtMost(size.width)
-                drawRect(
-                    brush = Brush.horizontalGradient(
-                        colors = if (isForward) listOf(Color.White, Color.Transparent)
-                        else listOf(Color.Transparent, Color.White),
-                        startX = startX,
-                        endX = endX.coerceAtLeast(startX + 0.1f),
-                    ),
-                    blendMode = BlendMode.DstIn,
-                )
-            }
-        }
-    Box(Modifier.fillMaxSize().then(wipeModifier)) {
-        AsyncImage(
-            model = request,
-            contentDescription = null,
-            contentScale = if (isPoster) ContentScale.Fit else ContentScale.Crop,
-            alignment = Alignment.Center,
-            onSuccess = {
-                val width = it.result.drawable.intrinsicWidth
-                val height = it.result.drawable.intrinsicHeight
-                onSuccess(width, height)
-                // The caller may reject a portrait candidate, but the wipe must always leave
-                // the loading state so the previous image can remain visible during fallback.
-                onLoaded()
-            },
-            onError = { onError() },
-            modifier = Modifier.fillMaxSize(),
-        )
+        Text("继续观看", color = Color(0xFF9AA3B2), fontSize = 13.sp,
+            modifier = Modifier.padding(start = geometry.inset.dp, top = 4.dp, bottom = 12.dp))
     }
 }
 

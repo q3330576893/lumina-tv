@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.lumina.tv.ui.screens
 
 import com.lumina.tv.ui.theme.*
@@ -698,7 +700,7 @@ fun DetailScreen(
             loadFailed = !itemNotFound
             return@LaunchedEffect
         }
-        val it0 = main
+        val it0 = main?.takeIf { it.id.isNotBlank() }
         item = it0
         if (it0 != null) {
             favoriteAction.syncFromServer(it0.isFavorite)
@@ -1108,26 +1110,16 @@ fun DetailScreen(
             Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Detail))
         }
 
-        if (loading) {
+        val contentState = detailContentState(loading, itemNotFound, loadFailed, item)
+        if (contentState == DetailContentState.LOADING) {
             LoadingView(text = "正在读取详情…")
-        } else if (itemNotFound) {
-            LoadingView(text = "\u672a\u627e\u5230\u8be5\u5185\u5bb9")
-        } else if (loadFailed) {
-            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("\u52a0\u8f7d\u5931\u8d25", color = TextMain, fontSize = TypeScale.sp16)
-                Spacer(Modifier.height(14.dp))
-                FocusSurface(Modifier.width(156.dp).height(42.dp), corner = 12.dp, requestFocus = true, onClick = {
-                    loading = true
-                    loadFailed = false
-                    detailRetry++
-                }) { focused ->
-                    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(12.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
-                        Text("\u70b9\u51fb\u91cd\u8bd5", color = TextMain, fontSize = TypeScale.sp13)
-                    }
-                }
+        } else if (contentState != DetailContentState.READY) {
+            DetailUnavailable(contentState, Modifier.align(Alignment.Center), onBack) {
+                loading = true
+                loadFailed = false
+                itemNotFound = false
+                detailRetry++
             }
-        } else if (item == null) {
-            LoadingView(text = "未找到该内容")
         } else {
             Column(Modifier.fillMaxSize().padding(top = 40.dp)) {
                 CompositionLocalProvider(LocalBringIntoViewSpec provides DetailNoBringIntoViewSpec) {
@@ -1237,13 +1229,13 @@ fun DetailScreen(
                         }
                         Spacer(Modifier.height(18.dp))
                         Row(
-                            Modifier.focusGroup().focusProperties {
+                            Modifier.fillMaxWidth().focusGroup().focusProperties {
                                 up = if (it0.overview != null) overviewFocus else FocusRequester.Cancel
                             },
                         ) {
                             FocusSurface(
-                                modifier = Modifier.height(52.dp).width(128.dp).focusProperties {
-                                    if (it0.positionTicks > 0L) right = playFromStartFocus
+                                modifier = Modifier.heightIn(min = 52.dp).widthIn(min = 160.dp, max = 280.dp).focusProperties {
+                                    if (it0.positionTicks > 0L) down = playFromStartFocus
                                 },
                                 corner = 23.dp,
                                 focusRequester = playFocus,
@@ -1254,20 +1246,25 @@ fun DetailScreen(
                                 },
                             ) { focused ->
                                 Row(
-                                    Modifier.fillMaxSize().luminaStatus(Accent).padding(horizontal = 28.dp),
+                                    Modifier.fillMaxWidth().luminaStatus(Accent).padding(horizontal = 16.dp, vertical = 12.dp),
                                     horizontalArrangement = Arrangement.Center,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Icon(Icons.Rounded.PlayArrow, null, tint = Color(0xFF06101F), modifier = Modifier.size(22.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text(if (playAction.resolving) "解析单集…" else "播放", color = Color(0xFF06101F), fontSize = TypeScale.sp17, fontWeight = FontWeight.Bold)
+                                    Text(if (playAction.resolving) "解析单集…" else if (it0.positionTicks > 0L) "续播" else "播放", color = Color(0xFF06101F), fontSize = TypeScale.sp17, fontWeight = FontWeight.Bold)
                                 }
                             }
+                        }
+                        androidx.compose.foundation.layout.FlowRow(
+                            Modifier.fillMaxWidth().padding(top = 12.dp).focusGroup().focusProperties { up = playFocus },
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
                             if (it0.positionTicks > 0L) {
-                                Spacer(Modifier.width(10.dp))
                                 FocusSurface(
                                     modifier = Modifier.height(52.dp).width(108.dp).focusProperties {
-                                        left = playFocus
+                                        up = playFocus
                                     },
                                     corner = 23.dp,
                                     focusRequester = playFromStartFocus,
@@ -1285,7 +1282,6 @@ fun DetailScreen(
                                 }
                             }
                             if (sources.isNotEmpty()) {
-                                Spacer(Modifier.width(12.dp))
                                 var sourceFocused by remember { mutableStateOf(false) }
                                 val source = sources.firstOrNull { it.id == selectedSourceId } ?: sources.first()
                                 val video = source.streams.firstOrNull { it.type.equals("Video", true) }
@@ -1328,7 +1324,6 @@ fun DetailScreen(
                                     }
                                 }
                             }
-                            Spacer(Modifier.width(12.dp))
                             // 收藏
                             FocusSurface(
                                 modifier = Modifier.size(46.dp),
@@ -1348,7 +1343,6 @@ fun DetailScreen(
                                     )
                                 }
                             }
-                            Spacer(Modifier.width(8.dp))
                             // 标记已看
                             FocusSurface(
                                 modifier = Modifier.size(46.dp),
@@ -1368,7 +1362,6 @@ fun DetailScreen(
                                     )
                                 }
                             }
-                            Spacer(Modifier.width(12.dp))
                             FocusSurface(
                                 Modifier.height(46.dp).width(46.dp),
                                 corner = 23.dp,
@@ -1381,7 +1374,6 @@ fun DetailScreen(
                                     Icon(Icons.Rounded.Tune, contentDescription = "播放设置", tint = TextMain, modifier = Modifier.size(20.dp))
                                 }
                             }
-                            Spacer(Modifier.width(12.dp))
                             FocusSurface(
                                 modifier = Modifier.height(48.dp).width(120.dp),
                                 corner = 23.dp,
@@ -1730,6 +1722,27 @@ fun DetailScreen(
                 },
                 onClose = { showSourceMenu = false },
             )
+        }
+    }
+}
+
+@Composable
+private fun DetailUnavailable(state: DetailContentState, modifier: Modifier, onBack: () -> Unit, onRetry: () -> Unit) {
+    Column(modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(when (state) {
+            DetailContentState.NOT_FOUND -> "未找到该内容"
+            DetailContentState.EMPTY -> "服务器返回的内容为空"
+            else -> "详情加载失败"
+        }, color = TextMain, fontSize = 18.sp)
+        androidx.compose.foundation.layout.FlowRow(Modifier.padding(top = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            FocusSurface(Modifier.widthIn(min = 120.dp).heightIn(min = 44.dp), corner = 12.dp,
+                requestFocus = true, onClick = onBack) { _ ->
+                Text("返回", color = TextMain, fontSize = 15.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
+            }
+            FocusSurface(Modifier.widthIn(min = 120.dp).heightIn(min = 44.dp), corner = 12.dp, onClick = onRetry) { _ ->
+                Text("重试", color = TextMain, fontSize = 15.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
+            }
         }
     }
 }
@@ -2269,9 +2282,7 @@ private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
                     model = url, contentDescription = ep.name,
                     contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize(),
                 )
-                if (ep.positionTicks > 0) {
-                    val progress = ep.runtimeTicks?.takeIf { it > 0L }
-                        ?.let { (ep.positionTicks.toFloat() / it).coerceIn(0f, 1f) } ?: 0.45f
+                browseProgress(ep)?.let { progress ->
                     Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(3.dp).luminaStatus(Accent))
                 }
                 val episodeNumber = ep.indexNumber

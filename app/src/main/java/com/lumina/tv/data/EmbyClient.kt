@@ -370,7 +370,7 @@ class EmbyClient(
             "Filters" to "IsFavorite", "SortBy" to FAVORITES_SORT, "SortOrder" to "Descending",
             "Limit" to limit.toString(), "StartIndex" to startIndex.toString(),
             "EnableTotalRecordCount" to "true",
-            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProductionLocations,OriginalLanguage",
+            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,EndDate,ProductionLocations,OriginalLanguage",
             "ImageTypeLimit" to "1", "EnableImageTypes" to "Primary,Backdrop,Thumb,Logo",
         )))
         val rows = response.optJSONArray("Items") ?: JSONArray()
@@ -454,7 +454,7 @@ class EmbyClient(
         genre: String? = null,
         personIds: String? = null,
         filters: String? = null,
-        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProductionLocations,OriginalLanguage",
+        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,EndDate,ProductionLocations,OriginalLanguage",
         requestTimeoutSeconds: Int? = null,
     ): List<MediaItem> = getItemsPage(
         parentId = parentId,
@@ -482,7 +482,7 @@ class EmbyClient(
         genre: String? = null,
         personIds: String? = null,
         filters: String? = null,
-        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,ProductionLocations,OriginalLanguage",
+        fields: String = "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,EndDate,ProductionLocations,OriginalLanguage",
         requestTimeoutSeconds: Int? = null,
     ): ItemsPage = withMetadataContext((requestTimeoutSeconds?.toLong() ?: 20L) * 1_000L) {
         val params = mutableMapOf(
@@ -535,7 +535,7 @@ class EmbyClient(
         val params = mapOf(
             "Limit" to limit.toString(),
             "MediaTypes" to "Video",
-            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,ProductionYear,ProductionLocations,OriginalLanguage,LastPlayedDate",
+            "Fields" to "Overview,PrimaryImageAspectRatio,UserData,Genres,ProductionYear,EndDate,ProductionLocations,OriginalLanguage,LastPlayedDate",
             "EnableImageTypes" to "Primary,Thumb,Backdrop,Logo",
         )
         val arr = getJson(url("/Users/$userId/Items/Resume", params)).optJSONArray("Items") ?: JSONArray()
@@ -998,6 +998,7 @@ class EmbyClient(
                 o.optString("LocationType").equals("Virtual", true),
             overview = o.optString("Overview").ifBlank { null },
             year = o.optInt("ProductionYear", 0).takeIf { it > 0 },
+            endYear = o.optString("EndDate").take(4).toIntOrNull()?.takeIf { it > 0 },
             runtimeTicks = o.optLong("RunTimeTicks", 0L).takeIf { it > 0 },
             seriesId = o.optString("SeriesId").ifBlank { null },
             seasonId = o.optString("SeasonId").ifBlank { null },
@@ -1044,9 +1045,9 @@ class EmbyClient(
 
     // ---------------- 图片 ----------------
 
-    fun imageUrl(item: MediaItem, maxHeight: Int = 480): String? {
+    fun imageUrl(item: MediaItem, maxHeight: Int = 480, maxWidth: Int? = null): String? {
         val tag = item.imageTag ?: return null
-        return url("/Items/${item.id}/Images/Primary", mapOf("maxHeight" to maxHeight.toString(), "tag" to tag, "quality" to "90"))
+        return url("/Items/${item.id}/Images/Primary", mapOf("maxHeight" to maxHeight.toString(), "maxWidth" to maxWidth?.toString(), "tag" to tag, "quality" to "90"))
     }
 
     fun imageUrl(id: String, tag: String?, maxHeight: Int = 480): String? {
@@ -1086,9 +1087,9 @@ class EmbyClient(
     }
 
     /** 透明标题图（Emby Logo 图），没有就返回 null 由调用方退回文字标题。 */
-    fun logoUrl(item: MediaItem, maxWidth: Int = 900): String? {
-        val tag = item.logoTag ?: return null
-        return url("/Items/${item.id}/Images/Logo", mapOf("maxWidth" to maxWidth.toString(), "tag" to tag, "quality" to "90"))
+    fun logoUrl(item: MediaItem, maxWidth: Int = 900, maxHeight: Int? = null): String? {
+        val tag = item.logoTag?.takeIf(String::isNotBlank) ?: return null
+        return url("/Items/${item.id}/Images/Logo", mapOf("maxWidth" to maxWidth.toString(), "maxHeight" to maxHeight?.toString(), "tag" to tag, "quality" to "90"))
     }
 
     fun backdropUrl(id: String, tag: String?, maxWidth: Int = 1920, quality: Int = 80): String? =

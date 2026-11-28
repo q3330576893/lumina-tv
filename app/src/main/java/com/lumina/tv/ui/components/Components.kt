@@ -427,9 +427,7 @@ fun PosterCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (item.positionTicks > 0 && !item.played) {
-                val total = item.runtimeTicks ?: 0L
-                val ratio = if (total > 0) (item.positionTicks.toFloat() / total).coerceIn(0f, 1f) else 0f
+            if (!item.played) com.lumina.tv.ui.screens.browseProgress(item)?.let { ratio ->
                 Box(
                     Modifier
                         .align(Alignment.BottomCenter)

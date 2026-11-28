@@ -11,7 +11,7 @@ internal object CacheMediaItemCodec {
 
     // Every constructor field is required, even nullable fields and empty collections.
     val fieldNames = setOf(
-        "id", "name", "type", "imageTag", "overview", "year", "rating", "runtimeTicks",
+        "id", "name", "type", "imageTag", "overview", "year", "endYear", "rating", "runtimeTicks",
         "seriesId", "seasonId", "indexNumber", "parentIndexNumber", "seriesName",
         "positionTicks", "played", "playedPercentage", "primaryImageAspectRatio", "backdropTag",
         "backdropTags", "parentBackdropItemId", "parentBackdropTags", "logoTag", "sourceCount",
@@ -54,7 +54,7 @@ internal object CacheMediaItemCodec {
         val json = JSONObject()
             .put("schemaVersion", SCHEMA_VERSION)
             .put("id", id).put("name", name).put("type", type)
-            .putNullable("imageTag", imageTag).putNullable("overview", overview).putNullable("year", year)
+            .putNullable("imageTag", imageTag).putNullable("overview", overview).putNullable("year", year).putNullable("endYear", endYear)
             .putNullable("rating", rating).putNullable("runtimeTicks", runtimeTicks).putNullable("seriesId", seriesId)
             .putNullable("seasonId", seasonId).putNullable("indexNumber", indexNumber).putNullable("parentIndexNumber", parentIndexNumber)
             .putNullable("seriesName", seriesName).put("positionTicks", positionTicks).put("played", played)
@@ -86,7 +86,7 @@ internal object CacheMediaItemCodec {
             MediaItem(
                 id = string("id"), name = string("name"), type = string("type"),
                 imageTag = nullableString("imageTag"), overview = nullableString("overview"),
-                year = nullableInt("year"), rating = nullableDouble("rating"), runtimeTicks = nullableLong("runtimeTicks"),
+                year = nullableInt("year"), endYear = nullableInt("endYear"), rating = nullableDouble("rating"), runtimeTicks = nullableLong("runtimeTicks"),
                 seriesId = nullableString("seriesId"), seasonId = nullableString("seasonId"),
                 indexNumber = nullableInt("indexNumber"), parentIndexNumber = nullableInt("parentIndexNumber"),
                 seriesName = nullableString("seriesName"), positionTicks = long("positionTicks"), played = bool("played"),
