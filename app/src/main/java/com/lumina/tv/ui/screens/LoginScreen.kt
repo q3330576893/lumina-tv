@@ -155,6 +155,14 @@ internal class LoginAttemptGuard {
 private data class PendingLoginPair(val config: PairConfig, val generation: Long)
 private data class LoginPairSnapshot(val generation: Long, val paired: Boolean, val alias: String?, val note: String?)
 
+enum class LoginRequiredField { Host, User }
+
+fun loginRequiredField(host: String, user: String): LoginRequiredField? = when {
+    host.isBlank() -> LoginRequiredField.Host
+    user.isBlank() -> LoginRequiredField.User
+    else -> null
+}
+
 @Composable
 fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (String) -> Unit = {}) {
     val context = LocalContext.current
@@ -216,16 +224,16 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         val address = (server ?: raw.takeIf { json == null })?.let { parseServerAddress(it) }
         if (address == null) {
             scanError = "二维码中缺少有效的服务器地址。"
-        } else if (!scanUser.isNullOrBlank() && scanPass != null) {
+        } else if (!scanUser.isNullOrBlank()) {
             fillAddress(address)
             user = scanUser
-            pass = scanPass
+            pass = scanPass.orEmpty()
             scanError = null
             pendingLoginBase = address.baseUrl
             scanLoginRequested = true
         } else {
             fillAddress(address)
-            scanError = "二维码缺少完整的服务器地址、用户名或密码。"
+            scanError = "二维码缺少完整的服务器地址或用户名。"
         }
 
     }
@@ -453,7 +461,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
             fillAddress(address)
             user = server.userName
             pass = ""
-            pairNotice = "已填入 ${server.name}，补上密码即可登录"
+            pairNotice = "已填入 ${server.name}，可直接登录或补充密码"
             error = null
             runCatching { passFocusRequester.requestFocus() }
         }
@@ -726,20 +734,17 @@ private fun LoginCard(
         }
     }
     fun validateAndSubmit() {
-        val h = host.isBlank()
-        val u = user.isBlank()
-        val p = pass.isBlank()
-        hostBad = h; userBad = u; passBad = p
-        localError = when {
-            h -> "请填写服务器地址"
-            u -> "请填写用户名"
-            p -> "请填写密码"
+        val missing = loginRequiredField(host, user)
+        hostBad = host.isBlank()
+        userBad = user.isBlank()
+        localError = when (missing) {
+            LoginRequiredField.Host -> "请填写服务器地址"
+            LoginRequiredField.User -> "请填写用户名"
             else -> null
         }
-        when {
-            h -> hostFocusRequester.requestFocus()
-            u -> userFocusRequester.requestFocus()
-            p -> passFocus.requestFocus()
+        when (missing) {
+            LoginRequiredField.Host -> hostFocusRequester.requestFocus()
+            LoginRequiredField.User -> userFocusRequester.requestFocus()
             else -> onLogin()
         }
     }

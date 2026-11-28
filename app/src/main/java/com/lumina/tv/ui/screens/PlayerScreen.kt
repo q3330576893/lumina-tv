@@ -288,6 +288,10 @@ import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
+const val AUDIO_TRACK_UNRESOLVED_NOTICE = "这条音轨的对应关系不确定，请选择下方播放器音轨"
+
+fun timelineNoticeMayClear(current: String?, expected: String): Boolean = current == expected
+
 internal fun formatTime(ms: Long): String {
     if (ms <= 0) return "00:00"
     val total = ms / 1000
@@ -963,7 +967,7 @@ fun PlayerScreen(
         playbackStatusNotice = message
         scope.launch {
             delay(4_000L)
-            if (playbackStatusNotice == message) playbackStatusNotice = null
+            if (timelineNoticeMayClear(playbackStatusNotice, message)) playbackStatusNotice = null
         }
     }
 
@@ -4869,11 +4873,12 @@ fun PlayerScreen(
                             AppRuntime.prefs?.rememberAudioTrack(item.id, streamIndex, source)
                         }
                         manualAudioStreamSelection = true
+                        if (mapped && playbackStatusNotice == AUDIO_TRACK_UNRESOLVED_NOTICE) playbackStatusNotice = null
                         if (requiresNegotiation) {
                             loadSource(forceTranscode = currentTarget?.playMethod == "Transcode", audioStreamIndex = streamIndex)
                         } else if (!mapped) {
                             pendingManualAudio = null
-                            playbackStatusNotice = "这条音轨的对应关系不确定，请选择下方播放器音轨"
+                            showTimelineNotice(AUDIO_TRACK_UNRESOLVED_NOTICE)
                             PageLog.add("trackSelection action=unresolved embyIndex=$streamIndex")
                         } else if (activeEngine == "mpv") {
                             mpvBackend?.setAudioTrack(streamIndex)
