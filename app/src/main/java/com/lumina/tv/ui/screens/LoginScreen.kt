@@ -1,5 +1,6 @@
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.ui.theme.*
 import android.Manifest
 import android.app.Activity
 import android.content.Context
@@ -9,11 +10,8 @@ import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.clickable
@@ -68,7 +66,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -450,8 +447,8 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
         confirmButton = { TextButton(onClick = { scanError = null }) { Text("关闭") } },
     )
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF07060C))) {
-        val wide = maxWidth >= 720.dp
+    BoxWithConstraints(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas)) {
+        val wide = TvTokenValues.loginColumnsFit(maxWidth.value, maxHeight.value, androidx.compose.ui.platform.LocalDensity.current.fontScale)
         PosterBackdrop()
 
         val savedServers = remember { AppRuntime.prefs?.savedServerList().orEmpty() }
@@ -470,7 +467,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
 
         if (wide) {
             Row(
-                Modifier.fillMaxSize().padding(horizontal = 26.dp, vertical = 22.dp),
+                Modifier.fillMaxSize().padding(horizontal = TvTokens.safeInset(maxWidth), vertical = 22.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 LoginRail(onHome = goHome, onHelp = { helpOpen = true })
@@ -502,7 +499,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, onCancel: () -> Unit = {}, onNavigate: (
                 }
             }
         } else {
-            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp)) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = TvTokens.safeInset(maxWidth), vertical = 18.dp)) {
                 LoginCard(
                     modifier = Modifier.fillMaxWidth(),
                     host = host, onHost = { host = it },
@@ -553,16 +550,7 @@ private fun PosterBackdrop() {
             .take(9)
     }
     if (urls.isEmpty()) {
-        Box(
-            Modifier.fillMaxSize().background(
-                Brush.linearGradient(listOf(Color(0xFF0B0A16), Color(0xFF141024), Color(0xFF07060C)))
-            )
-        ) {
-            Box(Modifier.align(Alignment.TopStart).offset(x = (-120).dp, y = (-160).dp).size(560.dp)
-                .background(Brush.radialGradient(listOf(Color(0x243DB8B0), Color.Transparent))))
-            Box(Modifier.align(Alignment.BottomEnd).offset(x = 150.dp, y = 170.dp).size(560.dp)
-                .background(Brush.radialGradient(listOf(Color(0x2A657DE8), Color.Transparent))))
-        }
+        Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas))
         return
     }
     Row(Modifier.fillMaxSize()) {
@@ -577,8 +565,7 @@ private fun PosterBackdrop() {
             }
         }
     }
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xE607060C), Color(0xF207060C)))))
-    Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0x9907060C), Color(0xCC07060C)))))
+    Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Login))
 }
 
 /** 左侧极简导航条：Logo + 主页 / 帮助 + 版本号，仿 Flux 的悬浮胶囊。 */
@@ -587,16 +574,16 @@ private fun LoginRail(onHome: (() -> Unit)?, onHelp: () -> Unit) {
     val shape = RoundedCornerShape(26.dp)
     Column(
         Modifier.width(78.dp).fillMaxHeight()
-            .shadow(20.dp, shape, clip = false)
+
             .clip(shape)
-            .background(Color(0x9910121A))
-            .border(1.dp, Color(0x26FFFFFF), shape)
+            .luminaSurface(SurfaceLevel.Floating)
+            .luminaBoundary(shape)
             .padding(vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
             Modifier.size(46.dp).clip(RoundedCornerShape(15.dp))
-                .background(Brush.linearGradient(listOf(Color(0xFF49C8B7), Color(0xFF657DE8)))),
+                .luminaStatus(Accent),
             contentAlignment = Alignment.Center,
         ) { Text("L", color = Color.White, fontSize = TypeScale.sp23, fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(20.dp))
@@ -613,11 +600,11 @@ private fun RailItem(icon: androidx.compose.ui.graphics.vector.ImageVector, labe
     FocusSurface(
         modifier = Modifier.size(58.dp),
         corner = 18.dp,
-        scaleTo = 1.06f,
+        scaleTo = TvTokenValues.FOCUS_SCALE,
         onClick = onClick,
     ) { focused ->
         Column(
-            Modifier.fillMaxSize().background(if (focused) Color(0x24FFFFFF) else Color.Transparent, RoundedCornerShape(18.dp)),
+            Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(18.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
@@ -656,18 +643,18 @@ private fun BrandHero(
                     FocusSurface(
                         modifier = Modifier.widthIn(max = 380.dp).fillMaxWidth().height(52.dp),
                         corner = 15.dp,
-                        scaleTo = 1.02f,
+                        scaleTo = TvTokenValues.FOCUS_SCALE,
                         onClick = { onPickServer(server) },
                     ) { focused ->
                         Row(
                             Modifier.fillMaxSize()
-                                .background(if (focused) Color(0x24FFFFFF) else Color(0x0FFFFFFF), RoundedCornerShape(15.dp))
+                                .luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(15.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral)
                                 .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box(
                                 Modifier.size(28.dp).clip(CircleShape)
-                                    .background(if (focused) Color(0x3335E0C0) else Color(0x1FFFFFFF)),
+                                    .luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                                 contentAlignment = Alignment.Center,
                             ) { Text("L", color = if (focused) VioletBright else InkSub, fontSize = TypeScale.sp13, fontWeight = FontWeight.Bold) }
                             Spacer(Modifier.width(10.dp))
@@ -717,10 +704,10 @@ private fun LoginCard(
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val shape = RoundedCornerShape(28.dp)
+    val shape = RoundedCornerShape(TvTokens.GroupCorner)
     LaunchedEffect(pairArrivalTick) {
         if (pairArrivalTick > 0) qrOpen = false
-        else { delay(150); runCatching { hostFocusRequester.requestFocus() } }
+        else { androidx.compose.runtime.withFrameNanos { }; runCatching { hostFocusRequester.requestFocus() } }
     }
     // Request focus after the Dialog has left composition, including its window focus restoration.
     LaunchedEffect(pairArrivalTick, qrOpen) {
@@ -749,15 +736,11 @@ private fun LoginCard(
         }
     }
     Column(
-        modifier.shadow(20.dp, shape, clip = false).clip(shape)
-            .background(Color(0xE60C0E16))
-            .border(1.dp, if (cardFocused) Color(0x55B69CFF) else Color(0x1FFFFFFF), shape)
+        modifier.clip(shape)
+            .luminaSurface(SurfaceLevel.Content)
+            .luminaBoundary(shape)
             .onFocusChanged { cardFocused = it.hasFocus }
-            .padding(horizontal = 22.dp, vertical = 18.dp)
-            .drawWithContent {
-                drawContent()
-                drawRect(Brush.horizontalGradient(listOf(com.lumina.tv.ui.theme.Accent, com.lumina.tv.ui.theme.Accent2)), size = androidx.compose.ui.geometry.Size(size.width, 3.dp.toPx()))
-            },
+            .padding(horizontal = 22.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         // 标题 + 扫码
@@ -767,10 +750,10 @@ private fun LoginCard(
                 Spacer(Modifier.height(3.dp))
                 Text("输入账号，或扫码从手机同步配置", color = InkSub, fontSize = TypeScale.sp11)
             }
-            FocusSurface(Modifier.height(38.dp), corner = 19.dp, scaleTo = 1.04f, onClick = { qrOpen = true }) { focused ->
+            FocusSurface(Modifier.height(38.dp), corner = 19.dp, scaleTo = TvTokenValues.FOCUS_SCALE, onClick = { qrOpen = true }) { focused ->
                 Row(
                     Modifier.height(38.dp)
-                        .background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(19.dp))
+                        .luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(19.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral)
                         .padding(horizontal = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -783,7 +766,7 @@ private fun LoginCard(
 
         pairNotice?.let { notice ->
             Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0x222BD9C0))
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).luminaSurface(tone = SurfaceTone.Success)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -801,14 +784,14 @@ private fun LoginCard(
                     }
                 }
             }
-            BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
+            BoxWithConstraints(Modifier.fillMaxSize().luminaScrim(BackdropShade.Modal), contentAlignment = Alignment.Center) {
                 val panelShape = RoundedCornerShape(20.dp)
                 val qrSize = minOf(220.dp, (maxWidth - 88.dp).coerceAtLeast(1.dp))
                 Column(
                     Modifier.widthIn(max = 480.dp).fillMaxWidth().padding(20.dp)
                         .heightIn(max = (maxHeight - 40.dp).coerceAtLeast(1.dp))
-                        .shadow(20.dp, panelShape).clip(panelShape)
-                        .background(Color(0xF20C0E16)).border(1.dp, Color(0x33FFFFFF), panelShape)
+                        .clip(panelShape)
+                        .luminaSurface(SurfaceLevel.Overlay).luminaBoundary(panelShape)
                         .verticalScroll(rememberScrollState()).padding(18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -843,16 +826,9 @@ private fun LoginCard(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("协议", color = InkSub, fontSize = TypeScale.sp11)
             listOf("http", "https").forEach { candidate ->
-                FocusSurface(Modifier.width(74.dp).height(34.dp), corner = 17.dp, scaleTo = 1.03f, onClick = { onScheme(candidate) }) { focused ->
+                FocusSurface(Modifier.width(74.dp).height(34.dp), corner = 17.dp, scaleTo = TvTokenValues.FOCUS_SCALE, onClick = { onScheme(candidate) }) { focused ->
                     Box(
-                        Modifier.fillMaxSize().background(
-                            when {
-                                scheme == candidate -> Color(0xFF6C5CE7)
-                                focused -> Color(0x2EFFFFFF)
-                                else -> Color(0x14FFFFFF)
-                            },
-                            RoundedCornerShape(17.dp),
-                        ),
+                        Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, RoundedCornerShape(17.dp), selected = scheme == candidate),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(candidate, color = if (scheme == candidate) Color.White else InkSub, fontSize = TypeScale.sp12, fontWeight = FontWeight.SemiBold)
@@ -872,27 +848,21 @@ private fun LoginCard(
         FocusSurface(
             Modifier.fillMaxWidth().height(50.dp).focusRequester(loginFocusRequester),
             corner = 25.dp,
-            scaleTo = 1.02f,
+            scaleTo = TvTokenValues.FOCUS_SCALE,
             onClick = { validateAndSubmit() },
         ) { focused ->
             Box(
-                Modifier.fillMaxSize().shadow(if (focused) 18.dp else 0.dp, RoundedCornerShape(25.dp), ambientColor = com.lumina.tv.ui.theme.Accent.copy(alpha = 0.45f), spotColor = com.lumina.tv.ui.theme.Accent.copy(alpha = 0.45f)).background(
-                    Brush.horizontalGradient(
-                        if (focused) listOf(Color(0xFF8E7DFF), Color(0xFF5F4BE0))
-                        else listOf(Color(0xFF7C6BFF), Color(0xFF5544D6))
-                    ),
-                    RoundedCornerShape(25.dp),
-                ),
+                Modifier.fillMaxSize().luminaStatus(Accent, RoundedCornerShape(25.dp)),
                 contentAlignment = Alignment.Center,
             ) {
                 if (busy) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                        CircularProgressIndicator(Modifier.size(16.dp), color = Color(0xFF06101F), strokeWidth = 2.dp)
                         Spacer(Modifier.width(10.dp))
-                        Text(if (probing) "正在探测服务器…" else "正在登录…", color = Color.White, fontSize = TypeScale.sp13)
+                        Text(if (probing) "正在探测服务器…" else "正在登录…", color = Color(0xFF06101F), fontSize = TypeScale.sp13)
                     }
                 } else {
-                    Text("连接并登录", color = Color.White, fontSize = TypeScale.sp14, fontWeight = FontWeight.Bold)
+                    Text("连接并登录", color = Color(0xFF06101F), fontSize = TypeScale.sp14, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -907,7 +877,7 @@ private fun LoginCard(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FocusSurface(Modifier.weight(1f).height(34.dp), corner = 17.dp, onClick = onScan) { focused ->
                 Row(
-                    Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(17.dp)),
+                    Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(17.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                     horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(Icons.Filled.QrCodeScanner, null, tint = if (focused) VioletBright else InkSub, modifier = Modifier.size(15.dp))
@@ -917,7 +887,7 @@ private fun LoginCard(
             }
             FocusSurface(Modifier.width(96.dp).height(34.dp), corner = 17.dp, onClick = onHelp) { focused ->
                 Box(
-                    Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(17.dp)),
+                    Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(17.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                     contentAlignment = Alignment.Center,
                 ) { Text("帮助", color = if (focused) VioletBright else InkSub, fontSize = TypeScale.sp11) }
             }
@@ -926,7 +896,7 @@ private fun LoginCard(
         Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("v${com.lumina.tv.BuildConfig.VERSION_NAME} · Lumina for Emby", color = InkSub.copy(alpha = 0.55f), fontSize = TypeScale.sp9)
             Spacer(Modifier.weight(1f))
-            Box(Modifier.size(5.dp).background(if (pairingUrl.isNotBlank()) Color(0xFF35E0C0) else Color(0xFF6B7280), CircleShape))
+            Box(Modifier.size(5.dp).luminaStatus(if (pairingUrl.isNotBlank()) Mint else TextSub, CircleShape))
             Spacer(Modifier.width(5.dp))
             Text(
                 if (pairingUrl.isNotBlank()) "局域网配对就绪" else "局域网未就绪",
@@ -953,12 +923,13 @@ private fun GlassField(
         shape = RoundedCornerShape(14.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = Ink, unfocusedTextColor = Ink,
-            focusedBorderColor = if (isError) Color(0xFFFF6B6B) else VioletBright,
-            unfocusedBorderColor = if (isError) Color(0xFFFF6B6B).copy(alpha = 0.7f) else Color(0x24FFFFFF),
+            focusedBorderColor = Color.Transparent,
+            unfocusedBorderColor = if (isError) Color(0xFFFF6B6B) else TvTokens.Boundary,
             cursorColor = VioletBright,
-            focusedContainerColor = Color(0x1FFFFFFF), unfocusedContainerColor = Color(0x14FFFFFF),
+            focusedContainerColor = surfaceColor(SurfaceLevel.Content, focused = true), unfocusedContainerColor = surfaceColor(SurfaceLevel.Content),
         ),
         modifier = modifier.height(52.dp)
+            .tvFocusBoundary(RoundedCornerShape(TvTokens.ContentCorner))
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { focused = it.isFocused },
     )
@@ -967,10 +938,10 @@ private fun GlassField(
 @Composable
 private fun FeaturePill(text: String) {
     Row(
-        Modifier.clip(CircleShape).background(Color(0x14FFFFFF)).padding(horizontal = 10.dp, vertical = 6.dp),
+        Modifier.clip(CircleShape).luminaSurface(SurfaceLevel.Content).padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(5.dp).background(Violet, CircleShape))
+        Box(Modifier.size(5.dp).luminaStatus(Violet, shape = CircleShape))
         Spacer(Modifier.width(5.dp))
         Text(text, color = InkSub, fontSize = TypeScale.sp9)
     }

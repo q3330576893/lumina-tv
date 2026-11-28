@@ -1,9 +1,9 @@
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.ui.theme.*
 import com.lumina.tv.data.catchingRequest
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -385,7 +385,7 @@ fun SearchScreen(
     }.joinToString(" · ")
 
     Column(
-        Modifier.fillMaxSize().padding(horizontal = 40.dp, vertical = 28.dp),
+        Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas).tvPagePadding(vertical = 28.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
@@ -399,16 +399,17 @@ fun SearchScreen(
                 trailingIcon = {
                     if (keyword.isNotEmpty()) FocusSurface(Modifier.width(42.dp).height(42.dp), corner = 21.dp,
                         onClick = { invalidateSearchFocus(); keyword = "" }) { focused ->
-                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                             Text("清除", color = TextSub, fontSize = 11.sp)
                         }
                     }
                 },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = TextMain, unfocusedTextColor = TextMain,
-                    focusedBorderColor = Accent.copy(alpha = 0.62f), unfocusedBorderColor = GlassLine, cursorColor = Accent,
+                    focusedBorderColor = Color.Transparent, unfocusedBorderColor = TvTokens.Boundary, cursorColor = Accent,
                 ),
                 modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(inputFocus)
+                    .tvFocusBoundary(RoundedCornerShape(16.dp))
                     .onFocusChanged { inputHasFocus = it.isFocused; if (it.isFocused) focusedHistoryEntry = null }
                     .onPreviewKeyEvent { event ->
                         if (keyword.isBlank() && history.isNotEmpty() && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
@@ -420,13 +421,13 @@ fun SearchScreen(
             Spacer(Modifier.width(12.dp))
             FocusSurface(Modifier.height(52.dp).width(96.dp), corner = 16.dp,
                 onClick = { submitSearch() }) { focused ->
-                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                     Text("搜索", color = TextMain, fontSize = 13.sp)
                 }
             }
             Spacer(Modifier.width(10.dp))
             FocusSurface(Modifier.height(52.dp).width(96.dp), corner = 16.dp, onClick = onBack) { focused ->
-                Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                     Text("返回", color = TextMain, fontSize = 13.sp)
                 }
             }
@@ -452,7 +453,7 @@ fun SearchScreen(
                     Text(errorPresentation.primary!!, color = TextSub, fontSize = 14.sp)
                     FocusSurface(Modifier.padding(top = 8.dp).height(42.dp).width(112.dp), corner = 12.dp,
                         onClick = { if (appendError != null) retryAppend() else submitSearch() }) { focused ->
-                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                             Text("重试", color = TextMain, fontSize = 13.sp)
                         }
                     }
@@ -473,7 +474,7 @@ fun SearchScreen(
                                 Text("尚未搜完，可手动继续搜索", color = TextSub, fontSize = 14.sp)
                                 FocusSurface(Modifier.padding(top = 12.dp).heightIn(min = 44.dp).widthIn(min = 136.dp),
                                     corner = 12.dp, onClick = { retryAppend() }) { focused ->
-                                    Box(Modifier.background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF))
+                                    Box(Modifier.luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral)
                                         .padding(horizontal = 18.dp, vertical = 12.dp), contentAlignment = Alignment.Center) {
                                         Text("继续搜索", color = TextMain, fontSize = 13.sp)
                                     }
@@ -509,7 +510,7 @@ fun SearchScreen(
                                     Text(errorPresentation.append.orEmpty(), color = TextSub, fontSize = 11.sp)
                                     FocusSurface(Modifier.padding(top = 6.dp).height(38.dp).width(112.dp), corner = 12.dp,
                                         onClick = { retryAppend() }) { focused ->
-                                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)), contentAlignment = Alignment.Center) {
+                                        Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                                             Text("重试", color = TextMain, fontSize = 12.sp)
                                         }
                                     }
@@ -550,7 +551,7 @@ fun SearchScreen(
                                         history = updated
                                     }) { focused ->
                                     Box(Modifier.fillMaxWidth().heightIn(min = 40.dp)
-                                        .background(if (focused) Color(0x33FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
+                                        .luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                                         Text("×", color = TextSub, fontSize = 16.sp)
                                     }
                                 }
@@ -578,7 +579,7 @@ fun SearchScreen(
                                     onClick = { latestRetry++ },
                                 ) { focused ->
                                     Box(
-                                        Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF)),
+                                        Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                                         contentAlignment = Alignment.Center,
                                     ) { Text("重试", color = TextMain, fontSize = 13.sp) }
                                 }

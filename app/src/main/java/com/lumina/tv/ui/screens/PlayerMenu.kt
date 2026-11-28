@@ -1,7 +1,8 @@
 ﻿package com.lumina.tv.ui.screens
 
+import com.lumina.tv.ui.theme.*
+
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -161,14 +162,14 @@ internal fun OptionMenu(
     var contentHasFocus by remember { mutableStateOf(false) }
     var contentFocusRequest by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
-        delay(100)
+        androidx.compose.runtime.withFrameNanos { }
         runCatching { tabFocuses.first().requestFocus() }
     }
     LaunchedEffect(selectedTab, contentFocusRequest, hasContentFocusTarget) {
         if (contentFocusRequest == 0 || !hasContentFocusTarget) return@LaunchedEffect
         contentHasFocus = false
         repeat(15) {
-            delay(50)
+            androidx.compose.runtime.withFrameNanos { }
             runCatching { contentFocus.requestFocus() }
             if (contentHasFocus) return@LaunchedEffect
         }
@@ -176,10 +177,10 @@ internal fun OptionMenu(
     }
 
     Box(
-        Modifier.fillMaxSize().background(Color(0x66000000)),
+        Modifier.fillMaxSize().luminaScrim(BackdropShade.Modal),
         contentAlignment = Alignment.Center,
     ) {
-        GlassPanel(Modifier.width(680.dp), corner = 22.dp, fillColor = Color(0x7510141D)) {
+        LuminaSurface(SurfaceLevel.Overlay, Modifier.width(680.dp), shape = RoundedCornerShape(TvTokens.ModalCorner)) {
             Column(Modifier.padding(22.dp)) {
                 TvHintBar("上下键切换轨道 · 返回键关闭面板")
                 Text("播放选项", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
@@ -202,21 +203,18 @@ internal fun OptionMenu(
                                     down = if (hasContentFocusTarget) contentFocus else FocusRequester.Cancel
                                 },
                             corner = 8.dp,
-                            scaleTo = 1.06f,
+                            scaleTo = TvTokenValues.FOCUS_SCALE,
                             onClick = {
                                 selectedTab = tab
                                 contentFocusRequest++
                             },
                         ) { focused ->
                             Column(
-                                Modifier.fillMaxSize().background(
-                                    when {
+                                Modifier.fillMaxSize().luminaStatus(when {
                                         focused -> Color(0xE6FFFFFF)
                                         selected -> Accent.copy(alpha = 0.22f)
                                         else -> Color.Transparent
-                                    },
-                                    RoundedCornerShape(8.dp),
-                                ),
+                                    }, shape = RoundedCornerShape(8.dp)),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.Center,
                             ) {
@@ -232,9 +230,7 @@ internal fun OptionMenu(
                                 )
                                 Spacer(Modifier.height(5.dp))
                                 Box(
-                                    Modifier.width(28.dp).height(2.dp).background(
-                                        if (selected) Accent else Color.Transparent,
-                                    ),
+                                    Modifier.width(28.dp).height(2.dp).luminaStatus(if (selected) Accent else Color.Transparent),
                                 )
                             }
                         }
@@ -420,7 +416,7 @@ internal fun OptionMenu(
                 Spacer(Modifier.height(16.dp))
                 MenuLabel("播放")
                 if (onlyMedia3Available) Box(
-                    Modifier.fillMaxWidth().height(38.dp).background(Color(0x14FFFFFF), RoundedCornerShape(10.dp)),
+                    Modifier.fillMaxWidth().height(38.dp).luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(10.dp)),
                 ) {
                     Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("播放内核", color = TextSub, fontSize = 12.sp)
@@ -430,14 +426,11 @@ internal fun OptionMenu(
                 } else FocusSurface(
                     modifier = Modifier.fillMaxWidth().height(38.dp)
                         .onFocusChanged { if (it.isFocused) contentHasFocus = true },
-                    corner = 10.dp, scaleTo = 1.08f,
+                    corner = 10.dp, scaleTo = TvTokenValues.FOCUS_SCALE,
                     onClick = onSwitchEngine,
                 ) { focused ->
                     Row(
-                        Modifier.fillMaxSize().background(
-                            if (focused) Color(0x55FFFFFF) else Color(0x14FFFFFF),
-                            RoundedCornerShape(10.dp),
-                        ).padding(horizontal = 12.dp),
+                        Modifier.fillMaxSize().luminaStatus(if (focused) Color(0x55FFFFFF) else Color(0x14FFFFFF), shape = RoundedCornerShape(10.dp)).padding(horizontal = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("播放内核", color = if (focused) Accent else TextMain, fontSize = 12.sp)
@@ -472,17 +465,15 @@ internal fun OptionMenu(
                             val hint = sourceHint(s, activeEngine, audioCaps)
                             FocusSurface(
                                 modifier = Modifier.fillMaxWidth().height(40.dp),
-                                corner = 12.dp, scaleTo = 1.08f,
+                                corner = 12.dp, scaleTo = TvTokenValues.FOCUS_SCALE,
                                 onClick = { onSwitchSource(s.id) },
                             ) { focused ->
                                 Row(
-                                    Modifier.fillMaxSize().background(
-                                        when {
+                                    Modifier.fillMaxSize().luminaStatus(when {
                                             active -> Accent.copy(alpha = 0.9f)
                                             focused -> Color(0x55FFFFFF)
                                             else -> Color(0x14FFFFFF)
-                                        }, RoundedCornerShape(12.dp)
-                                    ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(12.dp)) else Modifier)
+                                        }, shape = RoundedCornerShape(12.dp))
                                         .padding(horizontal = 12.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
@@ -564,14 +555,12 @@ private fun MenuChip(
         }
     val content: @Composable (Boolean) -> Unit = { focused ->
         Box(
-            Modifier.fillMaxSize().background(
-                when {
+            Modifier.fillMaxSize().luminaStatus(when {
                     focused -> Color(0xE6FFFFFF)
                     active -> activeColor.copy(alpha = 0.9f)
                     !enabled -> Color(0x0AFFFFFF)
                     else -> Color(0x14FFFFFF)
-                }, RoundedCornerShape(12.dp)
-            ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(12.dp)) else Modifier),
+                }, shape = RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -585,7 +574,7 @@ private fun MenuChip(
     }
     if (enabled) FocusSurface(
         modifier = m,
-        corner = 12.dp, scaleTo = 1.08f,
+        corner = 12.dp, scaleTo = TvTokenValues.FOCUS_SCALE,
         onFocusChanged = onFocusChanged,
         onClick = onClick,
     ) { focused -> content(focused) } else Box(m) { content(false) }

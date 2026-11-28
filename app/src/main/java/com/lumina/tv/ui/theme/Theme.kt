@@ -63,8 +63,8 @@ val BASE_PRESETS = listOf(
 data class GlassPreset(val key: String, val label: String)
 
 val GLASS_PRESETS = listOf(
-    GlassPreset("frosted", "磨砂"),
-    GlassPreset("clear", "清透"),
+    GlassPreset("frosted", "完整"),
+    GlassPreset("clear", "精简"),
     GlassPreset("off", "关闭"),
 )
 
@@ -73,15 +73,11 @@ val GLASS_PRESETS = listOf(
  * Accent / Accent2 保持 val 语义（getter 读取 state），全部既有调用点无需改动。
  */
 object ThemeRuntime {
-    var bgTop by mutableStateOf(Color(0xFF000000))
+    var bgTop by mutableStateOf(Color.Black)
         private set
     var bgCard by mutableStateOf(Color(0xFF0A0A0C))
         private set
-    var glassFill by mutableStateOf(Color(0x14FFFFFF))
-        private set
-    var glassStrong by mutableStateOf(Color(0x1FFFFFFF))
-        private set
-    var glassLine by mutableStateOf(Color(0x22FFFFFF))
+    var baseThemeKey by mutableStateOf("oled")
         private set
     var accent by mutableStateOf(Color(0xFF7C9CF5))
         private set
@@ -89,10 +85,22 @@ object ThemeRuntime {
         private set
     var glassStyle by mutableStateOf("frosted")
         private set
-    var glassEnabled by mutableStateOf(true)
+    private var deviceApi by mutableStateOf(0)
+    private var lowRam by mutableStateOf(true)
+    var systemRemovesAnimations by mutableStateOf(true)
         private set
-    var deviceBlurSupported by mutableStateOf(true)
-        private set
+
+    val effectTier: EffectTier get() = resolveEffectTier(deviceApi, lowRam, glassStyle)
+    val motion: MotionPolicy get() = motionPolicy(effectTier, systemRemovesAnimations)
+    val deviceBlurSupported: Boolean get() = deviceApi >= 31 && !lowRam
+    val glassEnabled: Boolean get() = effectTier != EffectTier.OFF
+    val trueBlurEnabled: Boolean get() = effectTier == EffectTier.FULL
+
+    fun updateDeviceCapabilities(api: Int, isLowRam: Boolean) {
+        deviceApi = api
+        lowRam = isLowRam
+    }
+    fun updateSystemMotion(removed: Boolean) { systemRemovesAnimations = removed }
 
     fun applyTheme(colorKey: String) {
         val p = THEME_PRESETS.firstOrNull { it.key == colorKey } ?: THEME_PRESETS[0]
@@ -101,57 +109,38 @@ object ThemeRuntime {
     }
 
     fun applyBase(key: String) {
-        val p = BASE_PRESETS.firstOrNull { it.key == key } ?: BASE_PRESETS[0]
+        val resolution = resolveBaseThemeKey(key)
+        val p = BASE_PRESETS.first { it.key == resolution.key }
+        baseThemeKey = p.key
         bgTop = p.bgTop
         bgCard = p.bgCard
-        glassFill = p.glassFill
-        glassStrong = p.glassStrong
-        glassLine = p.glassLine
+        if (resolution.mapped || resolution.fallback) {
+            com.lumina.tv.diag.PageLog.add("themeBase effective=${p.key} mapped=${resolution.mapped} fallback=${resolution.fallback} storedPreference=preserved")
+        }
     }
 
     fun applyGlass(styleKey: String) {
-        glassStyle = if (styleKey in listOf("frosted", "clear", "off")) styleKey else "frosted"
-        glassEnabled = glassStyle != "off"
+        glassStyle = styleKey.takeIf { it in setOf("frosted", "clear", "off") } ?: "frosted"
     }
 
-    fun updateDeviceBlurSupported(supported: Boolean) { deviceBlurSupported = supported }
-
-    val trueBlurEnabled: Boolean
-        get() = glassEnabled && deviceBlurSupported && android.os.Build.VERSION.SDK_INT >= 31
-
-    val glassBlurRadius: Dp
-        get() = if (glassStyle == "clear") 12.dp else 24.dp
-
+    // Legacy callers share the solid Content fallback; transparency belongs only to LuminaSurface.
+    val glassFill: Color get() = surfaceColor(SurfaceLevel.Content)
+    val glassStrong: Color get() = surfaceColor(SurfaceLevel.Content, focused = true)
+    val glassLine: Color get() = if (effectTier == EffectTier.OFF) Color.Transparent else TvTokens.Boundary
+    val frostTint: Color get() = glassFill
+    val frostStrongTint: Color get() = glassStrong
+    val frostFallback: Color get() = glassFill
+    val frostStrongFallback: Color get() = surfaceColor(SurfaceLevel.Floating)
+    val glassHighlight: Color get() = Color.Transparent
+    val glassBlurRadius: Dp get() = if (trueBlurEnabled) 16.dp else 0.dp
     val blurRadiusDp: Dp get() = glassBlurRadius
-
-    val frostTint: Color get() = if (glassStyle == "clear") Color(0x14FFFFFF) else Color(0x1AFFFFFF)
-    val frostStrongTint: Color get() = if (glassStyle == "clear") Color(0x24FFFFFF) else Color(0x2EFFFFFF)
-    val frostFallback: Color get() = if (glassStyle == "off") Color(0xFF141B2B) else Color(0xE6151B2A)
-    val frostStrongFallback: Color get() = if (glassStyle == "off") Color(0xFF1B2438) else Color(0xF21A2232)
-    val glassHighlight: Color get() = Color(0x0FFFFFFF)
-
-    /** 玻璃面板填充色 */
-    fun glassFill(focused: Boolean): Color = if (focused) glassFillStrong else glassFillSubtle
-    val glassFillSubtle: Color get() = when (glassStyle) {
-        "clear" -> Color(0x0AFFFFFF)
-        "off" -> frostFallback
-        else -> Color(0x14FFFFFF)
-    }
-    val glassFillStrong: Color get() = when (glassStyle) {
-        "clear" -> Color(0x1FFFFFFF)
-        "off" -> frostStrongFallback
-        else -> Color(0x2EFFFFFF)
-    }
-
-    /** 玻璃面板描边色 */
-    fun glassLine(focused: Boolean): Color = when (glassStyle) {
-        "clear" -> if (focused) accent.copy(alpha = 0.7f) else Color(0x14FFFFFF)
-        "off" -> if (focused) accent.copy(alpha = 0.9f) else Color(0x0FFFFFFF)
-        else -> if (focused) accent.copy(alpha = 0.9f) else Color(0x22FFFFFF)
-    }
-    val glassEdge: Color get() = glassLine(false)
-    val glassEdgeNeutral: Color get() = Color(0x2EFFFFFF)
-    val glassEdgeStrong: Color get() = accent.copy(alpha = 0.72f)
+    fun glassFill(focused: Boolean): Color = if (focused) glassStrong else glassFill
+    val glassFillSubtle: Color get() = glassFill
+    val glassFillStrong: Color get() = glassStrong
+    fun glassLine(focused: Boolean): Color = if (focused) Color.White else glassLine
+    val glassEdge: Color get() = glassLine
+    val glassEdgeNeutral: Color get() = glassLine
+    val glassEdgeStrong: Color get() = Color.White
 }
 
 val Accent: Color get() = ThemeRuntime.accent
@@ -161,6 +150,7 @@ val Accent2: Color get() = ThemeRuntime.accent2
 fun LuminaTheme(content: @Composable () -> Unit) {
     @Suppress("UNUSED_EXPRESSION")
     isSystemInDarkTheme()
+    ObserveVisualEnvironment()
     val scheme = darkColorScheme(
         primary = Accent,
         onPrimary = Color(0xFF06101F),
@@ -169,6 +159,8 @@ fun LuminaTheme(content: @Composable () -> Unit) {
         onBackground = TextMain,
         surface = InkSoft,
         onSurface = TextMain,
+        surfaceContainerHigh = surfaceColor(SurfaceLevel.Overlay),
+        surfaceTint = Color.Transparent,
         surfaceVariant = Color(0xFF151C2E),
         onSurfaceVariant = TextSub,
     )
@@ -220,8 +212,8 @@ object TypeScale {
 
 object ShapeScale {
     val capsule = RoundedCornerShape(26.dp)
-    val panel = RoundedCornerShape(20.dp)
-    val card = RoundedCornerShape(14.dp)
+    val panel = RoundedCornerShape(TvTokens.GroupCorner)
+    val card = RoundedCornerShape(TvTokens.ContentCorner)
     val chip = RoundedCornerShape(10.dp)
 }
 

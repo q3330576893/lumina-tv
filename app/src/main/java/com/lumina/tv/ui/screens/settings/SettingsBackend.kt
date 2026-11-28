@@ -1,11 +1,11 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.*
 import com.lumina.tv.ui.theme.TypeScale
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -96,7 +96,7 @@ fun SettingsBackend(
             Text("播放器与兼容性", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }
         item(key = "compat:group") {
-            Column(Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).glassBorder(groupShape)) {
+            Column(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).glassBorder(groupShape)) {
                 val engineOptions = listOf(
                     SettingChoiceOption("auto", "自动"),
                     SettingChoiceOption("media3", "Media3"),
@@ -135,7 +135,7 @@ fun SettingsBackend(
                             up = requesters.getValue("compat:bootLaunch")
                         }
                         .onFocusChanged { disclosureFocused = it.isFocused; if (it.isFocused) onFocused("compat:sourcePreferences") }
-                        .background(if (disclosureFocused) ThemeRuntime.frostStrongTint else Color.Transparent, disclosureShape)
+                        .luminaSurface(SurfaceLevel.Content, disclosureShape, focused = disclosureFocused)
                         .clickable {
                             if (sourcePreferencesExpanded) disclosureRequester.requestFocus()
                             sourcePreferencesExpanded = !sourcePreferencesExpanded
@@ -161,8 +161,8 @@ fun SettingsBackend(
                 AnimatedVisibility(
                     visible = sourcePreferencesExpanded,
                     modifier = Modifier.focusProperties { canFocus = sourcePreferencesExpanded },
-                    enter = expandVertically(),
-                    exit = shrinkVertically(),
+                    enter = expandVertically(androidx.compose.animation.core.tween(TvMotion.CATEGORY)),
+                    exit = shrinkVertically(androidx.compose.animation.core.tween(TvMotion.CATEGORY)),
                 ) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp)) {
                         Text("动态范围", color = TextSub, fontSize = TypeScale.sp10)
@@ -175,7 +175,7 @@ fun SettingsBackend(
                                 FocusSurface(Modifier.height(32.dp).widthIn(min = 72.dp), corner = 16.dp, onClick = {
                                     sourceDynamicRange = value; prefs?.sourceDynamicRange = value
                                 }) { focused ->
-                                    Box(Modifier.fillMaxWidth().height(32.dp).background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                                    Box(Modifier.fillMaxWidth().height(32.dp).luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(16.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral, selected = active), contentAlignment = Alignment.Center) {
                                         Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp10, modifier = Modifier.padding(horizontal = 10.dp))
                                     }
                                 }
@@ -189,7 +189,7 @@ fun SettingsBackend(
                                 FocusSurface(Modifier.height(32.dp).widthIn(min = 72.dp), corner = 16.dp, onClick = {
                                     sourceBitrate = value; prefs?.sourceBitratePreference = value
                                 }) { focused ->
-                                    Box(Modifier.fillMaxWidth().height(32.dp).background(if (active) Accent.copy(alpha = .9f) else if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                                    Box(Modifier.fillMaxWidth().height(32.dp).luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(16.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral, selected = active), contentAlignment = Alignment.Center) {
                                         Text(label, color = if (active) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp10, modifier = Modifier.padding(horizontal = 10.dp))
                                     }
                                 }

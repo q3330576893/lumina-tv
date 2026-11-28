@@ -8,7 +8,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
+import com.lumina.tv.ui.theme.*
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -26,7 +26,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
@@ -47,25 +46,16 @@ internal fun splashShimmerOffsetPx(offsetDp: Float, density: Density): Int =
 @Composable
 fun SplashScreen(serverName: String, modifier: Modifier = Modifier) {
     val enter = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        enter.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+    LaunchedEffect(ThemeRuntime.motion) {
+        enter.animateTo(1f, tween(TvMotion.CATEGORY, easing = FastOutSlowInEasing))
     }
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
-    val shimmerActive = lifecycleState.isAtLeast(Lifecycle.State.STARTED)
-    val transition = rememberInfiniteTransition(label = "splash-shimmer")
-    val shimmerX by transition.animateFloat(
-        initialValue = -60f,
-        targetValue = 160f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1100, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "splash-shimmer-x",
-    )
+    val shimmerActive = lifecycleState.isAtLeast(Lifecycle.State.STARTED) && ThemeRuntime.motion.idleAnimations
+
 
     Box(
         modifier = modifier
-            .background(Color(0xFF07060C))
+            .luminaSurface(SurfaceLevel.Canvas)
             .graphicsLayer { alpha = enter.value },
         contentAlignment = Alignment.Center,
     ) {
@@ -74,10 +64,10 @@ fun SplashScreen(serverName: String, modifier: Modifier = Modifier) {
                 modifier = Modifier
                     .size(84.dp)
                     .clip(RoundedCornerShape(26.dp))
-                    .background(Brush.linearGradient(listOf(Accent, Accent2))),
+                    .luminaStatus(Accent),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("L", color = Color.White, fontSize = 44.sp, fontWeight = FontWeight.Bold)
+                Text("L", color = Color(0xFF06101F), fontSize = 44.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(16.dp))
             Text(
@@ -96,6 +86,17 @@ fun SplashScreen(serverName: String, modifier: Modifier = Modifier) {
         }
 
         if (shimmerActive) {
+            val transition = rememberInfiniteTransition(label = "splash-shimmer")
+            val shimmerX by transition.animateFloat(
+                initialValue = -60f,
+                targetValue = 160f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1100, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart,
+                ),
+                label = "splash-shimmer-x",
+            )
+
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -103,18 +104,14 @@ fun SplashScreen(serverName: String, modifier: Modifier = Modifier) {
                     .width(160.dp)
                     .height(2.dp)
                     .clip(RoundedCornerShape(1.dp))
-                    .background(Color(0x22FFFFFF), RoundedCornerShape(1.dp)),
+                    .luminaSurface(SurfaceLevel.Content, RoundedCornerShape(1.dp)),
             ) {
                 Box(
                     modifier = Modifier
                         .offset { IntOffset(splashShimmerOffsetPx(shimmerX, this), 0) }
                         .width(60.dp)
                         .height(2.dp)
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(Color.Transparent, Accent, Accent2, Color.Transparent),
-                            ),
-                        ),
+                        .luminaStatus(Accent),
                 )
             }
         }

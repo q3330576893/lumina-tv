@@ -14,7 +14,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
+import com.lumina.tv.ui.theme.*
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -318,21 +318,11 @@ internal fun CtrlButton(
     FocusSurface(
         modifier = m,
         corner = if (primary) 26.dp else 22.dp,
-        scaleTo = 1.1f,
+        scaleTo = TvTokenValues.FOCUS_SCALE,
         onClick = onClick,
     ) { focused ->
-        val bg = if (primary) {
-            Brush.horizontalGradient(
-                listOf(
-                    Accent.copy(alpha = if (focused) 1f else 0.9f),
-                    Accent2.copy(alpha = if (focused) 1f else 0.9f),
-                )
-            )
-        } else {
-            SolidColor(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF))
-        }
         Box(
-            Modifier.fillMaxSize().background(bg),
+            Modifier.fillMaxSize().luminaStatus(if (primary) Accent else surfaceColor(SurfaceLevel.Floating, focused)),
             contentAlignment = Alignment.Center,
         ) {
             Icon(

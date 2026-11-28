@@ -1,5 +1,6 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.*
 import com.lumina.tv.ui.theme.TypeScale
 
 import androidx.compose.animation.AnimatedContent
@@ -10,7 +11,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.lazy.LazyListState
@@ -54,7 +54,7 @@ import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.ThemeRuntime
 import com.lumina.tv.ui.components.FrostPanel
-import com.lumina.tv.ui.motion.Motion
+import com.lumina.tv.ui.theme.TvMotion as Motion
 import com.lumina.tv.AppRuntime
 import androidx.compose.foundation.shape.RoundedCornerShape
 import dev.chrisbanes.haze.HazeState
@@ -77,7 +77,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     val contentFirstRequester = remember { FocusRequester() }
     var selectedCategory by remember { mutableStateOf(SettingsFocusMemory.category) }
     val focusedRowKeys = remember { mutableStateMapOf<SettingsCategory, String>().apply { putAll(SettingsFocusMemory.rowKeys) } }
-    val focusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    val focusRequesters = remember { mutableStateMapOf<String, FocusRequester>() }
     val listStates = remember { SettingsCategory.entries.associateWith { LazyListState() } }
     var focusEpoch by remember { mutableStateOf(0) }
     var previousCategory by remember { mutableStateOf(selectedCategory) }
@@ -92,7 +92,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     }
 
     LaunchedEffect(Unit) {
-        delay(120)
+        withFrameNanos { }
         if (focusedRowKeys[selectedCategory] == null) {
             runCatching { railRequester.requestFocus() }
         }
@@ -103,7 +103,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
             Modifier
                 .fillMaxSize()
                 .hazeSource(hazeState)
-                .background(Color.Black),
+                .luminaSurface(SurfaceLevel.Canvas),
         )
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val railWidth = if (maxWidth < 1100.dp) 192.dp else SettingsTokens.RailWidth
@@ -111,7 +111,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 Modifier
                     .fillMaxSize()
                     .padding(
-                        horizontal = SettingsTokens.PagePaddingH,
+                        horizontal = TvTokens.safeInset(maxWidth),
                         vertical = SettingsTokens.PagePaddingV,
                     ),
                 contentAlignment = Alignment.TopCenter,
@@ -222,7 +222,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
 
     LaunchedEffect(selectedCategory) {
         val epochAtSwitch = focusEpoch
-        delay(Motion.CATEGORY.toLong())
+        withFrameNanos { }
         if (focusEpoch != epochAtSwitch) return@LaunchedEffect
         val key = focusedRowKeys[selectedCategory]
         if (key == null) {
@@ -243,6 +243,8 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
             focusEpoch != epochAtSwitch || state.layoutInfo.visibleItemsInfo.any { it.index == index }
         }.first { it }
         withFrameNanos { }
+        if (focusEpoch != epochAtSwitch) return@LaunchedEffect
+        snapshotFlow { focusEpoch != epochAtSwitch || focusRequesters.containsKey(key) }.first { it }
         if (focusEpoch != epochAtSwitch) return@LaunchedEffect
         val currentRequester = focusRequesters[key]
         val restored = currentRequester != null && runCatching { currentRequester.requestFocus() }.isSuccess
@@ -277,14 +279,14 @@ private fun SettingsCategoryRail(
                             focused = it.isFocused
                             onRailFocusChanged(it.isFocused)
                         }
-                        .background(if (selected || focused) ThemeRuntime.frostStrongTint else Color.Transparent, RoundedCornerShape(12.dp))
+                        .luminaSurface(SurfaceLevel.Content, RoundedCornerShape(12.dp), focused = focused, selected = selected)
                         .then(if (enabled) Modifier.clickable {
                             onCategorySelected(category)
                         } else Modifier),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (selected || focused) Box(Modifier.width(SettingsTokens.FocusBarW).height(SettingsTokens.FocusBarH).background(Accent, RoundedCornerShape(2.dp)))
-                    Box(Modifier.padding(start = 14.dp).size(14.dp).background(if (selected) Accent else TextSub.copy(alpha = .75f), RoundedCornerShape(4.dp)))
+                    if (selected || focused) Box(Modifier.width(SettingsTokens.FocusBarW).height(SettingsTokens.FocusBarH).luminaStatus(Accent, shape = RoundedCornerShape(2.dp)))
+                    Box(Modifier.padding(start = 14.dp).size(14.dp).luminaStatus(if (selected) Accent else TextSub, RoundedCornerShape(4.dp)))
                     Text(category.label, Modifier.padding(start = 10.dp), color = if (selected || focused) TextMain else TextSub, fontSize = TypeScale.sp15, maxLines = 1)
                 }
             }

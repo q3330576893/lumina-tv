@@ -1,11 +1,11 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.*
 import com.lumina.tv.ui.theme.TypeScale
 
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -97,7 +97,7 @@ fun SettingsAbout(
             Text("关于与诊断", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }
         item(key = "about:group") {
-            Column(Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).glassBorder(groupShape)) {
+            Column(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).glassBorder(groupShape)) {
                 Column(Modifier.fillMaxWidth().heightIn(min = SettingsTokens.RowHeight).padding(horizontal = SettingsTokens.RowPaddingH, vertical = 10.dp), verticalArrangement = Arrangement.Center) {
                     Text("当前版本", color = TextMain, fontSize = SettingsTokens.RowTitleSize)
                     Text(BuildConfig.VERSION_NAME, color = TextSub, fontSize = SettingsTokens.RowDescSize)

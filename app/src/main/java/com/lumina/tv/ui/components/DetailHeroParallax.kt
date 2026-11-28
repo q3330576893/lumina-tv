@@ -9,13 +9,12 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
+import com.lumina.tv.ui.theme.*
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -26,6 +25,7 @@ internal class DetailHeroDrift internal constructor(private val scope: Coroutine
     internal val y = Animatable(0f)
 
     fun nudge(dx: Int, dy: Int) {
+        if (ThemeRuntime.motion.reduced) { reset(); return }
         if (dx != 0) scope.launch {
             x.snapTo(dx.toFloat())
             x.animateTo(0f, spring(dampingRatio = 0.75f, stiffness = 500f))
@@ -59,12 +59,12 @@ internal fun DetailHeroParallax(
     modifier: Modifier = Modifier,
 ) {
     Box(modifier) {
-        // 远景：模糊，不位移（模糊层动起来只会暴露边缘，且开销大）
+        // Canvas: static poster crop; browsing never requests blur.
         AsyncImage(
             model = backdropUrl,
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize().blur(42.dp).hazeSource(hazeState),
+            modifier = Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas),
         )
         // 近景：清晰，位移
         AsyncImage(
@@ -72,7 +72,7 @@ internal fun DetailHeroParallax(
             contentDescription = null,
             contentScale = ContentScale.Fit,
             modifier = Modifier.fillMaxSize().graphicsLayer {
-                if (parallaxEnabled && backdropUrl != null) {
+                if (parallaxEnabled && !ThemeRuntime.motion.reduced && backdropUrl != null) {
                     translationX = drift.x.value * NEAR_DEPTH_PX
                     translationY = drift.y.value * NEAR_DEPTH_PX
                 } else {

@@ -8,6 +8,13 @@ import androidx.compose.ui.zIndex
 
 import android.graphics.Bitmap
 import android.app.ActivityManager
+import com.lumina.tv.ui.theme.*
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.graphics.compositeOver
+import kotlinx.coroutines.yield
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -56,7 +63,6 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shadow
@@ -89,9 +95,6 @@ import com.lumina.tv.ui.theme.Radius
 import com.lumina.tv.ui.theme.ShapeScale
 import com.lumina.tv.ui.theme.TypeScale
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
 import androidx.compose.animation.core.EaseOutCubic
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -99,71 +102,18 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.delay
 
-/** 极光背景：深空底 + 两团缓慢漂移的光晕，营造 iOS 玻璃质感的空间感。 */
+/** Shared static Canvas; decorative idle motion is intentionally absent. */
 @Composable
 fun AuroraBackground(
     modifier: Modifier = Modifier,
     active: Boolean = true,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val drift = remember { Animatable(0f) }
-    LaunchedEffect(active) {
-        if (!active) return@LaunchedEffect
-        while (true) {
-            drift.animateTo(1f, tween(18000))
-            drift.animateTo(0f, tween(18000))
-        }
-    }
-    Box(modifier.fillMaxSize().background(Ink)) {
-        Canvas(Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            drawRect(
-                brush = Brush.linearGradient(
-                    colors = listOf(Color(0xFF0B1020), Ink, Color(0xFF0A0D18)),
-                    start = Offset(0f, 0f),
-                    end = Offset(w, h),
-                )
-            )
-            val x1 = w * (0.12f + 0.10f * drift.value)
-            val y1 = h * (0.10f + 0.06f * drift.value)
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(Accent.copy(alpha = 0.30f), Color.Transparent),
-                    center = Offset(x1, y1),
-                    radius = w * 0.55f,
-                ),
-                radius = w * 0.55f,
-                center = Offset(x1, y1),
-            )
-            val x2 = w * (0.86f - 0.08f * drift.value)
-            val y2 = h * (0.16f + 0.10f * drift.value)
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(Accent2.copy(alpha = 0.26f), Color.Transparent),
-                    center = Offset(x2, y2),
-                    radius = w * 0.45f,
-                ),
-                radius = w * 0.45f,
-                center = Offset(x2, y2),
-            )
-            val x3 = w * (0.55f + 0.12f * drift.value)
-            val y3 = h * (0.95f - 0.05f * drift.value)
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(Color(0xFF35E0D0).copy(alpha = 0.14f), Color.Transparent),
-                    center = Offset(x3, y3),
-                    radius = w * 0.38f,
-                ),
-                radius = w * 0.38f,
-                center = Offset(x3, y3),
-            )
-        }
-        content()
-    }
+    // Canvas is deliberately static. OFF shares the same solid fallback without light blobs.
+    Box(modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas), content = content)
 }
 
-/** 通用玻璃面板：半透明填色 + 1px 高光描边 + 大圆角，质感跟随设置页档位。 */
+/** Compatibility entry for Content. */
 @Composable
 fun GlassPanel(
     modifier: Modifier = Modifier,
@@ -172,29 +122,9 @@ fun GlassPanel(
     fillColor: Color? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    Box(
-        modifier
-            .clip(corner?.let { RoundedCornerShape(it) } ?: ShapeScale.panel)
-            .background(fillColor ?: ThemeRuntime.glassFill(focused))
-            .border(
-                width = if (focused) 1.5.dp else 1.dp,
-                color = if (focused) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge,
-                shape = corner?.let { RoundedCornerShape(it) } ?: ShapeScale.panel,
-            )
-    ) {
-        content()
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(60.dp)
-                .align(Alignment.TopCenter)
-                .background(
-                    Brush.verticalGradient(
-                    listOf(ThemeRuntime.glassHighlight, Color.Transparent)
-                    )
-                )
-        )
-    }
+    LuminaSurface(SurfaceLevel.Content, modifier,
+        shape = RoundedCornerShape(corner ?: TvTokens.GroupCorner), focused = focused,
+        content = content)
 }
 
 @Composable
@@ -207,43 +137,25 @@ fun FrostPanel(
 ) {
     val context = LocalContext.current
     val manager = remember(context) { context.getSystemService(ActivityManager::class.java) }
-    val supported = manager?.isLowRamDevice != true
-    LaunchedEffect(supported) { ThemeRuntime.updateDeviceBlurSupported(supported) }
-    val shape = RoundedCornerShape(corner)
-    Box(modifier.clip(shape)) {
-        Box(
-            Modifier.fillMaxSize()
-                .then(if (ThemeRuntime.trueBlurEnabled) Modifier.hazeEffect(
-                    state = hazeState,
-                    style = HazeStyle(
-                        backgroundColor = if (strong) ThemeRuntime.frostStrongFallback else ThemeRuntime.frostFallback,
-                        tint = HazeTint(if (strong) ThemeRuntime.frostStrongTint else ThemeRuntime.frostTint),
-                        blurRadius = ThemeRuntime.glassBlurRadius,
-                        noiseFactor = 0f,
-                    ),
-                ) else Modifier.background(if (strong) ThemeRuntime.frostStrongFallback else ThemeRuntime.frostFallback))
-        )
-        Box(Modifier.fillMaxSize().border(
-            1.dp,
-            if (strong) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdgeNeutral,
-            shape,
-        ))
-        content()
-    }
+    // Keep the local low-RAM/API guard as well as the central capability policy. Fail closed.
+    val supported = manager?.isLowRamDevice == false && android.os.Build.VERSION.SDK_INT >= 31
+    LuminaSurface(SurfaceLevel.Floating, modifier, RoundedCornerShape(corner),
+        tone = if (strong) SurfaceTone.Raised else SurfaceTone.Neutral,
+        hazeState = hazeState, allowBlur = supported, floatingEffect = true, content = content)
 }
 
 enum class FocusFamily { Poster, DenseGrid, Button, DetailPanel }
 
 object FocusScale {
-    const val POSTER_LARGE = 1.10f
-    const val POSTER_MEDIUM = 1.07f
-    const val DENSE_GRID = 1.06f
-    const val ULTRA_DENSE = 1.05f
+    const val POSTER_LARGE = TvTokenValues.FOCUS_SCALE
+    const val POSTER_MEDIUM = TvTokenValues.FOCUS_SCALE
+    const val DENSE_GRID = TvTokenValues.FOCUS_SCALE
+    const val ULTRA_DENSE = TvTokenValues.FOCUS_SCALE
 }
 
 internal fun posterTitleAreaHeight(fontScale: Float): Dp = (20f * fontScale + 16f).dp
 
-private const val FOCUS_ANIMATION_DURATION_MS = 140
+private const val FOCUS_ANIMATION_DURATION_MS = TvTokenValues.FOCUS_MS
 
 /** 放大后需要的额外内边距，避免四角卡被 Lazy 容器裁切。 */
 internal fun focusGutter(cardWidth: Dp, maxScale: Float): Dp =
@@ -256,8 +168,8 @@ private data class FocusSpec(
 private fun FocusFamily.spec(): FocusSpec = when (this) {
     FocusFamily.Poster -> FocusSpec(FocusScale.POSTER_LARGE, FOCUS_ANIMATION_DURATION_MS)
     FocusFamily.DenseGrid -> FocusSpec(FocusScale.DENSE_GRID, FOCUS_ANIMATION_DURATION_MS)
-    FocusFamily.Button -> FocusSpec(1.04f, FOCUS_ANIMATION_DURATION_MS)
-    FocusFamily.DetailPanel -> FocusSpec(1.02f, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.Button -> FocusSpec(TvTokenValues.FOCUS_SCALE, FOCUS_ANIMATION_DURATION_MS)
+    FocusFamily.DetailPanel -> FocusSpec(TvTokenValues.FOCUS_SCALE, FOCUS_ANIMATION_DURATION_MS)
 }
 
 internal fun activateFocusSurface(enabled: Boolean = true, onClick: () -> Unit) {
@@ -270,7 +182,7 @@ internal suspend fun requestSurfaceInitialFocus(
     request: () -> Unit,
 ) {
     if (!requested || !enabled()) return
-    delay(100)
+    yield() // Cancellation/disabled-state checkpoint; mounting is awaited by the caller.
     if (enabled()) request()
 }
 
@@ -312,14 +224,18 @@ fun FocusSurface(
     val currentEnabled by rememberUpdatedState(enabled)
     val focusSpec = focusFamily.spec()
     val scale = remember { Animatable(1f) }
-    LaunchedEffect(focused) {
+    val motion = ThemeRuntime.motion
+    LaunchedEffect(focused, motion) {
         scale.animateTo(
-            if (focused) (scaleTo ?: focusSpec.scale) else 1f,
-            tween(focusSpec.duration, easing = EaseOutCubic),
+            if (focused) minOf(scaleTo ?: focusSpec.scale, motion.focusScale) else 1f,
+            tween(motion.duration(focusSpec.duration), easing = EaseOutCubic),
         )
     }
     val requestFocusRequester = remember { FocusRequester() }
+    var mounted by remember { mutableStateOf(false) }
     LaunchedEffect(requestFocus, enabled) {
+        if (!requestFocus || !enabled) return@LaunchedEffect
+        snapshotFlow { mounted }.first { it }
         requestSurfaceInitialFocus(requestFocus, { currentEnabled }) {
             runCatching { requestFocusRequester.requestFocus() }
         }
@@ -332,6 +248,7 @@ fun FocusSurface(
     }
     Box(
         modifier
+            .onGloballyPositioned { mounted = true }
             .then(if (requestFocus) Modifier.focusRequester(requestFocusRequester) else Modifier)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusProperties { canFocus = enabled }
@@ -349,10 +266,11 @@ fun FocusSurface(
                 clip = false
             }
             .clip(RoundedCornerShape(corner))
-            .background(surfaceFill?.invoke(focused) ?: ThemeRuntime.glassFill(focused))
+            .luminaSurface(SurfaceLevel.Content)
+            .then(surfaceFill?.invoke(focused)?.let { Modifier.luminaStatus(it) } ?: Modifier)
             .border(
-                surfaceBorderWidth?.invoke(focused) ?: 1.dp,
-                surfaceBorderColor?.invoke(focused) ?: if (focused) Color.White.copy(alpha = 0.28f) else Color(0x24FFFFFF),
+                if (focused) TvTokens.FocusBorder else (surfaceBorderWidth?.invoke(false) ?: 1.dp),
+                if (focused) Color.White else (surfaceBorderColor?.invoke(false) ?: TvTokens.Boundary),
                 RoundedCornerShape(corner),
             )
             .clickable(enabled = enabled, interactionSource = interaction, indication = null,
@@ -366,15 +284,14 @@ internal fun ResumeRemovalPill(focusRequester: FocusRequester, onClick: () -> Un
     FocusSurface(
         modifier = Modifier.size(width = 84.dp, height = 34.dp),
         corner = 17.dp,
-        scaleTo = 1.07f,
+        scaleTo = TvTokenValues.FOCUS_SCALE,
         focusRequester = focusRequester,
         onClick = onClick,
     ) { focused ->
         val tint = if (focused) Color(0xFFFFC5BD) else TextMain
         Row(
             Modifier.fillMaxSize()
-                .background(Brush.verticalGradient(listOf(Color(0x38FFFFFF), Color(0x0DFFFFFF))), shape)
-                .border(if (focused) 1.5.dp else 0.5.dp, tint.copy(alpha = if (focused) 0.9f else 0.36f), shape),
+                .luminaSurface(SurfaceLevel.Content, shape, tone = SurfaceTone.Danger),
             horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -404,23 +321,26 @@ fun PosterCard(
     val interaction = remember { MutableInteractionSource() }
     val initialFocusRequester = remember { FocusRequester() }
     val focused by interaction.collectIsFocusedAsState()
-    val cardShape = RoundedCornerShape(12.dp)
+    val cardShape = RoundedCornerShape(TvTokens.ContentCorner)
     val scale = remember { Animatable(1f) }
 
-    LaunchedEffect(focused) {
+    val motion = ThemeRuntime.motion
+    LaunchedEffect(focused, motion) {
         scale.animateTo(
-            targetValue = if (focused) 1.04f else 1f,
-            animationSpec = tween(durationMillis = 140, easing = EaseOutCubic),
+            targetValue = if (focused) motion.focusScale else 1f,
+            animationSpec = tween(durationMillis = motion.duration(TvTokenValues.FOCUS_MS), easing = EaseOutCubic),
         )
     }
-    LaunchedEffect(requestInitialFocus) {
-        if (requestInitialFocus) {
-            kotlinx.coroutines.delay(120)
+    var mounted by remember { mutableStateOf(false) }
+    LaunchedEffect(requestInitialFocus, mounted) {
+        if (requestInitialFocus && mounted) {
+            yield()
             runCatching { initialFocusRequester.requestFocus() }
         }
     }
     Column(
         Modifier
+            .onGloballyPositioned { mounted = true }
             .zIndex(if (focused) 1f else 0f)
             .then(if (width != null) Modifier.width(width) else Modifier.fillMaxWidth())
             .then(if (titleOverlay) Modifier.aspectRatio(1f / aspectRatio) else Modifier)
@@ -449,7 +369,7 @@ fun PosterCard(
                 .fillMaxWidth()
                 .aspectRatio(1f / aspectRatio)
                 .clip(cardShape)
-                .background(Color(0xFF141B2B))
+                .luminaSurface(SurfaceLevel.Content)
         ) {
             AsyncImage(
                 model = imageUrl,
@@ -462,7 +382,7 @@ fun PosterCard(
                     Box(
                         Modifier.align(Alignment.TopStart).padding(6.dp)
                             .size(20.dp)
-                            .background(Color(0xCC000000), CircleShape),
+                            .luminaSurface(SurfaceLevel.Content, CircleShape),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text("✓", color = Accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -471,7 +391,7 @@ fun PosterCard(
                     Box(
                         Modifier.align(Alignment.TopStart).padding(6.dp)
                             .size(20.dp)
-                            .background(Color(0xCC000000), CircleShape),
+                            .luminaSurface(SurfaceLevel.Content, CircleShape),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text("✓", color = Color(0x99FFFFFF), fontSize = 11.sp)
@@ -494,7 +414,7 @@ fun PosterCard(
             if (titleOverlay) {
                 Box(
                     Modifier.align(Alignment.BottomStart).fillMaxWidth().height(44.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f))))
+                        .luminaScrim(BackdropShade.PosterTitle)
                 )
                 Text(
                     item.name,
@@ -527,7 +447,7 @@ fun PosterCard(
             }
             Box(
                 Modifier.matchParentSize().drawBehind {
-                    val edgeWidth = if (focused) 3.dp.toPx() else 1.dp.toPx()
+                    val edgeWidth = if (focused) TvTokens.FocusBorder.toPx() else 1.dp.toPx()
                     inset(edgeWidth / 2f) {
                         drawOutline(
                             cardShape.createOutline(size, layoutDirection, this),

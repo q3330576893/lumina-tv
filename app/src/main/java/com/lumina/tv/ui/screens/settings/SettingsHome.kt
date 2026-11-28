@@ -1,8 +1,8 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.*
 import com.lumina.tv.ui.theme.TypeScale
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -101,7 +101,7 @@ fun SettingsHome(
             item(key = "home:not-synced") {
                 Column(
                     Modifier.fillMaxWidth()
-                        .background(ThemeRuntime.frostTint, groupShape)
+                        .luminaSurface(SurfaceLevel.Content, shape = groupShape)
                         .glassBorder(groupShape)
                         .padding(SettingsTokens.RowPaddingH),
                 ) {
@@ -124,7 +124,7 @@ fun SettingsHome(
                     leftRequester = railRequester,
                     upRequester = if (view.id == views.firstOrNull()?.id) requester else null,
                     onFocused = onFocused,
-                    modifier = Modifier.background(ThemeRuntime.frostTint, groupShape).glassBorder(groupShape),
+                    modifier = Modifier.luminaSurface(SurfaceLevel.Content, shape = groupShape).glassBorder(groupShape),
                 )
             }
         }

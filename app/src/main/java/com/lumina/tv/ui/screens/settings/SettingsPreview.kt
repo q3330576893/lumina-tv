@@ -1,8 +1,8 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.*
 import com.lumina.tv.ui.theme.TypeScale
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -41,12 +41,12 @@ fun SubtitlePreviewCard(
     Box(
         modifier.fillMaxWidth().height(96.dp)
             .clip(shape)
-            .background(Color(0xFF07090E))
+            .luminaSurface(SurfaceLevel.Content)
             .border(1.dp, Color.White.copy(alpha = 0.16f), shape),
     ) {
         Box(
             Modifier.align(Alignment.BottomCenter).padding(bottom = bottomPadding)
-                .then(if (bg) Modifier.background(Color.Black.copy(alpha = 0.58f), RoundedCornerShape(3.dp)).padding(horizontal = 8.dp, vertical = 2.dp) else Modifier),
+                .then(if (bg) Modifier.luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(3.dp)).padding(horizontal = 8.dp, vertical = 2.dp) else Modifier),
             contentAlignment = Alignment.Center,
         ) {
             val previewText = "这是字幕样式的实时预览效果"
@@ -73,7 +73,7 @@ fun SubtitlePreviewCard(
             color = Color.White.copy(alpha = 0.78f),
             fontSize = TypeScale.sp10,
             modifier = Modifier.align(Alignment.TopEnd)
-                .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(bottomStart = 8.dp))
+                .luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(bottomStart = 8.dp))
                 .padding(horizontal = 8.dp, vertical = 4.dp),
         )
     }

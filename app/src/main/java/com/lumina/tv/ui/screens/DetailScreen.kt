@@ -1,5 +1,6 @@
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.ui.theme.*
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -14,7 +15,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
@@ -95,7 +95,6 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -130,7 +129,6 @@ import com.lumina.tv.player.sourceHint
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
-import com.lumina.tv.ui.components.FocusScale
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.DetailHeroParallax
@@ -161,8 +159,6 @@ import com.lumina.tv.data.catchingRequest
 import com.lumina.tv.data.withRequestBudget
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.lumina.tv.ui.components.GlassPanel
-import com.lumina.tv.ui.components.FrostPanel
 import dev.chrisbanes.haze.HazeState
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.lifecycle.Lifecycle
@@ -982,7 +978,7 @@ fun DetailScreen(
             withFrameNanos { }
             focused = playButtonFocused
             if (focused) break
-            if (attempt < 2) delay(120)
+            if (attempt < 2) withFrameNanos { }
         }
         if (!focused) PageLog.add("focus=play-failed")
     }
@@ -991,7 +987,7 @@ fun DetailScreen(
         if (showSourceMenu) {
             sourceMenuWasOpen = true
         } else if (sourceMenuWasOpen) {
-            delay(120)
+            withFrameNanos { }
             catchingRequest { sourceFocus.requestFocus() }
             sourceMenuWasOpen = false
         }
@@ -1050,7 +1046,7 @@ fun DetailScreen(
 
     Box(
         Modifier
-            .fillMaxSize()
+            .fillMaxSize().luminaSurface(SurfaceLevel.Canvas)
             .onPreviewKeyEvent { ev ->
                 if (ev.type == KeyEventType.KeyDown) {
                     when (ev.key) {
@@ -1108,18 +1104,8 @@ fun DetailScreen(
                 loopWholeItem = detailPreviewIsTrailer,
                 modifier = Modifier.fillMaxSize(),
             )
-            // 模糊海报 → 主色铺满：重模糊后叠深色渐层，页面颜色随封面走
-            val videoPlaying = detailVideoPlaying
-            val v0 by animateColorAsState(if (videoPlaying) Color(0x00000000) else Color(0x4D000000), tween(500), label = "detailMaskTop")
-            val v1 by animateColorAsState(if (videoPlaying) Color(0x33000000) else Color(0x99000000), tween(500), label = "detailMaskUpper")
-            val v2 by animateColorAsState(Color(0x99000000), tween(500), label = "detailMaskLower")
-            val v3 by animateColorAsState(if (videoPlaying) Color(0xCC000000) else Color(0xF20B0A09), tween(500), label = "detailMaskBottom")
-            val h0 by animateColorAsState(if (videoPlaying) Color(0x99000000) else Color(0xCC000000), tween(500), label = "detailMaskLeft")
-            val h1 by animateColorAsState(if (videoPlaying) Color(0x33000000) else Color(0x4D000000), tween(500), label = "detailMaskCenter")
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(v0, v1, v2, v3))))
-            Box(Modifier.fillMaxWidth(if (videoPlaying) 0.7f else 1f).fillMaxSize().background(
-                Brush.horizontalGradient(listOf(h0, h1, Color(0x00000000)))
-            ))
+            // Canvas uses one static mask in every effect tier.
+            Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Detail))
         }
 
         if (loading) {
@@ -1135,7 +1121,7 @@ fun DetailScreen(
                     loadFailed = false
                     detailRetry++
                 }) { focused ->
-                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(12.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                         Text("\u70b9\u51fb\u91cd\u8bd5", color = TextMain, fontSize = TypeScale.sp13)
                     }
                 }
@@ -1147,12 +1133,12 @@ fun DetailScreen(
                 CompositionLocalProvider(LocalBringIntoViewSpec provides DetailNoBringIntoViewSpec) {
                     Column(
                         Modifier.fillMaxSize().verticalScroll(detailScrollState)
-                            .padding(start = 48.dp, end = 48.dp, bottom = 24.dp)
+                            .tvPagePadding().padding(bottom = 24.dp)
                     ) {
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .background(Color(0x14FFFFFF), RoundedCornerShape(26.dp))
+                            .luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(26.dp))
                             .padding(20.dp)
                             .focusGroup()
                             .onFocusChanged { topRegionFocused = it.hasFocus }
@@ -1221,17 +1207,14 @@ fun DetailScreen(
                         it0.overview?.let {
                             Box(
                                 Modifier.fillMaxWidth()
-                                    .animateContentSize(animationSpec = tween(260))
+                                    .animateContentSize(animationSpec = tween(TvMotion.CATEGORY))
                                     .focusRequester(overviewFocus)
                                     .focusProperties {
                                         up = FocusRequester.Cancel
                                         down = playFocus
                                     }
                                     .onFocusChanged { overviewFocused = it.isFocused }
-                                    .background(
-                                        if (overviewFocused) Color(0x14FFFFFF) else Color.Transparent,
-                                        RoundedCornerShape(12.dp),
-                                    )
+                                    .luminaSurface(SurfaceLevel.Content, RoundedCornerShape(12.dp), focused = overviewFocused)
                                     .clickable { overviewExpanded = !overviewExpanded }
                                     .focusable(),
                             ) {
@@ -1271,14 +1254,7 @@ fun DetailScreen(
                                 },
                             ) { focused ->
                                 Row(
-                                    Modifier.fillMaxSize().background(
-                                        Brush.horizontalGradient(
-                                            listOf(
-                                                Accent.copy(alpha = if (focused) 1f else 0.9f),
-                                                Accent2.copy(alpha = if (focused) 1f else 0.9f),
-                                            )
-                                        )
-                                    ).padding(horizontal = 28.dp),
+                                    Modifier.fillMaxSize().luminaStatus(Accent).padding(horizontal = 28.dp),
                                     horizontalArrangement = Arrangement.Center,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
@@ -1301,12 +1277,7 @@ fun DetailScreen(
                                 ) { focused ->
                                     Box(
                                         Modifier.fillMaxSize()
-                                            .background(if (focused) Color(0x33FFFFFF) else Color(0x1FFFFFFF))
-                                            .border(
-                                                if (focused) 2.dp else 0.dp,
-                                                Color.White,
-                                                RoundedCornerShape(23.dp),
-                                            ),
+                                            .luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         Text("从头播放", color = Color.White, fontSize = TypeScale.sp14)
@@ -1329,7 +1300,7 @@ fun DetailScreen(
                                     modifier = Modifier
                                         .height(46.dp)
                                         .animateContentSize(
-                                            animationSpec = tween(240, easing = FastOutSlowInEasing),
+                                            animationSpec = tween(TvMotion.CATEGORY, easing = FastOutSlowInEasing),
                                         )
                                         .widthIn(min = 46.dp, max = 300.dp),
                                     corner = 23.dp,
@@ -1338,9 +1309,7 @@ fun DetailScreen(
                                     onClick = { showSourceMenu = true },
                                 ) { focused ->
                                     Row(
-                                        Modifier.fillMaxHeight().background(
-                                            if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
-                                        ).padding(horizontal = 12.dp),
+                                        Modifier.fillMaxHeight().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral).padding(horizontal = 12.dp),
                                         horizontalArrangement = Arrangement.Center,
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
@@ -1367,9 +1336,7 @@ fun DetailScreen(
                                 onClick = { toggleUserFlag(favoriteAction, favorite = true) },
                             ) { focused ->
                                 Box(
-                                    Modifier.fillMaxSize().background(
-                                        if (isFav) Accent.copy(alpha = 0.85f) else if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
-                                    ),
+                                    Modifier.fillMaxSize().luminaStatus(if (isFav) Accent else surfaceColor(SurfaceLevel.Content, focused)),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     if (favoriteAction.pending) CircularProgressIndicator(Modifier.size(20.dp), color = TextMain, strokeWidth = 2.dp)
@@ -1389,9 +1356,7 @@ fun DetailScreen(
                                 onClick = { toggleUserFlag(playedAction, favorite = false) },
                             ) { focused ->
                                 Box(
-                                    Modifier.fillMaxSize().background(
-                                        if (isPlayed) Accent.copy(alpha = 0.85f) else if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
-                                    ),
+                                    Modifier.fillMaxSize().luminaStatus(if (isPlayed) Accent else surfaceColor(SurfaceLevel.Content, focused)),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     if (playedAction.pending) CircularProgressIndicator(Modifier.size(20.dp), color = TextMain, strokeWidth = 2.dp)
@@ -1410,10 +1375,7 @@ fun DetailScreen(
                                 onClick = { showTrackSheet = true },
                             ) { focused ->
                                 Box(
-                                    Modifier.fillMaxSize().background(
-                                        if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF),
-                                        RoundedCornerShape(23.dp),
-                                    ),
+                                    Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(23.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Icon(Icons.Rounded.Tune, contentDescription = "播放设置", tint = TextMain, modifier = Modifier.size(20.dp))
@@ -1426,9 +1388,7 @@ fun DetailScreen(
                                 onClick = onBack,
                             ) { focused ->
                                 Row(
-                                    Modifier.fillMaxSize().background(
-                                        if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)
-                                    ).padding(horizontal = 24.dp),
+                                    Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral).padding(horizontal = 24.dp),
                                     horizontalArrangement = Arrangement.Center,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
@@ -1451,7 +1411,7 @@ fun DetailScreen(
                             FocusSurface(
                                 modifier = Modifier.height(34.dp),
                                 corner = 17.dp,
-                                scaleTo = 1.06f,
+                                scaleTo = TvTokenValues.FOCUS_SCALE,
                                 onClick = {
                                     if (selectedSeason?.id != s.id) {
                                         selectSeason(id, s)
@@ -1463,9 +1423,7 @@ fun DetailScreen(
                                 },
                             ) { focused ->
                                 Box(
-                                    Modifier.fillMaxSize().background(
-                                        if (active) Color(0x3D6EA8FF) else if (focused) Color(0x2AFFFFFF) else Color(0x14FFFFFF)
-                                    ).padding(horizontal = 16.dp),
+                                    Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral, selected = active).padding(horizontal = 16.dp),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
@@ -1493,14 +1451,14 @@ fun DetailScreen(
                         ) {
                             Text("季目录读取失败，请重试", color = TextSub, fontSize = TypeScale.sp12)
                             FocusSurface(
-                                Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = 1.04f,
+                                Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = TvTokenValues.FOCUS_SCALE,
                                 onClick = {
                                     seasonDirectory = beginSeasonDirectoryLoad()
                                     detailRetry++
                                 },
                             ) { focused ->
                                 Box(
-                                    Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
+                                    Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                                     contentAlignment = Alignment.Center,
                                 ) { Text("重试", color = TextMain, fontSize = TypeScale.sp12) }
                             }
@@ -1536,7 +1494,7 @@ fun DetailScreen(
                     ) {
                         Text("剧集读取失败，请重试", color = TextSub, fontSize = TypeScale.sp12)
                         FocusSurface(
-                            Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = 1.04f,
+                            Modifier.height(36.dp).width(100.dp), corner = 10.dp, scaleTo = TvTokenValues.FOCUS_SCALE,
                             onClick = {
                                 episodeLoadError = null
                                 episodeLoading = episodes.isEmpty()
@@ -1544,7 +1502,7 @@ fun DetailScreen(
                             },
                         ) { focused ->
                             Box(
-                                Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
+                                Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                                 contentAlignment = Alignment.Center,
                             ) { Text("重试", color = TextMain, fontSize = TypeScale.sp12) }
                         }
@@ -1570,7 +1528,7 @@ fun DetailScreen(
                 if (similarLoading) {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         repeat(4) {
-                            Box(Modifier.width(138.dp).height(190.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x1AFFFFFF)))
+                            Box(Modifier.width(138.dp).height(190.dp).clip(RoundedCornerShape(6.dp)).luminaSurface(SurfaceLevel.Content))
                         }
                     }
                 } else if (similar.isEmpty()) {
@@ -1684,7 +1642,7 @@ fun DetailScreen(
             val currentItem = it0!!
             val activeSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull()
             TrackSheet(onDismiss = { showTrackSheet = false }) {
-                GlassPanel(Modifier.fillMaxWidth(), corner = 12.dp) {
+                LuminaSurface(SurfaceLevel.Content, Modifier.fillMaxWidth(), RoundedCornerShape(12.dp)) {
                     Column(Modifier.padding(6.dp)) {
                         SettingRow("版本", selectedSourceLabel, enabled = sources.isNotEmpty()) {
                             showTrackSheet = false
@@ -1779,10 +1737,11 @@ fun DetailScreen(
 @Composable
 private fun PersonCard(person: MediaPerson, imageUrl: String?) {
     var focused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(if (focused) ThemeRuntime.motion.focusScale else 1f,
+        tween(TvMotion.FOCUS), label = "personFocus")
     Column(
         Modifier.width(112.dp)
             .graphicsLayer {
-                val scale = if (focused) 1.08f else 1f
                 scaleX = scale
                 scaleY = scale
             }
@@ -1790,11 +1749,11 @@ private fun PersonCard(person: MediaPerson, imageUrl: String?) {
             .focusable(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-      Box(Modifier.fillMaxWidth().background(if (focused) Color(0x20FFFFFF) else Color.Transparent, RoundedCornerShape(8.dp)).padding(6.dp)) {
+      Box(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(8.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral).padding(6.dp)) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 Modifier.size(96.dp).clip(CircleShape)
-                    .background(Color(0x1AFFFFFF)).then(if (focused) Modifier.border(2.dp, Accent, CircleShape) else Modifier),
+                    .luminaSurface(SurfaceLevel.Content).then(if (focused) Modifier.luminaBoundary(CircleShape, true) else Modifier),
                 contentAlignment = Alignment.Center,
             ) {
                 if (imageUrl != null) {
@@ -1877,8 +1836,8 @@ private fun PickerDialog(
     Dialog(onDismissRequest = { dismiss() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         AnimatedVisibility(
             visibleState = visibility,
-            enter = fadeIn(tween(PICKER_DIALOG_ANIMATION_MS)),
-            exit = fadeOut(tween(PICKER_DIALOG_ANIMATION_MS)),
+            enter = fadeIn(tween(ThemeRuntime.motion.duration(PICKER_DIALOG_ANIMATION_MS))),
+            exit = fadeOut(tween(ThemeRuntime.motion.duration(PICKER_DIALOG_ANIMATION_MS))),
         ) {
             var requestedFocusKey by remember { mutableStateOf<String?>(null) }
             // This effect lives inside the visible content, so initial focus also waits for mounting.
@@ -1895,19 +1854,19 @@ private fun PickerDialog(
                     requestFocus = { requesters.getValue(targetKey).requestFocus() },
                 )
             }
-            Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
-                GlassPanel(
-                    Modifier.width(560.dp).animateEnterExit(
+            Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Modal), contentAlignment = Alignment.Center) {
+                LuminaSurface(
+                    SurfaceLevel.Overlay, Modifier.width(560.dp).animateEnterExit(
                         enter = slideInHorizontally(
-                            animationSpec = tween(PICKER_DIALOG_ANIMATION_MS),
+                            animationSpec = tween(ThemeRuntime.motion.duration(PICKER_DIALOG_ANIMATION_MS)),
                             initialOffsetX = { fullWidth -> fullWidth },
                         ),
                         exit = slideOutHorizontally(
-                            animationSpec = tween(PICKER_DIALOG_ANIMATION_MS),
+                            animationSpec = tween(ThemeRuntime.motion.duration(PICKER_DIALOG_ANIMATION_MS)),
                             targetOffsetX = { fullWidth -> fullWidth },
                         ),
                     ),
-                    corner = 22.dp,
+                    shape = RoundedCornerShape(TvTokens.ModalCorner),
                 ) {
                     Column(Modifier.padding(22.dp)) {
                         Text(title, color = TextMain, fontSize = TypeScale.sp16, fontWeight = FontWeight.SemiBold)
@@ -1950,7 +1909,7 @@ private fun PickerDialog(
                                     onFocused = { requestedFocusKey = id },
                                     corner = 12.dp, scaleTo = 1f, onClick = { dismiss { onPick(id) } },
                                 ) { focused ->
-                                    Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Row(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(12.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Icon(if (id == currentKey) Icons.Rounded.CheckCircle else Icons.Rounded.Layers, null, tint = if (id == currentKey) Accent else TextSub, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(10.dp))
                                         Text(label, color = TextMain, fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1968,7 +1927,7 @@ private fun PickerDialog(
 @Composable
 private fun SettingRow(label: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
     FocusSurface(Modifier.fillMaxWidth().height(52.dp), corner = 10.dp, scaleTo = 1f, enabled = enabled, onClick = onClick) { focused ->
-        Row(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(10.dp)).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(10.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("$label：$value", color = if (enabled) TextMain else TextSub.copy(alpha = 0.65f), fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Text("›", color = if (enabled) Accent else TextSub.copy(alpha = 0.5f), fontSize = TypeScale.sp20)
         }
@@ -2009,12 +1968,12 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
     BackHandler(enabled = expanded) { onToggle() }
     var hasFocus by remember { mutableStateOf(false) }
 
-    FrostPanel(Modifier.fillMaxWidth().height(52.dp), hazeState = hazeState, corner = 12.dp, strong = false) {
+    LuminaSurface(SurfaceLevel.Content, Modifier.fillMaxWidth().height(52.dp), RoundedCornerShape(12.dp)) {
       Box(
         Modifier.fillMaxSize()
             .clip(RoundedCornerShape(12.dp))
-            .background(if (hasFocus) GlassStrong else Glass)
-            .border(if (hasFocus) 1.dp else 0.5.dp, if (hasFocus) Accent else GlassLine, RoundedCornerShape(12.dp))
+            .luminaSurface(SurfaceLevel.Content, tone = if (hasFocus) SurfaceTone.Raised else SurfaceTone.Neutral)
+            .luminaBoundary(RoundedCornerShape(12.dp), hasFocus)
             .onFocusChanged { hasFocus = it.hasFocus }
             .clickable(onClick = onToggle),
       ) {
@@ -2039,8 +1998,8 @@ private fun MediaInfoSection(source: MediaSource, expanded: Boolean, onToggle: (
 
     AnimatedVisibility(
         visible = expanded,
-        enter = expandVertically(tween(180)) + fadeIn(tween(180)),
-        exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
+        enter = expandVertically(tween(TvMotion.CATEGORY)) + fadeIn(tween(TvMotion.CATEGORY)),
+        exit = shrinkVertically(tween(TvMotion.CATEGORY)) + fadeOut(tween(TvMotion.CATEGORY)),
     ) {
         BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 10.dp)) {
             val twoColumns = maxWidth >= 600.dp
@@ -2071,12 +2030,12 @@ private fun FocusGlassSurface(
     val focused by interaction.collectIsFocusedAsState()
     val inputModeManager = LocalInputModeManager.current
     val showHighlight = focused && inputModeManager.inputMode == InputMode.Keyboard
-    val scale by animateFloatAsState(if (showHighlight) 1.01f else 1f, tween(240), label = "mediaInfoFocus")
+    val scale by animateFloatAsState(if (showHighlight) ThemeRuntime.motion.focusScale else 1f, tween(TvMotion.FOCUS), label = "mediaInfoFocus")
     Box(
         modifier.graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(corner))
-            .background(if (showHighlight) Color(0x0AFFFFFF) else normalFill)
-            .border(if (showHighlight) 1.5.dp else 1.dp, if (showHighlight) ThemeRuntime.glassEdgeStrong else ThemeRuntime.glassEdge, RoundedCornerShape(corner))
+            .luminaSurface(SurfaceLevel.Content, tone = if (showHighlight) SurfaceTone.Raised else SurfaceTone.Neutral)
+            .luminaBoundary(RoundedCornerShape(corner), showHighlight)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { content(showHighlight) }
@@ -2084,11 +2043,11 @@ private fun FocusGlassSurface(
 
 @Composable
 private fun MediaGlassCard(title: String, icon: ImageVector, count: String?, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Box(modifier.clip(RoundedCornerShape(14.dp)).background(Color(0x12FFFFFF)).border(1.dp, Color(0x29FFFFFF), RoundedCornerShape(14.dp)).focusGroup()) {
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x0FFFFFFF)))
+    Box(modifier.clip(RoundedCornerShape(14.dp)).luminaSurface(SurfaceLevel.Content).luminaBoundary(RoundedCornerShape(TvTokens.ContentCorner)).focusGroup()) {
+        Box(Modifier.fillMaxWidth().height(1.dp).luminaDivider())
         Column(Modifier.fillMaxWidth().padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(20.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x14FFFFFF)), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(20.dp).clip(RoundedCornerShape(6.dp)).luminaSurface(SurfaceLevel.Content), contentAlignment = Alignment.Center) {
                     Icon(icon, null, tint = Color(0xD9FFFFFF), modifier = Modifier.size(13.dp))
                 }
                 Spacer(Modifier.width(8.dp))
@@ -2110,7 +2069,7 @@ private fun DetailRows(rows: List<Pair<String, String>>) {
                 Text(value, color = Color(0xEBFFFFFF), fontSize = TypeScale.sp13, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             }
             if (index < rows.lastIndex) {
-                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(0.5.dp).background(GlassLine))
+                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(0.5.dp).luminaDivider())
             }
         }
     }
@@ -2145,7 +2104,7 @@ private fun SpecBadge(badge: MediaBadge, containerHeight: androidx.compose.ui.un
         MediaBadge.Surround51 -> R.drawable.badge_wm_51
     }
     val painter = painterResource(resource)
-    Box(Modifier.height(containerHeight).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 5.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.height(containerHeight).clip(RoundedCornerShape(4.dp)).luminaSurface(SurfaceLevel.Content).padding(horizontal = 5.dp), contentAlignment = Alignment.Center) {
         Image(painter, contentDescription = badge.name, contentScale = ContentScale.Fit,
             modifier = Modifier.height(imageHeight).aspectRatio(painter.intrinsicSize.width / painter.intrinsicSize.height))
     }
@@ -2256,13 +2215,13 @@ private fun TrackSheet(
     content: @Composable () -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Modal), contentAlignment = Alignment.Center) {
             Column(
                 Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(24.dp)
-                    .shadow(20.dp, RoundedCornerShape(20.dp))
+
                     .clip(RoundedCornerShape(20.dp))
-                    .background(Color(0xF20C0E16))
-                    .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp))
+                    .luminaSurface(SurfaceLevel.Overlay)
+                    .luminaBoundary(RoundedCornerShape(TvTokens.ModalCorner))
                     .padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -2270,7 +2229,7 @@ private fun TrackSheet(
                 content()
                 Spacer(Modifier.height(2.dp))
                 FocusSurface(Modifier.fillMaxWidth().height(44.dp), corner = 22.dp, requestFocus = true, onClick = onDismiss) { focused ->
-                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(22.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                         Text("完成", color = TextMain, fontSize = TypeScale.sp13)
                     }
                 }
@@ -2286,7 +2245,7 @@ private fun Poster(item: MediaItem, url: String?, width: Dp) {
             .width(width)
             .height(width * 1.5f)
             .clip(RoundedCornerShape(18.dp))
-            .background(Color(0x1AFFFFFF))
+            .luminaSurface(SurfaceLevel.Content)
     ) {
         AsyncImage(
             model = url, contentDescription = item.name,
@@ -2297,14 +2256,14 @@ private fun Poster(item: MediaItem, url: String?, width: Dp) {
 
 @Composable
 private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
-    FocusSurface(modifier = Modifier.width(200.dp), corner = 10.dp, scaleTo = 1.05f, onClick = onClick) { focused ->
+    FocusSurface(modifier = Modifier.width(200.dp), corner = 10.dp, scaleTo = TvTokenValues.FOCUS_SCALE, onClick = onClick) { focused ->
         Column {
             Box(
                 Modifier
                     .fillMaxWidth()
                     .height(112.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0x1AFFFFFF))
+                    .luminaSurface(SurfaceLevel.Content)
             ) {
                 AsyncImage(
                     model = url, contentDescription = ep.name,
@@ -2313,13 +2272,13 @@ private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
                 if (ep.positionTicks > 0) {
                     val progress = ep.runtimeTicks?.takeIf { it > 0L }
                         ?.let { (ep.positionTicks.toFloat() / it).coerceIn(0f, 1f) } ?: 0.45f
-                    Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(3.dp).background(Accent))
+                    Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(3.dp).luminaStatus(Accent))
                 }
                 val episodeNumber = ep.indexNumber
                 if (episodeNumber != null) {
                     Box(
                         Modifier.align(Alignment.TopStart).padding(6.dp)
-                            .clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.55f))
+                            .clip(RoundedCornerShape(6.dp)).luminaSurface(SurfaceLevel.Content)
                             .padding(horizontal = 6.dp, vertical = 2.dp),
                     ) {
                         Text("第 ${episodeNumber} 集", color = Color.White.copy(alpha = 0.9f), fontSize = TypeScale.sp11, maxLines = 1)
@@ -2331,7 +2290,7 @@ private fun EpisodeCard(ep: MediaItem, url: String?, onClick: () -> Unit) {
                     Text(
                         duration,
                         modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp)
-                            .clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 5.dp, vertical = 2.dp),
+                            .clip(RoundedCornerShape(4.dp)).luminaSurface(SurfaceLevel.Content).padding(horizontal = 5.dp, vertical = 2.dp),
                         color = Color.White.copy(alpha = 0.7f), fontSize = TypeScale.sp10, maxLines = 1,
                     )
                 }

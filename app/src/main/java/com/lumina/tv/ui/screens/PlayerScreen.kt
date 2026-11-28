@@ -1,5 +1,7 @@
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.ui.theme.*
+
 import com.lumina.tv.data.catchingRequest
 import com.lumina.tv.data.PlaybackStartIntent
 import com.lumina.tv.data.playbackReloadIntent
@@ -49,7 +51,6 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -118,12 +119,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
@@ -181,7 +180,6 @@ import com.lumina.tv.data.wideImageCandidates
 import com.lumina.tv.data.chooseSimilar
 import com.lumina.tv.data.toSourceOption
 import com.lumina.tv.ui.components.FocusSurface
-import com.lumina.tv.ui.components.GlassPanel
 import com.lumina.tv.ui.theme.Accent
 import com.lumina.tv.ui.theme.Accent2
 import com.lumina.tv.ui.theme.TextMain
@@ -3693,7 +3691,7 @@ fun PlayerScreen(
     }
     val pauseIndicatorAlpha by animateFloatAsState(
         targetValue = if (pauseIndicatorUntil > android.os.SystemClock.elapsedRealtime() && !optionMenu && error == null) 1f else 0f,
-        animationSpec = tween(120),
+        animationSpec = tween(TvMotion.PRESS),
         label = "pauseIndicatorAlpha",
     )
 
@@ -3709,7 +3707,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(controlsVisible, optionMenu, quickPanel, hiddenInputState.active) {
-        delay(80)
+        androidx.compose.runtime.withFrameNanos { }
         if (!optionMenu && quickPanel == QuickPanel.NONE &&
             android.os.SystemClock.elapsedRealtime() >= restoreMenuFocusUntil
         ) {
@@ -3814,7 +3812,7 @@ fun PlayerScreen(
         restoreMenuFocusUntil = android.os.SystemClock.elapsedRealtime() + 300L
         optionMenu = false
         scope.launch {
-            delay(80)
+            androidx.compose.runtime.withFrameNanos { }
             runCatching { menuFocus.requestFocus() }
         }
     }
@@ -3830,7 +3828,7 @@ fun PlayerScreen(
         when {
             chapterPanel -> {
                 chapterPanel = false
-                scope.launch { delay(80); runCatching { menuFocus.requestFocus() } }
+                scope.launch { androidx.compose.runtime.withFrameNanos { }; runCatching { menuFocus.requestFocus() } }
             }
             optionMenu -> closeOptionMenu()
             quickPanel != QuickPanel.NONE -> {
@@ -3852,7 +3850,7 @@ fun PlayerScreen(
     }
 
     Box(
-        Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
+        Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas).onPreviewKeyEvent { event ->
             val now = android.os.SystemClock.elapsedRealtime()
             if (now < inputSilenceUntil) return@onPreviewKeyEvent true
             if (passthroughPromptVisible) {
@@ -4075,13 +4073,13 @@ fun PlayerScreen(
                     )
                 }
                 if (bufferingImage == null) {
-                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF263142), Color(0xFF10141D)))))
+                    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas))
                     Text(item.seriesName ?: item.name, color = TextMain, fontSize = TypeScale.sp24, maxLines = 2,
                         modifier = Modifier.align(Alignment.Center).padding(horizontal = 40.dp))
                     Text("暂无横版剧照", color = TextSub, fontSize = TypeScale.sp13,
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 40.dp))
                 }
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
+                Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Darken))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Accent, strokeWidth = 2.5.dp, modifier = Modifier.size(36.dp))
                     Spacer(Modifier.height(10.dp))
@@ -4105,7 +4103,7 @@ fun PlayerScreen(
                 color = Color(0xFFFFD28A),
                 fontSize = TypeScale.sp12,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 96.dp)
-                    .background(Color(0xAA10141D), RoundedCornerShape(6.dp))
+                    .luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(6.dp))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -4118,7 +4116,7 @@ fun PlayerScreen(
                 color = Color(0xFFFFD28A),
                 fontSize = TypeScale.sp12,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 132.dp)
-                    .background(Color(0xAA10141D), RoundedCornerShape(6.dp))
+                    .luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(6.dp))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -4136,7 +4134,7 @@ fun PlayerScreen(
                         beginManualAttempt()
                         requestPlaybackReload(sessionGeneration)
                     }) { focused ->
-                        Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxSize().luminaStatus(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), shape = RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
                             Text("重试", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp12)
                         }
                     }
@@ -4164,7 +4162,7 @@ fun PlayerScreen(
                                 requestPlaybackReload(sessionGeneration)
                             }
                         }) { focused ->
-                            Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                            Box(Modifier.fillMaxSize().luminaStatus(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), shape = RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
                                 Text("换源", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp12)
                             }
                         }
@@ -4176,13 +4174,13 @@ fun PlayerScreen(
                         reloadForceTranscode = true
                         requestPlaybackReload(sessionGeneration)
                     }) { focused ->
-                        Box(Modifier.fillMaxSize().background(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxSize().luminaStatus(if (focused) Accent.copy(alpha = .9f) else Color(0x22FFFFFF), shape = RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
                             Text("立即切换转码", color = if (focused) Color(0xFF06101F) else TextMain, fontSize = TypeScale.sp12)
                         }
                     }
                     }
                     FocusSurface(Modifier.width(164.dp).height(40.dp), corner = 20.dp, onClick = { showDiagExport = true }) { focused ->
-                        Box(Modifier.fillMaxSize().background(if (focused) Color(0x2EFFFFFF) else Color(0x22FFFFFF), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxSize().luminaStatus(if (focused) Color(0x2EFFFFFF) else Color(0x22FFFFFF), shape = RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
                             Text("导出诊断包", color = if (focused) Accent else TextMain, fontSize = TypeScale.sp12)
                         }
                     }
@@ -4192,8 +4190,8 @@ fun PlayerScreen(
         }
 
         if (chapterPanel && chapters.isNotEmpty()) {
-            Box(Modifier.fillMaxSize().background(Color(0x66000000)), contentAlignment = Alignment.Center) {
-                GlassPanel(Modifier.width(520.dp).heightIn(max = 560.dp), corner = 20.dp, fillColor = Color(0xD910141D)) {
+            Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Modal), contentAlignment = Alignment.Center) {
+                LuminaSurface(SurfaceLevel.Overlay, Modifier.width(520.dp).heightIn(max = 560.dp), shape = RoundedCornerShape(TvTokens.ModalCorner)) {
                     Column(Modifier.padding(18.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("章节与片段", color = TextMain, fontSize = TypeScale.sp16, fontWeight = FontWeight.SemiBold)
@@ -4207,7 +4205,7 @@ fun PlayerScreen(
                                     chapterPanel = false
                                     controlsVisible = true
                                 }) { focused ->
-                                    Row(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Row(Modifier.fillMaxSize().luminaStatus(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), shape = RoundedCornerShape(8.dp)).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Text(formatTime(chapter.startMs), color = Accent, fontSize = TypeScale.sp12)
                                         Spacer(Modifier.width(12.dp))
                                         Text(chapter.name, color = TextMain, fontSize = TypeScale.sp12, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -4231,7 +4229,7 @@ fun PlayerScreen(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .padding(bottom = 132.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(8.dp))
+                    .luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(8.dp))
                     .padding(horizontal = 14.dp, vertical = 7.dp),
             )
         }
@@ -4246,7 +4244,7 @@ fun PlayerScreen(
                 color = TextMain, fontSize = TypeScale.sp13, fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .padding(top = 24.dp)
-                    .background(Color(0x99000000), RoundedCornerShape(16.dp))
+                    .luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(16.dp))
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
         }
@@ -4257,7 +4255,7 @@ fun PlayerScreen(
                 Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 36.dp, bottom = 96.dp)
-                    .background(Color(0xE6070A12), RoundedCornerShape(16.dp))
+                    .luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(16.dp))
                     .padding(horizontal = 18.dp, vertical = 14.dp),
             ) {
                 Column {
@@ -4274,27 +4272,23 @@ fun PlayerScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FocusSurface(
                             modifier = Modifier.height(34.dp).width(96.dp),
-                            corner = 17.dp, scaleTo = 1.04f,
+                            corner = 17.dp, scaleTo = TvTokenValues.FOCUS_SCALE,
                             onClick = {
                                 switchEpisode(ne)
                             },
                         ) { focused ->
                             Box(
-                                Modifier.fillMaxSize().background(
-                                    Accent.copy(alpha = if (focused) 1f else 0.9f), RoundedCornerShape(17.dp)
-                                ),
+                                Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(17.dp)),
                                 contentAlignment = Alignment.Center,
                             ) { Text("立即播放", color = Color(0xFF06101F), fontSize = TypeScale.sp12, fontWeight = FontWeight.Bold) }
                         }
                         FocusSurface(
                             modifier = Modifier.height(34.dp).width(80.dp),
-                            corner = 17.dp, scaleTo = 1.04f,
+                            corner = 17.dp, scaleTo = TvTokenValues.FOCUS_SCALE,
                             onClick = { cancelCreditsCountdown("cancel-button", allowRestart = false) },
                         ) { focused ->
                             Box(
-                                Modifier.fillMaxSize().background(
-                                    if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF), RoundedCornerShape(17.dp)
-                                ),
+                                Modifier.fillMaxSize().luminaStatus(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF), shape = RoundedCornerShape(17.dp)),
                                 contentAlignment = Alignment.Center,
                             ) { Text("取消", color = TextMain, fontSize = TypeScale.sp12) }
                         }
@@ -4376,9 +4370,7 @@ fun PlayerScreen(
                 onClick = { seekPlayerTo(maxOf(position, introSeconds * 1000L)) },
             ) { focused ->
                 Box(
-                    Modifier.fillMaxSize().background(
-                        if (focused) Color(0xCC070A12) else Color(0x99070A12), RoundedCornerShape(20.dp)
-                    ),
+                    Modifier.fillMaxSize().luminaStatus(if (focused) Color(0xCC070A12) else Color(0x99070A12), shape = RoundedCornerShape(20.dp)),
                     contentAlignment = Alignment.Center,
                 ) { Text("跳过片头 »", color = TextMain, fontSize = TypeScale.sp13) }
             }
@@ -4386,14 +4378,14 @@ fun PlayerScreen(
 
         AnimatedVisibility(
             visible = controlsOverlayVisible,
-            enter = fadeIn(animationSpec = tween(200)),
-            exit = if (isBufferingForDisplay) ExitTransition.None else fadeOut(animationSpec = tween(200)),
+            enter = fadeIn(animationSpec = tween(TvMotion.CATEGORY)),
+            exit = if (isBufferingForDisplay) ExitTransition.None else fadeOut(animationSpec = tween(TvMotion.CATEGORY)),
         ) {
             Box(Modifier.fillMaxSize()) {
                 Column(
                     Modifier.align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .background(Brush.verticalGradient(listOf(Color(0x00070A12), Color(0xE6070A12))))
+                        .luminaSurface(SurfaceLevel.Floating)
                         .padding(horizontal = 36.dp, vertical = 18.dp),
                 ) {
                     val frame = previewFrame
@@ -4405,7 +4397,7 @@ fun PlayerScreen(
                                 .coerceIn(0.dp, (maxWidth - previewWidth).coerceAtLeast(0.dp))
                             Box(
                                 Modifier.offset(x = x).width(previewWidth).height(90.dp)
-                                    .background(Color(0xE6070A12), RoundedCornerShape(6.dp)),
+                                    .luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(6.dp)),
                             ) {
                                 AsyncImage(
                                     model = frame,
@@ -4423,7 +4415,7 @@ fun PlayerScreen(
                                     fontSize = TypeScale.sp11,
                                     fontWeight = FontWeight.SemiBold,
                                     modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                                        .background(Color(0xAA070A12)).padding(vertical = 3.dp),
+                                        .luminaSurface(SurfaceLevel.Floating).padding(vertical = 3.dp),
                                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                                 )
                             }
@@ -4586,8 +4578,8 @@ fun PlayerScreen(
             Column(
                 Modifier.align(Alignment.BottomEnd).padding(end = 36.dp, bottom = 164.dp)
                     .width(panelWidth).heightIn(max = 300.dp)
-                    .background(Color(0xF20B1018), RoundedCornerShape(16.dp))
-                    .border(1.dp, Color(0x553B4655), RoundedCornerShape(16.dp))
+                    .luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(16.dp))
+                    .luminaBoundary(RoundedCornerShape(16.dp))
                     .padding(14.dp),
             ) {
                 Text(
@@ -4619,17 +4611,14 @@ fun PlayerScreen(
                                         right = if (item.seriesId != null) episodeFocus else menuFocus
                                     },
                                 corner = 8.dp,
-                                scaleTo = 1.08f,
+                                scaleTo = TvTokenValues.FOCUS_SCALE,
                                 onClick = {
                                     selectUserSpeed(s)
                                     closeQuickPanel(speedFocus)
                                 },
                             ) { focused ->
                                 Box(
-                                    Modifier.fillMaxSize().background(
-                                        if (active) Accent else if (focused) Color(0x55FFFFFF) else Color(0x18FFFFFF),
-                                        RoundedCornerShape(8.dp),
-                                    ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier),
+                                    Modifier.fillMaxSize().luminaStatus(if (active) Accent else if (focused) Color(0x55FFFFFF) else Color(0x18FFFFFF), shape = RoundedCornerShape(8.dp)),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
@@ -4656,18 +4645,12 @@ fun PlayerScreen(
                                     Modifier.height(40.dp)
                                         .widthIn(min = 64.dp)
                                         .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            when {
+                                        .luminaStatus(when {
                                                 active -> Accent
                                                 seasonFocused -> Color(0x33FFFFFF)
                                                 else -> Color(0x14FFFFFF)
-                                            }
-                                        )
-                                        .border(
-                                            if (seasonFocused) 2.dp else 1.dp,
-                                            if (seasonFocused) Color.White else Color(0x22FFFFFF),
-                                            RoundedCornerShape(8.dp),
-                                        )
+                                            })
+                                        .luminaBoundary(RoundedCornerShape(8.dp), seasonFocused)
                                         .focusRequester(seasonFocus)
                                         .focusProperties {
                                             left = FocusRequester.Default
@@ -4759,7 +4742,7 @@ fun PlayerScreen(
                                                 down = if (index / 5 == quickEpisodes.lastIndex / 5) triggerFocus else FocusRequester.Default
                                             },
                                         corner = 6.dp,
-                                        scaleTo = 1.08f,
+                                        scaleTo = TvTokenValues.FOCUS_SCALE,
                                         onFocusChanged = { if (it) quickContentHasFocus = true },
                                         onClick = {
                                             if (active) {
@@ -4771,10 +4754,7 @@ fun PlayerScreen(
                                         },
                                     ) { focused ->
                                         Box(
-                                            Modifier.fillMaxSize().background(
-                                                if (active) Accent else if (focused) Color(0x55FFFFFF) else Color(0x18FFFFFF),
-                                                RoundedCornerShape(6.dp),
-                                            ).then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp)) else Modifier),
+                                            Modifier.fillMaxSize().luminaStatus(if (active) Accent else if (focused) Color(0x55FFFFFF) else Color(0x18FFFFFF), shape = RoundedCornerShape(6.dp)),
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             Text(
@@ -4798,7 +4778,7 @@ fun PlayerScreen(
             Text(
                 "再按一次返回退出播放",
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp)
-                    .background(Color(0xCC0B1018), RoundedCornerShape(18.dp))
+                    .luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(18.dp))
                     .padding(horizontal = 14.dp, vertical = 8.dp),
                 color = TextMain,
                 fontSize = TypeScale.sp12,
@@ -5052,7 +5032,7 @@ fun PlayerScreen(
             modifier = Modifier.align(Alignment.BottomEnd).padding(end = 32.dp, bottom = 156.dp),
         ) {
             Column(
-                Modifier.background(Color(0xE6070A12), RoundedCornerShape(6.dp)).padding(horizontal = 14.dp, vertical = 10.dp),
+                Modifier.luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(6.dp)).padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -5064,17 +5044,17 @@ fun PlayerScreen(
                     )
                     Text("$playerVolumePercent%", color = TextMain, fontSize = TypeScale.sp14, fontWeight = FontWeight.SemiBold)
                 }
-                Box(Modifier.width(150.dp).height(4.dp).background(Color(0x44FFFFFF), RoundedCornerShape(2.dp))) {
+                Box(Modifier.width(150.dp).height(4.dp).luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(2.dp))) {
                     Box(
                         Modifier.fillMaxWidth(playerVolumePercent / 100f).fillMaxHeight()
-                            .background(Accent, RoundedCornerShape(2.dp)),
+                            .luminaStatus(Accent, shape = RoundedCornerShape(2.dp)),
                     )
                 }
             }
         }
         if (passthroughPromptVisible) {
-            Box(Modifier.fillMaxSize().background(Color(0x99000000)), contentAlignment = Alignment.Center) {
-                GlassPanel(Modifier.width(520.dp), corner = 8.dp, fillColor = Color(0xF018202B)) {
+            Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Modal), contentAlignment = Alignment.Center) {
+                LuminaSurface(SurfaceLevel.Overlay, Modifier.width(520.dp), shape = RoundedCornerShape(TvTokens.ModalCorner)) {
                     Text(
                         "当前观测到编码直通路径，音量可能由电视/功放控制；按 OK 尝试其他输出策略",
                         Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
@@ -5085,13 +5065,13 @@ fun PlayerScreen(
             }
         }
         audioDecodeNotice?.let { notice ->
-            Text(notice, Modifier.align(Alignment.BottomEnd).padding(24.dp).background(Color(0xAA10141D), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 8.dp), color = TextMain, fontSize = TypeScale.sp11)
+            Text(notice, Modifier.align(Alignment.BottomEnd).padding(24.dp).luminaSurface(SurfaceLevel.Floating, shape = RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 8.dp), color = TextMain, fontSize = TypeScale.sp11)
             LaunchedEffect(notice) { delay(3_000); audioDecodeNotice = null }
         }
     }
     if (showMpvConfirm) {
-        Box(Modifier.fillMaxSize().background(Color(0xCC000000)), contentAlignment = Alignment.Center) {
-            GlassPanel(Modifier.width(480.dp), corner = 18.dp, fillColor = Color(0xF018202B)) {
+        Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Modal), contentAlignment = Alignment.Center) {
+            LuminaSurface(SurfaceLevel.Overlay, Modifier.width(480.dp), shape = RoundedCornerShape(TvTokens.ModalCorner)) {
                 Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     Text("Media3 无法播放该片，是否尝试 mpv 内核？", color = TextMain, fontSize = TypeScale.sp17)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -5103,7 +5083,7 @@ fun PlayerScreen(
                             reloadForceTranscode = false
                             requestPlaybackReload(sessionGeneration)
                         }) { focused ->
-                            Box(Modifier.fillMaxSize().background(if (focused) Accent else Color(0x22FFFFFF), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                            Box(Modifier.fillMaxSize().luminaStatus(if (focused) Accent else Color(0x22FFFFFF), shape = RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
                                 Text("尝试", color = if (focused) Color(0xFF06101F) else TextMain)
                             }
                         }
@@ -5112,7 +5092,7 @@ fun PlayerScreen(
                             showMpvConfirm = false
                             reportError("Media3 播放失败。可导出诊断包或手动切换播放内核。")
                         }) { focused ->
-                            Box(Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                            Box(Modifier.fillMaxSize().luminaStatus(if (focused) Color(0x33FFFFFF) else Color(0x12FFFFFF), shape = RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
                                 Text("取消", color = TextMain)
                             }
                         }
@@ -5148,14 +5128,14 @@ private fun OsdIconButton(
             down = play
         },
         corner = 6.dp,
-        scaleTo = 1.15f,
+        scaleTo = TvTokenValues.FOCUS_SCALE,
         onFocusChanged = onFocusChanged,
         onClick = onClick,
     ) { focused ->
         Box(
             Modifier.fillMaxSize()
-                .background(if (focused) Color(0xFFE8ECF2) else Color(0x22FFFFFF), RoundedCornerShape(6.dp))
-                .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp)) else Modifier),
+                .luminaStatus(if (focused) Color(0xFFE8ECF2) else Color(0x22FFFFFF), shape = RoundedCornerShape(6.dp))
+                ,
             contentAlignment = Alignment.Center,
         ) {
             Icon(

@@ -1,6 +1,6 @@
 package com.lumina.tv.ui.screens
 
-import androidx.compose.foundation.background
+import com.lumina.tv.ui.theme.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.material3.Text
@@ -9,7 +9,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -104,7 +103,7 @@ internal fun FavoritesScreen(
     Box(Modifier.fillMaxSize()) {
         FavoritesBackdrop(url = backdropUrl, modifier = Modifier.matchParentSize())
         Column(Modifier.fillMaxSize().padding(top = 70.dp)) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 40.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(Modifier.fillMaxWidth().tvPagePadding(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
                     Text(if (state.refreshRequired) "已显示 ${state.items.size} 部 · ${if (state.refreshing) "正在核对收藏" else "待刷新"}"
                         else "已加载 ${state.items.size} / 共 ${state.total?.toString() ?: "未知"} 部",
@@ -116,7 +115,7 @@ internal fun FavoritesScreen(
                         else -> ""
                     }, color = TextSub, fontSize = 11.sp)
                 }
-                TextButton(enabled = !state.refreshing && !state.appending, onClick = {
+                TextButton(modifier = Modifier.tvFocusBoundary(), enabled = !state.refreshing && !state.appending, onClick = {
                     if (state.error != null && !state.refreshRequired) scope.launch { pager.append() }
                     else refresh++
                 }) { Text(if (state.error != null) "重试" else "刷新") }
@@ -127,11 +126,12 @@ internal fun FavoritesScreen(
                     maxWidth < 2400.dp -> 9
                     else -> 11
                 }
-                val cardWidth = (maxWidth - 40.dp * 2 - 12.dp * (gridColumns - 1)) / gridColumns
+                val pageInset = TvTokens.safeInset(maxWidth)
+                val cardWidth = (maxWidth - pageInset * 2 - 12.dp * (gridColumns - 1)) / gridColumns
                 LazyVerticalGrid(
                     state = gridState,
                     columns = GridCells.Fixed(gridColumns),
-                    contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 12.dp, bottom = 160.dp),
+                    contentPadding = PaddingValues(start = pageInset, end = pageInset, top = 12.dp, bottom = 160.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -156,7 +156,7 @@ internal fun FavoritesScreen(
 
 @Composable
 private fun FavoritesBackdrop(url: String?, modifier: Modifier) {
-    Box(modifier.fillMaxSize().background(Ink)) {
+    Box(modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas)) {
         if (!url.isNullOrBlank()) {
             AsyncImage(
                 model = url,
@@ -164,15 +164,7 @@ private fun FavoritesBackdrop(url: String?, modifier: Modifier) {
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
-            Box(Modifier.fillMaxSize().background(Ink.copy(alpha = 0.55f)))
-            Box(
-                Modifier.fillMaxSize().background(
-                    Brush.verticalGradient(
-                        0.55f to Ink.copy(alpha = 0f),
-                        1.00f to Ink.copy(alpha = 0.92f),
-                    )
-                )
-            )
+            Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Hero))
         }
     }
 }

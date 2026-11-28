@@ -1,8 +1,8 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.*
 import com.lumina.tv.ui.theme.TypeScale
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
@@ -135,10 +135,7 @@ private fun SideRailItem(
             },
         )
         .onFocusChanged { focused = it.isFocused }
-        .background(
-            if (selected || focused) ThemeRuntime.frostStrongTint else Color.Transparent,
-            shape,
-        )
+        .luminaSurface(SurfaceLevel.Content, shape, focused = focused, selected = selected)
         .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
 
     Box(itemModifier) {
@@ -148,7 +145,7 @@ private fun SideRailItem(
                     .width(SettingsTokens.FocusBarW)
                     .height(SettingsTokens.FocusBarH)
                     .align(Alignment.CenterStart)
-                    .background(Accent, RoundedCornerShape(2.dp)),
+                    .luminaStatus(Accent, shape = RoundedCornerShape(2.dp)),
             )
         }
         Row(
@@ -158,10 +155,7 @@ private fun SideRailItem(
             Box(
                 Modifier
                     .size(14.dp)
-                    .background(
-                        if (selected) Accent else TextSub.copy(alpha = 0.75f),
-                        RoundedCornerShape(4.dp),
-                    ),
+                    .luminaStatus(if (selected) Accent else TextSub, RoundedCornerShape(4.dp)),
             )
             Spacer(Modifier.width(10.dp))
             Text(

@@ -1,6 +1,6 @@
 package com.lumina.tv.ui.screens.settings
 
-import androidx.compose.foundation.background
+import com.lumina.tv.ui.theme.*
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -37,7 +37,7 @@ fun SettingsAppearance(
     modifier: Modifier = Modifier,
 ) {
     val prefs = AppRuntime.prefs
-    var baseThemeKey by remember { mutableStateOf(prefs?.baseTheme ?: "ink") }
+    var baseThemeKey by remember { mutableStateOf(resolveBaseThemeKey(prefs?.baseTheme).key) }
     var themeKey by remember { mutableStateOf(prefs?.themeColor ?: "blue") }
     var glassKey by remember { mutableStateOf(prefs?.glassStyle ?: "frosted") }
     var detailBackgroundVideo by remember {
@@ -79,7 +79,7 @@ fun SettingsAppearance(
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .background(ThemeRuntime.frostTint, groupShape)
+                    .luminaSurface(SurfaceLevel.Content, shape = groupShape)
                     .glassBorder(groupShape),
             ) {
                 Column {
@@ -126,12 +126,8 @@ fun SettingsAppearance(
 
                             "appearance:glassStyle" -> ChoiceRow(
                                 focusKey = spec.key,
-                                title = "玻璃质感",
-                                description = if (glassKey == "off") {
-                                    "已关闭玻璃效果，低配设备更流畅省电"
-                                } else {
-                                    "磨砂更沉浸，清透更轻盈，关闭更省电"
-                                },
+                                title = "视觉效果",
+                                description = "当前生效：${ThemeRuntime.effectTier.displayName} · 浏览页使用实体材质",
                                 options = GLASS_PRESETS.map {
                                     SettingChoiceOption(
                                         key = it.key,
@@ -202,6 +198,9 @@ fun SettingsAppearance(
                     }
                 }
             }
+        }
+        item(key = "appearance:effect-preview") {
+            EffectTierPreview(Modifier.fillMaxWidth().padding(top = 12.dp))
         }
         item(key = "appearance:bottom-space") {
             Spacer(Modifier.height(SettingsTokens.GroupGap))

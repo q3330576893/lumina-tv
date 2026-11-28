@@ -1,5 +1,6 @@
 package com.lumina.tv.ui.screens.settings
 
+import com.lumina.tv.ui.theme.*
 import com.lumina.tv.ui.theme.TypeScale
 
 import androidx.compose.animation.core.animateDpAsState
@@ -7,7 +8,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -44,7 +44,6 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
@@ -67,7 +66,7 @@ import com.lumina.tv.ui.theme.TextMain
 import com.lumina.tv.ui.theme.TextSub
 import com.lumina.tv.ui.theme.ThemeRuntime
 import com.lumina.tv.AppRuntime
-import com.lumina.tv.ui.motion.Motion
+import com.lumina.tv.ui.theme.TvMotion as Motion
 
 internal val LocalSettingsFocusKeys = staticCompositionLocalOf<MutableMap<String, FocusRequester>?> { null }
 internal val LocalSettingsListStates = staticCompositionLocalOf<Map<SettingsCategory, LazyListState>?> { null }
@@ -87,20 +86,7 @@ data class SettingChoiceOption(
     val color: Color? = null,
 )
 
-fun Modifier.glassBorder(shape: Shape): Modifier = border(
-    BorderStroke(
-        1.dp,
-        Brush.linearGradient(
-            colorStops = arrayOf(
-                0f to Color.White.copy(alpha = 0.78f),
-                0.38f to Color.White.copy(alpha = 0.10f),
-                0.62f to Color.White.copy(alpha = 0.06f),
-                1f to Color.White.copy(alpha = 0.42f),
-            ),
-        ),
-    ),
-    shape,
-)
+fun Modifier.glassBorder(shape: Shape): Modifier = luminaBoundary(shape)
 
 @Composable
 fun ToggleRow(
@@ -235,13 +221,13 @@ fun BaseThemeRow(
                     Box(
                         Modifier
                             .size(width = 56.dp, height = 40.dp)
-                            .graphicsLayer { scaleX = if (selected) 1.06f else 1f; scaleY = if (selected) 1.06f else 1f }
-                            .background(option.bgTop, RoundedCornerShape(6.dp))
+                            .graphicsLayer { scaleX = 1f; scaleY = 1f }
+                            .luminaStatus(option.bgTop, RoundedCornerShape(6.dp))
                             .then(if (selected) Modifier.border(2.dp, Accent, RoundedCornerShape(6.dp)) else Modifier),
                     )
                     Text(
                         text = option.label,
-                        color = TextSub.copy(alpha = 0.6f),
+                        color = TextSub,
                         fontSize = TypeScale.sp11,
                         maxLines = 1,
                     )
@@ -387,10 +373,7 @@ fun ActionRow(
                 .heightIn(min = 32.dp)
                 .widthIn(min = 72.dp)
                 .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-                .background(
-                    (if (danger) Danger else Accent).copy(alpha = 0.18f),
-                    RoundedCornerShape(15.dp),
-                )
+                .luminaSurface(SurfaceLevel.Content, RoundedCornerShape(15.dp), tone = if (danger) SurfaceTone.Danger else SurfaceTone.Accent)
                 .padding(horizontal = 14.dp),
             contentAlignment = Alignment.Center,
         ) {
@@ -411,7 +394,7 @@ fun PreviewCard(modifier: Modifier = Modifier) {
         modifier
             .fillMaxWidth()
             .height(96.dp)
-            .background(ThemeRuntime.frostTint, shape)
+            .luminaSurface(SurfaceLevel.Content, shape = shape)
             .glassBorder(shape),
     )
 }
@@ -464,8 +447,8 @@ private fun SettingsRowFrame(
                     onFocused(focusKey)
                 }
             }
-            .background(if (focused) ThemeRuntime.frostStrongTint else Color.Transparent, shape)
-            .then(if (focused) Modifier.glassBorder(shape) else Modifier)
+            .luminaSurface(SurfaceLevel.Content, shape, focused = focused)
+
             .clickable(interactionSource = interactionSource, indication = null) {
                 onClick()
             },
@@ -476,7 +459,7 @@ private fun SettingsRowFrame(
                     .width(SettingsTokens.FocusBarW)
                     .height(SettingsTokens.FocusBarH)
                     .align(Alignment.CenterStart)
-                    .background(Accent, RoundedCornerShape(2.dp)),
+                    .luminaStatus(Accent, shape = RoundedCornerShape(2.dp)),
             )
         }
         Row(
@@ -499,7 +482,7 @@ private fun SettingsRowFrame(
                     text = description,
                     color = TextSub,
                     fontSize = SettingsTokens.RowDescSize,
-                    maxLines = 1,
+                    maxLines = TvTokenValues.ROW_DESCRIPTION_LINES,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
@@ -515,7 +498,7 @@ private fun SettingsRowFrame(
                     .padding(start = SettingsTokens.RowPaddingH)
                     .fillMaxWidth()
                     .height(0.5.dp)
-                    .background(DividerColor),
+                    .luminaDivider(),
             )
         }
     }
@@ -531,16 +514,13 @@ private fun ToggleControl(checked: Boolean) {
     Box(
         Modifier
             .size(width = 34.dp, height = 20.dp)
-            .background(
-                if (checked) Accent else Color.White.copy(alpha = 0.18f),
-                RoundedCornerShape(10.dp),
-            ),
+            .luminaStatus(if (checked) Accent else TvTokens.Boundary, RoundedCornerShape(10.dp)),
     ) {
         Box(
             Modifier
                 .offset(x = thumbOffset, y = 2.dp)
                 .size(16.dp)
-                .background(if (checked) SelectedChoiceText else TextMain, CircleShape),
+                .luminaStatus(if (checked) SelectedChoiceText else TextMain, CircleShape),
         )
     }
 }
@@ -551,7 +531,7 @@ private fun SegmentedChoiceControl(options: List<SettingChoiceOption>, selectedK
     Row(
         Modifier
             .height(28.dp)
-            .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(14.dp)),
+            .luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(14.dp)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         options.forEach { option ->
@@ -560,7 +540,7 @@ private fun SegmentedChoiceControl(options: List<SettingChoiceOption>, selectedK
                 Modifier
                     .fillMaxHeight()
                     .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-                    .background(if (selected) Accent else Color.Transparent, RoundedCornerShape(14.dp))
+                    .luminaStatus(if (selected) Accent else surfaceColor(SurfaceLevel.Content), RoundedCornerShape(14.dp))
                     .padding(horizontal = 11.dp, vertical = 4.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -589,7 +569,7 @@ private fun ColorChoiceControl(options: List<SettingChoiceOption>, selectedKey: 
                 Box(
                     Modifier
                         .size(if (selected) 18.dp else 14.dp)
-                        .background(option.color ?: Color.Transparent, CircleShape)
+                        .luminaStatus(option.color ?: surfaceColor(SurfaceLevel.Content), CircleShape)
                         .then(
                             if (selected) Modifier.border(2.dp, Color.White, CircleShape)
                             else Modifier,

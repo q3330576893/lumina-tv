@@ -2,11 +2,12 @@
 
 package com.lumina.tv.ui.screens
 
+import com.lumina.tv.ui.theme.*
+
 import com.lumina.tv.data.catchingRequest
 
 import android.util.Log
 import android.app.Activity
-import android.app.ActivityManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -26,7 +27,6 @@ import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -107,7 +107,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -150,10 +149,6 @@ import com.lumina.tv.data.WideImageCandidate
 import com.lumina.tv.data.wideImageCandidates
 import com.lumina.tv.diag.PageLog
 import com.lumina.tv.ui.components.FocusSurface
-import com.lumina.tv.ui.components.FocusScale
-import com.lumina.tv.ui.components.GlassTone
-import com.lumina.tv.ui.components.glassSurface
-import com.lumina.tv.ui.components.focusGutter
 import com.lumina.tv.ui.components.LoadingView
 import com.lumina.tv.ui.components.PosterCard
 import com.lumina.tv.ui.components.ResumeRemovalPill
@@ -168,10 +163,6 @@ import com.lumina.tv.ui.theme.Space
 import com.lumina.tv.ui.theme.ShapeScale
 import com.lumina.tv.ui.theme.TypeScale
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
-import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -228,11 +219,6 @@ fun HomeScreen(
     val homeIdentity = client?.let { com.lumina.tv.data.identityScope(it.baseUrl, it.userId) }
     val prefetchSemaphore = remember { kotlinx.coroutines.sync.Semaphore(3) }
     val hazeState = remember { HazeState() }
-    LaunchedEffect(context) {
-        ThemeRuntime.updateDeviceBlurSupported(
-            context.getSystemService(ActivityManager::class.java)?.isLowRamDevice != true,
-        )
-    }
 
     var loading by remember { mutableStateOf(LibraryCache.home == null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -314,11 +300,11 @@ fun HomeScreen(
     fun closeSortMenu() {
         sortMenuOpen = false
         restoreSortFocus = true
-        scope.launch { delay(180); restoreSortFocus = false }
+        scope.launch { withFrameNanos { }; withFrameNanos { }; restoreSortFocus = false }
     }
     LaunchedEffect(sortMenuOpen, librarySort) {
         if (sortMenuOpen) {
-            delay(80)
+            withFrameNanos { }
             runCatching { sortItemRequesters[librarySort]?.requestFocus() }
         }
     }
@@ -863,7 +849,7 @@ fun HomeScreen(
                         repeat(6) {
                             withFrameNanos { }
                             if (runCatching { firstContentFocus.requestFocus() }.isSuccess) return@launch
-                            delay(40)
+                            withFrameNanos { }
                         }
                     }
                     resetToHero()
@@ -907,7 +893,7 @@ fun HomeScreen(
     }
 
     // 导航在顶部，右键不再劫持（原来的右键跳竖栏逻辑会让影片行无法继续右移）
-    Box(Modifier.fillMaxSize().background(Ink).onPreviewKeyEvent { event ->
+    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas).onPreviewKeyEvent { event ->
         if (event.type == KeyEventType.KeyDown && isGridNavKey(event.key) &&
             tab == HomeTab.Media && selectedLibraryId != null
         ) {
@@ -945,12 +931,12 @@ fun HomeScreen(
                         Text("诊断：$failure", color = TextSub.copy(alpha = 0.6f), fontSize = TypeScale.sp10, maxLines = 2)
                     }
                 }
-                tab == HomeTab.Recommend -> BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
+                tab == HomeTab.Recommend -> BoxWithConstraints(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas)) {
                     val heroWidth = maxWidth
                     val heroHeight = minOf(maxHeight * 0.86f, maxHeight - 172.dp).coerceAtLeast(320.dp)
                     LazyColumn(
                         state = recListState,
-                        modifier = Modifier.fillMaxSize().background(Ink),
+                        modifier = Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas),
                     ) {
                     item(key = "home-hero") {
                         Hero(
@@ -990,16 +976,16 @@ fun HomeScreen(
                     if (!loading && resume.isEmpty() && favorites.isEmpty()) {
                         item {
                             FocusSurface(
-                                modifier = Modifier.padding(horizontal = 34.dp, vertical = 12.dp)
+                                modifier = Modifier.tvPagePadding(vertical = 12.dp)
                                     .fillMaxWidth().height(56.dp).focusProperties { up = heroArtworkFocus },
                                 focusRequester = if (firstSectionKey == "empty") firstContentFocus else null,
                                 corner = 28.dp,
-                                scaleTo = 1.02f,
+                                scaleTo = TvTokenValues.FOCUS_SCALE,
                                 onClick = { tab = HomeTab.Media; selectedLibraryId = null },
                             ) { focused ->
                                 Box(
                                     Modifier.fillMaxSize()
-                                        .background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(28.dp)),
+                                        .luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(28.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text("还没有观看记录 · 去媒体库逛逛", color = TextMain, fontSize = TypeScale.sp13)
@@ -1048,12 +1034,12 @@ fun HomeScreen(
                 )
                 tab == HomeTab.Media && selectedLibrary != null -> Column(Modifier.fillMaxSize()) {
                     Row(
-                        Modifier.fillMaxWidth().height(96.dp).padding(start = 40.dp, end = 40.dp, top = 24.dp),
+                        Modifier.fillMaxWidth().height(96.dp).tvPagePadding().padding(top = 24.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         FocusSurface(modifier = Modifier.size(40.dp).focusRequester(libraryBackFocus).focusProperties { right = librarySortFocus }, corner = 20.dp, onClick = { selectedLibraryId = null; gridItems = emptyList() }) { focused ->
                             Box(
-                                Modifier.fillMaxSize().then(if (focused) Modifier.border(1.dp, Accent, CircleShape) else Modifier),
+                                Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text("‹", color = if (focused) Accent else TextMain, fontSize = TypeScale.sp20, fontWeight = FontWeight.Medium)
@@ -1073,20 +1059,13 @@ fun HomeScreen(
                         Box {
                             FocusSurface(
                                 modifier = Modifier.height(40.dp).width(112.dp).focusRequester(librarySortFocus).focusProperties { left = libraryBackFocus },
-                                corner = 20.dp, scaleTo = 1.03f,
+                                corner = 20.dp, scaleTo = TvTokenValues.FOCUS_SCALE,
                                 requestFocus = restoreSortFocus,
                                 onClick = { sortMenuOpen = true },
                             ) { focused ->
                                 Box(
                                     Modifier.fillMaxSize()
-                                        .background(
-                                            if (focused) Color(0x2EFFFFFF) else Color(0x14FFFFFF),
-                                            RoundedCornerShape(20.dp),
-                                        )
-                                        .then(
-                                            if (focused) Modifier.border(1.dp, Accent.copy(alpha = 0.7f), RoundedCornerShape(20.dp))
-                                            else Modifier.border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(20.dp))
-                                        ),
+                                        .luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(20.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1105,8 +1084,8 @@ fun HomeScreen(
                                         modifier = Modifier
                                             .width(180.dp)
                                             .clip(RoundedCornerShape(22.dp))
-                                            .background(Brush.verticalGradient(listOf(Color(0xF51C2638), Color(0xEA121A28))))
-                                            .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(22.dp))
+                                            .luminaSurface(SurfaceLevel.Overlay)
+                                            .luminaBoundary(RoundedCornerShape(TvTokens.ModalCorner))
                                             .padding(vertical = 8.dp),
                                     ) {
                                         SORT_LABELS.forEach { (key, label) ->
@@ -1132,7 +1111,7 @@ fun HomeScreen(
                                                         restoreTargetId = RESTORE_FIRST
                                                         closeSortMenu()
                                                     }
-                                                    .background(if (itemFocused) Color(0x26FFFFFF) else if (selected) Accent.copy(alpha = 0.20f) else Color.Transparent, RoundedCornerShape(10.dp))
+                                                    .luminaSurface(SurfaceLevel.Content, RoundedCornerShape(10.dp), focused = itemFocused, selected = selected)
                                                     .border(if (selected) 1.5.dp else 0.dp, if (selected) Accent else Color.Transparent, RoundedCornerShape(10.dp))
                                                     .padding(horizontal = 18.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
@@ -1141,7 +1120,7 @@ fun HomeScreen(
                                                 Text(label, color = if (itemFocused || selected) TextMain else TextSub, fontSize = TypeScale.sp14)
                                             }
                                         }
-                                        Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).height(1.dp).background(Color(0x26FFFFFF)))
+                                        Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).height(1.dp).luminaDivider())
                                         if (librarySort != "random") listOf("Descending" to "降序 ↓", "Ascending" to "升序 ↑").forEach { (order, label) ->
                                             val selected = librarySortOrder == order
                                             var orderFocused by remember(order) { mutableStateOf(false) }
@@ -1163,7 +1142,7 @@ fun HomeScreen(
                                                         restoreTargetId = RESTORE_FIRST
                                                         closeSortMenu()
                                                     }
-                                                    .background(if (orderFocused) Color(0x26FFFFFF) else if (selected) Accent.copy(alpha = 0.20f) else Color.Transparent, RoundedCornerShape(10.dp))
+                                                    .luminaSurface(SurfaceLevel.Content, RoundedCornerShape(10.dp), focused = orderFocused, selected = selected)
                                                     .padding(horizontal = 18.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
@@ -1188,14 +1167,15 @@ fun HomeScreen(
                             maxWidth < 2400.dp -> 7
                             else -> 9
                         }
-                        val cardWidth = (maxWidth - 32.dp * 2 - 12.dp * (libraryGridColumns - 1)) / libraryGridColumns
-                        val gutter = focusGutter(cardWidth, FocusScale.DENSE_GRID)
+                        val pageInset = TvTokens.safeInset(maxWidth)
+                        val cardWidth = (maxWidth - pageInset * 2 - 12.dp * (libraryGridColumns - 1)) / libraryGridColumns
+
                         LazyVerticalGrid(
                             state = gridState,
                             columns = GridCells.Fixed(libraryGridColumns),
                             contentPadding = PaddingValues(
-                                start = 32.dp + gutter, end = 32.dp + gutter,
-                                top = 12.dp + gutter, bottom = 160.dp + gutter,
+                                start = pageInset, end = pageInset,
+                                top = 12.dp, bottom = 160.dp,
                             ),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1237,7 +1217,7 @@ fun HomeScreen(
                                     modifier = Modifier.fillMaxWidth().height(48.dp),
                                     onClick = { gridRetryRequested++ },
                                 ) { focused ->
-                                    Box(Modifier.fillMaxSize().background(if (focused) Color(0x22FFFFFF) else Color.Transparent), contentAlignment = Alignment.Center) {
+                                    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral), contentAlignment = Alignment.Center) {
                                         Text("加载失败，按 OK 重试", color = TextMain, fontSize = TypeScale.sp13)
                                     }
                                 }
@@ -1255,14 +1235,15 @@ fun HomeScreen(
                         maxWidth < 2400.dp -> 7
                         else -> 9
                     }
-                    val cardWidth = (maxWidth - 32.dp * 2 - 12.dp * (gridColumns - 1)) / gridColumns
-                    val gutter = focusGutter(cardWidth, FocusScale.DENSE_GRID)
+                    val pageInset = TvTokens.safeInset(maxWidth)
+                    val cardWidth = (maxWidth - pageInset * 2 - 12.dp * (gridColumns - 1)) / gridColumns
+
                     LazyVerticalGrid(
                         state = gridState,
                         columns = GridCells.Fixed(gridColumns),
                         contentPadding = PaddingValues(
-                            start = 32.dp + gutter, end = 32.dp + gutter,
-                            top = 76.dp + gutter, bottom = 160.dp + gutter,
+                            start = pageInset, end = pageInset,
+                            top = 76.dp, bottom = 160.dp,
                         ),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1446,7 +1427,7 @@ private fun ServerCapsule(
                 .height(34.dp)
                 .widthIn(min = 92.dp, max = 204.dp)
                 .clip(glassShape)
-                .glassSurface(glassShape, tone = if (capsuleFocused) GlassTone.Accent else GlassTone.Normal)
+                .luminaSurface(SurfaceLevel.Floating, glassShape, focused = capsuleFocused)
                 .clickable(
                     interactionSource = capsuleInteraction,
                     indication = null,
@@ -1501,12 +1482,12 @@ private fun ServerCapsule(
                     Column(
                         Modifier
                             .clip(menuShape)
-                            .background(Brush.verticalGradient(listOf(Color(0xF51C2638), Color(0xEA121A28))))
-                            .border(1.dp, Color(0x40FFFFFF), menuShape)
+                            .luminaSurface(SurfaceLevel.Overlay)
+                            .luminaBoundary(menuShape)
                             .padding(10.dp),
                     ) {
                         Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(34.dp).clip(RoundedCornerShape(17.dp)).background(Color(0x2E6EA8FF)), contentAlignment = Alignment.Center) {
+                            Box(Modifier.size(34.dp).clip(RoundedCornerShape(17.dp)).luminaSurface(tone = SurfaceTone.Accent), contentAlignment = Alignment.Center) {
                                 Text("L", color = Accent, fontSize = TypeScale.sp17, fontWeight = FontWeight.Black)
                             }
                             Spacer(Modifier.width(10.dp))
@@ -1556,7 +1537,7 @@ private fun ServerCapsule(
                                         Row(
                                             Modifier.fillMaxSize()
                                                 .clip(RoundedCornerShape(12.dp))
-                                                .background(if (focused) Color(0x26FFFFFF) else Color.Transparent)
+                                                .luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral)
                                                 .padding(horizontal = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
@@ -1582,7 +1563,7 @@ private fun ServerCapsule(
                             }
                         }
                         if (savedServers.isNotEmpty()) {
-                            Spacer(Modifier.fillMaxWidth().height(1.dp).background(Color(0x30FFFFFF)))
+                            Spacer(Modifier.fillMaxWidth().height(1.dp).luminaDivider())
                             Spacer(Modifier.height(4.dp))
                         }
                         MenuRowGlass("切换服务器 / 账号", "重新扫码或输入地址登录") { serverMenuOpen = false; onSwitchServer() }
@@ -1600,13 +1581,7 @@ private fun MenuRowGlass(title: String, sub: String, danger: Boolean = false, on
     ) { focused ->
         Row(
             Modifier.fillMaxSize()
-                .background(
-                    when {
-                        focused -> if (danger) Color(0x33FF6B81) else Color(0x2EFFFFFF)
-                        else -> Color(0x0FFFFFFF)
-                    },
-                    RoundedCornerShape(16.dp),
-                )
+                .luminaSurface(SurfaceLevel.Content, RoundedCornerShape(16.dp), tone = if (danger) SurfaceTone.Danger else SurfaceTone.Neutral)
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1663,7 +1638,7 @@ private fun TopNavBar(
                         } else false
                     },
                 corner = 24.dp,
-                scaleTo = 1.08f,
+                scaleTo = TvTokenValues.FOCUS_SCALE,
                 onClick = {
                     when (index) {
                         0 -> onSelect(HomeTab.Recommend, null)
@@ -1678,14 +1653,14 @@ private fun TopNavBar(
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .background(if (focused) Color(0x1FFFFFFF) else Color.Transparent, RoundedCornerShape(24.dp))
-                        .then(if (focused) Modifier.border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(24.dp)) else Modifier),
+                        .luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(24.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral)
+                        ,
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                         Icon(icon, contentDescription = label, tint = if (active || focused) Accent else Color(0xFFD6DEEB), modifier = Modifier.size(26.dp))
                         Spacer(Modifier.height(8.dp))
-                        Box(Modifier.width(16.dp).height(3.dp).background(if (active) Accent.copy(alpha = 0.9f) else Color.Transparent, RoundedCornerShape(2.dp)))
+                        Box(Modifier.width(16.dp).height(3.dp).luminaStatus(if (active) Accent else surfaceColor(SurfaceLevel.Content), RoundedCornerShape(2.dp)))
                     }
                 }
             }
@@ -1697,8 +1672,8 @@ private fun TopNavBar(
                 ) {
                     Text(
                         label,
-                        modifier = Modifier.shadow(8.dp, RoundedCornerShape(8.dp))
-                            .background(Color(0xE610141D), RoundedCornerShape(8.dp))
+                        modifier = Modifier
+                            .luminaSurface(SurfaceLevel.Floating, RoundedCornerShape(8.dp))
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         color = Color.White,
                         fontSize = TypeScale.sp14,
@@ -1709,7 +1684,7 @@ private fun TopNavBar(
             }
             if (index == 2) {
                 Spacer(Modifier.width(6.dp))
-                Spacer(Modifier.width(1.dp).height(16.dp).background(Color(0x26FFFFFF)))
+                Spacer(Modifier.width(1.dp).height(16.dp).luminaDivider())
                 Spacer(Modifier.width(6.dp))
             } else if (index < entries.lastIndex) Spacer(Modifier.width(8.dp))
         }
@@ -1747,14 +1722,11 @@ private fun TopAction(label: String, icon: androidx.compose.ui.graphics.vector.I
     FocusSurface(
         modifier = Modifier.height(30.dp),
         corner = 15.dp,
-        scaleTo = 1.05f,
+        scaleTo = TvTokenValues.FOCUS_SCALE,
         onClick = onClick,
     ) { focused ->
         Row(
-            Modifier.fillMaxSize().background(
-                if (focused) Color(0x33FFFFFF) else Color(0x14FFFFFF),
-                RoundedCornerShape(15.dp),
-            ).padding(horizontal = 10.dp),
+            Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = RoundedCornerShape(15.dp), tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral).padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(icon, contentDescription = label, tint = if (focused) Accent else TextMain, modifier = Modifier.size(15.dp))
@@ -1775,18 +1747,11 @@ private fun TabChip(
     FocusSurface(
         modifier = Modifier.height(height).width(width),
         corner = (height / 2).coerceAtLeast(17.dp),
-        scaleTo = 1.06f,
+        scaleTo = TvTokenValues.FOCUS_SCALE,
         onClick = onClick,
     ) { focused ->
         Box(
-            Modifier.fillMaxSize().background(
-                when {
-                    active -> Accent.copy(alpha = 0.9f)
-                    focused -> Color(0x33FFFFFF)
-                    else -> Color(0x14FFFFFF)
-                },
-                RoundedCornerShape((height / 2).coerceAtLeast(17.dp)),
-            ),
+            Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, RoundedCornerShape((height / 2).coerceAtLeast(17.dp)), selected = active),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -1833,11 +1798,11 @@ private fun HomeLibraryRow(
                 FocusSurface(
                     modifier = Modifier.width(280.dp).height(150.dp),
                     corner = 10.dp,
-                    scaleTo = 1.04f,
+                    scaleTo = TvTokenValues.FOCUS_SCALE,
                     focusRequester = if (view == views.firstOrNull()) firstItemFocus else null,
                     onClick = { onOpenLibrary(view) },
                 ) { focused ->
-                    Box(Modifier.fillMaxSize().background(InkSoft, shape)) {
+                    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, shape = shape)) {
                         if (imageUrl != null) {
                             AsyncImage(
                                 model = imageUrl,
@@ -1848,13 +1813,7 @@ private fun HomeLibraryRow(
                         }
                         Box(
                             Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(0.55f)
-                                .background(
-                                    Brush.verticalGradient(
-                                        0f to Color.Transparent,
-                                        0.45f to Color.Black.copy(alpha = 0.72f),
-                                        1f to Color.Black.copy(alpha = 0.88f),
-                                    ),
-                                ),
+                                .luminaScrim(BackdropShade.Bottom),
                         )
                         Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(12.dp)) {
                             Text(
@@ -1871,7 +1830,7 @@ private fun HomeLibraryRow(
                                 fontSize = TypeScale.sp11,
                             )
                         }
-                        if (focused) Box(Modifier.fillMaxSize().border(1.5.dp, Accent, shape))
+
                     }
                 }
             }
@@ -1932,7 +1891,7 @@ private fun MediaLibrary(
                     FocusSurface(
                         modifier = Modifier.width(300.dp).height(132.dp),
                         corner = 20.dp,
-                        scaleTo = 1.04f,
+                        scaleTo = TvTokenValues.FOCUS_SCALE,
                         focusRequester = when (v.id) {
                             views.first().id -> firstItemFocus
                             restoreId -> restoreFocus
@@ -1944,9 +1903,9 @@ private fun MediaLibrary(
                         val shape = RoundedCornerShape(20.dp)
                         Box(
                             Modifier.fillMaxSize()
-                                .then(if (focused) Modifier.shadow(16.dp, shape, clip = false) else Modifier)
-                                .background(Color(0xFF141B2B), shape)
-                                .then(if (focused) Modifier.border(2.dp, Accent, shape) else Modifier)
+
+                                .luminaSurface(SurfaceLevel.Content, shape = shape)
+
                                 .clip(shape)
                         ) {
                             if (libraryItems.isNotEmpty()) {
@@ -1955,7 +1914,7 @@ private fun MediaLibrary(
                                         Column(Modifier.weight(1f).fillMaxHeight()) {
                                             repeat(2) { row ->
                                                 val imageItem = libraryItems.getOrNull(column * 2 + row)
-                                                Box(Modifier.weight(1f).fillMaxWidth().background(Color(0xFF1A2233))) {
+                                                Box(Modifier.weight(1f).fillMaxWidth().luminaSurface(SurfaceLevel.Content)) {
                                                     imageItem?.let { media ->
                                                         AsyncImage(
                                                             model = AppRuntime.client?.imageUrl(media, 360),
@@ -1969,9 +1928,9 @@ private fun MediaLibrary(
                                         }
                                     }
                                 }
-                                Box(Modifier.fillMaxSize().background(if (focused) Color(0x77000000) else Color(0x99000000)))
+                                Box(Modifier.fillMaxSize().luminaScrim(BackdropShade.Darken))
                             }
-                            Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x22FFFFFF)).align(Alignment.TopCenter))
+                            Box(Modifier.fillMaxWidth().height(1.dp).luminaDivider().align(Alignment.TopCenter))
                             Column(Modifier.align(Alignment.BottomStart).padding(16.dp)) {
                                 Text(v.name, color = Color.White, fontSize = TypeScale.sp20, fontWeight = FontWeight.Bold)
                                 Text(
@@ -1999,11 +1958,11 @@ private fun TopButton(icon: androidx.compose.ui.graphics.vector.ImageVector, lab
     FocusSurface(
         modifier = Modifier.size(40.dp),
         corner = 20.dp,
-        scaleTo = 1.12f,
+        scaleTo = TvTokenValues.FOCUS_SCALE,
         onClick = onClick,
     ) { focused ->
         Box(
-            Modifier.fillMaxSize().background(if (focused) Color(0x33FFFFFF) else Color(0x1AFFFFFF)),
+            Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
             contentAlignment = Alignment.Center,
         ) {
             Icon(icon, contentDescription = label, tint = if (focused) Accent else TextMain, modifier = Modifier.size(19.dp))
@@ -2129,13 +2088,13 @@ private fun Hero(
 ) {
     val item = items.getOrNull(currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0)))
     if (item == null) {
-        Box(Modifier.fillMaxWidth().height(heroHeight).background(Ink)
+        Box(Modifier.fillMaxWidth().height(heroHeight).luminaSurface(SurfaceLevel.Canvas)
             .focusRequester(artworkFocus)
             .focusProperties { up = navFocus }
             .onFocusChanged { onHeroFocusChanged(it.hasFocus) }
             .onPreviewKeyEvent { it.type == KeyEventType.KeyDown && it.key == Key.DirectionDown && onNavigateDown() }
             .focusable()) {
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
+            Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas))
             Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = TypeScale.sp13)
         }
         return
@@ -2287,13 +2246,13 @@ private fun Hero(
         topLoaded = false
         wipeProgress.snapTo(0f)
     }
-    LaunchedEffect(topLayer, topLoaded, transitionGeneration) {
+    LaunchedEffect(topLayer, topLoaded, transitionGeneration, ThemeRuntime.motion) {
         val layer = topLayer ?: return@LaunchedEffect
         if (!topLoaded || isRejectedHeroImage(layer.imageUrl)) return@LaunchedEffect
         val generation = transitionGeneration
         transitionJob?.cancel()
         transitionJob = transitionScope.launch {
-            wipeProgress.animateTo(1f, tween(600, easing = FastOutSlowInEasing))
+            wipeProgress.animateTo(1f, tween(TvMotion.CATEGORY, easing = FastOutSlowInEasing))
             if (generation == transitionGeneration && layer == topLayer) {
                 bottomLayer = layer
                 topLayer = null
@@ -2315,8 +2274,9 @@ private fun Hero(
     val playAction = rememberPlayableItemAction(listOf(item.id, displayItem.id, currentIndex), active = active) { target, _ -> onPlay(target) }
     val currentPlayAction by rememberUpdatedState(playAction)
     val advance by rememberUpdatedState(onNext)
-    LaunchedEffect(items, playAction.resolving, active, lifecycle) {
+    LaunchedEffect(items, playAction.resolving, active, lifecycle, ThemeRuntime.motion) {
         if (!active || items.size < 2 || playAction.resolving) return@LaunchedEffect
+        if (!ThemeRuntime.motion.idleAnimations) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             lastInteractionAt = android.os.SystemClock.elapsedRealtime()
             while (true) {
@@ -2364,7 +2324,6 @@ private fun Hero(
     }
     Box(
         Modifier
-            .hazeSource(hazeState)
             .fillMaxWidth()
             .height(heroHeight)
             .clipToBounds()
@@ -2404,10 +2363,10 @@ private fun Hero(
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Ink)
+                .luminaSurface(SurfaceLevel.Canvas)
         ) {
             if (bottomLayer == null && topLayer == null && item.id in tmdbResolvedIds) {
-                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(InkSoft, Ink))))
+                Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Canvas))
                 Text("暂无横版剧照", Modifier.align(Alignment.Center), color = TextSub, fontSize = TypeScale.sp13)
             }
             bottomLayer?.takeUnless { isRejectedHeroImage(it.imageUrl) }?.let bottom@{ layer ->
@@ -2459,12 +2418,7 @@ private fun Hero(
                 .focusable()
         )
         Box(
-            Modifier.fillMaxSize().background(
-                Brush.verticalGradient(
-                    0.45f to Ink.copy(alpha = 0f),
-                    1.00f to Ink.copy(alpha = 0.92f),
-                )
-            )
+            Modifier.fillMaxSize().luminaScrim(BackdropShade.Hero)
         )
         Column(
             Modifier.align(Alignment.BottomStart).heightIn(max = (heroHeight - 40.dp).coerceAtLeast(0.dp))
@@ -2516,7 +2470,7 @@ private fun Hero(
                         up = artworkFocus
                     },
                     corner = 26.dp,
-                    scaleTo = 1.05f,
+                    scaleTo = TvTokenValues.FOCUS_SCALE,
                     focusRequester = playFocus,
                     onFocusChanged = {
                         if (it) {
@@ -2531,9 +2485,7 @@ private fun Hero(
                     },
                 ) { focused ->
                     Row(
-                        Modifier.fillMaxSize().background(
-                            Color(0xFFE8ECF2)
-                        ),
+                        Modifier.fillMaxSize().luminaStatus(TextMain),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -2553,7 +2505,7 @@ private fun Hero(
                         up = artworkFocus
                     },
                     corner = 26.dp,
-                    scaleTo = 1.05f,
+                    scaleTo = TvTokenValues.FOCUS_SCALE,
                     focusRequester = detailFocus,
                     onFocusChanged = {
                         if (it) {
@@ -2565,7 +2517,7 @@ private fun Hero(
                     onClick = { playAction.invalidate(); onOpenDetail(displayItem.seriesId ?: displayItem.id) },
                 ) { focused ->
                     Box(
-                        Modifier.fillMaxSize().background(if (focused) Color(0x24FFFFFF) else Color(0x14FFFFFF)),
+                        Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content, tone = if (focused) SurfaceTone.Raised else SurfaceTone.Neutral),
                         contentAlignment = Alignment.Center,
                     ) { Text("查看详情", color = Color(0xFFE8ECF2), fontSize = TypeScale.sp15) }
                 }
@@ -2585,7 +2537,7 @@ private fun Hero(
                         Box(
                             Modifier.size(width = thumbnailWidth, height = thumbnailWidth * 9 / 16)
                                 .clip(RoundedCornerShape(6.dp))
-                                .background(InkSoft)
+                                .luminaSurface(SurfaceLevel.Content)
                         ) {
                             HeroThumb(
                                 thumbnailItem, client, tmdbBackdrops[thumbnailItem.id],
@@ -2633,7 +2585,7 @@ private fun HeroThumb(
         PageLog.add("thumbImg id=${item.id} pick=$candidateIndex failed=true")
         onFailed(image)
     }
-    Box(Modifier.fillMaxSize().background(InkSoft)) {
+    Box(Modifier.fillMaxSize().luminaSurface(SurfaceLevel.Content)) {
         if (candidates.isEmpty() || candidateFailed) Icon(Icons.Rounded.Movie, null, tint = TextSub, modifier = Modifier.align(Alignment.Center).size(14.dp))
         candidate?.let { candidate ->
             AsyncImage(candidate.url, null, contentScale = ContentScale.Crop,
@@ -2662,7 +2614,7 @@ private fun HeroBackdropImage(
     val request = remember(imageUrl) {
         ImageRequest.Builder(context).data(imageUrl).crossfade(false).build()
     }
-    val wipeModifier = if (wipeProgress == null) Modifier else Modifier
+    val wipeModifier = if (wipeProgress == null || !ThemeRuntime.motion.carouselDisplacement) Modifier else Modifier
         .graphicsLayer {
             val progress = wipeProgress.value
             translationX = (if (isForward) 1f else -1f) * 18.dp.toPx() * (1f - progress)
@@ -2758,8 +2710,8 @@ private fun RowSection(
                 .focusGroup()
                 .onFocusChanged { onRowFocusChanged?.invoke(it.hasFocus) },
             contentPadding = PaddingValues(
-                start = 40.dp + focusGutter(width, FocusScale.POSTER_MEDIUM),
-                end = 40.dp + focusGutter(width, FocusScale.POSTER_MEDIUM),
+                start = 40.dp,
+                end = 40.dp,
             ),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -2803,7 +2755,7 @@ private fun HomeRowSkeleton(title: String) {
                 Box(
                     Modifier.width(170.dp).aspectRatio(1f / 1.5f)
                         .clip(ShapeScale.card)
-                        .background(Color(0xFF18202D))
+                        .luminaSurface(SurfaceLevel.Content)
                 )
             }
         }

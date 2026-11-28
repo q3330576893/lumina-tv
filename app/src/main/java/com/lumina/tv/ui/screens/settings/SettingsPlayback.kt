@@ -1,6 +1,6 @@
 package com.lumina.tv.ui.screens.settings
 
-import androidx.compose.foundation.background
+import com.lumina.tv.ui.theme.*
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -136,7 +136,7 @@ fun SettingsPlayback(
             Text("播放", color = TextSub, fontSize = SettingsTokens.GroupLabelSize, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp))
         }
         item(key = "playback:group") {
-            Column(Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).glassBorder(groupShape)) {
+            Column(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).glassBorder(groupShape)) {
                 ChoiceRow("playback:defaultSpeed", "默认倍速", "选择新视频的默认播放速度", speedOptions, speed.toString(), { key ->
                     speed = key.toFloat(); prefs?.defaultSpeed = speed
                 }, requesters.getValue(rowKeys[0]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[1]))

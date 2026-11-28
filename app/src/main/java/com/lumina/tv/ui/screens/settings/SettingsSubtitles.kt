@@ -1,6 +1,6 @@
 package com.lumina.tv.ui.screens.settings
 
-import androidx.compose.foundation.background
+import com.lumina.tv.ui.theme.*
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -68,7 +68,7 @@ fun SettingsSubtitles(
             SubtitlePreviewCard(subtitleScale, Color(subtitleColor), subtitleOutline, subtitlePosition, subtitleBg)
         }
         item(key = "subtitles:group") {
-            Column(Modifier.fillMaxWidth().background(ThemeRuntime.frostTint, groupShape).glassBorder(groupShape)) {
+            Column(Modifier.fillMaxWidth().luminaSurface(SurfaceLevel.Content, shape = groupShape).glassBorder(groupShape)) {
                 ChoiceRow("subtitles:subtitleScale", "字号", "调整字幕显示大小", scaleOptions, subtitleScale.toString(), { key ->
                     subtitleScale = key.toFloat(); prefs?.subtitleScale = subtitleScale
                 }, requesters.getValue(rowKeys[0]), railRequester, { onFocused(it) }, upRequester = requesters.getValue(rowKeys[0]), downRequester = requesters.getValue(rowKeys[1]))
