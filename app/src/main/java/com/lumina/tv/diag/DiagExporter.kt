@@ -3,12 +3,14 @@ package com.lumina.tv.diag
 import android.content.Context
 import android.os.Build
 import android.os.Looper
+import android.system.Os
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import com.lumina.tv.AppRuntime
 import com.lumina.tv.BuildConfig
 import com.lumina.tv.player.MpvAvailabilityProbe
+import com.lumina.tv.player.diagnosticsGap
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -16,9 +18,10 @@ import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.FutureTask
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
+import java.security.MessageDigest
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.nio.file.AtomicMoveNotSupportedException
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -31,6 +34,8 @@ data class DiagPayload(
     val mpvLog: String,
     val appLog: String,
     val uiText: String,
+    val playbackFailureJson: String = "{}",
+    val diagnosticsGapJson: String = "{\"missing\":[],\"reason\":\"not checked\"}",
 )
 
 /** Remove the known credential before field/URL masking and before callers impose a size limit. */
@@ -82,43 +87,44 @@ object DiagExporter {
             .put("outcome", outcome)
     }
 
+    internal fun withBuildIdentity(context: Context, metaJson: String): String {
+        val apkSha = runCatching {
+            MessageDigest.getInstance("SHA-256").let { digest ->
+                context.applicationInfo.sourceDir.let(::File).inputStream().use { input ->
+                    val buffer = ByteArray(128 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        digest.update(buffer, 0, count)
+                    }
+                }
+                digest.digest().joinToString("") { "%02x".format(it) }
+            }
+        }.getOrNull()
+        val mappingSha = runCatching {
+            context.assets.open("diag/mapping-sha256.txt").bufferedReader(Charsets.US_ASCII).use { it.readText().trim() }
+                .takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+        }.getOrNull()
+        return runCatching {
+            JSONObject(metaJson).put("buildIdentity", JSONObject()
+                .put("baseApkSha256", apkSha ?: JSONObject.NULL)
+                .put("r8MappingSha256", mappingSha ?: JSONObject.NULL)
+                .put("state", if (apkSha != null && mappingSha != null) "bound" else "incomplete"))
+                .toString(2)
+        }.getOrElse { metaJson }
+    }
+
     fun appLogTail(): String {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             return "app.log unavailable: logcat capture requires a background thread"
         }
         val timeoutMs = 1500L
-        val timeoutMessage = "app.log unavailable: logcat timed out after ${timeoutMs}ms"
-        val capture = FutureTask {
-            val process = ProcessBuilder("logcat", "-d", "-v", "epoch", "-t", "800", "--pid=${android.os.Process.myPid()}")
-                .redirectErrorStream(true)
-                .start()
-            val output = FutureTask {
-                process.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
-                    lines.toList().takeLast(800).joinToString("\n")
-                }
-            }
-            try {
-                Thread(output, "lumina-logcat-reader").apply { isDaemon = true }.start()
-                if (process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) output.get() else timeoutMessage
-            } finally {
-                output.cancel(true)
-                process.destroyForcibly()
-            }
+        val capture = LogcatCapture.read(120 * 1024, timeoutMs) { resources ->
+            resources.process(ProcessBuilder("logcat", "-d", "-v", "epoch", "-t", "800", "--pid=${android.os.Process.myPid()}")
+                .redirectErrorStream(true).start()).inputStream
         }
-        return try {
-            Thread(capture, "lumina-logcat-capture").apply { isDaemon = true }.start()
-            capture.get(timeoutMs, TimeUnit.MILLISECONDS)
-        } catch (_: TimeoutException) {
-            timeoutMessage
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            "app.log unavailable: logcat capture interrupted"
-        } catch (failure: Exception) {
-            val cause = failure.cause ?: failure
-            "app.log unavailable: ${cause.message ?: cause::class.java.simpleName}"
-        } finally {
-            capture.cancel(true)
-        }
+        return "[logcat] status=${capture.status} truncated=${capture.truncated}\n" +
+            LogRedactor.redact(capture.bytes.toString(Charsets.UTF_8))
     }
 
     fun export(context: Context, payload: DiagPayload, kind: String = "playback"): File {
@@ -127,11 +133,13 @@ object DiagExporter {
         val time = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val out = File(dir, "lumina-diag-$kind-$time.zip")
         val files = linkedMapOf(
-            "meta.json" to payload.metaJson,
+            "meta.json" to withBuildIdentity(context, payload.metaJson),
             "playback-info.json" to payload.playbackInfoJson,
             "streams.json" to payload.streamsJson,
             "tracks.json" to payload.tracksJson,
             "errors.json" to payload.errorsJson,
+            "playback-failure.json" to payload.playbackFailureJson,
+            "diagnostics-gap.json" to payload.diagnosticsGapJson,
             "mpv.log" to payload.mpvLog,
             "app.log" to (AppLog.snapshot() + "\n[logcat]\n" + appLogTail()),
             "mpv-audio.jsonl" to File(context.filesDir, "mpv-audio.jsonl").takeIf(File::exists)?.let { readPrefix(it, 384 * 1024) }.orEmpty(),
@@ -176,7 +184,76 @@ object DiagExporter {
         return String(buffer, 0, bytesRead, Charsets.UTF_8)
     }
 
-    internal fun writeArchive(out: File, files: Map<String, String>): File {
+    internal fun writeArchive(out: File, files: Map<String, String>): File = writeArchive(out, files) { file, mode ->
+        Os.chmod(file.absolutePath, mode)
+    }
+
+    internal fun writeArchive(out: File, files: Map<String, String>, setMode: (File, Int) -> Unit): File {
+        var completed = false
+        try {
+            val auditedFiles = addAuditEntries(files)
+            val initialFiles = archivePermissionFiles(auditedFiles, "unknown")
+            writeArchiveContents(out, initialFiles)
+            val directoryOk = out.parentFile?.let { runCatching { setMode(it, 0x1F8) }.isSuccess } ?: true
+            val fileOk = runCatching { setMode(out, 0x1B0) }.isSuccess
+            if (directoryOk && fileOk) {
+                val temporary = File.createTempFile("diag-permissions-", ".zip", out.parentFile)
+                try {
+                    writeArchiveContents(temporary, archivePermissionFiles(auditedFiles, "0660"))
+                    setMode(temporary, 0x1B0)
+                    replaceArchive(temporary, out)
+                } catch (_: Exception) {
+                    // The initial validated archive remains available and says permissions=unknown.
+                } finally {
+                    temporary.delete()
+                }
+            } else {
+                runCatching { Log.w("DiagExporter", "permissions=unknown; archive retained") }
+            }
+            completed = true
+            return out
+        } finally {
+            if (!completed) out.delete()
+        }
+    }
+
+    private fun addAuditEntries(files: Map<String, String>): Map<String, String> = LinkedHashMap(files).apply {
+        val failure = runCatching { JSONObject(this["playback-failure.json"] ?: "{}") }
+            .getOrElse { JSONObject() }
+        this["playback-failure.json"] = failure.toString()
+        this["diagnostics-gap.json"] = diagnosticsGap(failure).toString()
+        val sources = JSONObject().put("schemaVersion", 1).put("files", JSONObject())
+        val fileSources = sources.getJSONObject("files")
+        keys.toList().forEach { name ->
+            val source = when (name) {
+                "playback-failure.json", "errors.json", "meta.json", "playback-info.json", "streams.json", "tracks.json" -> "current"
+                "lastSession.json" -> "lastSession"
+                "mpv.log" -> "current"
+                else -> "historical"
+            }
+            fileSources.put(name, JSONObject().put("source", source))
+        }
+        this["sources.json"] = sources.toString()
+    }
+
+    private fun archivePermissionFiles(files: Map<String, String>, permissions: String): Map<String, String> =
+        LinkedHashMap(files).apply {
+            put("archive-permissions.json", JSONObject().put("permissions", permissions).toString())
+            this["meta.json"]?.let { original ->
+                runCatching { JSONObject(original).put("archivePermissions", permissions).toString() }
+                    .getOrNull()?.let { this["meta.json"] = it }
+            }
+        }
+
+    private fun replaceArchive(temporary: File, out: File) {
+        try {
+            Files.move(temporary.toPath(), out.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(temporary.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
+
+    private fun writeArchiveContents(out: File, files: Map<String, String>): File {
         var completed = false
         try {
             ZipOutputStream(out.outputStream().buffered()).use { zip ->

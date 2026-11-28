@@ -25,9 +25,10 @@ object SamplesMain {
             "S1 security" to { S1SecurityChecks.main(emptyArray()) },
             "S2 language" to { S2LanguageChecks.main(emptyArray()) },
             "S5 wide images" to { S5WideImageChecks.main(emptyArray()) },
+            "V6 M00 diagnostics" to { M00Checks.main(emptyArray()) },
             "A1 reliability" to { A1ReliabilityChecks.main(emptyArray()) },
         )
-        check(suites.size == 10) { "Expected all 9 sample suites plus A1; refusing an incomplete gate." }
+        check(suites.size == 11) { "Expected all sample suites plus A1 and M00; refusing an incomplete gate." }
         suites.forEachIndexed { index, (name, run) ->
             println("[${index + 1}/${suites.size}] START $name")
             run()

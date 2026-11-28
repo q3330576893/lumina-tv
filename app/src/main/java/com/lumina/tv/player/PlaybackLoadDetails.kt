@@ -3,6 +3,7 @@ package com.lumina.tv.player
 import com.lumina.tv.data.EmbyClient
 import com.lumina.tv.data.EmbyException
 import com.lumina.tv.data.PlaybackInfoCapture
+import androidx.media3.common.PlaybackException
 import org.json.JSONObject
 
 internal data class PlaybackLoadKey(val generation: Int, val itemId: String, val sourceId: String?) {
@@ -25,6 +26,14 @@ internal class PlaybackLoadDetails(key: PlaybackLoadKey) {
     var lastPlaybackErrorJson: String? = null
     var mpvInitializationError: String? = null
     private var loadFailure: JSONObject? = null
+    var failureThrowable: Throwable? = null
+        private set
+    var media3Failure: PlaybackException? = null
+        private set
+    var mediaPeriodId: String? = null
+        private set
+    var failureElapsedRealtimeMs: Long? = null
+        private set
 
     fun bindSource(sourceId: String) {
         key = key.copy(sourceId = sourceId)
@@ -39,6 +48,8 @@ internal class PlaybackLoadDetails(key: PlaybackLoadKey) {
     }
 
     fun recordFailure(failure: Exception) {
+        failureThrowable = failure
+        failureElapsedRealtimeMs = System.nanoTime() / 1_000_000L
         val httpStatus = generateSequence<Throwable>(failure) { it.cause }
             .filterIsInstance<EmbyException>().firstNotNullOfOrNull { it.httpStatus }
         val details = state("failed").put("exceptionType", failure.javaClass.simpleName)
@@ -49,6 +60,13 @@ internal class PlaybackLoadDetails(key: PlaybackLoadKey) {
             negotiationDiagnostics = details
         }
         if (rangeProbeDiagnostics.optString("state") == "pending") rangeProbeDiagnostics = state("unavailable")
+    }
+
+    fun recordMedia3Failure(failure: PlaybackException, failedPeriodId: String?) {
+        failureThrowable = failure
+        media3Failure = failure
+        mediaPeriodId = failedPeriodId
+        failureElapsedRealtimeMs = System.nanoTime() / 1_000_000L
     }
 
     fun playbackInfoJson(expected: PlaybackLoadKey): String? =
@@ -86,6 +104,10 @@ internal class PlaybackLoadDetails(key: PlaybackLoadKey) {
             media3Error = if (current) lastPlaybackErrorJson?.let { JSONObject(it) } else null,
             loadFailure = if (current) loadFailure else null,
             mpvInitializationError = if (current) mpvInitializationError else null,
+            failureThrowable = if (current) failureThrowable else null,
+            media3Failure = if (current) media3Failure else null,
+            mediaPeriodId = if (current) mediaPeriodId else null,
+            failureElapsedRealtimeMs = if (current) failureElapsedRealtimeMs else null,
         )
     }
 
@@ -103,6 +125,10 @@ internal data class PlaybackLoadDetailSnapshot(
     val media3Error: JSONObject?,
     val loadFailure: JSONObject?,
     val mpvInitializationError: String?,
+    val failureThrowable: Throwable?,
+    val media3Failure: PlaybackException?,
+    val mediaPeriodId: String?,
+    val failureElapsedRealtimeMs: Long?,
 ) {
     fun playbackJson(): JSONObject = JSONObject().put("urlType", urlType)
         .put("negotiation", negotiation).put("rangeProbe", rangeProbe)

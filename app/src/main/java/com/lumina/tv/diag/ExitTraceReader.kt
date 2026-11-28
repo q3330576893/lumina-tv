@@ -52,6 +52,11 @@ internal class DiagnosticReadResources : AutoCloseable {
         return value
     }
 
+    fun awaitProcessExit(timeoutMs: Long): Boolean {
+        val value = synchronized(lock) { process } ?: return true
+        return value.waitFor(timeoutMs.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
+    }
+
     override fun close() {
         val resources = synchronized(lock) {
             if (closed) return

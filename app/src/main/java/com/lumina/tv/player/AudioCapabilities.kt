@@ -7,6 +7,8 @@ import android.media.AudioManager
 import android.media.AudioProfile
 import android.media.MediaCodecList
 import android.os.Build
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class AudioProfileInfo(
     val maxChannels: Int,
@@ -14,7 +16,17 @@ data class AudioProfileInfo(
     val sampleRates: Set<Int>,
 )
 
-data class AudioCapabilities(val profiles: Map<Int, List<AudioProfileInfo>>)
+data class AudioProbeEvidence(
+    val api: String,
+    val input: String,
+    val rawResult: String,
+    val state: String,
+) {
+    fun json(): JSONObject = JSONObject()
+        .put("api", api).put("input", JSONObject(input)).put("rawResult", JSONObject(rawResult)).put("state", state)
+}
+
+data class AudioCapabilities(val profiles: Map<Int, List<AudioProfileInfo>>, val probe: AudioProbeEvidence? = null)
 typealias AudioCaps = AudioCapabilities
 
 enum class AudioSupport { PASSTHROUGH, DECODE_ONLY, UNSUPPORTED }
@@ -132,32 +144,56 @@ fun detect(context: Context): AudioCaps {
         ),
     )
     if (Build.VERSION.SDK_INT >= 33) {
-        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        manager.getDirectProfilesForAttributes(
-            AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build(),
-        ).forEach { profile: AudioProfile ->
-            val masks = profile.channelMasks.filter { it != 0 }.toSet()
-            if (masks.isNotEmpty()) {
-                val maxChannels = masks.maxOf { mask -> if (mask == 6396) 8 else Integer.bitCount(mask) }
-                profiles.getOrPut(profile.format) { mutableListOf() }
-                    .add(AudioProfileInfo(maxChannels, masks, profile.sampleRates.toSet()))
+        val api = "AudioManager.getDirectProfilesForAttributes"
+        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build()
+        val input = JSONObject().put("usage", AudioAttributes.USAGE_MEDIA)
+            .put("contentType", AudioAttributes.CONTENT_TYPE_MOVIE).put("sdkInt", Build.VERSION.SDK_INT)
+        val raw = try {
+            val found = (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
+                .getDirectProfilesForAttributes(attributes)
+            val rawProfiles = JSONArray()
+            found.forEach { profile: AudioProfile ->
+                val masks = profile.channelMasks.filter { it != 0 }.toSet()
+                rawProfiles.put(JSONObject().put("format", profile.format)
+                    .put("channelMasks", JSONArray(profile.channelMasks.toList()))
+                    .put("sampleRates", JSONArray(profile.sampleRates.toList())))
+                if (masks.isNotEmpty()) {
+                    val maxChannels = masks.maxOf { mask -> if (mask == 6396) 8 else Integer.bitCount(mask) }
+                    profiles.getOrPut(profile.format) { mutableListOf() }
+                        .add(AudioProfileInfo(maxChannels, masks, profile.sampleRates.toSet()))
+                }
             }
+            AudioProbeEvidence(api, input.toString(), JSONObject().put("profiles", rawProfiles).toString(), "ok")
+        } catch (error: Exception) {
+            return AudioCapabilities(emptyMap(), AudioProbeEvidence(api, input.toString(),
+                JSONObject().put("exceptionClass", error.javaClass.name).toString(), "read_failed"))
         }
+        return AudioCaps(profiles.mapValues { (_, encodingProfiles) -> encodingProfiles.toList() }, raw)
     } else {
-        val intent = context.registerReceiver(null, android.content.IntentFilter(AudioManager.ACTION_HDMI_AUDIO_PLUG))
-        val connected = intent?.getIntExtra(AudioManager.EXTRA_AUDIO_PLUG_STATE, 0) == 1
-        if (connected) {
-            val encodings: IntArray =
-                intent?.getIntArrayExtra(AudioManager.EXTRA_ENCODINGS) ?: intArrayOf()
-            val maxChannels: Int =
-                (intent?.getIntExtra(AudioManager.EXTRA_MAX_CHANNEL_COUNT, 2) ?: 2).coerceAtLeast(2)
-            encodings.forEach { enc ->
-                val masks = listOf(1, 2, 6, 8).mapNotNull { count ->
-                    AudioCodecMatrix.channelMask(count).takeIf { count <= maxChannels }
-                }.toSet()
-                if (masks.isNotEmpty()) profiles[enc] = mutableListOf(AudioProfileInfo(maxChannels, masks, emptySet()))
+        val api = "AudioManager.ACTION_HDMI_AUDIO_PLUG broadcast extras"
+        val rawInput = JSONObject().put("action", AudioManager.ACTION_HDMI_AUDIO_PLUG)
+            .put("sdkInt", Build.VERSION.SDK_INT)
+        val rawResult = try {
+            val intent = context.registerReceiver(null, android.content.IntentFilter(AudioManager.ACTION_HDMI_AUDIO_PLUG))
+            val connected = intent?.getIntExtra(AudioManager.EXTRA_AUDIO_PLUG_STATE, 0) == 1
+            val encodings = intent?.getIntArrayExtra(AudioManager.EXTRA_ENCODINGS) ?: intArrayOf()
+            val maxChannels = (intent?.getIntExtra(AudioManager.EXTRA_MAX_CHANNEL_COUNT, 2) ?: 2).coerceAtLeast(2)
+            if (connected) {
+                encodings.forEach { enc ->
+                    val masks = listOf(1, 2, 6, 8).mapNotNull { count ->
+                        AudioCodecMatrix.channelMask(count).takeIf { count <= maxChannels }
+                    }.toSet()
+                    if (masks.isNotEmpty()) profiles[enc] = mutableListOf(AudioProfileInfo(maxChannels, masks, emptySet()))
+                }
             }
+            AudioProbeEvidence(api, rawInput.toString(), JSONObject()
+                .put("plugged", connected).put("encodings", JSONArray(encodings.toList()))
+                .put("maxChannelCount", maxChannels).toString(), if (intent == null) "no_broadcast" else "ok")
+        } catch (error: Exception) {
+            return AudioCapabilities(emptyMap(), AudioProbeEvidence(api, rawInput.toString(),
+                JSONObject().put("exceptionClass", error.javaClass.name).toString(), "read_failed"))
         }
+        return AudioCaps(profiles.mapValues { (_, encodingProfiles) -> encodingProfiles.toList() }, rawResult)
     }
-    return AudioCaps(profiles.mapValues { (_, encodingProfiles) -> encodingProfiles.toList() })
 }

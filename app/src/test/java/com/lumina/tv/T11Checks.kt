@@ -411,7 +411,7 @@ object T11Checks {
         check(exit.indexOf("backend?.release(") < exit.indexOf("ExitSessionDiagnostics.enqueue("))
         check("last-session.json\").writeText" !in player)
         val audio = source("player/MpvAudioDiagnostics.kt")
-        check("properties.toMap()" in audio && "DiagnosticCapture.read(" in audio)
+        check("properties.toMap()" in audio && "LogcatCapture.read(" in audio)
         check("useLines" !in audio && "waitFor(" !in audio && "readText(" !in audio)
         val close = audio.substringAfter("fun close()").substringBefore("companion object")
         check(".close()" !in close && ".destroy" !in close && "shutdownNow()" in close)

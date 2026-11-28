@@ -4,7 +4,7 @@ import android.content.Context
 import android.media.AudioManager
 import android.os.Process
 import android.os.Looper
-import com.lumina.tv.diag.DiagnosticCapture
+import com.lumina.tv.diag.LogcatCapture
 import com.lumina.tv.diag.appendDiagnosticLog
 import com.lumina.tv.diag.LatestDiagnosticWrite
 import com.lumina.tv.diag.PageLog
@@ -111,7 +111,7 @@ internal class MpvAudioDiagnostics(context: Context) {
 
     private fun captureSystemAudio(identity: MpvPlayerController.LoadIdentity, point: String, sampleAt: Long, startedAt: Long) {
         if (closed || active !== identity) return
-        val capture = DiagnosticCapture.read(128 * 1024, 2000L) { resources ->
+        val capture = LogcatCapture.read(128 * 1024, 2000L) { resources ->
             val process = resources.process(ProcessBuilder("logcat", "-d", "-v", "epoch", "-t", "1200", "--pid=${Process.myPid()}")
                 .redirectErrorStream(true).start())
             process.inputStream

@@ -22,12 +22,27 @@ import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.json.JSONArray
 
-/** Diagnostic-only readback; never substitute the build-time version for a missing native value. */
-internal fun nativeVersionDiagnosticProperties(readProperty: (String) -> String? = { null }): Map<String, String> =
-    listOf("mpv-version", "ffmpeg-version").associateWith { key ->
-        runCatching { readProperty(key) }.getOrNull()?.trim()
-            ?.takeIf { it.isNotEmpty() && it.length <= 80 && it.all { c -> c in ' '..'~' } } ?: "UNKNOWN"
-    } + ("coordinate" to "dev.jdtech.mpv:libmpv:1.0.0")
+/** Diagnostic-only live readback; unavailable states are kept distinct from native values. */
+internal fun nativeVersionDiagnosticProperties(
+    initialized: Boolean,
+    readProperty: (String) -> String?,
+): Map<String, Any> = listOf("mpv-version", "ffmpeg-version").associateWith { key ->
+    val result = org.json.JSONObject().put("readPath", "libmpv.$key")
+    if (!initialized) {
+        result.put("state", "not_initialized").put("value", org.json.JSONObject.NULL)
+    } else {
+        val read = runCatching { readProperty(key)?.trim() }
+        val value = read.getOrNull()?.takeIf { it.isNotEmpty() && it.length <= 80 && it.all { c -> c in ' '..'~' } }
+        when {
+            value != null -> result.put("state", "available").put("value", value)
+            read.isFailure -> result.put("state", "read_failed").put("value", org.json.JSONObject.NULL)
+                .put("failureClass", read.exceptionOrNull()?.javaClass?.name)
+            else -> result.put("state", "read_failed").put("value", org.json.JSONObject.NULL)
+                .put("reason", "property_returned_null_or_invalid")
+        }
+    }
+    result
+} + ("coordinate" to "dev.jdtech.mpv:libmpv:1.0.0")
 
 internal fun mpvLoadAcceptsSeek(terminal: Boolean, ended: Boolean, endKind: MpvEndKind?): Boolean =
     !terminal && !ended && endKind == null
@@ -808,10 +823,10 @@ class MpvPlayerController(
     fun softwareRetryCount(): Int = softwareRetryCount
     fun diagnosticLoadIdentity(): LoadIdentity? = activeLoad?.takeIf(::isActive)?.identity
 
-    fun diagnosticNativeVersions(): Map<String, String> {
+    fun diagnosticNativeVersions(): Map<String, Any> {
         checkMainThread()
         val engine = activeLoad?.takeIf(::isActive)?.engine
-        return nativeVersionDiagnosticProperties { key -> engine?.getPropertyString(key) }
+        return nativeVersionDiagnosticProperties(engine != null) { key -> engine?.getPropertyString(key) }
     }
 
     /** Fresh readback only: never expose cached properties from a retired physical load as actual output. */

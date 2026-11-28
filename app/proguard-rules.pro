@@ -11,6 +11,9 @@
 # Org.json 由 Android 平台提供
 -dontwarn org.json.**
 
+# Keep exception type names readable in exported playback failure records.
+-keepnames class * extends java.lang.Exception
+
 # ZXing
 -keep class com.google.zxing.** { *; }
 

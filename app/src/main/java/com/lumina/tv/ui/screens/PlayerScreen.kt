@@ -207,6 +207,7 @@ import com.lumina.tv.player.shouldRetryNetworkPlayback
 import com.lumina.tv.player.playbackNetworkRetryDelayMs
 import com.lumina.tv.player.shouldRecoverAudioWithoutSelection
 import com.lumina.tv.player.PlaybackRangeProbe
+import com.lumina.tv.player.PlaybackHttpTrace
 import com.lumina.tv.player.classifyPlaybackError
 import com.lumina.tv.player.OptionalVttDataSourceFactory
 import com.lumina.tv.player.PlaybackPath
@@ -542,6 +543,7 @@ fun PlayerScreen(
     var networkRetryCount by remember(item.id) { mutableIntStateOf(0) }
     var sessionGeneration by loadCoordinator::generation
     val playbackDiagnostics = remember(item.id) { com.lumina.tv.player.PlaybackDiagnostics { PageLog.add(it) } }
+    val playbackHttpTrace = remember(item.id) { PlaybackHttpTrace { playbackDiagnostics.identityJson() } }
     val watchdog = remember(item.id) { PlaybackWatchdog() }
     var mpvBufferProgress by remember(item.id) { mutableStateOf<Pair<Long, Long>?>(null) }
     var recoveryBudget by remember(item.id) { mutableStateOf(PlaybackRecoveryBudget()) }
@@ -745,8 +747,10 @@ fun PlayerScreen(
     var titleLogoFailed by remember(item.id) { mutableStateOf(false) }
 
 
-    val httpFactory = remember(client) {
-        OkHttpDataSource.Factory(client?.playbackHttpClient ?: okhttp3.OkHttpClient())
+    val httpFactory = remember(client, playbackHttpTrace) {
+        val baseClient = client?.playbackHttpClient ?: okhttp3.OkHttpClient()
+        val observedClient = baseClient.newBuilder().eventListenerFactory(playbackHttpTrace).build()
+        OkHttpDataSource.Factory(observedClient)
             .setUserAgent("LuminaTV/1.5 (Android)")
     }
 
@@ -2381,7 +2385,8 @@ fun PlayerScreen(
             controlsVisible, isActuallyStalled, error.takeIf { load.current }, position,
             activeVideoDecoder.takeIf { load.current }, dvDecoderPath.takeIf { load.current }, playbackStatusNotice.takeIf { load.current },
             phaseTimes.takeIf { load.current } ?: JSONObject(), droppedFrames, renderedFrames, bufferingCount, bufferingDurationMs,
-            duration, playbackDiagnostics, selectedAudioStreamIndex, audioOutputLedger.current().takeIf { load.current },
+            duration, playbackDiagnostics, playbackHttpTrace.snapshot(playbackDiagnostics.identityJson()),
+            selectedAudioStreamIndex, audioOutputLedger.current().takeIf { load.current },
         )
     }
 
@@ -3022,6 +3027,11 @@ fun PlayerScreen(
 
     DisposableEffect(exo) {
         val analytics = object : AnalyticsListener {
+            override fun onPlayerError(eventTime: AnalyticsListener.EventTime, error: androidx.media3.common.PlaybackException) {
+                if (!isCurrentMedia3Event(eventTime)) return
+                loadDetails.recordMedia3Failure(error, eventTime.mediaPeriodId?.toString())
+            }
+
             override fun onAudioDecoderInitialized(
                 eventTime: AnalyticsListener.EventTime, decoderName: String,
                 initializedTimestampMs: Long, initializationDurationMs: Long,

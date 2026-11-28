@@ -1,6 +1,35 @@
 import java.time.Duration
 import java.util.Properties
+import java.security.MessageDigest
+import com.android.build.api.artifact.SingleArtifact
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+abstract class GenerateR8MappingDigest : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val mappingFile: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val hash = MessageDigest.getInstance("SHA-256").digest(mappingFile.get().asFile.readBytes())
+            .joinToString("") { "%02x".format(it) }
+        outputDirectory.file("diag/mapping-sha256.txt").get().asFile.apply {
+            parentFile.mkdirs()
+            writeText("$hash\n", Charsets.US_ASCII)
+        }
+    }
+}
 
 plugins {
     id("com.android.application")
@@ -70,6 +99,16 @@ android {
             pickFirsts += "**/libc++_shared.so"
         }
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+    }
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        val digest = tasks.register<GenerateR8MappingDigest>("generate${variant.name.replaceFirstChar(Char::uppercase)}MappingDigest") {
+            mappingFile.set(variant.artifacts.get(SingleArtifact.OBFUSCATION_MAPPING_FILE))
+            outputDirectory.set(layout.buildDirectory.dir("generated/diag-mapping/${variant.name}"))
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(digest, GenerateR8MappingDigest::outputDirectory)
     }
 }
 

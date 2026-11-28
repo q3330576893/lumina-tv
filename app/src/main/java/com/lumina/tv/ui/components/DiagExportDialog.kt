@@ -23,6 +23,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import org.json.JSONObject
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
@@ -31,6 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.zip.ZipFile
 
 private val DIAG_OUTCOMES = listOf("黑屏", "卡缓冲", "没声音", "花屏", "报错退出", "环境日志")
 
@@ -49,6 +51,7 @@ fun DiagExportDialog(
     var busy by remember { mutableStateOf(false) }
     var resultPath by remember { mutableStateOf<String?>(null) }
     var exportedFile by remember { mutableStateOf<File?>(null) }
+    var missingDiagnosticFacts by remember { mutableStateOf(0) }
     val saveZipLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip"),
     ) { uri ->
@@ -85,6 +88,9 @@ fun DiagExportDialog(
                     Text(if (busy) "正在打包…" else "文件只保存在本机，不会上传。")
                 } else {
                     Text(resultPath.orEmpty())
+                    if (missingDiagnosticFacts > 0) {
+                        Text("本次诊断包不完整：缺 $missingDiagnosticFacts 项")
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text("可以保存到所选位置，或通过已安装应用分享。")
                     TextButton(onClick = {
@@ -120,8 +126,24 @@ fun DiagExportDialog(
             if (resultPath == null) Button(enabled = !busy, onClick = {
                 busy = true
                 scope.launch {
-                    runCatching { export(outcome) }
-                        .onSuccess { exportedFile = it; resultPath = it.absolutePath }
+                    runCatching {
+                        val file = export(outcome)
+                        val missing = withContext(Dispatchers.IO) {
+                            ZipFile(file).use { zip ->
+                                val entry = zip.getEntry("diagnostics-gap.json")
+                                if (entry == null) 0 else {
+                                    val json = JSONObject(zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() })
+                                    json.optJSONArray("missing")?.length() ?: 0
+                                }
+                            }
+                        }
+                        file to missing
+                    }
+                        .onSuccess { (file, missing) ->
+                            exportedFile = file
+                            missingDiagnosticFacts = missing
+                            resultPath = file.absolutePath
+                        }
                         .onFailure { Toast.makeText(context, "导出失败：${it.message}", Toast.LENGTH_LONG).show() }
                     busy = false
                 }

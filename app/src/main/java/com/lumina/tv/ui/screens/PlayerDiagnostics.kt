@@ -19,7 +19,7 @@ import com.lumina.tv.data.MediaSource
 import com.lumina.tv.data.TmdbClient
 import com.lumina.tv.diag.DiagExporter
 import com.lumina.tv.diag.DiagPayload
-import com.lumina.tv.diag.DiagnosticCapture
+import com.lumina.tv.diag.LogcatCapture
 import com.lumina.tv.diag.AppLog
 import com.lumina.tv.diag.NetLog
 import com.lumina.tv.player.MpvAvailabilityProbe
@@ -33,7 +33,11 @@ import com.lumina.tv.player.MpvAvailabilitySnapshot
 import com.lumina.tv.player.MpvPlayerController
 import com.lumina.tv.player.nativeVersionDiagnosticProperties
 import com.lumina.tv.player.PlaybackDiagnostics
+import com.lumina.tv.player.PlaybackFailureInput
+import com.lumina.tv.player.PlaybackHttpTrace
 import com.lumina.tv.player.PlaybackLoadDetailSnapshot
+import com.lumina.tv.player.diagnosticsGap
+import com.lumina.tv.player.playbackFailureJson
 import com.lumina.tv.player.PlayerLifecycle
 import com.lumina.tv.player.displayHdrDiagnostic
 import com.lumina.tv.player.readDisplayHdrTypes
@@ -72,6 +76,7 @@ internal fun buildPlayerDiagPayload(
     bufferingDurationMs: Long,
     duration: Long,
     playbackDiagnostics: PlaybackDiagnostics,
+    httpTrace: JSONObject,
     selectedAudioStreamIndex: Int?,
     audioOutputSnapshot: AudioOutputSnapshot?,
 ): DiagPayload {
@@ -103,6 +108,7 @@ internal fun buildPlayerDiagPayload(
             binding.generation == load.key.generation &&
             binding.trackId == (actualAudioIndex?.toString() ?: "unknown")
     }
+
     val actualOutput = if (!load.current) JSONObject.NULL else actualOutputSnapshot?.json()
         ?: JSONObject().put("value", "unknown").put("confidence", "UNKNOWN")
     val displayHdrTypes = readDisplayHdrTypes(context)
@@ -111,13 +117,18 @@ internal fun buildPlayerDiagPayload(
     if (activeEngine == "mpv") listOf("decoderInitMs", "compatMappingMs", "firstFrameMs", "stableOutputMs").forEach { key ->
         if (phases.isNull(key)) phases.put(key, "N/A")
     }
+    val nativeVersions = JSONObject(mpvBackend?.diagnosticNativeVersions()
+        ?: nativeVersionDiagnosticProperties(false) { null })
+    val audioProbe = audioCaps.probe?.json() ?: JSONObject()
+        .put("api", JSONObject.NULL).put("input", JSONObject.NULL).put("rawResult", JSONObject.NULL)
+        .put("state", "not_collected")
     val meta = DiagExporter.baseMeta(context, outcome)
         .put("load", loadIdentity)
         .put("display", JSONObject().put("hdr", displayHdrDiagnostic(displayHdrTypes)?.let(::JSONArray) ?: JSONObject.NULL))
         .put("engine", mpvAvailability.addTo(JSONObject()
             .put("prefs", AppRuntime.prefs?.playerEngine ?: "unknown")
             .put("active", activeEngine)
-            .put("native", JSONObject(mpvBackend?.diagnosticNativeVersions() ?: nativeVersionDiagnosticProperties()))
+            .put("native", nativeVersions)
             .put("anime4k", JSONObject()
                 .put("mode", AppRuntime.prefs?.anime4kMode ?: "off")
                 .put("shaders", if (activeEngine == "mpv") mpvBackend?.anime4kShaderCount() ?: 0 else 0)
@@ -125,7 +136,8 @@ internal fun buildPlayerDiagPayload(
             .put("audioSupport", JSONObject()
                 .put("maxChannels", audioCapabilitySummary.maxChannels)
                 .put("passthrough", JSONArray(audioCapabilitySummary.codecs
-                    .filterValues { it == AudioSupport.PASSTHROUGH }.keys.sorted())))
+                    .filterValues { it == AudioSupport.PASSTHROUGH }.keys.sorted()))
+                .put("probe", audioProbe))
             .put("mpvProperties", JSONObject(mpvBackend?.diagnosticProperties().orEmpty()))
             .put("liveVideoDecoders", PlayerLifecycle.registry.liveVideoDecoders)
             .put("videoDecoderCountScope", "media3_callbacks;mpv_lifecycle_only")
@@ -225,6 +237,55 @@ internal fun buildPlayerDiagPayload(
         .put("metrics", if (load.current) playbackDiagnostics.snapshot(android.os.SystemClock.elapsedRealtime())
             .put("droppedFrames", droppedFrames + (mpvBackend?.diagnosticProperties()?.get("vo-drop-frame-count")?.toLongOrNull() ?: 0L))
             .put("droppedFramesScope", "screen-session") else JSONObject().put("state", "stale"))
+    val metrics = playbackDiagnostics.snapshot(android.os.SystemClock.elapsedRealtime())
+    val metricEvents = metrics.optJSONArray("events") ?: JSONArray()
+    val loadStartedAt = (0 until metricEvents.length()).asSequence()
+        .map { metricEvents.optJSONObject(it) }
+        .firstOrNull { it?.optString("event") == "load_started" &&
+            it.optJSONObject("loadIdentity")?.optInt("generation") == load.key.generation }
+        ?.optLong("elapsedRealtimeMs")?.takeIf { it > 0L }
+    val failureAt = load.failureElapsedRealtimeMs
+    val failureTimeline = JSONObject()
+        .put("loadStartedMs", if (loadStartedAt != null) 0L else JSONObject.NULL)
+        .put("loadStartedElapsedRealtimeMs", loadStartedAt ?: JSONObject.NULL)
+        .put("failureElapsedMs", if (loadStartedAt != null && failureAt != null) (failureAt - loadStartedAt).coerceAtLeast(0L) else JSONObject.NULL)
+        .put("failureElapsedRealtimeMs", failureAt ?: JSONObject.NULL)
+        .put("stageDurationsMs", JSONObject(phases.toString()))
+        .put("events", metricEvents)
+        .put("mediaPeriodId", load.mediaPeriodId ?: JSONObject.NULL)
+    val decoderMime = load.media3Failure?.let(::media3RendererMime) ?: exo.videoFormat?.sampleMimeType
+    val decoderFallbacks = decoderFallbackHistory(load.media3Failure)
+    val decoderHardwareAccelerated = activeVideoDecoder?.let(::decoderHardwareAcceleration)
+    val playbackFailure = playbackFailureJson(PlaybackFailureInput(
+        failure = load.failureThrowable,
+        playbackException = load.media3Failure,
+        http = JSONObject(httpTrace.toString()),
+        sessionId = playbackDiagnostics.sessionId,
+        generation = load.key.generation,
+        loadIdentity = loadIdentity,
+        engine = activeEngine,
+        decoderName = activeVideoDecoder,
+        decoderMime = decoderMime,
+        hardwareAccelerated = decoderHardwareAccelerated,
+        initResult = when {
+            activeVideoDecoder != null -> "initialized"
+            load.media3Failure?.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> "init_failed"
+            load.failureThrowable != null -> "not_initialized_or_not_captured"
+            else -> null
+        },
+        fallbackHistory = decoderFallbacks,
+        audioProbe = audioProbe,
+        audioSelection = JSONObject().put("requestedMode", audioDecodeMode)
+            .put("engine", activeEngine).put("support", audioSupport)
+            .put("selectedOutput", actualOutput),
+        phaseTimeline = failureTimeline,
+        nativeVersions = nativeVersions,
+        abi = meta.getJSONObject("build").getJSONArray("supportedAbis"),
+        hdr = displayHdrTypes?.let(::JSONArray),
+        engineSelectionReason = engineSwitchTrace.lastOrNull() ?: "no engine switch recorded; preference=${AppRuntime.prefs?.playerEngine ?: "unknown"}",
+        source = if (load.current) "current" else "lastSession",
+    ))
+    val diagnosticsGap = diagnosticsGap(playbackFailure)
     return DiagPayload(
         metaJson = meta.toString(2),
         playbackInfoJson = load.playbackInfoJson,
@@ -233,6 +294,8 @@ internal fun buildPlayerDiagPayload(
         errorsJson = errors.toString(2),
         mpvLog = mpvBackend?.diagnosticLog().orEmpty(),
         appLog = "",
+        playbackFailureJson = playbackFailure.toString(2),
+        diagnosticsGapJson = diagnosticsGap.toString(2),
         uiText = buildString {
             appendLine("screen=${AppRuntime.screenLabel}")
             appendLine("media=${item.name} / ${item.seriesName ?: "no series"}")
@@ -341,7 +404,7 @@ internal suspend fun exportDiagnosticBundle(context: Context, payload: DiagPaylo
             return boundedDiagnosticJson(LogRedactor.redactJson(bytes.toString(Charsets.UTF_8)), 120 * 1024)
         }
         try {
-            val capture = DiagnosticCapture.read(120 * 1024, 1500L) { resources ->
+            val capture = LogcatCapture.read(120 * 1024, 1500L) { resources ->
                 resources.process(ProcessBuilder("logcat", "-d", "-v", "epoch", "-t", "800", "--pid=${android.os.Process.myPid()}")
                     .redirectErrorStream(true).start()).inputStream
             }
@@ -349,8 +412,9 @@ internal suspend fun exportDiagnosticBundle(context: Context, payload: DiagPaylo
             val appLog = AppLog.snapshot() + "\n[logcat] status=${capture.status} truncated=${capture.truncated}\n" +
                 LogRedactor.redact(capture.bytes.toString(Charsets.UTF_8))
             val files = linkedMapOf(
-                "meta.json" to logs.metaJson, "playback-info.json" to logs.playbackInfoJson,
+                "meta.json" to DiagExporter.withBuildIdentity(context, logs.metaJson), "playback-info.json" to logs.playbackInfoJson,
                 "streams.json" to logs.streamsJson, "tracks.json" to logs.tracksJson, "errors.json" to logs.errorsJson,
+                "playback-failure.json" to logs.playbackFailureJson, "diagnostics-gap.json" to logs.diagnosticsGapJson,
                 "mpv.log" to logs.mpvLog, "app.log" to appLog,
                 "mpv-audio.jsonl" to tail(context.filesDir, "mpv-audio.jsonl", 384 * 1024),
                 "mpv-audio-system.log" to tail(context.filesDir, "mpv-audio-system.log", 384 * 1024),
@@ -370,3 +434,45 @@ internal suspend fun exportDiagnosticBundle(context: Context, payload: DiagPaylo
             throw error
         }
     }
+
+private fun media3RendererMime(error: androidx.media3.common.PlaybackException): String? =
+    (error as? androidx.media3.exoplayer.ExoPlaybackException)?.rendererFormat?.sampleMimeType
+
+private fun decoderFallbackHistory(error: Throwable?): JSONArray {
+    val output = JSONArray()
+    val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
+    val queue = ArrayDeque<Any>()
+    error?.let(queue::addLast)
+    while (queue.isNotEmpty() && output.length() < 16) {
+        val current = queue.removeFirst()
+        if (!seen.add(current)) continue
+        val fallback = reflectedValue(current, "fallbackDecoderInitializationException")
+        if (current.javaClass.simpleName.contains("DecoderInitializationException", true)) {
+            val codec = reflectedValue(current, "codecInfo")
+            val codecName = codec?.let { reflectedValue(it, "name")?.toString() }
+            output.put(JSONObject()
+                .put("name", codecName ?: JSONObject.NULL)
+                .put("mime", reflectedValue(current, "mimeType") ?: JSONObject.NULL)
+                .put("hardwareAccelerated", codecName?.let(::decoderHardwareAcceleration) ?: JSONObject.NULL)
+            .put("reason", (current as? Throwable)?.message?.let { LogRedactor.redact(it) } ?: JSONObject.NULL))
+        }
+        (current as? Throwable)?.cause?.let(queue::addLast)
+        fallback?.let(queue::addLast)
+    }
+    return output
+}
+
+private fun reflectedValue(instance: Any, property: String): Any? = runCatching {
+    val getter = instance.javaClass.methods.firstOrNull {
+        it.name == "get${property.replaceFirstChar(Char::uppercase)}" || it.name == "is${property.replaceFirstChar(Char::uppercase)}"
+    } ?: return@runCatching null
+    getter.invoke(instance)
+}.getOrNull()
+
+private fun decoderHardwareAcceleration(name: String): Boolean? {
+    if (android.os.Build.VERSION.SDK_INT < 29) return null
+    return runCatching {
+        android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
+            .firstOrNull { it.name == name }?.isHardwareAccelerated
+    }.getOrNull()
+}
